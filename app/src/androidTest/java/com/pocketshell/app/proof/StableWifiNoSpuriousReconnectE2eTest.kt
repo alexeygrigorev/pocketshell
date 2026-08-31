@@ -762,7 +762,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use {

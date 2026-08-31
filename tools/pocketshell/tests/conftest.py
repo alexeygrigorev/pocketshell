@@ -13,7 +13,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _disable_aplexer_by_default(monkeypatch):
+def _isolate_process_environment(tmp_path, monkeypatch):
+    """Keep every test away from the developer's live home/XDG state."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for name in ("CONFIG", "CACHE", "DATA", "STATE"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("POCKETSHELL_APLEXER", "0")
 
 

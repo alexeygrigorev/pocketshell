@@ -81,14 +81,14 @@ class ResumableUploadIntegrationTest {
             port = port,
             user = "testuser",
             key = SshKey.Path(keyFile),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 15_000,
         ).getOrThrow()
 
     private fun connectReal(uploadStallTimeoutMs: Long): RealSshSession = runBlocking {
         val connector = SshConnection.RealSshConnector
         val client = connector.createClient()
-        connector.applyKnownHostsPolicy(client, KnownHostsPolicy.AcceptAll)
+        connector.applyKnownHostsPolicy(client, TestOnlyAcceptAll)
         connector.connect(client, host, port, 15_000)
         connector.authenticate(client, "testuser", SshKey.Path(keyFile), null)
         RealSshSession(client, uploadStallTimeoutMs = uploadStallTimeoutMs)

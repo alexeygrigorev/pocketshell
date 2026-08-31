@@ -187,7 +187,7 @@ class HostTmuxSessionsGatewayTest {
             assertEquals(HOST.port, connector.targets.single().leaseKey.port)
             assertEquals(HOST.username, connector.targets.single().leaseKey.user)
             assertEquals("${HOST.id}:$KEY_PATH", connector.targets.single().leaseKey.credentialId)
-            assertEquals("accept-all", connector.targets.single().leaseKey.knownHostsId)
+            assertEquals(SshLeaseManager.UNCONFIRMED_HOST_KEY_ID, connector.targets.single().leaseKey.knownHostsId)
             assertFalse(session.closed)
             // Issue #2160: derived from the production constant, so an
             // invocation change (e.g. adding/removing the locale-proof `-u`)

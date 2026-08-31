@@ -718,7 +718,7 @@ abstract class NetworkFaultProofBase {
                 port = NETWORK_FAULT_SSH_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).getOrThrow()
         }
@@ -762,7 +762,7 @@ abstract class NetworkFaultProofBase {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -941,7 +941,7 @@ abstract class NetworkFaultProofBase {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -973,7 +973,7 @@ abstract class NetworkFaultProofBase {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -1361,7 +1361,7 @@ class SshSentinel private constructor(
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).getOrThrow()
             }

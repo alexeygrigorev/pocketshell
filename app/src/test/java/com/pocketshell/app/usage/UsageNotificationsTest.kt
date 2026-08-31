@@ -13,6 +13,10 @@ import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import java.time.Instant
 import java.time.ZoneId
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -504,12 +508,53 @@ class UsageNotificationsTest {
                 )
 
             UsageNotificationDismissReceiver().onReceive(context, intent)
-
+            val deadline = System.currentTimeMillis() + 5_000
+            while (store.notifiedKeys() != setOf(key) && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10)
+            }
             assertEquals(setOf(key), store.notifiedKeys())
         } finally {
             UsageNotificationDismissReceiver.storeFactory = { ctx ->
                 SharedPreferencesUsageNotificationStateStore(ctx)
             }
+        }
+    }
+
+    @Test
+    fun dismissReceiverReturnsBeforeBlockedPreferenceWorkCompletes() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val blockingStore = object : UsageNotificationStateStore {
+            override fun notifiedKeys(): Set<UsageNotificationKey> {
+                entered.countDown()
+                release.await(10, TimeUnit.SECONDS)
+                return emptySet()
+            }
+
+            override fun setNotifiedKeys(keys: Set<UsageNotificationKey>) {
+                finished.countDown()
+            }
+        }
+        UsageNotificationDismissReceiver.storeFactory = { blockingStore }
+        UsageNotificationDismissReceiver.callbackScope = CoroutineScope(Dispatchers.IO)
+        try {
+            val key = UsageNotificationKey(1L, "codex", UsageThresholdState.Exceeded, "7d")
+            val intent = Intent(UsageNotificationDismissReceiver.ACTION_DISMISS)
+                .putExtra(UsageNotificationDismissReceiver.EXTRA_NOTIFICATION_KEY, key.encode())
+
+            UsageNotificationDismissReceiver().onReceive(context, intent)
+
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertFalse("broadcast callback blocked on preference IO", finished.await(100, TimeUnit.MILLISECONDS))
+            release.countDown()
+            assertTrue(finished.await(5, TimeUnit.SECONDS))
+        } finally {
+            release.countDown()
+            UsageNotificationDismissReceiver.storeFactory = { ctx ->
+                SharedPreferencesUsageNotificationStateStore(ctx)
+            }
+            UsageNotificationDismissReceiver.callbackScope = CoroutineScope(Dispatchers.IO)
         }
     }
 

@@ -13,6 +13,7 @@ import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -2065,6 +2066,8 @@ class ShareViewModelTest {
             port = 22,
             username = "alex",
             keyId = keyId,
+            trustedHostKeyAlgorithm = "ssh-ed25519",
+            trustedHostKeySha256 = "SHA256:test-$id",
         )
         // Persist the host so child rows (e.g. project_roots, issue
         // #473) satisfy the foreign-key constraint.
@@ -2298,8 +2301,9 @@ class ShareViewModelTest {
                 port = port,
                 user = username,
                 credentialId = if (purpose == null) "$id:$keyPath" else "$id:$keyPath|purpose=$purpose",
-                knownHostsId = "accept-all",
+                knownHostsId = "host-key:${trustedHostKeySha256}",
             ),
             key = SshKey.Path(java.io.File(keyPath)),
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(trustedHostKeySha256),
         )
 }

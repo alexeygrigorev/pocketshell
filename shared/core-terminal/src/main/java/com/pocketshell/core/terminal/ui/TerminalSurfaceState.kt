@@ -1594,21 +1594,6 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Issue #966 connected-proof seam: inject into this state's exact active model.
-     * The caller must first bind this owner to the visible TerminalView and retain
-     * the returned epoch through the pre-call oracle; any late producer/reseed then
-     * changes the epoch and hard-fails the proof.
-     */
-    @androidx.annotation.VisibleForTesting
-    public fun appendDirectlyToRenderModelForTesting(bytes: ByteArray): RenderModelOwnerSnapshot {
-        val emulator = bridge?.emulator ?: _session?.emulator
-            ?: error("no active emulator model")
-        emulator.append(bytes, bytes.size)
-        renderModelMutationEpoch.incrementAndGet()
-        return renderModelOwnerSnapshotForTesting()
-    }
-
-    /**
      * Stop the producer-collection coroutine and the bridge's input
      * drainer. Safe to call multiple times; no-op when nothing is attached.
      *

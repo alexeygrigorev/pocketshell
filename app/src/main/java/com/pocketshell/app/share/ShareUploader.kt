@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.hostKeyTrustBinding
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
@@ -101,12 +102,13 @@ internal class ShareUploader(
      * the app uses.
      */
     private val connect: suspend (HostEntity, SshKey, String, String?) -> Result<SshSession> = { host, key, _, _ ->
+        val trust = host.hostKeyTrustBinding()
         SshConnection.connect(
             host = host.hostname,
             port = host.port,
             user = host.username,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = trust.policy,
         )
     },
     /**

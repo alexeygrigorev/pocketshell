@@ -232,6 +232,34 @@ class FileExplorerLeaseTest {
         )
     }
 
+    @Test
+    fun rebindCancelsOldHostTransferAndFencesItsCompletionFromNewHost() = runBlocking {
+        val uploadEntered = CountDownLatch(1)
+        val releaseUpload = CountDownLatch(1)
+        val session = FakeSshSession(
+            beforeUpload = {
+                uploadEntered.countDown()
+                releaseUpload.await(10, TimeUnit.SECONDS)
+            },
+        )
+        val vm = fixture.create(
+            SshLeaseManager(connector = CountingConnector(session), idleTtlMillis = 30_000L),
+        )
+        vm.start(request("/host-a", hostId = 1L))
+        vm.state.awaitReady { it.currentPath == "/host-a" }
+        vm.uploadFile("late.txt", 1L) { ByteArrayInputStream(byteArrayOf(1)) }
+        assertTrue(uploadEntered.await(10, TimeUnit.SECONDS))
+
+        vm.start(request("/host-b", hostId = 2L))
+        assertEquals(FileTransferState.Idle, vm.transfer.value)
+        releaseUpload.countDown()
+        val hostB = vm.state.awaitReady { it.currentPath == "/host-b" }
+        kotlinx.coroutines.delay(100)
+
+        assertEquals("/host-b", hostB.currentPath)
+        assertEquals(FileTransferState.Idle, vm.transfer.value)
+    }
+
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
         predicate: (FileExplorerUiState.Ready) -> Boolean = { true },
     ): FileExplorerUiState.Ready {
@@ -254,8 +282,8 @@ class FileExplorerLeaseTest {
         error("transfer never reached Success; was ${value}")
     }
 
-    private fun request(startDir: String) = FileExplorerViewModel.Request(
-        hostId = 1L,
+    private fun request(startDir: String, hostId: Long = 1L) = FileExplorerViewModel.Request(
+        hostId = hostId,
         hostname = "10.0.2.2",
         port = 2222,
         username = "tester",
@@ -311,6 +339,7 @@ class FileExplorerLeaseTest {
      */
     private class FakeSshSession(
         private val listDirectoryFailure: Throwable? = null,
+        private val beforeUpload: () -> Unit = {},
         private val beforeListDirectory: suspend (Int) -> Unit = {},
     ) : SshSession {
         var closed: Boolean = false
@@ -368,7 +397,10 @@ class FileExplorerLeaseTest {
             length: Long,
             name: String,
             remotePath: String,
-        ): String = remotePath
+        ): String {
+            beforeUpload()
+            return remotePath
+        }
 
         override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
             byteArrayOf(1, 2, 3)

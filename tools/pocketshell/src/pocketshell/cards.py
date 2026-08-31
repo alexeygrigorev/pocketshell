@@ -58,6 +58,12 @@ from __future__ import annotations
 import os
 import re
 import sys
+import base64
+import errno
+import fcntl
+import logging
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +73,10 @@ import click
 
 # Permissions for the per-session card file (owner-only, matches tree.py).
 NEW_FILE_MODE = 0o600
+_LOGGER = logging.getLogger(__name__)
+_UNSUPPORTED_SYNC_ERRNOS = {errno.EINVAL, errno.ENOTSUP}
+if hasattr(errno, "EOPNOTSUPP"):
+    _UNSUPPORTED_SYNC_ERRNOS.add(errno.EOPNOTSUPP)
 
 # Default checklist card id used when ``--id`` is omitted: a session has exactly
 # one "default" checklist unless the agent names them, which keeps the common
@@ -107,7 +117,7 @@ class CardPaths:
     cards_dir: Path
 
     def session_file(self, session: str) -> Path:
-        return self.cards_dir / f"{_sanitise_session(session)}.yaml"
+        return self.cards_dir / f"{_encode_session(session)}.yaml"
 
 
 # Env override for the cards root, so tests (and a non-default deployment) can
@@ -136,16 +146,10 @@ def resolve_paths(
     return CardPaths(cards_dir=base_home / ".pocketshell" / "cards")
 
 
-def _sanitise_session(session: str) -> str:
-    """Sanitise a tmux session name into a safe single-path-segment filename.
-
-    tmux session names cannot contain whitespace but can contain ``/``, ``.``
-    etc.; replace anything outside ``[A-Za-z0-9._-]`` so the name maps to one
-    flat file (no traversal, no nested dirs).
-    """
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", session.strip())
-    safe = safe.strip(".") or "session"
-    return safe
+def _encode_session(session: str) -> str:
+    """Reversibly encode a tmux session as one safe path segment."""
+    encoded = base64.urlsafe_b64encode(session.encode("utf-8")).decode("ascii")
+    return "s-" + encoded.rstrip("=")
 
 
 def _ensure_dir(path: Path) -> None:
@@ -156,25 +160,90 @@ def _ensure_dir(path: Path) -> None:
         pass
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically with mode 0600 (copied from tree.py)."""
-    _ensure_dir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, NEW_FILE_MODE)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-    except BaseException:
+def _durability_barrier(fd: int, *, path: Path, kind: str) -> bool:
+    """Fsync one file or directory, tolerating only unsupported barriers."""
+    while True:
         try:
-            os.unlink(tmp)
+            os.fsync(fd)
+            return True
+        except OSError as error:
+            if error.errno == errno.EINTR:
+                continue
+            if error.errno in _UNSUPPORTED_SYNC_ERRNOS:
+                _LOGGER.warning(
+                    "durability barrier unavailable for %s %s: %s; "
+                    "continuing with atomic publication",
+                    kind,
+                    path,
+                    error,
+                )
+                return False
+            raise
+
+
+def _fsync_directory(path: Path) -> bool:
+    """Fsync a directory after rename when the filesystem supports it."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(str(path), flags)
+    except OSError as error:
+        if error.errno in _UNSUPPORTED_SYNC_ERRNOS:
+            _LOGGER.warning(
+                "durability barrier unavailable for directory %s: %s; "
+                "continuing with atomic publication",
+                path,
+                error,
+            )
+            return False
+        raise
+    try:
+        return _durability_barrier(fd, path=path, kind="directory")
+    finally:
+        os.close(fd)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Publish ``text`` atomically with file and directory durability barriers."""
+    _ensure_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(tmp_name)
+    open_fd = fd
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            open_fd = -1
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            os.chmod(tmp, NEW_FILE_MODE)
+            _durability_barrier(handle.fileno(), path=tmp, kind="file")
+        os.replace(tmp, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        if open_fd >= 0:
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
+        try:
+            tmp.unlink()
         except FileNotFoundError:
             pass
+        except OSError:
+            pass
         raise
-    os.replace(tmp, path)
-    try:
-        os.chmod(path, NEW_FILE_MODE)
-    except FileNotFoundError:
-        pass
+
+
+@contextmanager
+def _session_lock(path: Path):
+    """Hold the cross-process advisory lock for one session document."""
+    _ensure_dir(path.parent)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, NEW_FILE_MODE)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -427,9 +496,7 @@ def _import_yaml() -> Any:
     return yaml
 
 
-def read_cards(session: str, *, paths: CardPaths) -> list[dict[str, Any]]:
-    """Return the session's list of cards (empty when none / unreadable)."""
-    path = paths.session_file(session)
+def _read_cards_file(path: Path, session: str) -> list[dict[str, Any]]:
     try:
         raw = path.read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError, PermissionError):
@@ -443,14 +510,28 @@ def read_cards(session: str, *, paths: CardPaths) -> list[dict[str, Any]]:
         return []
     if not isinstance(doc, Mapping):
         return []
+    if doc.get("session") != session:
+        return []
     cards = doc.get("cards")
     if not isinstance(cards, list):
         return []
     return [dict(c) for c in cards if isinstance(c, Mapping)]
 
 
+def read_cards(session: str, *, paths: CardPaths) -> list[dict[str, Any]]:
+    """Return the session's list of cards (empty when none / unreadable)."""
+    return _read_cards_file(paths.session_file(session), session)
+
+
 def write_cards(session: str, cards: list[dict[str, Any]], *, paths: CardPaths) -> Path:
     """Atomically persist the session's card list as YAML. Returns the path."""
+    path = paths.session_file(session)
+    with _session_lock(path):
+        _write_cards_file(path, session, cards)
+    return path
+
+
+def _write_cards_file(path: Path, session: str, cards: list[dict[str, Any]]) -> None:
     yaml = _import_yaml()
     doc = {
         "schema": 1,
@@ -459,9 +540,22 @@ def write_cards(session: str, cards: list[dict[str, Any]], *, paths: CardPaths) 
         "cards": cards,
     }
     text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
-    path = paths.session_file(session)
     _write_private(path, text)
-    return path
+
+
+def _mutate_cards(
+    session: str,
+    *,
+    paths: CardPaths,
+    mutation: Callable[[list[dict[str, Any]]], Any],
+) -> tuple[Path, Any]:
+    """Apply one read-modify-write transaction under the session lock."""
+    path = paths.session_file(session)
+    with _session_lock(path):
+        cards = _read_cards_file(path, session)
+        result = mutation(cards)
+        _write_cards_file(path, session, cards)
+    return path, result
 
 
 # ---------------------------------------------------------------------------
@@ -513,11 +607,13 @@ def upsert_card(session: str, card: dict[str, Any], *, paths: CardPaths) -> Path
     Replace preserves nothing of the old card — a re-push of a checklist by the
     agent is a full replace (hard-cut semantics; the new list is authoritative).
     """
-    cards = read_cards(session, paths=paths)
-    card_id = card["id"]
-    cards = [c for c in cards if c.get("id") != card_id]
-    cards.append(card)
-    return write_cards(session, cards, paths=paths)
+    def mutate(cards: list[dict[str, Any]]) -> None:
+        card_id = card["id"]
+        cards[:] = [c for c in cards if c.get("id") != card_id]
+        cards.append(card)
+
+    path, _ = _mutate_cards(session, paths=paths, mutation=mutate)
+    return path
 
 
 def apply_interaction(
@@ -532,23 +628,20 @@ def apply_interaction(
     Raises :class:`ValueError` when the card id is not found in the session, or
     when the type's :meth:`apply_interaction` rejects the interaction.
     """
-    cards = read_cards(session, paths=paths)
-    target: Optional[dict[str, Any]] = None
-    for card in cards:
-        if card.get("id") == card_id:
-            target = card
-            break
-    if target is None:
-        raise ValueError(f"no card with id {card_id!r} in session {session!r}")
-    handler = get_card_type(target.get("type", ""))
-    if handler is None:
-        raise ValueError(f"card {card_id!r} has unknown type {target.get('type')!r}")
-    body = target.get("body", {}) if isinstance(target.get("body"), Mapping) else {}
-    state = target.get("state", {}) if isinstance(target.get("state"), Mapping) else {}
-    new_state = handler.apply_interaction(dict(body), dict(state), interaction)
-    target["state"] = new_state
-    target["updated_at"] = _now_iso()
-    write_cards(session, cards, paths=paths)
+    def mutate(cards: list[dict[str, Any]]) -> dict[str, Any]:
+        target = next((card for card in cards if card.get("id") == card_id), None)
+        if target is None:
+            raise ValueError(f"no card with id {card_id!r} in session {session!r}")
+        handler = get_card_type(target.get("type", ""))
+        if handler is None:
+            raise ValueError(f"card {card_id!r} has unknown type {target.get('type')!r}")
+        body = target.get("body", {}) if isinstance(target.get("body"), Mapping) else {}
+        state = target.get("state", {}) if isinstance(target.get("state"), Mapping) else {}
+        target["state"] = handler.apply_interaction(dict(body), dict(state), interaction)
+        target["updated_at"] = _now_iso()
+        return target
+
+    _, target = _mutate_cards(session, paths=paths, mutation=mutate)
     return target
 
 

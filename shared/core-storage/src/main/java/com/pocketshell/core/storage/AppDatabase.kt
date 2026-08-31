@@ -10,7 +10,6 @@ import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
-import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -24,7 +23,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 17
+const val APP_DATABASE_SCHEMA_VERSION = 19
 
 /**
  * The PocketShell Room database.
@@ -64,7 +63,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun forwardingIntentDao(): ForwardingIntentDao
     abstract fun sshKeyDao(): SshKeyDao
     abstract fun portRemappingDao(): PortRemappingDao
-    abstract fun portUsageDao(): PortUsageDao
     abstract fun projectRootDao(): ProjectRootDao
     abstract fun snippetDao(): SnippetDao
     abstract fun aiApiCallLogDao(): AiApiCallLogDao
@@ -267,6 +265,24 @@ val MIGRATION_16_17: Migration = object : Migration(16, 17) {
     }
 }
 
+/** Issue #2243: give every saved host a stable opaque remote tree owner. */
+val MIGRATION_17_18: Migration = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN treeIdentity TEXT NOT NULL DEFAULT ''")
+        db.execSQL(
+            "UPDATE hosts SET treeIdentity = lower(hex(randomblob(16))) WHERE treeIdentity = ''",
+        )
+    }
+}
+
+/** Issue #2433: durable, app-private SSH server identity confirmation. */
+val MIGRATION_18_19: Migration = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeyAlgorithm TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeySha256 TEXT")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -284,6 +300,8 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_14_15,
     MIGRATION_15_16,
     MIGRATION_16_17,
+    MIGRATION_17_18,
+    MIGRATION_18_19,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

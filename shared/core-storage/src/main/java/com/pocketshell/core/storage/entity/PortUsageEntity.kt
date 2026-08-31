@@ -5,35 +5,11 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 
 /**
- * Per-(host, remote port) usage counters for the auto-forward panel
- * (issue #203).
+ * Historical per-(host, remote port) counters retained only as Room schema.
  *
- * Ported unchanged from `ssh-auto-forward-android` (`data/db/entity/
- * PortUsageEntity.kt`). The composite primary key on
- * `(hostId, remotePort)` is intentional — there is exactly one row per
- * (host, port) pair, so [PortUsageDao.insertIfMissing] is idempotent
- * and the `incrementClick` / `addBytes` update verbs can be safe upserts
- * via "INSERT OR IGNORE" semantics on the DAO.
- *
- * Two counters live here:
- *
- * - [clickCount] — how many times the user has tapped the "open in
- *   browser" affordance for this tunnel. Drives the "frequent ports"
- *   indicator on the panel (a star next to ports the user keeps coming
- *   back to).
- * - [totalBytes] — accumulated bytes-in + bytes-out across every
- *   forward instance for this remote port. Per-tunnel byte counts are
- *   ephemeral (they reset every time the SshSession reconnects); this
- *   column is what lets the panel report "12 MB total since you added
- *   this port" across reconnects.
- *
- * The `lastUsedAt` epoch-millis column is updated by both verbs so a
- * future "recently used" sort key has a single column to range-scan.
- *
- * The FK ON DELETE CASCADE matches the rest of the host-scoped tables
- * ([HostEntity], [PortRemappingEntity], [SnippetEntity], ...): deleting
- * a host wipes its usage history without leaving orphaned rows. The
- * `hostId` index supports the `getByHostId` panel query.
+ * The unused DAO was removed in issue #2432. Keeping this entity, its table,
+ * foreign key, index, and migrations lets existing installs upgrade without a
+ * destructive schema change; production has no reader or writer for the rows.
  */
 @Entity(
     tableName = "port_usage",

@@ -133,6 +133,7 @@ class FolderListViewModel internal constructor(
     // exercise the instant cold render (the tree then shows the brief Loading
     // until the first reconcile, exactly as before).
     private val treeClientCache: TreeClientCache? = null,
+    private val treePersistenceOwner: TreePersistenceOwner = TreePersistenceOwner(),
     // Issue #885: the `pocketshell` version this app build expects on the host,
     // for the passive payload-version mismatch check. Defaults to reading the
     // installed app `versionName` (app + CLI ship in lockstep on every release
@@ -238,6 +239,7 @@ class FolderListViewModel internal constructor(
         treeRemoteSource: TreeRemoteSource,
         // Issue #867: the per-host client-side cold cache for instant cold render.
         treeClientCache: TreeClientCache,
+        treePersistenceOwner: TreePersistenceOwner,
     ) : this(
         gateway = gateway,
         hostDao = hostDao,
@@ -253,6 +255,7 @@ class FolderListViewModel internal constructor(
         enginesGateway = enginesGateway,
         treeRemoteSource = treeRemoteSource,
         treeClientCache = treeClientCache,
+        treePersistenceOwner = treePersistenceOwner,
         attachLifecycle = true,
         periodicReconcileEnabled = true,
     )
@@ -719,6 +722,7 @@ class FolderListViewModel internal constructor(
         cache = treeClientCache,
         processStarted = processStarted,
         dispatcher = { ioDispatcher },
+        persistenceOwner = treePersistenceOwner,
         policy = TreeSyncPolicy(periodicEnabled = periodicReconcileEnabled),
         awaitBeforeFullReconcile = { params: BoundParams ->
             engineDiscovery.awaitBindRefresh(params.hostId)

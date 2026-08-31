@@ -110,6 +110,7 @@ class AttachmentMisrouteBindToOriginTest {
     private fun TmuxSessionViewModel.connectToSession(
         sessionName: String,
         session: SshSession,
+        trustedHostKeySha256: String? = null,
     ) {
         replaceClientForTest(
             hostId = 1L,
@@ -121,6 +122,7 @@ class AttachmentMisrouteBindToOriginTest {
             sessionName = sessionName,
             client = FakeTmuxClient(),
             session = session,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
     }
 
@@ -269,11 +271,12 @@ class AttachmentMisrouteBindToOriginTest {
     fun originStillActiveSeam_coversActiveSwitchedAndGoneOrigins() = runVmTest {
         val vm = newVm()
         vm.connectToSession("alpha", RecordingSshSession("A"))
+        val originAlpha = checkNotNull(vm.activeTarget)
 
         // A is still active -> still the origin.
         assertTrue(
             "origin A is still the active target -> bind-to-origin gate must allow",
-            vm.attachmentOriginStillActiveForTest(originHostId = 1L, originSessionName = "alpha"),
+            vm.attachmentOriginStillActiveForTest(originAlpha),
         )
 
         // Switch A -> B: origin A is no longer active.
@@ -281,19 +284,19 @@ class AttachmentMisrouteBindToOriginTest {
         assertFalse(
             "after switching A->B, origin A is NOT the active target -> gate must deny " +
                 "(the misroute guard)",
-            vm.attachmentOriginStillActiveForTest(originHostId = 1L, originSessionName = "alpha"),
+            vm.attachmentOriginStillActiveForTest(originAlpha),
         )
         // ...and B IS the active target now (sanity: the gate tracks identity).
         assertTrue(
             "B is the active target after the switch",
-            vm.attachmentOriginStillActiveForTest(originHostId = 1L, originSessionName = "bravo"),
+            vm.attachmentOriginStillActiveForTest(checkNotNull(vm.activeTarget)),
         )
 
         // Origin gone entirely (active target cleared).
         vm.clearForTest()
         assertFalse(
             "with no active target, an origin A is no longer active -> gate must deny",
-            vm.attachmentOriginStillActiveForTest(originHostId = 1L, originSessionName = "alpha"),
+            vm.attachmentOriginStillActiveForTest(originAlpha),
         )
     }
 
@@ -303,12 +306,40 @@ class AttachmentMisrouteBindToOriginTest {
         val vm = newVm()
         // No connection: no active target. null origin == null active -> true.
         assertTrue(
-            vm.attachmentOriginStillActiveForTest(originHostId = null, originSessionName = null),
+            vm.attachmentOriginStillActiveForTest(null),
         )
         vm.connectToSession("alpha", RecordingSshSession("A"))
         assertFalse(
             "a null origin must NOT match a non-null active target",
-            vm.attachmentOriginStillActiveForTest(originHostId = null, originSessionName = null),
+            vm.attachmentOriginStillActiveForTest(null),
+        )
+    }
+
+    @Test
+    fun attachmentOriginRejectsOldFingerprintAfterRekeyButAcceptsSameFingerprint() = runVmTest {
+        val vm = newVm()
+        vm.connectToSession(
+            sessionName = "alpha",
+            session = RecordingSshSession("old-trust"),
+            trustedHostKeySha256 = "SHA256:old",
+        )
+        val oldTrustOrigin = checkNotNull(vm.activeTarget)
+
+        assertTrue(vm.attachmentOriginStillActiveForTest(oldTrustOrigin))
+
+        vm.connectToSession(
+            sessionName = "alpha",
+            session = RecordingSshSession("new-trust"),
+            trustedHostKeySha256 = "SHA256:new",
+        )
+
+        assertFalse(
+            "an attachment authorized under the old key must not complete after rekey",
+            vm.attachmentOriginStillActiveForTest(oldTrustOrigin),
+        )
+        assertTrue(
+            "an attachment snapshot under the current fingerprint remains authorized",
+            vm.attachmentOriginStillActiveForTest(checkNotNull(vm.activeTarget)),
         )
     }
 

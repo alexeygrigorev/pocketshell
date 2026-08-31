@@ -488,7 +488,7 @@ class Issue1829MainThreadConfinementTest {
             "FirstHostTestConnectViewModel.start" to {
                 firstHostTestConnectViewModel.start(HOST.id)
             },
-            "AddEditHostViewModel.loadHost" to { addEditHostViewModel.loadHost(HOST.id) },
+            "AddEditHostViewModel.bind" to { addEditHostViewModel.bind(HOST.id) },
             "AddEditHostViewModel.consumeFirstInvalidField" to {
                 addEditHostViewModel.consumeFirstInvalidField()
             },
@@ -579,7 +579,7 @@ class Issue1829MainThreadConfinementTest {
         )
 
     private fun writeNodes(cache: TreeClientCache, vararg nodes: TreeRemoteSource.TreeNode) {
-        cache.write(HOST.name, TreeClientCache.CachedTree(nodes = nodes.toList()))
+        cache.write(HOST.id, 1L, TreeClientCache.CachedTree(nodes = nodes.toList()))
     }
 
     private fun sessionRow(name: String): FolderSessionRow =

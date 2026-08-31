@@ -17,9 +17,14 @@ Coverage (one test per acceptance criterion):
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import stat
+import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from click.testing import CliRunner
 
 from pocketshell import cards as cards_mod
@@ -55,9 +60,201 @@ def test_resolve_paths_default_under_home() -> None:
     assert paths.cards_dir == Path("/home/u/.pocketshell/cards")
 
 
-def test_session_file_sanitises_name(tmp_path: Path) -> None:
+def test_session_file_identity_is_injective(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    assert paths.session_file("a/b c").name == "a_b_c.yaml"
+    aliases = ("a/b", "a_b", "...", "session", "привет")
+    names = [paths.session_file(session).name for session in aliases]
+    assert len(set(names)) == len(aliases)
+    assert all("/" not in name for name in names)
+
+
+def _upsert_in_process(
+    cards_dir: str,
+    session: str,
+    card_id: str,
+    ready: multiprocessing.synchronize.Event,
+    start: multiprocessing.synchronize.Event,
+    reads_complete: multiprocessing.synchronize.Barrier | None = None,
+) -> None:
+    paths = cards_mod.CardPaths(cards_dir=Path(cards_dir))
+    card = cards_mod.build_card(
+        card_type="note",
+        card_id=card_id,
+        title=None,
+        build_kwargs={"text": card_id},
+    )
+    ready.set()
+    start.wait(timeout=5)
+    if reads_complete is not None:
+        original_read = cards_mod.read_cards
+
+        def read_then_rendezvous(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            cards = original_read(*args, **kwargs)
+            reads_complete.wait(timeout=5)
+            return cards
+
+        cards_mod.read_cards = read_then_rendezvous
+    cards_mod.upsert_card(session, card, paths=paths)
+
+
+def _interact_in_process(
+    cards_dir: str,
+    item_id: str,
+    ready: multiprocessing.synchronize.Event,
+    start: multiprocessing.synchronize.Event,
+) -> None:
+    paths = cards_mod.CardPaths(cards_dir=Path(cards_dir))
+    ready.set()
+    start.wait(timeout=5)
+    cards_mod.apply_interaction(
+        "shared", "checklist", {"item": item_id, "done": True}, paths=paths
+    )
+
+
+def test_concurrent_upserts_preserve_both_cards(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+    reads_complete = ctx.Barrier(2)
+    ready = [ctx.Event(), ctx.Event()]
+    processes = [
+        ctx.Process(
+            target=_upsert_in_process,
+            args=(
+                str(paths.cards_dir),
+                "shared",
+                card_id,
+                ready[index],
+                start,
+                reads_complete,
+            ),
+        )
+        for index, card_id in enumerate(("one", "two"))
+    ]
+    for process in processes:
+        process.start()
+    assert all(event.wait(timeout=5) for event in ready)
+    start.set()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    assert {card["id"] for card in cards_mod.read_cards("shared", paths=paths)} == {
+        "one", "two",
+    }
+
+
+def test_private_write_orders_durability_barriers_around_replace(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    target = tmp_path / "cards" / "session.yaml"
+    events: list[str] = []
+    real_fsync = cards_mod.os.fsync
+    real_replace = cards_mod.os.replace
+
+    def record_fsync(fd: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        events.append(f"fsync:{kind}")
+        real_fsync(fd)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        events.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(cards_mod.os, "fsync", record_fsync)
+    monkeypatch.setattr(cards_mod.os, "replace", record_replace)
+
+    cards_mod._write_private(target, "durable\n")
+
+    assert events == ["fsync:file", "replace", "fsync:directory"]
+    assert target.read_text(encoding="utf-8") == "durable\n"
+
+
+def test_private_write_fails_before_replace_when_file_fsync_fails(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    target = tmp_path / "cards" / "session.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_text("previous\n", encoding="utf-8")
+    replace_called = False
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError(5, "simulated storage failure")
+
+    def record_replace(_source: Path, _destination: Path) -> None:
+        nonlocal replace_called
+        replace_called = True
+
+    monkeypatch.setattr(cards_mod.os, "fsync", fail_fsync)
+    monkeypatch.setattr(cards_mod.os, "replace", record_replace)
+
+    with pytest.raises(OSError, match="simulated storage failure"):
+        cards_mod._write_private(target, "new\n")
+
+    assert replace_called is False
+    assert target.read_text(encoding="utf-8") == "previous\n"
+    assert list(target.parent.glob(f".{target.name}.*")) == []
+
+
+def test_card_mutation_obeys_cross_process_lock(tmp_path: Path) -> None:
+    import fcntl
+
+    paths = _paths(tmp_path)
+    path = paths.session_file("shared")
+    path.parent.mkdir(parents=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        ctx = multiprocessing.get_context("fork")
+        ready, start = ctx.Event(), ctx.Event()
+        process = ctx.Process(
+            target=_upsert_in_process,
+            args=(str(paths.cards_dir), "shared", "blocked", ready, start),
+        )
+        process.start()
+        assert ready.wait(timeout=5)
+        start.set()
+        time.sleep(0.15)
+        assert process.is_alive(), "mutation bypassed the session lock"
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    process.join(timeout=5)
+    assert process.exitcode == 0
+
+
+def test_concurrent_interactions_preserve_both_updates(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    items = cards_mod.parse_checklist_markdown("- [ ] first\n- [ ] second\n")
+    card = cards_mod.build_card(
+        card_type="checklist", card_id="checklist", title=None,
+        build_kwargs={"items": items},
+    )
+    cards_mod.upsert_card("shared", card, paths=paths)
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+    ready = [ctx.Event(), ctx.Event()]
+    processes = [
+        ctx.Process(
+            target=_interact_in_process,
+            args=(str(paths.cards_dir), item["id"], ready[index], start),
+        )
+        for index, item in enumerate(items)
+    ]
+    for process in processes:
+        process.start()
+    assert all(event.wait(timeout=5) for event in ready)
+    start.set()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    [stored] = cards_mod.read_cards("shared", paths=paths)
+    assert set(stored["state"]["checked"]) == {item["id"] for item in items}
+
+
+def test_read_rejects_document_with_wrong_session_identity(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    path = paths.session_file("expected")
+    path.parent.mkdir(parents=True)
+    path.write_text("schema: 1\nsession: foreign\ncards:\n  - id: leaked\n")
+    assert cards_mod.read_cards("expected", paths=paths) == []
 
 
 # ----- session auto-detection ($TMUX) --------------------------------

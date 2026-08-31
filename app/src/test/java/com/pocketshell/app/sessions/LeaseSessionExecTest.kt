@@ -64,7 +64,7 @@ class LeaseSessionExecTest {
         assertEquals(2222, key.port)
         assertEquals("testuser", key.user)
         assertEquals("42:/tmp/key", key.credentialId)
-        assertEquals("accept-all", key.knownHostsId)
+        assertEquals(SshLeaseManager.UNCONFIRMED_HOST_KEY_ID, key.knownHostsId)
     }
 
     @Test

@@ -22,7 +22,7 @@ import java.io.InputStream
  * Roadmap slice **S6 (#1329)** — the OPEN / SWITCH / REVEAL transitions are now DECIDED by the
  * [com.pocketshell.core.connection.ConnectionController] from the events the VM SUBMITS at the
  * flow edges (`Enter` / `Switch` / `revealLive`), NOT dictated by the retired inline
- * `driveControllerIntent` open/switch/reveal arms. These tests read the AUTHORITATIVE controller
+ * controller-owned open/switch/reveal arms. These tests read the AUTHORITATIVE controller
  * state via [TmuxSessionViewModel.connectionControllerStateForTest] and assert it reflects the
  * controller's own decision.
  *
@@ -86,7 +86,7 @@ class Issue1329ControllerDecidesOpenSwitchTest : TmuxSessionViewModelTestBase() 
         assertTrue(vm.connectionControllerStateForTest() is CoreConnectionState.Live)
 
         // The switch window a same-host fast switch holds before the Live flip.
-        vm.forceAttachingStateForTest("alpha.example", 22, "alex")
+        vm.forceControllerAttachingForTest()
         runCurrent()
 
         assertTrue(

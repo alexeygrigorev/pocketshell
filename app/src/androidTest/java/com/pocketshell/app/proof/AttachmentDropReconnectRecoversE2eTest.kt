@@ -24,6 +24,7 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.activePaneRenderOwnerSnapshotForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -282,7 +283,7 @@ class AttachmentDropReconnectRecoversE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
         val clientBeforeDrop = vm.currentClientIdentityForTest()
@@ -603,7 +604,7 @@ class AttachmentDropReconnectRecoversE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -621,7 +622,7 @@ class AttachmentDropReconnectRecoversE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -783,7 +784,7 @@ class AttachmentDropReconnectRecoversE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use {

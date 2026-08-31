@@ -22,50 +22,14 @@ import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
 
 /**
- * ⚠️ THIS TEST IS DELIBERATELY RECORDING A DEFECT. DO NOT "FIX" IT. ⚠️
+ * Real-transport host-key trust regressions for #2433.
  *
- * Issue #1799 — the S0 fixture/characterization slice of #1639 §H1
- * (SSH host-key verification). **It is GREEN on current `main` on purpose.**
+ * An unknown key is first observed through a rejected handshake. Only the exact
+ * fingerprint returned by that handshake may subsequently connect. Restarting
+ * the same fixture on the same endpoint generates a different key and proves
+ * that the previously trusted fingerprint rejects it.
  *
- * ## What it records
- *
- * PocketShell performs **no host-key trust checking at all** today. Every
- * production connect either passes [KnownHostsPolicy.AcceptAll] explicitly or —
- * like `DefaultPortForwardConnector`, which omits the argument entirely — falls
- * through to [SshConnection.connect]'s DEFAULT, which is also `AcceptAll`. So:
- *
- *  * a first connect to a host key the client has **never seen** succeeds, and
- *  * a connect to a **changed** host key on the *same* `host:port` also
- *    succeeds, with no error, no prompt, and no signal of any kind.
- *
- * The second one is the dangerous half: a changed host key on an endpoint you
- * previously trusted is the classic man-in-the-middle signature, and every other
- * SSH client on the planet hard-stops on it. PocketShell connects and hands the
- * user a shell.
- *
- * ## Why it asserts SUCCESS instead of failing
- *
- * There is no fix in this slice (see #1639 — the mismatch/re-key UX is a parked
- * maintainer decision). A test that asserted the *desired* behaviour would be a
- * permanently-red test nobody could merge; the value here is a **pinned, executed,
- * real-transport observation** of the current trust posture. When #1639 §H1 lands,
- * the two `assertTrue(result.isSuccess)` assertions below flip to
- * `assertTrue(result.isFailure)` — and *that flip* is the red→green D33 proof for
- * §H1, produced against a fixture that can actually enter the failing state (G10).
- *
- * If you arrived here because this test "looks backwards": it is. Read #1639
- * before changing it. Changing the assertion without landing the verifier turns a
- * documented hole into an undocumented one.
- *
- * ## Why the assertions are on the CONNECTION OUTCOME
- *
- * Every load-bearing assertion is `Result.isSuccess` / `Result.isFailure` on a
- * real [SshConnection.connect] over a real SSH transport, followed by a real
- * `exec` round-trip proving the session is genuinely usable — never "a verifier
- * was consulted" or "a lambda fired". A seam-level assertion would prove nothing
- * about trust (the #1693 round-1 failure shape).
- *
- * ## Why a dedicated fixture was needed
+ * The dedicated fixture is needed because
  *
  * `tests/docker/Dockerfile.ssh` bakes its host keys into an image layer, so every
  * container from it presents the same key forever and "the key changed" is
@@ -168,31 +132,11 @@ class HostKeyTrustCharacterizationIntegrationTest {
     }
 
     // ------------------------------------------------------------------
-    // Characterization 1 — an UNKNOWN host key is accepted today
+    // Unknown -> explicit first-use trust -> known automatic reconnect.
     // ------------------------------------------------------------------
 
-    /**
-     * #1799 / #1639 §H1 characterization: a first connect to a host key the
-     * client has never seen **succeeds today**.
-     *
-     * The freshly re-keyed container's key did not exist until a few seconds
-     * ago, so it cannot be in any store anywhere. Two connects are made to the
-     * exact same endpoint:
-     *
-     *  1. with [KnownHostsPolicy.KnownHostsFile] over an EMPTY known-hosts file —
-     *     this is the control. It must FAIL, which proves (a) the key really is
-     *     unknown, and (b) sshj's verification machinery is live in this build,
-     *     so step 2's success is a *trust decision*, not a broken verifier or a
-     *     fixture that would let anything through.
-     *  2. with the argument OMITTED — the exact call shape of
-     *     `DefaultPortForwardConnector`, which falls through to
-     *     [SshConnection.connect]'s `AcceptAll` default. This SUCCEEDS, and the
-     *     session round-trips a real command.
-     *
-     * Step 2 is the recorded defect. It flips to `isFailure` under #1639 §H1.
-     */
     @Test
-    fun firstConnectToAnUnknownHostKeyIsAcceptedToday() = runBlocking {
+    fun firstConnectToAnUnknownHostKeyIsRejectedUntilExplicitlyTrusted() = runBlocking {
         val container = startRekeyedFixture()
         val fingerprints = hostKeyFingerprints(container)
         assertTrue(
@@ -200,47 +144,25 @@ class HostKeyTrustCharacterizationIntegrationTest {
             fingerprints.isNotEmpty(),
         )
 
-        // (1) Control: an empty known-hosts store cannot verify this key.
-        val emptyStore = emptyKnownHostsFile("unknown-key-control")
-        val strictResult = connect(KnownHostsPolicy.KnownHostsFile(emptyStore))
-        strictResult.getOrNull()?.close()
+        val strictResult = connect(KnownHostsPolicy.VerifiedFingerprint(null))
         assertTrue(
-            "CONTROL FAILED: a host key that is in no known-hosts store must be " +
-                "unverifiable. It connected instead, so this test could not " +
-                "distinguish 'trusted' from 'verifier broken'. Host key " +
-                "fingerprints on the fixture were: $fingerprints",
+            "an unknown key must be rejected before confirmation",
             strictResult.isFailure,
         )
-        assertTrue(
-            "expected an SshException from the strict control; got " +
-                "${strictResult.exceptionOrNull()}",
-            strictResult.exceptionOrNull() is SshException,
-        )
+        val unknown = strictResult.exceptionOrNull() as UnknownHostKeyException
+        assertTrue("reported key must be one actually served", unknown.presentedSha256 in fingerprints)
 
-        // (2) THE CHARACTERIZATION: production's default policy accepts it.
-        val defaultResult = connectWithProductionDefaultPolicy()
-        assertTrue(
-            "CHARACTERIZATION (#1639 §H1, expected GREEN on current main): " +
-                "SshConnection.connect with the knownHosts argument omitted — the " +
-                "DefaultPortForwardConnector call shape — accepts a host key the " +
-                "client has never seen. If this now FAILS, host-key verification " +
-                "has landed: flip this assertion to isFailure and cite the §H1 " +
-                "change. Got: ${defaultResult.exceptionOrNull()}",
-            defaultResult.isSuccess,
-        )
-        defaultResult.getOrThrow().use { session ->
-            assertEquals(
-                "the accepted-on-trust session must be a genuinely usable shell, " +
-                    "not a nominally-successful handshake",
-                0,
-                session.exec("true").exitCode,
-            )
-            assertEquals("testuser", session.exec("whoami").stdout.trim())
+        repeat(2) { attempt ->
+            connect(KnownHostsPolicy.VerifiedFingerprint(unknown.presentedSha256))
+                .getOrThrow()
+                .use { session ->
+                    assertEquals("trusted reconnect $attempt must be usable", 0, session.exec("true").exitCode)
+                }
         }
     }
 
     // ------------------------------------------------------------------
-    // Characterization 2 — a CHANGED host key is accepted today
+    // Changed key on the exact same endpoint is rejected.
     // ------------------------------------------------------------------
 
     /**
@@ -267,7 +189,7 @@ class HostKeyTrustCharacterizationIntegrationTest {
      * Step 5 flips to `isFailure` under #1639 §H1.
      */
     @Test
-    fun connectAfterTheHostKeyChangesIsAcceptedToday() = runBlocking {
+    fun connectAfterTheHostKeyChangesIsRejectedWithBothFingerprints() = runBlocking {
         // (1) First incarnation.
         val first = startRekeyedFixture()
         val firstImageId = first.containerInfo.imageId
@@ -276,19 +198,10 @@ class HostKeyTrustCharacterizationIntegrationTest {
             "fixture must present at least one host key",
             firstFingerprints.isNotEmpty(),
         )
-        val trustedStore = knownHostsFileFor(first, "changed-key-trusted")
-
-        // (2) Control: the seeded store really does verify THIS key.
-        val trustedResult = connect(KnownHostsPolicy.KnownHostsFile(trustedStore))
-        assertTrue(
-            "CONTROL FAILED: the known-hosts file seeded from this very container " +
-                "must verify its own host key, otherwise step (4)'s rejection " +
-                "would prove nothing. Got: ${trustedResult.exceptionOrNull()}",
-            trustedResult.isSuccess,
-        )
-        trustedResult.getOrThrow().use { session ->
-            assertEquals(0, session.exec("true").exitCode)
-        }
+        val firstUnknown = connect(KnownHostsPolicy.VerifiedFingerprint(null)).exceptionOrNull()
+            as UnknownHostKeyException
+        connect(KnownHostsPolicy.VerifiedFingerprint(firstUnknown.presentedSha256))
+            .getOrThrow().close()
 
         // (3) Re-key by restarting the fixture on the SAME endpoint.
         stopFixture(first)
@@ -322,43 +235,12 @@ class HostKeyTrustCharacterizationIntegrationTest {
                 firstFingerprints.intersect(secondFingerprints).isEmpty(),
         )
 
-        // (4) A real verifier DOES notice the change.
-        val mismatchResult = connect(KnownHostsPolicy.KnownHostsFile(trustedStore))
-        mismatchResult.getOrNull()?.close()
-        assertTrue(
-            "a known-hosts store holding the OLD key must reject the NEW key; if " +
-                "this connected, the mismatch is undetectable in this build and " +
-                "step (5) proves nothing. old=$firstFingerprints new=$secondFingerprints",
-            mismatchResult.isFailure,
-        )
-        assertTrue(
-            "expected an SshException on host-key mismatch; got " +
-                "${mismatchResult.exceptionOrNull()}",
-            mismatchResult.exceptionOrNull() is SshException,
-        )
-
-        // (5) THE CHARACTERIZATION: production's default policy accepts the
-        //     changed key anyway.
-        val defaultResult = connectWithProductionDefaultPolicy()
-        assertTrue(
-            "CHARACTERIZATION (#1639 §H1, expected GREEN on current main): " +
-                "SshConnection.connect with the knownHosts argument omitted accepts " +
-                "a CHANGED host key on an endpoint it already connected to — the " +
-                "classic MITM signature — with no error and no prompt. If this now " +
-                "FAILS, host-key verification has landed: flip this assertion to " +
-                "isFailure and cite the §H1 change. old=$firstFingerprints " +
-                "new=$secondFingerprints got=${defaultResult.exceptionOrNull()}",
-            defaultResult.isSuccess,
-        )
-        defaultResult.getOrThrow().use { session ->
-            assertEquals(
-                "the session established over the CHANGED host key must be a " +
-                    "genuinely usable shell — that is what makes the hole matter",
-                0,
-                session.exec("true").exitCode,
-            )
-            assertEquals("testuser", session.exec("whoami").stdout.trim())
-        }
+        val mismatchResult = connect(KnownHostsPolicy.VerifiedFingerprint(firstUnknown.presentedSha256))
+        assertTrue("changed key must be rejected", mismatchResult.isFailure)
+        val changed = mismatchResult.exceptionOrNull() as ChangedHostKeyException
+        assertEquals(firstUnknown.presentedSha256, changed.expectedSha256)
+        assertTrue(changed.presentedSha256 in secondFingerprints)
+        assertTrue(changed.presentedSha256 !in firstFingerprints)
     }
 
     // ------------------------------------------------------------------
@@ -368,20 +250,10 @@ class HostKeyTrustCharacterizationIntegrationTest {
     /**
      * The EXACT production call shape of `DefaultPortForwardConnector`: the
      * `knownHosts` argument is omitted, so [SshConnection.connect]'s default
-     * ([KnownHostsPolicy.AcceptAll]) applies. Deliberately NOT written as
-     * `knownHosts = KnownHostsPolicy.AcceptAll` — the point is that production
+     * ([TestOnlyAcceptAll]) applies. Deliberately NOT written as
+     * `knownHosts = TestOnlyAcceptAll` — the point is that production
      * reaches this posture by *default*, without any caller opting in.
      */
-    private suspend fun connectWithProductionDefaultPolicy(): Result<SshSession> =
-        SshConnection.connect(
-            host = "127.0.0.1",
-            port = FIXED_HOST_PORT,
-            user = "testuser",
-            key = SshKey.Path(privateKeyFile),
-            passphrase = null,
-            timeoutMs = 15_000,
-        )
-
     private suspend fun connect(policy: KnownHostsPolicy): Result<SshSession> =
         SshConnection.connect(
             host = "127.0.0.1",

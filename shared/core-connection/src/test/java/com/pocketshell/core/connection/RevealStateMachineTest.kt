@@ -397,6 +397,47 @@ class RevealStateMachineTest {
         assertTrue(m.state.value is RevealState.Live)
     }
 
+    @Test
+    fun `late connecting edge does not erase an already landed exact seed`() {
+        val m = RevealStateMachine()
+        m.navigate(a, "session-A")
+
+        // The pane-list/capture path may land before the controller state-flow
+        // collector observes the cold-attach Connecting edge. The seed is still
+        // authoritative for this exact target and must remain visible.
+        m.onSeed(seed(a, frame = "captured-before-connecting"))
+        assertTrue(m.state.value is RevealState.Live)
+
+        m.onConnectionState(ConnectionState.Connecting(host, a))
+
+        assertEquals(
+            RevealState.Live(
+                a,
+                "session-A",
+                listOf(seed(a, frame = "captured-before-connecting")),
+                null,
+            ),
+            m.state.value,
+        )
+    }
+
+    @Test
+    fun `a real recovery invalidates the late lifecycle allowance after silent hold`() {
+        val m = RevealStateMachine()
+        m.bringLive(a, "session-A")
+        val liveBefore = m.state.value as RevealState.Live
+
+        m.setConnectionProjection(ConnectionProjection.SilentWithinGraceRecovery)
+        m.onConnectionState(ConnectionState.Reconnecting(host, a, attempt = 1))
+        assertEquals(liveBefore, m.state.value)
+
+        // Once the bounded hold ends, a new lifecycle edge must not reuse the pre-drop
+        // seed as proof of the new attach. Removing the invalidation makes this incorrectly Live.
+        m.setConnectionProjection(ConnectionProjection.Normal)
+        m.onConnectionState(ConnectionState.Connecting(host, a))
+        assertEquals(RevealState.Seeding(a, "session-A"), m.state.value)
+    }
+
     // --- agentName override (only in Live, only for this id) ---------------
 
     @Test

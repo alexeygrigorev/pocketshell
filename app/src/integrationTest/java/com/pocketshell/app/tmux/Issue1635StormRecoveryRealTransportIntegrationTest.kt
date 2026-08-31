@@ -453,7 +453,7 @@ class Issue1635StormRecoveryRealTransportIntegrationTest {
         user = "testuser",
         key = SshKey.Path(privateKeyFile),
         passphrase = null,
-        knownHosts = KnownHostsPolicy.AcceptAll,
+        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         timeoutMs = 15_000,
     ).getOrThrow()
 

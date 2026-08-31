@@ -8,8 +8,8 @@
 #
 #   - Trivially queryable with one command: `git show validated-rc --quiet`
 #     (or `git ls-remote --tags origin validated-rc` for the SHA alone).
-#   - The tag message carries the SHA, the run URL, and an ISO-8601 UTC
-#     timestamp, so all three required fields are in the ONE artifact.
+#   - The tag message carries the SHA, the Release Emulator Validation run URL,
+#     the triggering Tests run URL, and an ISO-8601 UTC timestamp.
 #   - Unambiguous by construction: there is exactly one `validated-rc` ref,
 #     always force-moved to the latest green run, so there is never a
 #     stale-vs-fresh choice between multiple candidate markers — the
@@ -20,7 +20,7 @@
 #     Actions API access.
 #
 # Usage:
-#   ci-nightly-rc-mark.sh --sha SHA --run-url URL [--dry-run] [--remote NAME]
+#   ci-nightly-rc-mark.sh --sha SHA --run-url URL --trigger-run-url URL [--dry-run] [--remote NAME]
 #
 # Exits non-zero (and says why on stderr) on any git failure — recording the
 # marker must itself be loud on failure, never silently skipped.
@@ -29,6 +29,7 @@ set -uo pipefail
 
 SHA=""
 RUN_URL=""
+TRIGGER_RUN_URL=""
 REMOTE="origin"
 DRY_RUN=0
 
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --sha) SHA="$2"; shift 2 ;;
     --run-url) RUN_URL="$2"; shift 2 ;;
+    --trigger-run-url) TRIGGER_RUN_URL="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -47,8 +49,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$SHA" || -z "$RUN_URL" ]]; then
-  echo "usage: $0 --sha SHA --run-url URL [--dry-run] [--remote NAME]" >&2
+if [[ -z "$SHA" || -z "$RUN_URL" || -z "$TRIGGER_RUN_URL" ]]; then
+  echo "usage: $0 --sha SHA --run-url URL --trigger-run-url URL [--dry-run] [--remote NAME]" >&2
   exit 2
 fi
 
@@ -92,7 +94,8 @@ TAG_MESSAGE="$(
 PocketShell validated RC
 
 SHA: $SHA
-Run: $RUN_URL
+Release validation run: $RUN_URL
+Triggering Tests run: $TRIGGER_RUN_URL
 Recorded: $TIMESTAMP
 
 This is a MOVING marker (force-updated on every green Release Emulator
@@ -102,7 +105,7 @@ not treat an older local copy of this tag as current; always \`git fetch
 EOF
 )"
 
-echo "Recording validated-rc marker: sha=$SHA run=$RUN_URL at $TIMESTAMP"
+echo "Recording validated-rc marker: sha=$SHA validation_run=$RUN_URL trigger_run=$TRIGGER_RUN_URL at $TIMESTAMP"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would force-create annotated tag validated-rc at $SHA and force-push to $REMOTE"

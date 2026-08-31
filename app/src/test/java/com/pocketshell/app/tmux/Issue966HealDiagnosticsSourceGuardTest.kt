@@ -13,6 +13,47 @@ import org.junit.Test
  * latch timeout, Boolean outcome collapse, or artifact with no typed reason/stats.
  */
 class Issue966HealDiagnosticsSourceGuardTest {
+    @Test
+    fun proofStateMachinesAreTestOnlyAndProductionDiagnosticsAreImmutableData() {
+        val production = locateAllProductionTerminalSource()
+        val proof = locateProof()
+
+        assertTrue(production.contains("PRODUCTION_FILE:") && production.contains("com/pocketshell/app/tmux"))
+        assertTrue(production.contains("shared/core-terminal/src/main/java"))
+        assertTrue(production.contains("class TerminalSurfaceState("))
+        assertTrue(production.contains("shared/core-tmux/src/main/java"))
+        assertTrue(production.contains("public interface TmuxClient"))
+        assertTrue(production.contains("internal data class ActivePaneRenderDiagnostics("))
+        assertTrue(
+            "production tmux source must expose immutable diagnostics only",
+            productionRenderDiagnosticsAreObservationOnly(production),
+        )
+        assertFalse(
+            "the cross-module guard must redden when core-terminal restores pane injection",
+            productionRenderDiagnosticsAreObservationOnly(
+                production + "\n// shared/core-terminal/src/main/.../TerminalSurfaceState.kt\n" +
+                    "fun appendDirectlyToRenderModelForTesting(bytes: ByteArray) { " +
+                    "emulator.append(bytes, bytes.size) }",
+            ),
+        )
+        assertTrue(
+            "the structural overflow contract must require an explicit retained source",
+            structuralOverflowContractIsMandatory(production),
+        )
+        assertFalse(
+            "the guard must redden when the silent empty-flow compatibility fallback returns",
+            structuralOverflowContractIsMandatory(
+                production + "\npublic val structuralEventOverflowGeneration: Flow<Long> " +
+                    "get() = emptyFlow()",
+            ),
+        )
+        assertTrue(proof.contains("internal enum class StaleRenderHealProofStepForTest"))
+        assertTrue(proof.contains("internal class StaleRenderHealOwnerRecoveryForTest"))
+        assertTrue(proof.contains("getDeclaredMethod(\"activeVisiblePane\")"))
+        assertTrue(proof.contains("appendToRenderModelForProof(bytes)"))
+        assertTrue(proof.contains("readPrivateField(\"renderModelMutationEpoch\")"))
+    }
+
 
     @Test
     fun staleRenderOwnerPredicateAndProofOrderAreExecutable() {
@@ -211,7 +252,7 @@ class Issue966HealDiagnosticsSourceGuardTest {
     @Test
     fun issue2272KeepsSelectiveFullFrameOracleAndProductionShapedHealPath() {
         val journey = locateJourney("AgentAltScreenPartialBlackHealJourneyE2eTest.kt")
-        val proof = locateMain("ActivePaneRenderOwnerSnapshotForTest.kt")
+        val proof = locateProof()
 
         assertTrue(
             "the already-healed branch must use the pure owner/frame predicate",
@@ -298,7 +339,7 @@ class Issue966HealDiagnosticsSourceGuardTest {
 
     @Test
     fun vmOwnerSeamHardFailsUnequalOrUnsettledInjection() {
-        val seam = locateMain("ActivePaneRenderOwnerSnapshotForTest.kt") +
+        val seam = locateProof() +
             locateMain("TmuxSessionViewModel.kt")
         assertTrue(seam.contains("attachResizeSeedSettled"))
         assertTrue(seam.contains("sizeOperationsInFlight == 0"))
@@ -306,7 +347,7 @@ class Issue966HealDiagnosticsSourceGuardTest {
         assertTrue(seam.contains("automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch"))
         assertTrue(seam.contains("before.sameOwnerAs(expectedOwner)"))
         assertTrue(seam.contains("before.modelMutationEpoch == expectedOwner.modelMutationEpoch"))
-        assertTrue(seam.contains("appendDirectlyToRenderModelForTesting(bytes)"))
+        assertTrue(seam.contains("appendToRenderModelForProof(bytes)"))
 
         // Exercise the settlement gate itself. A source substring cannot prove that either
         // applied dimension remains tied to its effective dimension after a refactor.
@@ -337,14 +378,12 @@ class Issue966HealDiagnosticsSourceGuardTest {
         assertTrue(regression.contains("issue966ManualOwnerRatchetRejectsCompletedAutomaticHealAba"))
         assertTrue(regression.contains("issue966InjectionRejectsCompletedAutomaticHealBeforePostInjectionSnapshot"))
 
-        val postInjection = locateMain("TmuxSessionViewModel.kt").substringBetween(
-            "val after = activePaneRenderOwnerSnapshotForTest()",
+        val postInjection = locateProof().substringBetween(
+            "val after = activePaneRenderDiagnosticsForTest().toProofSnapshot()",
             "return after",
         )
         assertTrue(postInjection.contains("after.automaticHealOperationsInFlight == 0"))
-        assertTrue(postInjection.contains(
-            "after.automaticHealActivityEpoch ==\n            expectedOwner.automaticHealActivityEpoch",
-        ))
+        assertTrue(postInjection.contains("after.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch"))
     }
 
     @Test
@@ -418,10 +457,59 @@ class Issue966HealDiagnosticsSourceGuardTest {
             "src/main/java/com/pocketshell/app/tmux/$name",
         )
 
+    private fun locateAllProductionTerminalSource(): String {
+        val moduleCandidates = listOf(
+            listOf(
+                File("app/src/main/java/com/pocketshell/app/tmux"),
+                File("src/main/java/com/pocketshell/app/tmux"),
+            ),
+            listOf(
+                File("shared/core-terminal/src/main/java"),
+                File("../shared/core-terminal/src/main/java"),
+            ),
+            listOf(
+                File("shared/core-tmux/src/main/java"),
+                File("../shared/core-tmux/src/main/java"),
+            ),
+        )
+        val directories = moduleCandidates.map { candidates ->
+            candidates.firstOrNull(File::isDirectory)
+                ?: error("Could not locate ${candidates.first()} from ${File(".").absolutePath}")
+        }
+        return directories.asSequence()
+            .flatMap { directory -> directory.walkTopDown().asSequence() }
+            .filter { it.isFile && it.extension == "kt" }
+            .sortedBy(File::getPath)
+            .joinToString("\n") { file ->
+                "// PRODUCTION_FILE:${file.path}\n${file.readText()}"
+            }
+    }
+
+    private fun productionRenderDiagnosticsAreObservationOnly(source: String): Boolean =
+        listOf(
+            "StaleRenderHealProofStepForTest",
+            "StaleRenderHealOwnerRecoveryForTest",
+            "fun sameOwnerAs",
+            "appendToActivePaneRenderModelForDiagnostics",
+            "appendDirectlyToRenderModelForTesting",
+            "afterAppendBeforeSnapshotForTest",
+        ).none(source::contains)
+
+    private fun structuralOverflowContractIsMandatory(source: String): Boolean =
+        !Regex(
+            """structuralEventOverflowGeneration\s*:\s*Flow<Long>\s*get\(\)\s*=\s*emptyFlow\(\)""",
+        ).containsMatchIn(source)
+
     private fun locateTest(name: String): String =
         locate(
             "app/src/test/java/com/pocketshell/app/tmux/$name",
             "src/test/java/com/pocketshell/app/tmux/$name",
+        )
+
+    private fun locateProof(): String =
+        locate(
+            "app/src/proofTest/java/com/pocketshell/app/tmux/ActivePaneRenderProofForTest.kt",
+            "src/proofTest/java/com/pocketshell/app/tmux/ActivePaneRenderProofForTest.kt",
         )
 
     private fun locate(vararg candidates: String): String {

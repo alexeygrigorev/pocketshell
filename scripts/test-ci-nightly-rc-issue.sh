@@ -52,7 +52,7 @@ call_body() {
 # --- no existing issue => create, body carries marker + SHA + run URL ---
 reset_sandbox_calls
 write_fake_gh ""
-out="$(PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/run/1" --sha deadbeef)"
+out="$(PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/validation/1" --trigger-run-url "https://example/tests/1" --sha deadbeef)"
 [[ "$out" == *"Created tracking issue"* ]] || fail "expected a create, got: $out"
 create_call="$(for f in "$SANDBOX"/call-*.args; do
   if tr '\0' '\n' < "$f" | sed -n '1{N;s/\n/ /;p}' | grep -qx "issue create"; then
@@ -63,13 +63,14 @@ done | sed -E 's#.*call-([0-9]+)\.args#\1#')"
 body="$(call_body "$create_call")"
 [[ "$body" == *"pocketshell-nightly-rc-red-marker"* ]] || fail "issue body missing the marker token"
 [[ "$body" == *"deadbeef"* ]] || fail "issue body missing the SHA"
-[[ "$body" == *"https://example/run/1"* ]] || fail "issue body missing the run URL"
-pass "no existing tracking issue => creates one with marker + SHA + run URL"
+[[ "$body" == *"Release Emulator Validation run: https://example/validation/1"* ]] || fail "issue body missing release-validation run URL"
+[[ "$body" == *"Triggering Tests run: https://example/tests/1"* ]] || fail "issue body missing triggering Tests run URL"
+pass "no existing tracking issue => creates one with marker + SHA + distinct provenance URLs"
 
 # --- existing open issue found via marker search => comment, never a 2nd create ---
 reset_sandbox_calls
 write_fake_gh "42"
-out="$(PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/run/2" --sha cafef00d)"
+out="$(PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/validation/2" --trigger-run-url "https://example/tests/2" --sha cafef00d)"
 [[ "$out" == *"Commented on existing tracking issue #42"* ]] || fail "expected a comment on #42, got: $out"
 create_calls=0
 for f in "$SANDBOX"/call-*.args; do
@@ -83,7 +84,7 @@ pass "existing open issue found via marker => comments, never creates a second i
 # --- gh create failure surfaces loudly ---
 reset_sandbox_calls
 write_fake_gh "" 1
-if PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/run/3" --sha aaaa1111 >/dev/null 2>&1; then
+if PATH="$SANDBOX/bin:$PATH" "$TARGET" --repo owner/repo --run-url "https://example/validation/3" --trigger-run-url "https://example/tests/3" --sha aaaa1111 >/dev/null 2>&1; then
   fail "expected non-zero exit when 'gh issue create' fails"
 fi
 pass "a failed 'gh issue create' call surfaces as a non-zero exit (never swallowed)"

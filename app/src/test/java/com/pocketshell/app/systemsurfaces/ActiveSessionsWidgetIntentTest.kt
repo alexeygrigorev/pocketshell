@@ -41,7 +41,6 @@ class ActiveSessionsWidgetIntentTest {
         keyPath = "/data/keys/id_ed25519",
         sessionName = "claude-main",
         startDirectory = "/home/alex/project",
-        composerDraft = "",
         savedAtMillis = 1_000L,
     )
 

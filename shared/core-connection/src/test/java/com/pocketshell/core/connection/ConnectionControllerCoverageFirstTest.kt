@@ -61,6 +61,24 @@ class ConnectionControllerCoverageFirstTest {
         return this
     }
 
+    @Test
+    fun `seed can complete a cold attach before the lease live edge`() {
+        val transport = FakeTransportPort()
+        val controller = controller(transport = transport)
+
+        transport.setWarm(host, false)
+        controller.submit(ConnectionEvent.Enter(host, a))
+        assertEquals(ConnectionState.Connecting(host, a), controller.state.value)
+
+        // The tmux attach can capture and pass its final liveness fence before the
+        // lease observer publishes TransportLive. A valid seed is enough evidence
+        // to complete the cold attach; the later lease edge must not regress it.
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
+        assertEquals(ConnectionState.Live(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Live(host, a), controller.state.value)
+    }
+
     // --- #630 in-app-nav-mismatch skip -----------------------------------
 
     @Test
@@ -114,9 +132,13 @@ class ConnectionControllerCoverageFirstTest {
         // error band; the live channel heals.
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
-        // SSH recovery alone cannot reveal a dead/unattached control channel.
+        // SSH recovery alone cannot reveal a dead/unattached control channel, and the
+        // typed recovery phase remains Reattaching until the target seed lands.
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
@@ -136,7 +158,10 @@ class ConnectionControllerCoverageFirstTest {
         assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
 
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
@@ -169,7 +194,10 @@ class ConnectionControllerCoverageFirstTest {
         assertEquals(a, controller.state.value.targetIdOrNull())
 
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(
             "target-tagged control-channel recovery must return to Live on the original target",

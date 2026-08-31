@@ -79,7 +79,7 @@ class GitHistoryViewModelTest {
                     port = 22,
                     user = "alexey",
                     credentialId = "1:/tmp/key",
-                    knownHostsId = "accept-all",
+                    knownHostsId = "host-key:unconfirmed",
                 ),
                 session = NoopSshSession(),
                 wedgeMs = wedgeMs,

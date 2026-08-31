@@ -231,7 +231,7 @@ class SnippetPickerTmuxZOrderDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("tmux kill-session -t '$SESSION_NAME' 2>/dev/null || true") }
@@ -244,7 +244,7 @@ class SnippetPickerTmuxZOrderDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("tmux new-session -d -s '$sessionName' -c /tmp") }

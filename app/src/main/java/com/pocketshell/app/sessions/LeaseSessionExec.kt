@@ -24,8 +24,8 @@ import java.io.File
  * The lease key MUST match those by construction so a borrow here reuses the
  * app-wide `@Singleton` [SshLeaseManager]'s WARM transport for the host instead
  * of dialing a fresh ~3-4s SSH handshake per action. The credential id is
- * `"$hostId:$keyPath"` and the known-hosts id is the fixed `"accept-all"`,
- * exactly as the existing gateways encode them.
+ * `"$hostId:$keyPath"` and the known-hosts id is the verified server-key
+ * fingerprint, so a trust change cannot inherit a warm transport.
  */
 data class LeaseSessionTarget(
     val hostId: Long,
@@ -35,6 +35,8 @@ data class LeaseSessionTarget(
     val keyPath: String,
     val passphrase: CharArray?,
     val leasePurpose: String? = null,
+    val trustedHostKeyAlgorithm: String? = null,
+    val trustedHostKeySha256: String? = null,
 ) {
     internal fun toSshLeaseTarget(): SshLeaseTarget =
         SshLeaseTarget(
@@ -43,11 +45,12 @@ data class LeaseSessionTarget(
                 port = port,
                 user = username,
                 credentialId = credentialId(),
-                knownHostsId = "accept-all",
+                knownHostsId = trustedHostKeySha256?.let { "host-key:$it" }
+                    ?: "host-key:unconfirmed",
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(trustedHostKeySha256),
         )
 
     // CharArray breaks data-class structural equality; the lease identity is
@@ -60,7 +63,9 @@ data class LeaseSessionTarget(
             port == other.port &&
             username == other.username &&
             keyPath == other.keyPath &&
-            leasePurpose == other.leasePurpose
+            leasePurpose == other.leasePurpose &&
+            trustedHostKeyAlgorithm == other.trustedHostKeyAlgorithm &&
+            trustedHostKeySha256 == other.trustedHostKeySha256
     }
 
     override fun hashCode(): Int {
@@ -70,6 +75,8 @@ data class LeaseSessionTarget(
         result = 31 * result + username.hashCode()
         result = 31 * result + keyPath.hashCode()
         result = 31 * result + (leasePurpose?.hashCode() ?: 0)
+        result = 31 * result + (trustedHostKeyAlgorithm?.hashCode() ?: 0)
+        result = 31 * result + (trustedHostKeySha256?.hashCode() ?: 0)
         return result
     }
 

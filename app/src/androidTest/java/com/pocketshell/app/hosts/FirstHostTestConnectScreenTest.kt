@@ -9,6 +9,8 @@ import com.pocketshell.app.bootstrap.HOST_BOOTSTRAP_SHEET_TAG
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.ssh.ChangedHostKeyException
+import com.pocketshell.core.ssh.UnknownHostKeyException
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -96,5 +98,65 @@ class FirstHostTestConnectScreenTest {
         }
 
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun unknownHostKeyShowsFingerprintAndRequiresExplicitTrustAction() {
+        var confirmed = false
+        compose.setContent {
+            PocketShellTheme {
+                FirstHostTestConnectContent(
+                    state = FirstHostTestConnectState(
+                        status = FirstHostTestStatus.ConfirmHostKey(
+                            UnknownHostKeyException(
+                                "example.test", 22, "ssh-ed25519", "SHA256:first-use",
+                            ),
+                        ),
+                    ),
+                    hostId = 42L,
+                    onBack = {},
+                    onEditHost = {},
+                    onRetry = {},
+                    onConfirmHostKey = { confirmed = true },
+                    onStartSetup = { _, _ -> },
+                    bootstrapState = null,
+                    bootstrapHostName = "",
+                    onInstall = {},
+                    onInstallTool = {},
+                    onEnableNotifications = {},
+                    onDismissSetup = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("SHA256:first-use", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Trust and connect").assertIsDisplayed()
+        compose.onNodeWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG).performClick()
+        compose.runOnIdle { assertEquals(true, confirmed) }
+    }
+
+    @Test
+    fun changedHostKeyShowsExpectedAndPresentedBeforeReplacement() {
+        compose.setContent {
+            PocketShellTheme {
+                FirstHostTestConnectContent(
+                    state = FirstHostTestConnectState(
+                        status = FirstHostTestStatus.ConfirmHostKey(
+                            ChangedHostKeyException(
+                                "example.test", 22, "ssh-ed25519", "SHA256:old", "SHA256:new",
+                            ),
+                        ),
+                    ),
+                    hostId = 42L,
+                    onBack = {}, onEditHost = {}, onRetry = {}, onConfirmHostKey = {},
+                    onStartSetup = { _, _ -> }, bootstrapState = null, bootstrapHostName = "",
+                    onInstall = {}, onInstallTool = {}, onEnableNotifications = {}, onDismissSetup = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Expected: SHA256:old", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Received: SHA256:new", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Replace trusted key").assertIsDisplayed()
     }
 }

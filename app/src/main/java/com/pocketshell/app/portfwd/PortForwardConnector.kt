@@ -1,5 +1,7 @@
 package com.pocketshell.app.portfwd
 
+import com.pocketshell.app.ssh.hostKeyTrustBinding
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
@@ -11,13 +13,19 @@ interface PortForwardConnector {
     suspend fun connect(host: HostEntity, keyPath: String, passphrase: CharArray?): Result<SshSession>
 }
 
-class DefaultPortForwardConnector @Inject constructor() : PortForwardConnector {
-    override suspend fun connect(host: HostEntity, keyPath: String, passphrase: CharArray?): Result<SshSession> =
-        SshConnection.connect(
+internal class DefaultPortForwardConnector @Inject constructor(
+    private val trustPromptRouter: HostKeyTrustPromptRouter,
+) : PortForwardConnector {
+    override suspend fun connect(host: HostEntity, keyPath: String, passphrase: CharArray?): Result<SshSession> {
+        val result = host.hostKeyTrustBinding().let { trust -> SshConnection.connect(
             host = host.hostname,
             port = host.port,
             user = host.username,
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-        )
+            knownHosts = trust.policy,
+        ) }
+        result.exceptionOrNull()?.let { failure -> trustPromptRouter.report(host.id, failure) }
+        return result
+    }
 }

@@ -176,7 +176,8 @@ class FolderListViewModelClientCacheTest {
     fun peekIsInMemoryOnly_missesUntilWarmedThenHitsFromDisk() {
         val writer = newCache()
         writer.write(
-            HOST.name,
+            HOST.id,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = listOf(node("alpha", 0, folderPath("alpha"))),
             ),
@@ -189,12 +190,12 @@ class FolderListViewModelClientCacheTest {
             "peek must be in-memory only — a fresh (un-warmed) instance has no Main-" +
                 "thread read, so it MISSES the on-disk snapshot",
             null,
-            reader.peek(HOST.name),
+            reader.peek(HOST.id),
         )
 
         // The OFF-Main warm parses the file into memory; now (and only now) peek hits.
         reader.warmAll()
-        val warmed = reader.peek(HOST.name)
+        val warmed = reader.peek(HOST.id)
         assertTrue("warmAll must parse the on-disk snapshot into memory", warmed != null)
         assertEquals(
             listOf("alpha"),
@@ -215,7 +216,8 @@ class FolderListViewModelClientCacheTest {
         // Write via one instance (disk + that instance's memory), then bind a VM with
         // a DIFFERENT, cold-memory instance — the file is on disk but un-warmed.
         newCache().write(
-            HOST.name,
+            HOST.id,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = listOf(node("gamma", 0, folderPath("gamma"))),
             ),
@@ -279,7 +281,8 @@ class FolderListViewModelClientCacheTest {
     @Test
     fun coldStartWithoutProcessStartWarm_flashesLoadingThenPaintsOffMain_RED() = runTest {
         newCache().write(
-            HOST.name,
+            HOST.id,
+            1L,
             TreeClientCache.CachedTree(nodes = listOf(node("alpha", 0, folderPath("alpha")))),
         )
         val coldCache = newCache() // fresh process: file on disk, parsed map cold.
@@ -320,7 +323,8 @@ class FolderListViewModelClientCacheTest {
     @Test
     fun coldStartAfterProcessStartWarm_rendersInstantlyNoLoadingFlash_GREEN() = runTest {
         newCache().write(
-            HOST.name,
+            HOST.id,
+            1L,
             TreeClientCache.CachedTree(nodes = listOf(node("alpha", 0, folderPath("alpha")))),
         )
         val coldCache = newCache() // fresh process: file on disk, parsed map cold.
@@ -487,7 +491,7 @@ class FolderListViewModelClientCacheTest {
 
         // The first reconcile must have written the settled tree to the cache so
         // the NEXT cold start renders instantly (the local-first SWR half).
-        val cached = cache.read(HOST.name).nodes.map { it.session }
+        val cached = cache.read(HOST.id).nodes.map { it.session }
         assertEquals(
             "the reconcile mirrors the settled tree into the client cache",
             listOf("alpha", "beta"),
@@ -520,7 +524,8 @@ class FolderListViewModelClientCacheTest {
         // ~/git/<project>, the watched root resolved, and the scanned project
         // subfolders — the full grouped shape, persisted to the client cache.
         cache.write(
-            HOST.name,
+            HOST.id,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = listOf(
                     node("alpha", 0, folderPath("alpha")),
@@ -594,7 +599,7 @@ class FolderListViewModelClientCacheTest {
         runCurrent()
         assertEquals(listOf("alpha", "beta"), readySessions(vm))
 
-        val cached = cache.read(HOST.name)
+        val cached = cache.read(HOST.id)
         assertEquals(
             "the reconcile must persist the resolved watched-root paths to the cache",
             mapOf(gitRoot to gitRoot),
@@ -657,7 +662,7 @@ class FolderListViewModelClientCacheTest {
         )
 
     private fun writeNodes(cache: TreeClientCache, vararg nodes: TreeRemoteSource.TreeNode) {
-        cache.write(HOST.name, TreeClientCache.CachedTree(nodes = nodes.toList()))
+        cache.write(HOST.id, 1L, TreeClientCache.CachedTree(nodes = nodes.toList()))
     }
 
     private fun sessionRow(name: String, attached: Boolean = true): FolderSessionRow =

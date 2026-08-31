@@ -117,10 +117,16 @@ object ConnectionJournalSchema {
                 put("event", "enter")
                 put("eventHostFingerprint", event.host.value)
                 put("eventSessionFingerprint", event.targetId.value)
+                put("eventForceCold", event.forceCold)
             }
             is ConnectionEvent.Switch -> {
                 put("event", "switch")
                 put("eventSessionFingerprint", event.targetId.value)
+            }
+            is ConnectionEvent.TargetIdentityAdopted -> {
+                put("event", "target_identity_adopted")
+                put("eventFromSessionFingerprint", event.from.value)
+                put("eventToSessionFingerprint", event.to.value)
             }
             ConnectionEvent.Foreground -> put("event", "foreground")
             ConnectionEvent.Background -> put("event", "background")
@@ -155,6 +161,11 @@ object ConnectionJournalSchema {
                 put("eventSessionFingerprint", event.targetId.value)
                 put("paneId", event.paneId)
             }
+            is ConnectionEvent.AttachReady -> {
+                put("event", "attach_ready")
+                put("eventSessionFingerprint", event.targetId.value)
+                put("paneId", event.paneId)
+            }
             ConnectionEvent.ReconnectLadderEntered -> put("event", "reconnect_ladder_entered")
             ConnectionEvent.ReconnectFailed -> put("event", "reconnect_failed")
             ConnectionEvent.ReconnectGaveUp -> put("event", "reconnect_gave_up")
@@ -166,6 +177,10 @@ object ConnectionJournalSchema {
         state.hostOrNull()?.let { put("${prefix}HostFingerprint", it.value) }
         state.targetIdOrNull()?.let { put("${prefix}SessionFingerprint", it.value) }
         when (state) {
+            is ConnectionState.Attaching -> {
+                put("${prefix}Warm", state.warm)
+                put("${prefix}Recovering", state.recovering)
+            }
             is ConnectionState.Backgrounded -> put("${prefix}SinceMs", state.sinceMs)
             is ConnectionState.NetworkLossSuspended -> put("${prefix}SinceMs", state.sinceMs)
             is ConnectionState.Reconnecting -> {
@@ -194,8 +209,11 @@ object ConnectionJournalSchema {
 }
 
 internal fun ConnectionEvent.journalSafe(): ConnectionEvent = when (this) {
-    is ConnectionEvent.Enter -> ConnectionEvent.Enter(host.journalSafe(), targetId.journalSafe())
+    is ConnectionEvent.Enter ->
+        ConnectionEvent.Enter(host.journalSafe(), targetId.journalSafe(), forceCold)
     is ConnectionEvent.Switch -> ConnectionEvent.Switch(targetId.journalSafe())
+    is ConnectionEvent.TargetIdentityAdopted ->
+        ConnectionEvent.TargetIdentityAdopted(from.journalSafe(), to.journalSafe())
     ConnectionEvent.Foreground -> this
     ConnectionEvent.Background -> this
     is ConnectionEvent.TransportDropped -> ConnectionEvent.TransportDropped(cause.journalSafe())
@@ -206,6 +224,8 @@ internal fun ConnectionEvent.journalSafe(): ConnectionEvent = when (this) {
     is ConnectionEvent.TargetGone -> ConnectionEvent.TargetGone(targetId.journalSafe())
     is ConnectionEvent.SeedLanded ->
         ConnectionEvent.SeedLanded(targetId.journalSafe(), paneId.journalSafeToken())
+    is ConnectionEvent.AttachReady ->
+        ConnectionEvent.AttachReady(targetId.journalSafe(), paneId.journalSafeToken())
     ConnectionEvent.ReconnectLadderEntered -> this
     ConnectionEvent.ReconnectFailed -> this
     ConnectionEvent.ReconnectGaveUp -> this

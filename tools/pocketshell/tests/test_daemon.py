@@ -18,6 +18,7 @@ socket on the host running the test suite.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import signal
 import socket
@@ -731,6 +732,78 @@ def test_cli_daemon_stop_is_idempotent(sandbox_socket: Path) -> None:
     assert "not running" in result.output
 
 
+def test_stop_does_not_signal_stale_reused_pid(
+    sandbox_socket: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid_path = daemon_mod.resolve_pid_path(sandbox_socket)
+    pid_path.write_text(f"{os.getpid()}\n")
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+    assert daemon_mod.stop_daemon(socket_path=sandbox_socket, timeout=0.01) is False
+    assert signalled == []
+
+
+def _serve_after_ordered_bind(
+    socket_path: str,
+    first_bound: multiprocessing.synchronize.Event,
+    second_attempted: multiprocessing.synchronize.Event,
+    role: str,
+) -> None:
+    original_bind = daemon_mod.Daemon._bind
+
+    def ordered_bind(daemon: daemon_mod.Daemon) -> socket.socket:
+        if role == "second":
+            assert first_bound.wait(timeout=5)
+        try:
+            bound = original_bind(daemon)
+        finally:
+            if role == "second":
+                second_attempted.set()
+        if role == "first":
+            first_bound.set()
+            assert second_attempted.wait(timeout=5)
+        return bound
+
+    daemon_mod.Daemon._bind = ordered_bind
+    daemon_mod.serve_foreground(socket_path=Path(socket_path), idle_timeout=30)
+
+
+def test_concurrent_foreground_starts_have_one_owner(sandbox_socket: Path) -> None:
+    ctx = multiprocessing.get_context("fork")
+    first_bound = ctx.Event()
+    second_attempted = ctx.Event()
+    first = ctx.Process(
+        target=_serve_after_ordered_bind,
+        args=(str(sandbox_socket), first_bound, second_attempted, "first"),
+    )
+    second = ctx.Process(
+        target=_serve_after_ordered_bind,
+        args=(str(sandbox_socket), first_bound, second_attempted, "second"),
+    )
+    processes = (first, second)
+    first.start()
+    try:
+        assert first_bound.wait(timeout=5)
+        second.start()
+        assert second_attempted.wait(timeout=5)
+        second.join(timeout=1)
+        assert second.exitcode == 0, "the second contender did not lose ownership"
+        assert daemon_mod.wait_until_ready(socket_path=sandbox_socket, deadline=10)
+        owner_pid = daemon_mod.call("daemon.ping", socket_path=sandbox_socket)["pid"]
+        assert owner_pid == first.pid
+        assert daemon_mod.is_daemon_running(sandbox_socket)
+        assert daemon_mod.read_pid(daemon_mod.resolve_pid_path(sandbox_socket)) == owner_pid
+    finally:
+        daemon_mod.stop_daemon(socket_path=sandbox_socket)
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=2)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=2)
+
+
 def test_cli_daemon_start_lazy_spawns_daemon(
     sandbox_socket: Path,
     tmp_path: Path,
@@ -984,7 +1057,9 @@ def test_tree_upsert_invalidates_tree_get_cache(tmp_path: Path) -> None:
     assert cached["cached"] is True
 
     mutation = _dispatch_in_memory(
-        daemon, "tree.upsert", {"host": "h1", "nodes": [{"session": "a"}]}
+        daemon,
+        "tree.upsert",
+        {"host": "h1", "expected_version": 0, "nodes": [{"session": "a"}]},
     )
     assert mutation["result"]["status"] == "ok"
 

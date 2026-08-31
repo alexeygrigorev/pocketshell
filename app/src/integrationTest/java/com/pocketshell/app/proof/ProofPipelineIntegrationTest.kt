@@ -110,7 +110,7 @@ class ProofPipelineIntegrationTest {
                 port = sshPort,
                 user = "testuser",
                 key = SshKey.Pem(privateKeyText),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             )
             assertTrue(
@@ -176,7 +176,7 @@ class ProofPipelineIntegrationTest {
             port = sshPort,
             user = "testuser",
             key = SshKey.Pem(privateKeyText),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
         val shell = try {

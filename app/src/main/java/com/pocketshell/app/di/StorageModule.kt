@@ -10,7 +10,6 @@ import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
-import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -85,13 +84,11 @@ object StorageModule {
 
     // Issue #203 expanded scope: ported from `ssh-auto-forward-android`.
     // `provideAppDatabase` already wires the migration that creates the
-    // `port_remappings` (v1) and `port_usage` (v10) tables; here we just
-    // surface the DAOs so the port-forward panel + AutoForwarder can read
-    // and write them via the new bridge interfaces in
+    // `port_remappings` (v1) and historical `port_usage` (v10) tables. Only
+    // port remappings have a live consumer; the unused port-usage DAO was
+    // removed while its table remains for upgrade-compatible Room schemas.
+    // Surface the live DAO through the bridge interfaces in
     // `com.pocketshell.core.portfwd`.
     @Provides
     fun providePortRemappingDao(db: AppDatabase): PortRemappingDao = db.portRemappingDao()
-
-    @Provides
-    fun providePortUsageDao(db: AppDatabase): PortUsageDao = db.portUsageDao()
 }

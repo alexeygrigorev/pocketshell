@@ -66,6 +66,7 @@ class ProbeLivenessBusyVsDeadTest {
         override val disconnected: StateFlow<Boolean> = disconnectedState
         override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = MutableStateFlow(null)
         override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()
+        override val structuralEventOverflowGeneration: StateFlow<Long> = MutableStateFlow(0L)
         override fun close() = Unit
         override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
             error("not used")

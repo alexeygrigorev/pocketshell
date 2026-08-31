@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import android.os.SystemClock
+
 import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.app.tmux.tmuxSessionGenerationOrNull
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -463,10 +465,10 @@ internal class HostTreeModel {
      * authoritative). The discovery maps (scanned/history/resolved/optimistic
      * folders) are replaced wholesale from the probe.
      *
-     * @param now wall-clock millis used for the optimistic grace check and to
+     * @param now monotonic elapsed millis used for the optimistic grace check and to
      *   stamp [lastReconciledAt]. Injectable for deterministic tests.
      */
-    fun reconcile(snapshot: ProbeSnapshot, now: Long = System.currentTimeMillis()) {
+    fun reconcile(snapshot: ProbeSnapshot, now: Long = SystemClock.elapsedRealtime()) {
         val incomingByGeneration = LinkedHashMap<TmuxSessionGeneration, FolderSessionEntry>()
         val incomingProvisionalByName = LinkedHashMap<String, FolderSessionEntry>()
         snapshot.sessions.forEach { entry ->
@@ -698,7 +700,7 @@ internal class HostTreeModel {
      * does not prune it. A node already present is updated in place (keeps its
      * slot); a new node is appended.
      */
-    fun insertSession(entry: FolderSessionEntry, folderPath: String, now: Long = System.currentTimeMillis()) {
+    fun insertSession(entry: FolderSessionEntry, folderPath: String, now: Long = SystemClock.elapsedRealtime()) {
         val generation = entry.generationOrNull()
         if (generation == null) {
             // A name-only insert is provisional. It may be displayed, but it
@@ -746,7 +748,7 @@ internal class HostTreeModel {
      */
     fun applyReconcileGoneDelta(
         goneGenerations: Collection<TmuxSessionGeneration>,
-        now: Long = System.currentTimeMillis(),
+        now: Long = SystemClock.elapsedRealtime(),
     ): Boolean {
         var pruned = false
         goneGenerations.forEach { generation ->

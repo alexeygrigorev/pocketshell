@@ -4,6 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Delete-intent target for usage warning notifications (issue #619).
@@ -25,11 +29,18 @@ class UsageNotificationDismissReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_DISMISS) return
         val raw = intent.getStringExtra(EXTRA_NOTIFICATION_KEY) ?: return
         val key = UsageNotificationKey.decode(raw) ?: return
-        runCatching {
-            val store = storeFactory(context.applicationContext)
-            store.setNotifiedKeys(store.notifiedKeys() + key)
-        }.onFailure {
-            Log.w(TAG, "usage notification dismissal record failed", it)
+        val pendingResult: PendingResult? = goAsync()
+        callbackScope.launch {
+            try {
+                runCatching {
+                    val store = storeFactory(context.applicationContext)
+                    store.setNotifiedKeys(store.notifiedKeys() + key)
+                }.onFailure {
+                    Log.w(TAG, "usage notification dismissal record failed", it)
+                }
+            } finally {
+                pendingResult?.finish()
+            }
         }
     }
 
@@ -49,5 +60,8 @@ class UsageNotificationDismissReceiver : BroadcastReceiver() {
         var storeFactory: (Context) -> UsageNotificationStateStore = { ctx ->
             SharedPreferencesUsageNotificationStateStore(ctx)
         }
+
+        internal var callbackScope: CoroutineScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }

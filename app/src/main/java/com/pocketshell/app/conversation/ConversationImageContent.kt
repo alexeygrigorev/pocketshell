@@ -1,6 +1,7 @@
 package com.pocketshell.app.conversation
 
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import com.pocketshell.app.fileviewer.BoundedImageDecoder
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,6 +22,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -74,6 +77,15 @@ object NoConversationImageLoader : ConversationImageLoader {
  */
 val LocalConversationImageLoader: ProvidableCompositionLocal<ConversationImageLoader> =
     staticCompositionLocalOf { NoConversationImageLoader }
+
+internal fun interface ConversationBitmapDecoder {
+    fun decode(bytes: ByteArray): Bitmap?
+}
+
+internal val LocalConversationBitmapDecoder: ProvidableCompositionLocal<ConversationBitmapDecoder> =
+    staticCompositionLocalOf {
+        ConversationBitmapDecoder { bytes -> BoundedImageDecoder.decodeByteArray(bytes) }
+    }
 
 /**
  * Render every image carried by a conversation event (a [ConversationImage]
@@ -137,18 +149,24 @@ private fun ImageOrFallback(
     reference: String,
     modifier: Modifier,
 ) {
-    val bitmap = remember(bytes) {
-        runCatching {
-            withDecodeOptions(bytes)
-        }.getOrNull()
+    val decoder = LocalConversationBitmapDecoder.current
+    val decodeResult by produceState<Result<Bitmap?>?>(initialValue = null, bytes, decoder) {
+        value = withContext(Dispatchers.Default) {
+            runCatching { decoder.decode(bytes) }
+        }
     }
-    if (bitmap == null) {
+    if (decodeResult == null) {
+        ImagePlaceholder(reference = reference, modifier = modifier)
+        return
+    }
+    val decodedBitmap = decodeResult?.getOrNull()
+    if (decodedBitmap == null) {
         ImageFallback(reference = reference, modifier = modifier)
         return
     }
     var showFull by remember { mutableStateOf(false) }
     Image(
-        bitmap = bitmap.asImageBitmap(),
+        bitmap = decodedBitmap.asImageBitmap(),
         contentDescription = "Image: $reference",
         contentScale = ContentScale.Fit,
         alignment = Alignment.TopStart,
@@ -158,20 +176,6 @@ private fun ImageOrFallback(
             .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .testTag(CONVERSATION_IMAGE_TAG),
     )
-}
-
-/** Decode bounded so a large host screenshot never decodes at full resolution. */
-private fun withDecodeOptions(bytes: ByteArray): android.graphics.Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    val w = bounds.outWidth
-    val h = bounds.outHeight
-    if (w <= 0 || h <= 0) return null
-    var sample = 1
-    val maxPixels = 2_000_000
-    while ((w / sample) * (h / sample) > maxPixels) sample *= 2
-    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
 }
 
 @Composable

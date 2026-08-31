@@ -126,7 +126,7 @@ class TerminalKeyboardStressTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
+        val hostKeySha256 = waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
         val intent = TerminalLabActivity.intent(
             context = appContext,
@@ -134,6 +134,7 @@ class TerminalKeyboardStressTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             privateKeyPem = key,
+            hostKeySha256 = hostKeySha256,
         )
 
         launchedActivity = ActivityScenario.launch(intent)

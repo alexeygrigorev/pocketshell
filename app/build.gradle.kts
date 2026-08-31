@@ -1,3 +1,4 @@
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 plugins {
@@ -62,19 +63,55 @@ data class PocketshellDerivedVersion(val code: Int, val name: String)
 fun derivePocketshellVersion(): PocketshellDerivedVersion {
     val fallback = PocketshellDerivedVersion(1, "0.0.0-dev")
     return try {
-        val script = rootProject.file("scripts/derive-version.sh")
+        val script = rootProject.file(
+            providers.gradleProperty("pocketshellVersionDeriveScript")
+                .orElse("scripts/derive-version.sh")
+                .get()
+        )
         if (!script.exists()) return fallback
         val process = ProcessBuilder("bash", script.absolutePath, "both")
             .directory(rootProject.projectDir)
-            .redirectErrorStream(false)
+            // Derivation diagnostics are never build output. Discarding stderr
+            // means even a noisy/wedged child cannot fill a pipe and deadlock.
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
             .start()
-        val stdout = process.inputStream.bufferedReader().readText()
+        val stdoutCapture = ByteArrayOutputStream()
+        val stdoutDrainer = Thread({
+            try {
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = process.inputStream.read(buffer)
+                    if (count < 0) break
+                    // Keep only the small protocol prefix while continuing to
+                    // drain everything, so stdout is bounded and cannot block.
+                    val remaining = 64 * 1024 - stdoutCapture.size()
+                    if (remaining > 0) {
+                        stdoutCapture.write(buffer, 0, minOf(count, remaining))
+                    }
+                }
+            } catch (_: Exception) {
+                // Timeout cleanup closes the stream to release this drainer.
+            }
+        }, "pocketshell-version-stdout").apply {
+            isDaemon = true
+            start()
+        }
         val finished = process.waitFor(15, TimeUnit.SECONDS)
         if (!finished) {
+            process.descendants().forEach { it.destroyForcibly() }
             process.destroyForcibly()
+            process.inputStream.close()
+            process.waitFor(1, TimeUnit.SECONDS)
+            stdoutDrainer.join(1000)
             return fallback
         }
         if (process.exitValue() != 0) return fallback
+        stdoutDrainer.join(5000)
+        if (stdoutDrainer.isAlive) {
+            process.inputStream.close()
+            return fallback
+        }
+        val stdout = stdoutCapture.toString(Charsets.UTF_8)
 
         var code = fallback.code
         var name = fallback.name
@@ -189,9 +226,11 @@ android {
     sourceSets {
         getByName("androidTest") {
             assets.srcDir(rootProject.file("tests/docker"))
+            java.srcDir("src/proofTest/java")
         }
         getByName("test") {
             java.srcDir("src/integrationTest/java")
+            java.srcDir("src/proofTest/java")
         }
     }
 

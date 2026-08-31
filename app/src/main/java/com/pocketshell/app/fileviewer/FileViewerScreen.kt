@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -50,14 +51,18 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -115,6 +120,7 @@ const val FILE_VIEWER_TITLE_TAG = "fileViewerTitle"
 const val FILE_VIEWER_TYPE_ICON_TAG = "fileViewerTypeIcon"
 const val FILE_VIEWER_LOADING_TAG = "fileViewerLoading"
 const val FILE_VIEWER_IMAGE_TAG = "fileViewerImage"
+const val FILE_VIEWER_IMAGE_LOADING_TAG = "fileViewerImageLoading"
 const val FILE_VIEWER_TEXT_TAG = "fileViewerText"
 const val FILE_VIEWER_PDF_TAG = "fileViewerPdf"
 const val FILE_VIEWER_PDF_PAGE_TAG = "fileViewerPdfPage"
@@ -1387,16 +1393,48 @@ private fun WorkspaceUnavailablePanel(
  * source-bitmap pixels via [ImageFitMapping] before commit, so the flattened
  * export matches what the user drew. The `Pan` tool re-enables pinch/pan.
  */
+internal class ImageTransformState {
+    var scale by mutableFloatStateOf(1f)
+    var offsetX by mutableFloatStateOf(0f)
+    var offsetY by mutableFloatStateOf(0f)
+}
+
 @Composable
-private fun ImagePanel(
+internal fun rememberImageTransformState(imageIdentity: String): ImageTransformState =
+    remember(imageIdentity) { ImageTransformState() }
+
+internal fun interface FileViewerBitmapDecoder {
+    fun decode(file: File): Bitmap?
+}
+
+internal val LocalFileViewerBitmapDecoder: ProvidableCompositionLocal<FileViewerBitmapDecoder> =
+    staticCompositionLocalOf {
+        FileViewerBitmapDecoder { file -> BoundedImageDecoder.decodeFile(file) }
+    }
+
+@Composable
+internal fun ImagePanel(
     cacheFile: File,
     annotationState: ImageAnnotationState = ImageAnnotationState(),
     onAddAnnotation: (Annotation) -> Unit = {},
     modifier: Modifier = Modifier,
+    onTransformStateObserved: (ImageTransformState) -> Unit = {},
 ) {
-    val bitmap = remember(cacheFile.path) {
-        runCatching { BoundedImageDecoder.decodeFile(cacheFile)?.asImageBitmap() }.getOrNull()
+    val decoder = LocalFileViewerBitmapDecoder.current
+    val decodeResult by produceState<Result<androidx.compose.ui.graphics.ImageBitmap?>?>(
+        null,
+        cacheFile.path,
+        decoder,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { decoder.decode(cacheFile)?.asImageBitmap() }
+        }
     }
+    if (decodeResult == null) {
+        LoadingIndicator.Spinner(modifier = Modifier.testTag(FILE_VIEWER_IMAGE_LOADING_TAG))
+        return
+    }
+    val bitmap = decodeResult?.getOrNull()
     if (bitmap == null) {
         CannotPreviewPanel(
             message = "Couldn't decode the image.",
@@ -1413,14 +1451,13 @@ private fun ImagePanel(
         annotationState.tool != AnnotationTool.Text
     val textPlacing = annotateActive && annotationState.tool == AnnotationTool.Text
 
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
+    val transform = rememberImageTransformState(cacheFile.path)
+    SideEffect { onTransformStateObserved(transform) }
     // Entering annotate mode pins the view to fit-scale so the coordinate map is
     // the pure letterbox transform; the Pan tool can still pinch/zoom.
     LaunchedEffect(annotateActive) {
         if (annotateActive) {
-            scale = 1f; offsetX = 0f; offsetY = 0f
+            transform.scale = 1f; transform.offsetX = 0f; transform.offsetY = 0f
         }
     }
 
@@ -1473,13 +1510,13 @@ private fun ImagePanel(
     } else if (!annotateActive) {
         Modifier.pointerInput(Unit) {
             detectTransformGestures { _, pan, zoom, _ ->
-                scale = (scale * zoom).coerceIn(1f, 8f)
-                if (scale > 1f) {
-                    offsetX += pan.x
-                    offsetY += pan.y
+                transform.scale = (transform.scale * zoom).coerceIn(1f, 8f)
+                if (transform.scale > 1f) {
+                    transform.offsetX += pan.x
+                    transform.offsetY += pan.y
                 } else {
-                    offsetX = 0f
-                    offsetY = 0f
+                    transform.offsetX = 0f
+                    transform.offsetY = 0f
                 }
             }
         }
@@ -1487,13 +1524,13 @@ private fun ImagePanel(
         // Annotate mode + Pan tool: pinch/pan the pinned image.
         Modifier.pointerInput(Unit) {
             detectTransformGestures { _, pan, zoom, _ ->
-                scale = (scale * zoom).coerceIn(1f, 8f)
-                if (scale > 1f) {
-                    offsetX += pan.x
-                    offsetY += pan.y
+                transform.scale = (transform.scale * zoom).coerceIn(1f, 8f)
+                if (transform.scale > 1f) {
+                    transform.offsetX += pan.x
+                    transform.offsetY += pan.y
                 } else {
-                    offsetX = 0f
-                    offsetY = 0f
+                    transform.offsetX = 0f
+                    transform.offsetY = 0f
                 }
             }
         }
@@ -1514,10 +1551,10 @@ private fun ImagePanel(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offsetX,
-                    translationY = offsetY,
+                    scaleX = transform.scale,
+                    scaleY = transform.scale,
+                    translationX = transform.offsetX,
+                    translationY = transform.offsetY,
                 )
                 .testTag(FILE_VIEWER_IMAGE_TAG),
         )

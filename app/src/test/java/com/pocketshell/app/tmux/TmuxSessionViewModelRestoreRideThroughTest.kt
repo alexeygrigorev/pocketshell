@@ -209,7 +209,7 @@ class TmuxSessionViewModelRestoreRideThroughTest : TmuxSessionViewModelTestBase(
 
                 // The load-bearing signal is the ride-through EFFECT itself: on base
                 // `rideThroughNetworkRestore` runs and records this diagnostic on its way
-                // to `revealControllerLive()` + `setConnectionState(Live)`. With the
+                // to the controller's authoritative reveal-live transition. With the
                 // #1863 guard it returns before either. (The displayed status is not a
                 // discriminator here — the #1522 loss band is debounced, so it never left
                 // `Connected` in this window; the bug is precisely that the ride-through

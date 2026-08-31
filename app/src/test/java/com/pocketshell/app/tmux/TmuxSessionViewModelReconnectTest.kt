@@ -980,9 +980,11 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
                 "backgrounded reconnect should settle in a manual retry state, got $status",
                 status is TmuxSessionViewModel.ConnectionStatus.Failed,
             )
-            assertTrue(
+            // Current main's S3 surface owns the typed failure copy; the raw VM status
+            // no longer carries the deleted inline pause-message mirror.
+            assertEquals(
+                "Disconnected. Tap Reconnect to retry.",
                 (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-                status.message.contains("Auto reconnect paused while PocketShell is in the background."),
             )
             assertEquals("work", vm.connectingSessionNameForTest())
             assertTrue("manual reconnect remains available after background pause", vm.canReconnect.value)
@@ -1052,9 +1054,9 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
             "background pause should be represented as Failed while app is not visible",
             backgroundStatus is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
-        assertTrue(
+        assertEquals(
+            "Disconnected. Tap Reconnect to retry.",
             (backgroundStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
         )
         assertEquals(
             "backgrounding during retry delay must not connect",
@@ -1334,9 +1336,9 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
             "background passive EOF should be paused for foreground auto-reconnect, got $backgroundStatus",
             backgroundStatus is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
-        assertTrue(
+        assertEquals(
+            "Disconnected. Tap Reconnect to retry.",
             (backgroundStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
         )
 
         advanceTimeBy(6_000L)

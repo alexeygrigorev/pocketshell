@@ -93,6 +93,8 @@ class ConnectionController(
     private val random: Random = Random.Default,
     /** Issue #1709: replay-complete submit-boundary journal. */
     private val journal: ConnectionJournalPort = ConnectionJournalPort.Noop,
+    /** Liveness used when the typed network-loss hold resolves on restore. */
+    private val liveness: LivenessPort = LivenessPort { false },
 ) {
     /**
      * Enforces the single-confining-dispatcher contract in DEBUG builds by
@@ -536,15 +538,18 @@ class ConnectionController(
         when (event) {
             is ConnectionEvent.Enter -> onEnter(current, event)
             is ConnectionEvent.Switch -> onSwitch(current, event)
+            is ConnectionEvent.TargetIdentityAdopted -> onTargetIdentityAdopted(current, event)
             ConnectionEvent.Foreground -> onForeground(current)
             ConnectionEvent.Background -> onBackground(current)
             is ConnectionEvent.TransportDropped -> onTransportDropped(current, event)
             ConnectionEvent.TransportLive -> onTransportLive(current)
             is ConnectionEvent.NetworkChanged -> onNetworkChanged(current, event)
-            ConnectionEvent.NetworkLost -> current
-            ConnectionEvent.NetworkRestored -> current
+            ConnectionEvent.NetworkLost,
+            ConnectionEvent.NetworkRestored,
+            -> reduceNetworkLossRestore(current, event, liveness, reducerNowMs())
             is ConnectionEvent.TargetGone -> onTargetGone(current, event)
             is ConnectionEvent.SeedLanded -> onSeedLanded(current, event)
+            is ConnectionEvent.AttachReady -> onAttachReady(current, event)
             ConnectionEvent.ReconnectLadderEntered -> onReconnectLadderEntered(current)
             ConnectionEvent.ReconnectFailed -> onReconnectFailed(current)
             ConnectionEvent.ReconnectGaveUp -> onReconnectGaveUp(current)
@@ -562,8 +567,8 @@ class ConnectionController(
         // affordance out of a terminal Unreachable routes through here.
         graceDeadlineMs = null
         endEpisode()
-        return if (consultWarm(event.host)) {
-            ConnectionState.Attaching(event.host, event.targetId)
+        return if (!event.forceCold && consultWarm(event.host)) {
+            ConnectionState.Attaching(event.host, event.targetId, warm = true)
         } else {
             ConnectionState.Connecting(event.host, event.targetId)
         }
@@ -588,7 +593,31 @@ class ConnectionController(
         val host = current.hostOrNull() ?: return current
         graceDeadlineMs = null
         endEpisode()
-        return ConnectionState.Attaching(host, event.targetId)
+        return ConnectionState.Attaching(host, event.targetId, warm = true)
+    }
+
+    /**
+     * Pane listing can turn the navigation id into tmux's exact session-generation id
+     * while an attach is already in flight. Preserve the lifecycle phase and hidden
+     * episode bookkeeping; only retarget future feedback to the authoritative id.
+     */
+    private fun onTargetIdentityAdopted(
+        current: ConnectionState,
+        event: ConnectionEvent.TargetIdentityAdopted,
+    ): ConnectionState {
+        if (event.from == event.to || event.from != current.targetIdOrNull()) return current
+        return when (current) {
+            ConnectionState.Idle -> current
+            is ConnectionState.Connecting -> current.copy(targetId = event.to)
+            is ConnectionState.Attaching -> current.copy(targetId = event.to)
+            is ConnectionState.Live -> current.copy(targetId = event.to)
+            is ConnectionState.Backgrounded -> current.copy(targetId = event.to)
+            is ConnectionState.NetworkLossSuspended -> current.copy(targetId = event.to)
+            is ConnectionState.Reattaching -> current.copy(targetId = event.to)
+            is ConnectionState.Reconnecting -> current.copy(targetId = event.to)
+            is ConnectionState.Gone -> current.copy(targetId = event.to)
+            is ConnectionState.Unreachable -> current.copy(targetId = event.to)
+        }
     }
 
     /**
@@ -709,20 +738,34 @@ class ConnectionController(
      * [ConnectionState.Live]. A fresh lease therefore reclaimed displayed
      * `Connected` while the replacement tmux attach was still in flight — exactly
      * the false-live window #1863's one-interval proof caught under full-suite load.
-     * Every transport-up path now waits in [ConnectionState.Attaching]. The
-     * target-tagged [ConnectionEvent.SeedLanded] (or the facade's explicit
-     * preserved-control-channel confirmation) is the sole recovery promotion to
-     * [ConnectionState.Live].
+     * A cold transport-up path waits in [ConnectionState.Attaching], while a
+     * replacement transport for [ConnectionState.Reattaching] remains in that typed
+     * recovery phase. The target-tagged [ConnectionEvent.AttachReady]/
+     * [ConnectionEvent.SeedLanded] (or the facade's explicit preserved-control-channel
+     * confirmation) is the sole recovery promotion to [ConnectionState.Live]. Keeping
+     * Reattaching in the reducer makes the lifecycle decision typed; a display projection
+     * must not reconstruct it from a VM grace boolean.
      *
      * A spurious live signal in another state is ignored.
      */
     private fun onTransportLive(current: ConnectionState): ConnectionState =
         when (current) {
             is ConnectionState.Reattaching ->
-                ConnectionState.Attaching(current.host, current.targetId)
+                ConnectionState.Attaching(
+                    current.host,
+                    current.targetId,
+                    warm = false,
+                    recovering = true,
+                )
             is ConnectionState.Reconnecting ->
-                ConnectionState.Attaching(current.host, current.targetId)
-            is ConnectionState.Connecting -> ConnectionState.Attaching(current.host, current.targetId)
+                ConnectionState.Attaching(
+                    current.host,
+                    current.targetId,
+                    warm = false,
+                    recovering = true,
+                )
+            is ConnectionState.Connecting ->
+                ConnectionState.Attaching(current.host, current.targetId, warm = false)
             else -> current
         }
 
@@ -783,6 +826,7 @@ class ConnectionController(
             is ConnectionState.Attaching,
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
+            is ConnectionState.Backgrounded,
             -> {
                 endEpisode()
                 ConnectionState.Unreachable(host, target)
@@ -873,13 +917,43 @@ class ConnectionController(
             return current
         }
         val host = current.hostOrNull() ?: return current
+        return promoteAttachReadiness(current, host, event.targetId)
+    }
+
+    /**
+     * Attach/list-panes readiness is connection evidence even when capture returned a blank
+     * frame or failed best-effort. The reveal reducer still requires a non-empty frame; this
+     * event only keeps the lifecycle/status authority from claiming a dead or never-attached
+     * transport. It shares the exact target-id and state transition fence with SeedLanded.
+     */
+    private fun onAttachReady(current: ConnectionState, event: ConnectionEvent.AttachReady): ConnectionState {
+        if (event.targetId != current.targetIdOrNull()) {
+            return current
+        }
+        val host = current.hostOrNull() ?: return current
+        return promoteAttachReadiness(current, host, event.targetId)
+    }
+
+    private fun promoteAttachReadiness(
+        current: ConnectionState,
+        host: HostKey,
+        targetId: SessionId,
+    ): ConnectionState {
         return when (current) {
-            // Issue #1633: as with TransportLive, the seed landing opens the stability
+            // Issue #1633: as with TransportLive, attach readiness opens the stability
             // window; the episode commits only once that window closes.
+            // The lease's TransportLive edge and the tmux seed can arrive in either order:
+            // the attach may capture a pane before the lease event collector publishes its
+            // up-edge. A target-tagged seed has already crossed the VM's final control-channel
+            // liveness fence, so it is sufficient evidence to complete the attach even when the
+            // controller is still in cold Connecting. Treating this as a no-op strands every
+            // such cold open in Connecting after the later TransportLive downgrades it to
+            // Attaching(warm=false), with no second seed event to promote it.
+            is ConnectionState.Connecting,
             is ConnectionState.Attaching,
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
-            -> liveAt(host, event.targetId)
+            -> liveAt(host, targetId)
             // Already Live (a background-pane reveal seed) or any other state:
             // the landing doesn't change the lifecycle state.
             else -> current
@@ -1007,12 +1081,9 @@ fun ConnectionState.hostOrNull(): HostKey? = when (this) {
 }
 
 /**
- * Pure foundation reducer for the future S4 network-loss path.
- *
- * This is intentionally NOT called by [ConnectionController.submit] in this prep
- * slice. It defines the contract that VM/app wiring will later fold in:
- * live loss holds without redial; restore rides through when the transport is
- * proven alive, otherwise it enters the silent reconnect ladder.
+ * Typed network-loss reducer used by [ConnectionController.submit]. It keeps a live loss hold
+ * without redialing; restore rides through when the injected transport evidence proves the
+ * existing channel alive, otherwise it enters the silent reconnect ladder.
  */
 fun reduceNetworkLossRestore(
     current: ConnectionState,

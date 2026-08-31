@@ -11,6 +11,10 @@ import android.widget.RemoteViews
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
 import com.pocketshell.app.session.LastSessionStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class ActiveSessionsWidgetProvider : AppWidgetProvider() {
 
@@ -19,14 +23,29 @@ class ActiveSessionsWidgetProvider : AppWidgetProvider() {
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray,
     ) {
-        updateWidgets(context, appWidgetManager, appWidgetIds)
+        val pendingResult: PendingResult? = goAsync()
+        callbackScope.launch {
+            try {
+                updateWidgets(context, appWidgetManager, appWidgetIds)
+            } finally {
+                pendingResult?.finish()
+            }
+        }
     }
 
     companion object {
         fun updateAll(context: Context) {
-            val appWidgetManager = AppWidgetManager.getInstance(context)
-            val component = ComponentName(context, ActiveSessionsWidgetProvider::class.java)
-            updateWidgets(context, appWidgetManager, appWidgetManager.getAppWidgetIds(component))
+            callbackScope.launch {
+                val appWidgetManager = AppWidgetManager.getInstance(context)
+                val component = ComponentName(context, ActiveSessionsWidgetProvider::class.java)
+                updateWidgets(context, appWidgetManager, appWidgetManager.getAppWidgetIds(component))
+            }
+        }
+
+        internal var callbackScope: CoroutineScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        internal var stateReader: (Context) -> SessionWidgetState = { ctx ->
+            SystemSurfaceStateStore(ctx).readSessionWidgetState()
         }
 
         private fun updateWidgets(
@@ -35,7 +54,7 @@ class ActiveSessionsWidgetProvider : AppWidgetProvider() {
             appWidgetIds: IntArray,
         ) {
             if (appWidgetIds.isEmpty()) return
-            val state = runCatching { SystemSurfaceStateStore(context).readSessionWidgetState() }
+            val state = runCatching { stateReader(context) }
                 .getOrElse {
                     Log.w(SYSTEM_SURFACES_TAG, "widget state read failed", it)
                     SessionWidgetState(activeSessionCount = 0)

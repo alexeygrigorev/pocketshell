@@ -34,6 +34,22 @@ internal object BoundedImageDecoder {
         return BitmapFactory.decodeFile(file.path, options)
     }
 
+    fun decodeByteArray(
+        bytes: ByteArray,
+        maxPixels: Int = DEFAULT_MAX_PIXELS,
+        codec: ByteArrayBitmapCodec = AndroidByteArrayBitmapCodec,
+    ): Bitmap? {
+        require(maxPixels > 0) { "maxPixels must be positive" }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        codec.decode(bytes, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxPixels)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return codec.decode(bytes, options)
+    }
+
     fun decodeStream(openInputStream: () -> InputStream?, maxPixels: Int = DEFAULT_MAX_PIXELS): Bitmap? {
         require(maxPixels > 0) { "maxPixels must be positive" }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -76,4 +92,13 @@ internal object BoundedImageDecoder {
     private fun ceilDiv(value: Int, divisor: Int): Long {
         return (value.toLong() + divisor.toLong() - 1L) / divisor.toLong()
     }
+}
+
+internal fun interface ByteArrayBitmapCodec {
+    fun decode(bytes: ByteArray, options: BitmapFactory.Options): Bitmap?
+}
+
+private object AndroidByteArrayBitmapCodec : ByteArrayBitmapCodec {
+    override fun decode(bytes: ByteArray, options: BitmapFactory.Options): Bitmap? =
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }

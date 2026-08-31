@@ -213,7 +213,7 @@ class TmuxDetectedPortForwardDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -229,7 +229,7 @@ class TmuxDetectedPortForwardDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("tmux new-session -d -s '$SESSION_NAME' -c /tmp") }

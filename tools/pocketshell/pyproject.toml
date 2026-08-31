@@ -129,6 +129,10 @@ exclude = [
 ]
 
 [tool.uv]
+# CI and local frozen-sync checks use the same installer semantics. Bump this
+# deliberately together with .github/workflows/tests.yml and validate the
+# committed lock before merging.
+required-version = "==0.10.11"
 # Keep the lockfile's reproducibility cutoff project-local. The host may have
 # a rolling global `exclude-newer` policy that predates deliberately pinned
 # releases (quse 0.0.15 and tmuxctl 0.3.5); this exact value is also the

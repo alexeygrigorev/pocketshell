@@ -1,6 +1,7 @@
 package com.pocketshell.app.conversation
 
 import android.graphics.Bitmap
+import android.os.Looper
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
@@ -13,10 +14,15 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.uikit.theme.PocketShellTheme
 import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Issue #842 — rendered-UI proof that a transcript image is SURFACED inline
@@ -126,6 +132,40 @@ class ConversationImageContentRenderTest {
             }
         }
         compose.waitForIdle()
+        compose.onNodeWithTag(CONVERSATION_IMAGE_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun conversationContentComposesWhileDecoderIsBlockedOffMain() {
+        val decodeStarted = CountDownLatch(1)
+        val releaseDecode = CountDownLatch(1)
+        val decodeThread = AtomicReference<Thread>()
+        val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val decoder = ConversationBitmapDecoder {
+            decodeThread.set(Thread.currentThread())
+            decodeStarted.countDown()
+            check(releaseDecode.await(10, TimeUnit.SECONDS))
+            bitmap
+        }
+        val loader = ConversationImageLoader { Result.success(tinyPngBytes()) }
+
+        try {
+            compose.setContent {
+                PocketShellTheme {
+                    CompositionLocalProvider(
+                        LocalConversationImageLoader provides loader,
+                        LocalConversationBitmapDecoder provides decoder,
+                    ) {
+                        ConversationImageContent(image = image)
+                    }
+                }
+            }
+            assertTrue("decoder never started", decodeStarted.await(5, TimeUnit.SECONDS))
+            compose.onNodeWithTag(CONVERSATION_IMAGE_PLACEHOLDER_TAG).assertIsDisplayed()
+            assertNotSame(Looper.getMainLooper().thread, decodeThread.get())
+        } finally {
+            releaseDecode.countDown()
+        }
         compose.onNodeWithTag(CONVERSATION_IMAGE_TAG).assertIsDisplayed()
     }
 

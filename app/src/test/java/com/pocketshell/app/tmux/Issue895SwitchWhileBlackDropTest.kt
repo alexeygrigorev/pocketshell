@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
  *
  * Defect: a transport drop that lands while the VM is in the `Switching`
  * (Attaching) window was SWALLOWED by the
- * `inlineConnectionStatus as? ConnectionStatus.Connected ?: return` early-return
+ * VM-private `Connected` early-return
  * in [TmuxSessionViewModel.handlePassiveClientDisconnect], so the inline
  * passive-disconnect handling never ran and no diagnostic was recorded — the
  * user was left frozen on a black pane with no escapable state.
@@ -185,9 +185,8 @@ class Issue895SwitchWhileBlackDropTest {
         runCurrent()
 
         // Enter the Switching window the way a same-host fast switch does
-        // (Attaching set before the Live flip). inlineConnectionStatus now
-        // projects to ConnectionStatus.Switching.
-        vm.forceAttachingStateForTest("alpha.example", 22, "alex")
+        // (Attaching before the Live flip). The controller now projects Switching.
+        vm.forceControllerAttachingForTest()
         runCurrent()
         assertTrue(
             "precondition: VM is in the Switching window",
@@ -225,7 +224,7 @@ class Issue895SwitchWhileBlackDropTest {
         connectVm(vm, client)
         runCurrent()
 
-        vm.forceAttachingStateForTest("alpha.example", 22, "alex")
+        vm.forceControllerAttachingForTest()
         runCurrent()
         assertTrue(
             "precondition: VM is in the Switching window",

@@ -26,10 +26,10 @@ reading to the current one:
    by at least :data:`RESET_RECOVERY_THRESHOLD` percentage points (e.g.
    from 8% remaining to 100% remaining). A fresh limit window resets the
    meter, so a large recovery is the strongest signal a reset happened.
-2. **A new window boundary started.** The previous reading carried a
+2. **A fixed-window boundary started.** The previous reading carried a
    ``reset_at`` and the current ``reset_at`` has advanced *past* the old
-   one (the old window's deadline elapsed and the provider rolled to a new
-   window). This catches a reset even when the percentage signal is noisy.
+   one after the old deadline elapsed. Rolling-window deadline motion is not
+   a boundary signal; it requires the strong percentage-recovery signal.
 
 Either signal flags a reset. Both being present strengthens confidence but
 is not required.
@@ -177,11 +177,15 @@ def _detect_window_reset(
         if float(cur_pct) - float(prev_pct) >= RESET_RECOVERY_THRESHOLD:
             recovery_reset = True
 
-    # Signal 2: a new window boundary started (reset_at advanced past the
-    # previously-stated deadline). Requires both timestamps to compare.
+    # Signal 2: a fixed window rolled after its previously stated deadline.
+    # Providers revise future deadlines and continuously move rolling-window
+    # deadlines, neither of which proves that quota was restored.
     window_rolled = False
-    if prev_reset_dt is not None and cur_reset_dt is not None:
-        if cur_reset_dt > prev_reset_dt:
+    rolling = previous.get("rolling") is True or current.get("rolling") is True
+    if not rolling and all(
+        value is not None for value in (prev_reset_dt, cur_reset_dt, captured_dt)
+    ):
+        if cur_reset_dt > prev_reset_dt and captured_dt >= prev_reset_dt:
             window_rolled = True
 
     if not (recovery_reset or window_rolled):

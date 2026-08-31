@@ -47,6 +47,7 @@ import com.pocketshell.app.tmux.closeCachedRuntime
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.storage.AppDatabase
@@ -56,6 +57,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -68,6 +70,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicLong
 import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
@@ -564,6 +567,156 @@ class MultiSessionSwitchJourneyE2eTest {
     } }
 
     /**
+     * Issue #2309 accelerated real-path acceptance.
+     *
+     * The production TTL is five minutes, so a short healthy switch ring cannot
+     * prove expiry. This test changes only the production scheduler's TTL and
+     * monotonic-clock inputs, then drives the same user path: open A, switch to
+     * B (parking A), advance beyond that configured TTL, observe exact A runtime
+     * teardown and its remote tmux client disappearing, and return to A through
+     * a fresh attach that accepts terminal input.
+     */
+    @Test
+    fun parkedRuntimeCrossesInjectedTtlThenUserReturnFreshAttaches() { runBlocking {
+        val recording = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        diagnostics = recording
+        val cache = runtimeCacheFromActiveViewModel()
+        var expiryPolicy: AutoCloseable? = null
+
+        try {
+            waitForHostRowPresent(hostRowTag)
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            waitForFolderListReady(hostRowTag)
+            waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+            compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+            waitForTerminalViewAttached()
+            waitForTerminalContains(SESSION_A_MARKER, "issue2309 initial attach to A")
+
+            expectedMarker[SESSION_A] = SESSION_A_MARKER
+            expectedMarker[SESSION_B] = SESSION_B_MARKER
+            expectedMarker[SESSION_C] = SESSION_C_MARKER
+            assertInputRoutesToShownSession(SESSION_A, "issue2309 initial")
+            val oldRemoteClient = listTmuxClientsForSession(SESSION_A).single()
+
+            switchAndAssert(step = 1, fromSession = SESSION_A, toSession = SESSION_B)
+            val hostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+            val parkedA = cache.cachedRuntimesForHost(hostId).single {
+                it.key.sessionName == SESSION_A
+            }
+            val parkedBinding = parkedA.healthBinding
+            val parkedClientHash = System.identityHashCode(parkedA.client)
+            val parkedLease = requireNotNull(parkedA.lease) {
+                "issue2309 real parked A runtime must own its production SSH lease"
+            }
+            assertTrue(cache.containsExact(parkedBinding))
+            assertFalse(parkedA.client.disconnected.value)
+            assertTrue(parkedA.paneProducerJobs.values.any { it.isActive })
+
+            // Accelerate only after A is authoritatively parked. The user
+            // journey up to this point runs under the real five-minute policy,
+            // so the test cannot race its own fixture setup against a tiny TTL.
+            val clock = AtomicLong(SystemClock.elapsedRealtime())
+            expiryPolicy = cache.configureExpiryPolicyForTest(
+                ttlMs = ISSUE2309_CONNECTED_TTL_MS,
+                nowMs = clock::get,
+            )
+            // The scheduler still waits the accelerated real TTL. Advancing the
+            // injected monotonic clock makes its deadline observation strictly
+            // exceed that same configured TTL rather than faking an expiry call.
+            clock.addAndGet(ISSUE2309_CONNECTED_TTL_MS + 1L)
+            val expiryWaitStarted = SystemClock.elapsedRealtime()
+            withTimeout(20_000L) {
+                while (
+                    cache.containsExact(parkedBinding) ||
+                    !parkedA.client.disconnected.value ||
+                    parkedA.paneProducerJobs.values.any { it.isActive }
+                ) {
+                    delay(50L)
+                }
+            }
+            withTimeout(10_000L) {
+                while (listTmuxClientsForSession(SESSION_A).isNotEmpty()) delay(100L)
+            }
+            val expiryWaitMs = SystemClock.elapsedRealtime() - expiryWaitStarted
+            val cleanupEvents = recording.eventsNamed("parked_runtime_cleanup")
+            val completedExpiry = cleanupEvents.filter {
+                it.fields["reason"] == "ttl_expired" &&
+                    it.fields["cleanupCompleted"] == true &&
+                    (it.fields["parkAgeMs"] as? Long ?: -1L) >= ISSUE2309_CONNECTED_TTL_MS
+            }
+
+            assertFalse(
+                "issue2309 expired exact runtime must no longer be cache-owned",
+                cache.containsExact(parkedBinding),
+            )
+            assertTrue("issue2309 expiry must close the exact parked client", parkedA.client.disconnected.value)
+            assertTrue(
+                "issue2309 expiry must cancel every exact parked producer",
+                parkedA.paneProducerJobs.values.all { !it.isActive },
+            )
+            assertTrue("issue2309 expiry must release the exact parked SSH lease", leaseReleased(parkedLease))
+            assertTrue(
+                "issue2309 diagnostics must prove completed cleanup after crossing the configured TTL; " +
+                    "events=$cleanupEvents",
+                completedExpiry.isNotEmpty(),
+            )
+            cleanupEvents.forEach { event ->
+                assertEquals(
+                    "issue2309 expiry diagnostics must remain content-free",
+                    setOf("parkAgeMs", "reason", "cleanupCompleted"),
+                    event.fields.keys,
+                )
+            }
+
+            switchAndAssert(step = 2, fromSession = SESSION_B, toSession = SESSION_A)
+            val freshRemoteClient = listTmuxClientsForSession(SESSION_A).single()
+            assertTrue(
+                "issue2309 returning after expiry must attach a fresh remote tmux client; " +
+                    "old=$oldRemoteClient fresh=$freshRemoteClient",
+                freshRemoteClient.pid != oldRemoteClient.pid &&
+                    freshRemoteClient.shellPid != oldRemoteClient.shellPid,
+            )
+            // switchAndAssert's final assertion is the real terminal-input
+            // round trip, proving the fresh return is usable rather than merely
+            // present in the remote client list.
+            captureViewport("issue2309-expired-runtime-fresh-return-$SESSION_A")
+            recordTiming("issue2309_configured_ttl_ms", ISSUE2309_CONNECTED_TTL_MS)
+            recordTiming("issue2309_expiry_wait_ms", expiryWaitMs)
+            writeText(
+                "issue2309-expiry-diagnostics.txt",
+                buildString {
+                    appendLine("parked_binding=$parkedBinding")
+                    appendLine("parked_client_hash=$parkedClientHash")
+                    appendLine("old_remote_client=$oldRemoteClient")
+                    appendLine("fresh_remote_client=$freshRemoteClient")
+                    appendLine("configured_ttl_ms=$ISSUE2309_CONNECTED_TTL_MS")
+                    appendLine("injected_park_age_ms=${ISSUE2309_CONNECTED_TTL_MS + 1L}")
+                    appendLine("cleanup_events=$cleanupEvents")
+                },
+            )
+            writeSummary(
+                lines = listOf(
+                    "issue=2309 accelerated parked-runtime expiry acceptance",
+                    "journey=A->B park, cross injected TTL, expiry cleanup, B->A fresh return",
+                    "configured_ttl_ms=$ISSUE2309_CONNECTED_TTL_MS",
+                    "exact_runtime_removed=true",
+                    "producer_jobs_cancelled=true",
+                    "client_closed=true",
+                    "lease_released=true",
+                    "old_remote_client=$oldRemoteClient",
+                    "fresh_remote_client=$freshRemoteClient",
+                    "terminal_input_round_trip=true",
+                ),
+            )
+            writeTimings()
+        } finally {
+            expiryPolicy?.close()
+        }
+        Unit
+    } }
+
+    /**
      * Issue #1537 G10 deterministic stale-generation reproduction.
      *
      * This drives the real Docker/tmux lifecycle with APIs present on both the
@@ -618,7 +771,7 @@ class MultiSessionSwitchJourneyE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(fixtureKey),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).getOrThrow()
         }
@@ -669,7 +822,6 @@ class MultiSessionSwitchJourneyE2eTest {
             paneProducerJobs = emptyMap(),
             paneInputQueues = emptyMap(),
             paneInputJobs = emptyMap(),
-            paneAgentJobs = emptyMap(),
             paneAgentInputs = generation1.paneAgentInputs,
             agentConversations = generation1.agentConversations,
             remoteColumns = generation1.remoteColumns,
@@ -1490,6 +1642,12 @@ class MultiSessionSwitchJourneyE2eTest {
         return requireNotNull(cache) { "issue1537: active VM common runtime cache unavailable" }
     }
 
+    private fun leaseReleased(lease: SshLease): Boolean =
+        SshLease::class.java
+            .getDeclaredField("released")
+            .apply { isAccessible = true }
+            .getBoolean(lease)
+
     private suspend fun listTmuxClientsForSession(sessionName: String): List<RemoteTmuxClient> {
         val script =
             "tmux list-clients -t ${shellQuote(sessionName)} -F '#{client_name}|#{client_pid}'"
@@ -1529,7 +1687,7 @@ class MultiSessionSwitchJourneyE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(fixtureKey),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(command) }
@@ -1618,7 +1776,7 @@ class MultiSessionSwitchJourneyE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -1678,7 +1836,7 @@ class MultiSessionSwitchJourneyE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(script) } }
         val exec = result.getOrNull()
@@ -1700,7 +1858,7 @@ class MultiSessionSwitchJourneyE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).mapCatching { session ->
                     session.use {
@@ -2284,6 +2442,12 @@ class MultiSessionSwitchJourneyE2eTest {
         // block so detection is unambiguous.
         const val INJECTION_PROBE_BUDGET_MS: Long = 700L
         const val INJECTED_MAIN_BLOCK_MS: Long = 2_000L
+
+        // Real scheduler delay used by #2309's accelerated acceptance. The
+        // injected monotonic clock advances past this exact value before the
+        // one-shot wakes, proving a genuine TTL crossing without a five-minute
+        // device run.
+        const val ISSUE2309_CONNECTED_TTL_MS: Long = 1_500L
 
         // Strings the Disconnected/broken-transport path surfaces. None must
         // appear in the visible transcript on a healthy switch.

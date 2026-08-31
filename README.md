@@ -243,7 +243,7 @@ The test matrix and Docker/emulator setup are in
 [docs/testing.md](docs/testing.md) and
 [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md). The
 orchestrator/reviewer process is in [process.md](process.md). How we
-ship a version (candidate branch, stabilize, tag, merge back) is
+ship a version (candidate branch, stabilize, fast-forward the exact SHA to main, push main, tag from main) is
 [docs/release.md](docs/release.md).
 
 ## Repository layout

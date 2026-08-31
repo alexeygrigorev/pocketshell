@@ -93,6 +93,9 @@ public interface TmuxClient : AutoCloseable {
      */
     public val events: Flow<ControlEvent>
 
+    /** Retained dirty generation for authoritative repair after a structural drop. */
+    public val structuralEventOverflowGeneration: Flow<Long>
+
     /**
      * Connect: spawn `tmux -CC` over the wrapped session and start
      * forwarding events. Idempotent — calling twice returns immediately
@@ -848,6 +851,7 @@ internal class RealTmuxClient(
     // the connection. Generous by default so the normal path (the ViewModel
     // collects within milliseconds) is unaffected; tests inject a short value.
     private val firstSubscriberReplayGraceMs: Long = DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS,
+    private val structuralEventBufferCapacity: Int = EVENT_BUFFER,
 ) : TmuxClient {
     // Issue #576 (P4): monotonic counter of the last reader-side event the
     // control-mode reader parsed (any `%begin`/`%end`/`%error`/`%output`).
@@ -885,27 +889,17 @@ internal class RealTmuxClient(
             Dispatchers.IO,
     )
 
-    // Shared flow of STRUCTURAL events. extraBufferCapacity absorbs short
-    // bursts without blocking the reader.
-    //
-    // Issue #1224: pane `%output` is NO LONGER emitted onto this bus. It used to
-    // be (best-effort, so the ViewModel could log first-frame-per-pane), which
-    // meant a dense output burst filled the 256-slot buffer and could silently
-    // drop a burst-tail structural event (`%window-close` / `%session-changed`)
-    // — leaving a stale window node or wrong active session in the UI. Output
-    // now rides ONLY the per-pane [outputFor] pipes (the ViewModel's
-    // first-visible-output log taps that stream); this bus carries structural
-    // events ONLY, so an output burst can never crowd them out.
-    //
-    // replay = 0 because subscribers only care about events that arrive
-    // after they start collecting; tmux's structural state (sessions /
-    // windows / panes) is re-derivable by issuing `list-sessions` etc.
+    // Structural-only, replay-zero bus. Overflow is retained separately so the
+    // consumer can coalesce an authoritative state repair.
     private val eventBus = MutableSharedFlow<ControlEvent>(
         replay = 0,
-        extraBufferCapacity = EVENT_BUFFER,
+        extraBufferCapacity = structuralEventBufferCapacity,
     )
 
     override val events: Flow<ControlEvent> = eventBus.asSharedFlow()
+
+    private val structuralOverflow = MutableStateFlow(0L)
+    override val structuralEventOverflowGeneration: StateFlow<Long> = structuralOverflow.asStateFlow()
 
     private val paneOutputPipes =
         ConcurrentHashMap<String, PaneOutputPipe>()
@@ -2283,6 +2277,7 @@ internal class RealTmuxClient(
         }
         if (!eventBus.tryEmit(event)) {
             val dropped = eventBusDroppedEvents.incrementAndGet()
+            structuralOverflow.value++
             if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
                 TmuxClientDiagnostics.record(
                     "tmux_client_eventbus_overflow",

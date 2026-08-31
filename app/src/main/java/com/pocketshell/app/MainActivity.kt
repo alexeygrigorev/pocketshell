@@ -40,6 +40,7 @@ import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
@@ -54,6 +55,7 @@ import com.pocketshell.app.hosts.FirstHostTestConnectScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
 import com.pocketshell.app.fileexplorer.FileExplorerScreen
@@ -135,6 +137,7 @@ class MainActivity : FragmentActivity() {
     // The tmux session VM stays activity-scoped: we only have one live
     // session at a time today; multi-pane lifecycle arrives with #22.
     private val tmuxSessionViewModel: TmuxSessionViewModel by viewModels()
+    private val navigationState: RetainedNavigationState by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
     /**
@@ -243,14 +246,11 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var sshKeyDao: SshKeyDao
 
-    /**
-     * Issue #177: the navigator's current top destination, reported up by
-     * [AppNavigator] so `onStop` can persist it. The session screen also
-     * reports its current composer draft here so the restored view comes
-     * back with the user's half-typed message intact.
-     */
+    @Inject
+    internal lateinit var hostKeyTrustPromptRouter: HostKeyTrustPromptRouter
+
+    /** Issue #177: the navigator's current top destination, persisted on stop. */
     private var currentTopDestination: AppDestination = AppDestination.HostList
-    private var currentComposerDraft: String = ""
     private var restoredTmuxDestination: AppDestination.TmuxSession? = null
 
     /**
@@ -260,15 +260,6 @@ class MainActivity : FragmentActivity() {
      */
     @VisibleForTesting
     internal fun currentDestinationForTest(): AppDestination = currentTopDestination
-
-
-    /**
-     * Issue #177: the composer draft restored alongside a recent
-     * persisted session, handed to the session screen so the user's
-     * half-typed message comes back. Consumed once by the navigator;
-     * cleared after the restored destination has been seeded.
-     */
-    private var restoredComposerDraft by mutableStateOf("")
 
     /**
      * Issue #560: remote attachment path(s) handed in by the share-into-
@@ -402,11 +393,6 @@ class MainActivity : FragmentActivity() {
             "defaultHostLaunchPending" to resolveDefaultHostOnLaunch,
         )
         restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
-        restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
-            restored?.composerDraft.orEmpty()
-        } else {
-            ""
-        }
         pendingImportPayload = importPayload
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
         window.decorView.setBackgroundColor(DarkSystemBarColor)
@@ -483,15 +469,18 @@ class MainActivity : FragmentActivity() {
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
                         hostDetailViewMode = settings.hostDetailViewMode,
                         requestedDestination = requestedDestination,
+                        retainedNavigationState = navigationState,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
                         // Issue #177: the navigator reports its current top
-                        // destination + composer draft so `onStop` can
-                        // persist the in-session view for fast resume; the
-                        // restored draft flows the other way so the session
-                        // comes back with the user's half-typed message.
-                        onCurrentDestinationChanged = { dest ->
+                        // destination so `onStop` can persist the in-session
+                        // view for fast resume.
+                        onCurrentDestinationCaptured = { dest ->
                             currentTopDestination = dest
+                            NavigationCallbackProbe.onCaptured?.invoke(dest)
+                        },
+                        onCurrentDestinationChanged = { dest ->
+                            NavigationCallbackProbe.onReported?.invoke(dest)
                             // Issue #698: opening a host (folder list / session)
                             // is one of the maintainer's main entry points and
                             // they skip the home screen, so fire the throttled
@@ -518,9 +507,6 @@ class MainActivity : FragmentActivity() {
                                 }
                             }
                         },
-                        onComposerDraftChanged = { draft -> currentComposerDraft = draft },
-                        initialComposerDraft = restoredComposerDraft,
-                        onInitialComposerDraftConsumed = { restoredComposerDraft = "" },
                         initialComposerAttachments = pendingComposerAttachments,
                         onInitialComposerAttachmentsConsumed = {
                             pendingComposerAttachments = emptyList()
@@ -543,6 +529,7 @@ class MainActivity : FragmentActivity() {
                         // return to this host's sessions?" dialog — including on the
                         // cold-restore path.
                         staleSessionPromptController = staleSessionPromptController,
+                        hostKeyTrustPromptRouter = hostKeyTrustPromptRouter,
                     )
                 }
             }
@@ -745,7 +732,7 @@ class MainActivity : FragmentActivity() {
      * Issue #177: persist the last in-session view on the way out (D21 —
      * persistence happens at `onStop` time, nothing runs while
      * backgrounded). When the user is sitting on a tmux session we record
-     * the destination + draft so the next foreground restores it; when
+     * the destination so the next foreground restores it; when
      * they are anywhere else we clear the snapshot so a stale session is
      * never silently restored after the user navigated away on purpose.
      */
@@ -753,7 +740,6 @@ class MainActivity : FragmentActivity() {
         val session = resolveLastSessionForStop(
             currentDestination = currentTopDestination,
             tmuxIntent = tmuxSessionViewModel.latestRestoreIntentSnapshot(),
-            composerDraft = currentComposerDraft,
             savedAtMillis = System.currentTimeMillis(),
         )
         if (session != null) {
@@ -818,6 +804,38 @@ class MainActivity : FragmentActivity() {
 }
 
 /**
+ * Credential-bearing navigation state retained only in memory across Activity
+ * configuration recreation. It intentionally has no SavedStateHandle: process
+ * death must not serialize decrypted passphrases into an Android state bundle.
+ */
+internal class RetainedNavigationState : ViewModel() {
+    var current: AppDestination? = null
+    val backStack: MutableList<AppDestination> = mutableListOf()
+    var entryId: Long = 0L
+    private var reported: AppDestination? = null
+
+    fun markReported(destination: AppDestination): Boolean {
+        if (reported == destination) return false
+        reported = destination
+        return true
+    }
+}
+
+/** Instrumentation observer for the real Activity -> navigator callback boundary. */
+internal object NavigationCallbackProbe {
+    @Volatile
+    var onReported: ((AppDestination) -> Unit)? = null
+
+    @Volatile
+    var onCaptured: ((AppDestination) -> Unit)? = null
+
+    fun reset() {
+        onReported = null
+        onCaptured = null
+    }
+}
+
+/**
  * Issue #859 (Slice D): the parsed request carried by an agent-card push
  * notification tap — the tmux session to open and the best-effort host hostname
  * to resolve it against.
@@ -849,8 +867,8 @@ private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`
  * we push / pop; rendering branches on the head.
  *
- * Saveable: we deliberately do NOT persist the back stack across process
- * death or a configuration change. Every destination carries the host's SSH
+ * The stack is retained in memory across configuration changes but deliberately
+ * is NOT persisted across process death. Every destination carries the host's SSH
  * connection tuple including a decrypted `CharArray?` passphrase, and a
  * `rememberSaveable` stack would write that secret into the saved-state bundle
  * the system spills to disk.
@@ -867,19 +885,13 @@ private fun AppNavigator(
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     hostDetailViewMode: HostDetailViewMode,
     requestedDestination: AppDestination,
+    retainedNavigationState: RetainedNavigationState = RetainedNavigationState(),
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
-    // Issue #177: report the current top destination + the active session
-    // composer draft up to the activity so `onStop` can persist the
-    // in-session view for fast resume.
+    // Issue #177: report the current top destination so `onStop` can persist
+    // the in-session view for fast resume.
     onCurrentDestinationChanged: (AppDestination) -> Unit = {},
-    onComposerDraftChanged: (String) -> Unit = {},
-    // Issue #177: the composer draft restored from the persisted session,
-    // seeded into the session screen on the restore path. Consumed once;
-    // [onInitialComposerDraftConsumed] clears it so a later in-session
-    // navigation does not re-seed a stale draft.
-    initialComposerDraft: String = "",
-    onInitialComposerDraftConsumed: () -> Unit = {},
+    onCurrentDestinationCaptured: (AppDestination) -> Unit = {},
     // Issue #560: staged remote attachment path(s) from a share-into-session
     // launch. Seeded into the session composer as #544 chips with the
     // composer opened + focused. Consumed once; cleared via
@@ -908,6 +920,7 @@ private fun AppNavigator(
     // where the folder tree was never opened. Null in previews/tests that do not
     // exercise the recovery dialog.
     staleSessionPromptController: com.pocketshell.app.tmux.StaleSessionPromptController? = null,
+    hostKeyTrustPromptRouter: HostKeyTrustPromptRouter? = null,
 ) {
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
@@ -932,8 +945,8 @@ private fun AppNavigator(
     // safe by resolving the current destination's PARENT when there is nothing
     // to pop, so a back gesture from a restored session reaches that host's
     // sessions screen rather than the host list.
-    var current: AppDestination by remember {
-        mutableStateOf(requestedDestination)
+    var current: AppDestination by remember(retainedNavigationState) {
+        mutableStateOf(retainedNavigationState.current ?: requestedDestination)
     }
     LaunchedEffect(Unit) {
         StartupTiming.markOnce(
@@ -959,21 +972,25 @@ private fun AppNavigator(
         (current as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
     }
 
-    // Issue #177: report the current top destination up to the activity
-    // so `onStop` can persist the in-session view. Fires on every
-    // navigation, including the initial restored destination.
-    LaunchedEffect(current) {
-        StartupTiming.mark("app-navigator-current", "destination" to current.timingName())
-        CrashReporter.updateContext(current.crashReportContext())
+    fun reportDestination(dest: AppDestination) {
+        if (!retainedNavigationState.markReported(dest)) return
+        StartupTiming.mark("app-navigator-current", "destination" to dest.timingName())
+        CrashReporter.updateContext(dest.crashReportContext())
         DiagnosticEvents.record(
             "navigation",
             "route_changed",
-            "route" to current.diagnosticRouteName(),
+            "route" to dest.diagnosticRouteName(),
         )
-        onCurrentDestinationChanged(current)
+        onCurrentDestinationChanged(dest)
     }
 
-    val backStack = remember { mutableListOf<AppDestination>() }
+    LaunchedEffect(Unit) {
+        retainedNavigationState.current = current
+        onCurrentDestinationCaptured(current)
+        reportDestination(current)
+    }
+
+    val backStack = remember(retainedNavigationState) { retainedNavigationState.backStack }
 
     fun setCurrentDestination(dest: AppDestination) {
         // Capture synchronously with navigation. A stale-session signal can be
@@ -982,7 +999,27 @@ private fun AppNavigator(
         // though the cold-restore route already identifies this host.
         (dest as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
         current = dest
-        onCurrentDestinationChanged(dest)
+        retainedNavigationState.entryId += 1L
+        retainedNavigationState.current = dest
+        onCurrentDestinationCaptured(dest)
+        reportDestination(dest)
+    }
+
+    LaunchedEffect(hostKeyTrustPromptRouter) {
+        hostKeyTrustPromptRouter?.pendingHostId?.collect { hostId ->
+            hostId ?: return@collect
+            val trustDestination = AppDestination.FirstHostTestConnect(
+                hostId = hostId,
+                firstRunGuided = false,
+            )
+            val alreadyConfirmingThisHost =
+                (current as? AppDestination.FirstHostTestConnect)?.hostId == hostId
+            if (!alreadyConfirmingThisHost) {
+                backStack += current
+                setCurrentDestination(trustDestination)
+            }
+            hostKeyTrustPromptRouter.consume(hostId)
+        }
     }
 
     LaunchedEffect(requestedDestination) {
@@ -1190,12 +1227,17 @@ private fun AppNavigator(
 
         AppDestination.AddHost -> AddEditHostScreen(
             hostId = null,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
+            onHostSaved = { hostId ->
+                replace(AppDestination.FirstHostTestConnect(hostId, firstRunGuided = false))
+            },
         )
 
         AppDestination.AddFirstHost -> AddEditHostScreen(
             hostId = null,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
             firstRunGuided = true,
@@ -1205,7 +1247,13 @@ private fun AppNavigator(
         is AppDestination.FirstHostTestConnect -> FirstHostTestConnectScreen(
             hostId = dest.hostId,
             onBack = ::back,
-            onEditHost = { id -> replace(AppDestination.EditFirstHost(id)) },
+            onEditHost = { id ->
+                replace(
+                    if (dest.firstRunGuided) AppDestination.EditFirstHost(id)
+                    else AppDestination.EditHost(id),
+                )
+            },
+            firstRunGuided = dest.firstRunGuided,
             onOpenHost = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.FolderList(
@@ -1223,6 +1271,7 @@ private fun AppNavigator(
 
         is AppDestination.EditFirstHost -> AddEditHostScreen(
             hostId = dest.hostId,
+            entryId = retainedNavigationState.entryId,
             onDone = { replace(AppDestination.FirstHostTestConnect(dest.hostId)) },
             firstRunGuided = true,
             onFirstRunHostSaved = { hostId -> replace(AppDestination.FirstHostTestConnect(hostId)) },
@@ -1230,7 +1279,11 @@ private fun AppNavigator(
 
         is AppDestination.EditHost -> AddEditHostScreen(
             hostId = dest.hostId,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
+            onHostSaved = { hostId ->
+                replace(AppDestination.FirstHostTestConnect(hostId, firstRunGuided = false))
+            },
         )
 
         // Issue #129 + #290: live camera QR scanner. It is launched
@@ -1880,12 +1933,6 @@ private fun AppNavigator(
                     ),
                 )
             },
-            // Issue #177: seed the restored composer draft into the agent
-            // composer so a fast-resumed session comes back with the
-            // user's half-typed message, and report draft edits up so the
-            // next `onStop` persists them.
-            initialComposerDraft = initialComposerDraft,
-            onInitialComposerDraftConsumed = onInitialComposerDraftConsumed,
             // Issue #560: seed the share-staged attachment(s) into the
             // session composer as #544 chips and open the composer focused.
             initialComposerAttachments = initialComposerAttachments,
@@ -1894,7 +1941,6 @@ private fun AppNavigator(
             // "Attach to current session" action into the composer draft.
             initialComposerPrompt = initialComposerPrompt,
             onInitialComposerPromptConsumed = onInitialComposerPromptConsumed,
-            onComposerDraftChanged = onComposerDraftChanged,
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(
@@ -2177,7 +2223,6 @@ internal fun shouldTrapSystemBack(destination: AppDestination): Boolean =
 internal fun resolveLastSessionForStop(
     currentDestination: AppDestination,
     tmuxIntent: TmuxRestoreIntentSnapshot?,
-    composerDraft: String,
     savedAtMillis: Long,
 ): LastSessionStore.LastSession? {
     val routeDestination = currentDestination as? AppDestination.TmuxSession ?: return null
@@ -2205,7 +2250,6 @@ internal fun resolveLastSessionForStop(
             startDirectory = source.startDirectory,
             tmuxSessionId = source.tmuxSessionId,
             sessionCreated = source.sessionCreated,
-            composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
     } else {
@@ -2220,7 +2264,6 @@ internal fun resolveLastSessionForStop(
             startDirectory = routeDestination.startDirectory,
             tmuxSessionId = routeDestination.tmuxSessionId,
             sessionCreated = routeDestination.sessionCreated,
-            composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
     }
@@ -2511,7 +2554,8 @@ internal fun AppDestination.timingName(): String = when (this) {
     AppDestination.HostList -> "HostList"
     AppDestination.AddHost -> "AddHost"
     AppDestination.AddFirstHost -> "AddFirstHost"
-    is AppDestination.FirstHostTestConnect -> "FirstHostTestConnect(hostId=$hostId)"
+    is AppDestination.FirstHostTestConnect ->
+        "FirstHostTestConnect(hostId=$hostId,firstRunGuided=$firstRunGuided)"
     is AppDestination.EditFirstHost -> "EditFirstHost(hostId=$hostId)"
     is AppDestination.EditHost -> "EditHost"
     AppDestination.Scan -> "Scan"

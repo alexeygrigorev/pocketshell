@@ -30,7 +30,11 @@ import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.app.requireMainThread
-import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.acceptPresentedHostKey
+import com.pocketshell.app.ssh.actionableMessage
+import com.pocketshell.app.ssh.findHostKeyVerificationFailure
+import com.pocketshell.app.ssh.hostKeyTrustBinding
+import com.pocketshell.core.ssh.HostKeyVerificationException
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.dao.HostDao
@@ -58,6 +62,7 @@ const val FIRST_HOST_TEST_CONNECT_SCREEN_TAG = "first-host-test-connect:screen"
 const val FIRST_HOST_TEST_CONNECT_RETRY_TAG = "first-host-test-connect:retry"
 const val FIRST_HOST_TEST_CONNECT_EDIT_TAG = "first-host-test-connect:edit"
 const val FIRST_HOST_TEST_CONNECT_OPEN_TAG = "first-host-test-connect:open"
+const val FIRST_HOST_TEST_CONNECT_TRUST_TAG = "first-host-test-connect:trust-host-key"
 
 private const val FIRST_HOST_TEST_CONNECT_TIMEOUT_MS = 10_000
 
@@ -67,6 +72,7 @@ fun FirstHostTestConnectScreen(
     onBack: () -> Unit,
     onEditHost: (Long) -> Unit,
     onOpenHost: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
+    firstRunGuided: Boolean = true,
     modifier: Modifier = Modifier,
     viewModel: FirstHostTestConnectViewModel = hiltViewModel(),
     bootstrapViewModel: HostListViewModel = hiltViewModel(),
@@ -93,6 +99,8 @@ fun FirstHostTestConnectScreen(
         onBack = onBack,
         onEditHost = onEditHost,
         onRetry = { viewModel.start(hostId, force = true) },
+        onConfirmHostKey = viewModel::confirmPresentedHostKey,
+        firstRunGuided = firstRunGuided,
         onStartSetup = { host, keyPath -> bootstrapViewModel.bootstrapHost(host, keyPath, null) },
         bootstrapState = bootstrapState,
         bootstrapHostName = bootstrapHostName,
@@ -112,6 +120,8 @@ internal fun FirstHostTestConnectContent(
     onBack: () -> Unit,
     onEditHost: (Long) -> Unit,
     onRetry: () -> Unit,
+    onConfirmHostKey: () -> Unit = {},
+    firstRunGuided: Boolean = true,
     onStartSetup: (HostEntity, keyPath: String) -> Unit,
     bootstrapState: HostBootstrapSheetState?,
     bootstrapHostName: String,
@@ -144,13 +154,15 @@ internal fun FirstHostTestConnectContent(
                 }
             },
         )
-        FirstHostWizardSteps(
-            activeStep = if (state.status == FirstHostTestStatus.Success) {
-                FirstHostWizardStep.Setup
-            } else {
-                FirstHostWizardStep.Test
-            },
-        )
+        if (firstRunGuided) {
+            FirstHostWizardSteps(
+                activeStep = if (state.status == FirstHostTestStatus.Success) {
+                    FirstHostWizardStep.Setup
+                } else {
+                    FirstHostWizardStep.Test
+                },
+            )
+        }
 
         Column(
             modifier = Modifier
@@ -175,8 +187,12 @@ internal fun FirstHostTestConnectContent(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     PocketShellButton(
-                        text = "Finish setup",
+                        text = if (firstRunGuided) "Finish setup" else "Done",
                         onClick = {
+                            if (!firstRunGuided) {
+                                onBack()
+                                return@PocketShellButton
+                            }
                             val host = state.host ?: return@PocketShellButton
                             val key = state.key ?: return@PocketShellButton
                             onStartSetup(host, key.privateKeyPath)
@@ -201,6 +217,24 @@ internal fun FirstHostTestConnectContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag(FIRST_HOST_TEST_CONNECT_OPEN_TAG),
+                    )
+                }
+
+                is FirstHostTestStatus.ConfirmHostKey -> {
+                    Text(
+                        text = status.failure.actionableMessage(),
+                        color = PocketShellColors.Text,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    PocketShellButton(
+                        text = if (status.failure is com.pocketshell.core.ssh.ChangedHostKeyException) {
+                            "Replace trusted key"
+                        } else {
+                            "Trust and connect"
+                        },
+                        onClick = onConfirmHostKey,
+                        variant = ButtonVariant.Primary,
+                        modifier = Modifier.fillMaxWidth().testTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG),
                     )
                 }
 
@@ -275,6 +309,7 @@ sealed interface FirstHostTestStatus {
     data object Testing : FirstHostTestStatus
     data object Success : FirstHostTestStatus
     data object NeedsPassphrase : FirstHostTestStatus
+    data class ConfirmHostKey(val failure: HostKeyVerificationException) : FirstHostTestStatus
     data class Failed(val message: String) : FirstHostTestStatus
 }
 
@@ -288,6 +323,17 @@ class FirstHostTestConnectViewModel @Inject constructor(
     val state: StateFlow<FirstHostTestConnectState> = _state.asStateFlow()
 
     private var testingHostId: Long? = null
+
+    fun confirmPresentedHostKey() {
+        requireMainThread("FirstHostTestConnectViewModel.confirmPresentedHostKey")
+        val current = _state.value
+        val failure = (current.status as? FirstHostTestStatus.ConfirmHostKey)?.failure ?: return
+        val host = current.host ?: return
+        viewModelScope.launch {
+            hostDao.update(host.acceptPresentedHostKey(failure))
+            start(host.id, force = true)
+        }
+    }
 
     fun start(hostId: Long, force: Boolean = false) {
         // #1829: the guard reads `testingHostId` AND `_state.value`, then does
@@ -335,8 +381,15 @@ class FirstHostTestConnectViewModel @Inject constructor(
                 return@launch
             }
             val result = tester.test(host, key)
+            val hostKeyFailure = result.exceptionOrNull()?.findHostKeyVerificationFailure()
             _state.value = if (result.isSuccess) {
                 FirstHostTestConnectState(host = host, key = key, status = FirstHostTestStatus.Success)
+            } else if (hostKeyFailure != null) {
+                FirstHostTestConnectState(
+                    host = host,
+                    key = key,
+                    status = FirstHostTestStatus.ConfirmHostKey(hostKeyFailure),
+                )
             } else {
                 FirstHostTestConnectState(
                     host = host,
@@ -357,13 +410,14 @@ open class FirstHostConnectionTester @Inject constructor() {
         if (!exists) {
             return Result.failure(IllegalStateException("SSH key file is missing"))
         }
+        val trust = host.hostKeyTrustBinding()
         val session = SshConnection.connect(
             host = host.hostname,
             port = host.port,
             user = host.username,
             key = SshKey.Path(file),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = trust.policy,
             timeoutMs = FIRST_HOST_TEST_CONNECT_TIMEOUT_MS,
         ).getOrElse { return Result.failure(it) }
         session.close()

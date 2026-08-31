@@ -72,23 +72,21 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-anchor = '''    if "short_term" not in record and "long_term" not in record:
+anchor = '''    if "windows" not in record:
         raise ValueError(
-            f"quse provider '{provider}' is missing canonical 'windows' or both "
-            "legacy window fields 'short_term' and 'long_term'"
+            f"quse provider '{provider}' is missing the canonical 'windows' map"
         )
 '''
 if text.count(anchor) != 1:
     raise SystemExit(
-        f"expected exactly one #2274 missing-both guard in {path}, found {text.count(anchor)}"
+        f"expected exactly one missing-canonical-windows guard in {path}, found {text.count(anchor)}"
     )
 
-# Exact regression mutant: remove the missing-both guard. The old loop then
-# silently emits an empty canonical map, while both valid producer controls
-# remain unaffected.
+# Exact regression mutant: remove the missing-canonical-windows guard while
+# valid canonical producer controls remain unaffected.
 mutated = text.replace(anchor, "", 1)
 if mutated == text or anchor in mutated:
-    raise SystemExit("missing-both guard mutant was not applied exactly once")
+    raise SystemExit("missing-canonical-windows mutant was not applied exactly once")
 path.write_text(mutated)
 PY
 }
@@ -160,17 +158,17 @@ if [[ "$candidate_clean_sha" != "$WORKTREE_SOURCE_SHA_BEFORE" ]]; then
 fi
 
 run_test baseline_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
+  tests/test_usage.py::test_flatten_rejects_record_without_canonical_windows
 BASELINE_AFFECTED_RC="$RUN_RC"
 require_rc 0 "fixed affected test"
 
 run_test baseline_control_translation \
-  tests/test_usage.py::test_flatten_translates_published_window_labels_without_rederiving_values
+  tests/test_usage.py::test_flatten_go_record_keeps_producer_owned_window_labels
 BASELINE_CONTROL_TRANSLATION_RC="$RUN_RC"
 require_rc 0 "fixed translation control"
 
 run_test baseline_control_canonical \
-  tests/test_usage.py::test_flatten_accepts_separate_canonical_go_contract
+  tests/test_usage.py::test_flatten_quse_0015_codex_reset_credits_pass_through
 BASELINE_CONTROL_CANONICAL_RC="$RUN_RC"
 require_rc 0 "fixed canonical control"
 
@@ -182,19 +180,19 @@ if [[ "$MUTANT_SOURCE_SHA" == "$candidate_clean_sha" ]]; then
 fi
 
 run_test mutant_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
+  tests/test_usage.py::test_flatten_rejects_record_without_canonical_windows
 MUTANT_AFFECTED_RC="$RUN_RC"
-require_rc 1 "missing-both guard mutant affected test"
+require_rc 1 "missing-canonical-windows mutant affected test"
 
 run_test mutant_control_translation \
-  tests/test_usage.py::test_flatten_translates_published_window_labels_without_rederiving_values
+  tests/test_usage.py::test_flatten_go_record_keeps_producer_owned_window_labels
 MUTANT_CONTROL_TRANSLATION_RC="$RUN_RC"
-require_rc 0 "missing-both guard mutant translation control"
+require_rc 0 "missing-canonical-windows mutant go control"
 
 run_test mutant_control_canonical \
-  tests/test_usage.py::test_flatten_accepts_separate_canonical_go_contract
+  tests/test_usage.py::test_flatten_quse_0015_codex_reset_credits_pass_through
 MUTANT_CONTROL_CANONICAL_RC="$RUN_RC"
-require_rc 0 "missing-both guard mutant canonical control"
+require_rc 0 "missing-canonical-windows mutant reset-credits control"
 
 cp "$PRISTINE_SOURCE" "$CANDIDATE_SOURCE"
 restored_sha="$(sha256sum "$CANDIDATE_SOURCE" | awk '{print $1}')"
@@ -204,7 +202,7 @@ if [[ "$restored_sha" != "$candidate_clean_sha" ]]; then
 fi
 
 run_test restored_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
+  tests/test_usage.py::test_flatten_rejects_record_without_canonical_windows
 RESTORED_AFFECTED_RC="$RUN_RC"
 require_rc 0 "restored affected test"
 
@@ -214,4 +212,4 @@ if [[ "$worktree_after_run" != "$WORKTREE_SOURCE_SHA_BEFORE" ]]; then
   exit 1
 fi
 
-printf 'PASS: missing-both mutant red (affected rc=1), legacy/canonical controls green, source restored\n'
+printf 'PASS: missing-canonical-windows mutant red (affected rc=1), canonical controls green, source restored\n'

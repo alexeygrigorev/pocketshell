@@ -649,24 +649,15 @@ internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
  * — `after` climbing `attempt=2,3,4,5 -> Unreachable` with real growing backoff, while `band`
  * read **`Connected`** the entire time. The app DISPLAYED "Connected" while it was giving up.
  *
- * TmuxSessionViewModel.projectStatusFromController's own contract is *"the controller is the
- * single status source, so its state must be re-projected whenever it can change — not only at
- * the inline `setConnectionState` choke point"* — but nothing ENFORCED it. Re-projection is
- * PUSHED, from exactly two families of site: the inline `setConnectionState` edge, and
- * `ConnectionEffectDriver.submitTransport` (its `onControllerTransition` callback; the driver's
- * `collectStateTransitions` does NOT re-project). This loop is a THIRD family — it feeds the
- * controller directly — and it only runs while `inlineConnectionStatus` is `Connected`, so
- * during a storm the inline path never moves and no push ever fires.
+ * `TmuxSessionViewModel.projectStatusFromController` is intentionally PUSHED at every typed
+ * controller event boundary. This loop is one such boundary: after it advances the controller
+ * attempt, it must project that exact state immediately or the view-facing flow remains stale.
  *
  * ## Why HERE and not reactively off `ConnectionController.state`
  * Re-projecting on EVERY controller transition looks like the tidier single-authority fix, and
- * it makes this journey green — but it was MEASURED to also surface transient controller states
- * the inline path deliberately overrides, repainting a calm `Connected` as a spurious
- * `Reconnecting` band (the #635/#685 class) in `postGraceLifecycleReattachCoalesces*`. The
- * controller is the authority; the push points are also its SYNC points. So the fix is scoped
- * to the one site that changes controller state with no push. Reconciling that tension properly
- * — making the projection reactive without resurrecting the spurious band — is a real design
- * question, and a release blocker is not where to answer it.
+ * it makes this journey green — but it was MEASURED to repaint on intermediate reducer states
+ * before the owning effect boundary had completed. The controller remains the sole lifecycle
+ * authority; these explicit projection boundaries preserve ordering without another state.
  */
 /**
  * Issue #1654: how long the passive-grace loop (the #1610 STORM path) waits before its next

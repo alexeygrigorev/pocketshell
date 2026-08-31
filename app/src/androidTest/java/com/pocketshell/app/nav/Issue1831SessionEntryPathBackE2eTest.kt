@@ -167,7 +167,6 @@ class Issue1831SessionEntryPathBackE2eTest {
                 keyPath = keyPathForSeededHost(),
                 sessionName = SEEDED_SESSION,
                 startDirectory = null,
-                composerDraft = "",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )
@@ -475,7 +474,7 @@ class Issue1831SessionEntryPathBackE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(script) } }.getOrNull()
         assertTrue(
@@ -491,7 +490,7 @@ class Issue1831SessionEntryPathBackE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use {

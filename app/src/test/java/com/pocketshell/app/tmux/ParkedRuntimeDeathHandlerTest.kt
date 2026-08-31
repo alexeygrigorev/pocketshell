@@ -276,7 +276,6 @@ class ParkedRuntimeDeathHandlerTest {
         paneProducerJobs = emptyMap(),
         paneInputQueues = emptyMap(),
         paneInputJobs = emptyMap(),
-        paneAgentJobs = emptyMap(),
         paneAgentInputs = emptyMap(),
         agentConversations = emptyMap(),
         remoteColumns = 0,

@@ -71,6 +71,7 @@ import com.pocketshell.app.tmux.connection.selectBackgroundArm
 import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
+import com.pocketshell.app.tmux.connection.ControllerStatusProjector
 import com.pocketshell.app.tmux.connection.controlChannelAliveForReveal
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
 import com.pocketshell.app.tmux.connection.DeadLeaseRecoveryAuthority
@@ -114,16 +115,17 @@ import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
 import com.pocketshell.app.tmux.connection.TransportEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
-import com.pocketshell.app.tmux.connection.shouldReportValidatedHandoffToController
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.ConnectionProjection
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.LivenessProbe
+import com.pocketshell.core.connection.LivenessPort
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RuntimeHealthLedger
 import com.pocketshell.core.connection.SessionId
+import com.pocketshell.core.connection.targetIdOrNull
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -799,25 +801,12 @@ public class TmuxSessionViewModel @Inject constructor(
             )
 
     /**
-     * EPIC #687 slice 1b: the VM-internal [ConnectionState] that [_connectionStatus]
-     * is now a projection of. Tracked alongside [_connectionStatus] so the two move
-     * together; every status emission goes through [setConnectionState], which sets
-     * this and projects via [connectionStatusFor]. Slice 1c lets
-     * `ConnectionController.state` feed this same field. Not exposed — purely
-     * VM-internal source-of-truth for the view-facing [ConnectionStatus] facade.
-     */
-    private var _connectionState: ConnectionState = ConnectionState.Idle
-
-    /**
      * EPIC #687: the `:shared:core-connection` `ConnectionController` the VM runs.
-     * It is fed the lifecycle inputs the inline path dispatches
-     * ([observeBackground]/[observeForeground]/[observeNetworkChanged]) PLUS every
-     * inline connection transition mirrored from the single [setConnectionState]
-     * choke point. Slice 1c-iv-a flipped the STATUS: the controller's state now
+     * It is fed typed lifecycle, intent, transport, and reveal events. Its state
      * DRIVES [_connectionStatus] (the single status source, projected by
      * [projectStatusFromController]). Slice 1c-iv-b-B2 (#742) moved the controller's
      * TRANSPORT inputs (TransportLive / TransportDropped) onto the
-     * [ConnectionEffectDriver]'s real port flows, deleting the inline mirror feeds.
+     * [ConnectionEffectDriver]'s real port flows.
      *
      * The warm-lease snapshot is the VM's existing [liveLeaseKeys] set, so the
      * controller's within-grace predicate reads the same warm signal the inline
@@ -847,6 +836,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.toSshLeaseTarget()
             },
         ).apply {
+            // S7 (#766): the controller — not a deleted VM hint — decides warm-attach vs
+            // cold-dial at `enter`. [hostKeyFor] is a 1:1 encoding of the full [SshLeaseKey],
+            // so this `any` is exactly "a live lease for THIS target's lease identity", the
+            // same predicate the deleted inline `warmOpenHint` read. It must stay
+            // NON-SUSPENDING: the controller's reducer consults it synchronously.
             warmSnapshot = { hostKey ->
                 liveLeaseKeys.any { leaseKey -> hostKeyFor(leaseKey) == hostKey }
             }
@@ -867,6 +861,16 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
     /**
+     * One-shot evidence for the controller's synchronous [LivenessPort] query. The restore
+     * effect may need an asynchronous reader/probe decision; it publishes that result here
+     * immediately before submitting [CoreConnectionEvent.NetworkRestored]. This is evidence,
+     * not a second lifecycle state: [connectionManager] remains the sole authority for the
+     * resulting Live-versus-Reconnecting transition.
+     */
+    @Volatile
+    private var networkRestoreProvenAliveForController: Boolean = false
+
+    /**
      * EPIC #792 Slice E — the connection FACADE. The single object the VM holds for the whole
      * connect/attach/reattach/grace/lease/reconnect surface: it owns the
      * `:shared:core-connection` [ConnectionController] (the SOLE connection-state authority) and
@@ -874,7 +878,10 @@ public class TmuxSessionViewModel @Inject constructor(
      * `ConnectionControllerShadowBridge` — there is no shadow/mirror/dual-write remaining (D28).
      */
     private val connectionManager: ConnectionManager =
-        ConnectionManager(transport = connectionTransportPort)
+        ConnectionManager(
+            transport = connectionTransportPort,
+            liveness = LivenessPort { networkRestoreProvenAliveForController },
+        )
 
     /**
      * EPIC #792 Slice B — the GRACE IO owner. Consolidates the three background-grace
@@ -897,6 +904,26 @@ public class TmuxSessionViewModel @Inject constructor(
                 override fun launchForegroundHealWithinGrace() =
                     this@TmuxSessionViewModel.launchForegroundHealWithinGrace()
             },
+        )
+
+    private val controllerStatusProjector: ControllerStatusProjector =
+        ControllerStatusProjector(
+            controllerState = { connectionManager.state },
+            currentTargets = {
+                listOf(activeTarget, connectingTarget, latestConnectIntent?.target)
+                    .filterNotNull()
+                    .map { target ->
+                        ConnectionStatusProjection.TargetEndpoint(
+                            targetId = controllerSessionId(target),
+                            endpoint = ConnectionStatusProjection.Endpoint(
+                                host = target.host,
+                                port = target.port,
+                                user = target.user,
+                            ),
+                        )
+                    }
+            },
+            publish = { _connectionStatus.value = it },
         )
 
     /**
@@ -965,7 +992,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // connection-core [backgroundEffects] dispatcher (#1047 Slice 1) and, on the
             // detach arm, routes the clean-detach teardown through the single [GraceEffects]
             // owner ([graceEffects.onBackgrounded] -> launchBackgroundDetachTeardown).
-            backgroundedEffect = { onControllerBackgrounded() },
+            backgroundedEffect = { previous -> onControllerBackgrounded(previous) },
             // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
             // On the controller's Backgrounded→Reattaching edge (within grace + warm lease)
             // it fires the RESEED-ONLY body — re-promote Live + heal blank panes over the
@@ -1057,8 +1084,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * (and there is no point probing before any session is attached anyway).
      *
      * The probe loop runs in [viewModelScope] (Main): its gate-checks +
-     * confirmed-drop effects touch Main-thread VM state (the controller,
-     * `setConnectionState`, the per-connection coroutines), so it MUST share the
+     * confirmed-drop effects touch Main-thread VM state (controller + per-connection coroutines), so it MUST share the
      * Main dispatcher in production + on the emulator. JVM unit tests
      * (`runTest` + the virtual-clock Main) would otherwise hang — the infinite
      * `delay(interval)` → `probe` → `delay` loop self-reschedules so
@@ -1367,20 +1393,14 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun paneOverflowRecoveryInFlightForTest(paneId: String): Boolean =
         paneId in paneOverflowRecoveryInFlight
 
-    /**
-     * Issue #895 (switch-while-black) test seam: force the inline connection
-     * state to [ConnectionState.Attaching] so a regression test can drive a
-     * passive drop while [inlineConnectionStatus] projects to
-     * [ConnectionStatus.Switching]. This mirrors the window a same-host fast
-     * switch holds (`runFastSessionSwitch`/`fastSwitchSessionForTest` set
-     * `Attaching` before the `Live` flip). Used to pin that a drop during the
-     * Switching window still surfaces an escapable band (no swallow gate).
-     */
-    internal fun forceAttachingStateForTest(host: String, port: Int, user: String) {
-        // S6 (#1329): drive Attaching via the same-host Switch intent (retired Attaching arm).
-        val (ctrlHost, ctrlTarget) = controllerHostAndTarget()
-        if (ctrlHost != null && ctrlTarget != null) connectionManager.switchTo(ctrlHost, ctrlTarget)
-        setConnectionState(ConnectionState.Attaching(host, port, user))
+    /** Issue #895: put the real controller into the same-host Attaching window. */
+    internal fun forceControllerAttachingForTest() {
+        val (trackedHost, trackedTarget) = controllerHostAndTarget()
+        connectionManager.switchTo(
+            trackedHost ?: HostKey("issue-895-host"),
+            trackedTarget ?: SessionId("issue-895-switch"),
+        )
+        projectStatusFromController()
     }
 
     /**
@@ -1582,126 +1602,91 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun controllerSessionId(target: ConnectionTarget): SessionId =
         revealController.sessionId(target)
 
-    /**
-     * EPIC #687 slice 1b: the single emission point — set the VM-internal
-     * [ConnectionState] and project it to the view-facing [ConnectionStatus] via the
-     * pure [connectionStatusFor] mapper. Replaces the scattered direct
-     * `_connectionStatus.value = ...` writes so the status is always a projection of
-     * an explicit state. Zero behavior change: the projected value is byte-identical
-     * to the previous direct assignment.
-     *
-     * EPIC #792 Slice E: ALSO drives the connection INTENT into the AUTHORITATIVE
-     * [connectionManager] (the controller). The controller's state is the SOLE source of
-     * the displayed status (no shadow/mirror remains — D28); this choke point is simply the
-     * cheapest place to read which host/target the VM is connecting/switching to.
-     */
-    private fun setConnectionState(state: ConnectionState) {
-        _connectionState = state
-        // EPIC #687 slice 1c-iv-a (THE STATUS FLIP): the inline path NO LONGER
-        // writes [_connectionStatus]. The view-facing status is now projected SOLELY
-        // from the [ConnectionController]'s state — the controller is the
-        // single source of truth for what the user SEES. The inline EFFECT machinery
-        // (reconnect jobs, generation counter, named coroutine jobs, classifier
-        // bodies) keeps running UNCHANGED; it just no longer owns the displayed
-        // status. Inline effects that need to gate on "am I connected?" read the
-        // VM-internal [inlineConnectionStatus] (a pure projection of [_connectionState]
-        // — byte-identical to the status this method used to write), NOT the
-        // controller-driven [_connectionStatus]. 1c-iv-b hard-cuts the inline
-        // [_connectionState]/effect machinery once the controller drives effects too.
-        driveControllerIntent(state)
-        projectStatusFromController(state)
+    private fun projectStatusFromController() = controllerStatusProjector.project()
+
+    /** True only when the typed controller is live for [target]. */
+    private fun controllerIsLiveFor(target: ConnectionTarget? = activeTarget): Boolean {
+        val state = connectionManager.state as? CoreConnectionState.Live ?: return false
+        return target == null || state.targetId == controllerSessionId(target)
     }
 
     /**
-     * EPIC #687 slice 1c-iv-a: the inline EFFECT machinery's own "current status"
-     * view — a pure projection of the inline [_connectionState] through the same
-     * [connectionStatusFor] mapper this VM has always used. Before the flip,
-     * [_connectionStatus] was always exactly `connectionStatusFor(_connectionState)`,
-     * so reading this is byte-identical to the old `_connectionStatus.value` reads:
-     * the ~20 inline effect call sites that gate on `Connected`/`Reconnecting`/
-     * `Failed` keep behaving identically while the DISPLAYED [_connectionStatus]
-     * follows the controller (and diverges only on the two approved #685 paths).
-     * This is NOT a second status SOURCE — nothing writes it; it is the inline
-     * effect state read back. 1c-iv-b deletes it with the rest of the inline machinery.
+     * The blank/stale render heal owns a CURRENT transport while its controller state is
+     * settling through an attach/recovery phase. Requiring `Live` here strands a freshly
+     * reattached blank pane because the controller deliberately promotes to `Live` only
+     * after the authoritative seed lands. This predicate still rejects stale targets,
+     * terminal states, background holds, and the typed network-loss hold.
      */
-    private val inlineConnectionStatus: ConnectionStatus
-        get() = connectionStatusFor(_connectionState)
-
-    /**
-     * EPIC #687 slice 1c-iv-a: project the AUTHORITATIVE [ConnectionController]'s state onto
-     * the view-facing [_connectionStatus] — the SINGLE status source. The coarse
-     * SHAPE (Idle/Connecting/Switching/Connected/Reconnecting/Failed) comes from the
-     * controller; the display PAYLOAD (host/port/user, reconnect attempt/reason, the
-     * failure message) comes from the inline [state] the VM constructed for this
-     * transition (the controller's core state carries opaque HostKey/SessionId, not
-     * the host/port/user the view renders).
-     *
-     * The approved #685 behavior falls out of the controller's state for free: a
-     * recoverable drop leaves the controller in `Reattaching`/`Reconnecting` (calm)
-     * rather than the inline `Unreachable`, so the user sees a calm `Reconnecting`
-     * band, NOT the scary `Failed`/"Tap Reconnect" control-channel band. A healthy
-     * within-grace foreground whose control channel survived remains `Live`; #822
-     * requires a confirmed-dead one to stay truthfully `Reattaching` until a real
-     * replacement seed lands. #720: a true `Unreachable` projects to a
-     * [ConnectionStatus.Failed] whose curated message + calm tappable "Tap to reconnect"
-     * band ([FailedConnectionRow]) replace the scary error text.
-     */
-    private fun projectStatusFromController(inlineState: ConnectionState) {
-        // #822: the reveal hold preserves the viewport, not false transport truth. A fresh
-        // carrier advances the core to Attaching; this recovery still displays Reconnecting
-        // until a real replacement seed makes the core Live. Healthy foregrounds stay Live.
-        val controllerState = connectionManager.state
-        val displayState =
-            if (graceEffects.isWithinGraceRecoveryActive() && controllerState is CoreConnectionState.Attaching) {
-                CoreConnectionState.Reattaching(controllerState.host, controllerState.targetId)
-            } else {
-                controllerState
-            }
-        _connectionStatus.value = connectionStatusForController(displayState, inlineState)
-    }
-
-    /**
-     * Re-project [_connectionStatus] from the controller after a NON-`setConnectionState`
-     * bridge feed (a lifecycle event — background / foreground / network-change /
-     * transport-drop, or the real transport-live / seed-landed feedback) that can
-     * move the controller's state. Uses the current inline [_connectionState] as the
-     * payload carrier. The controller is the single status source, so its state must
-     * be re-projected whenever it can change — not only at the inline
-     * [setConnectionState] choke point.
-     */
-    private fun projectStatusFromController() {
-        projectStatusFromController(_connectionState)
-    }
-
-    /**
-     * EPIC #687 slice 1c-iii / EPIC #792 Slice A: drive the controller's INTENT.
-     *
-     * Roadmap slice **S6 (#1329)**: the OPEN / SWITCH / REVEAL arms are RETIRED — open/switch
-     * SUBMIT `Enter`/`Switch` at the flow edges so the controller DECIDES the transition, and
-     * the reveal edge submits `revealLive` at each `setConnectionState(Live)` (D28: controller
-     * is authority, not a mirror). This drives ONLY the remaining reconnect/gone/unreachable arms.
-     */
-    private fun driveControllerIntent(state: ConnectionState) {
-        val (host, target) = controllerHostAndTarget()
-        when (state) {
-            // S6 (#1329): open/switch/reveal are controller-decided at the flow edges;
-            // these inline states are display-payload carriers only now.
-            is ConnectionState.Idle,
-            is ConnectionState.Connecting,
-            is ConnectionState.Attaching,
-            is ConnectionState.Live,
-            is ConnectionState.Backgrounded,
-            -> Unit
-            is ConnectionState.Reattaching,
-            is ConnectionState.Reconnecting,
-            ->
-                if (host != null && target != null) {
-                    connectionManager.escalateReconnecting(host, target)
-                }
-            is ConnectionState.Gone ->
-                if (target != null) connectionManager.markGone(target)
-            is ConnectionState.Unreachable -> connectionManager.escalateUnreachable()
+    private fun controllerHasCurrentRecoveryFor(target: ConnectionTarget): Boolean {
+        val state = connectionManager.state
+        if (state.targetIdOrNull() != controllerSessionId(target)) return false
+        return when (state) {
+            is CoreConnectionState.Live,
+            is CoreConnectionState.Attaching,
+            is CoreConnectionState.Reattaching,
+            is CoreConnectionState.Reconnecting,
+            -> true
+            else -> false
         }
+    }
+
+    private fun controllerCanCancelConnect(): Boolean =
+        when (connectionManager.state) {
+            is CoreConnectionState.Connecting,
+            is CoreConnectionState.Reattaching,
+            is CoreConnectionState.Reconnecting,
+            is CoreConnectionState.NetworkLossSuspended,
+            -> true
+            else -> false
+        }
+
+    private fun controllerHasConnectInFlight(): Boolean =
+        controllerCanCancelConnect() || connectionManager.state is CoreConnectionState.Attaching
+
+    /** Submit the typed terminal event first, then project its authoritative result. */
+    private fun surfaceControllerUnreachable(
+        target: ConnectionTarget? = activeTarget ?: connectingTarget,
+        failureMessage: String? = null,
+    ) {
+        if (failureMessage != null) {
+            controllerStatusProjector.rememberFailure(
+                target?.let(::controllerSessionId) ?: connectionManager.state.targetIdOrNull(),
+                failureMessage,
+            )
+        } else {
+            controllerStatusProjector.clearFailure(
+                target?.let(::controllerSessionId) ?: connectionManager.state.targetIdOrNull(),
+            )
+        }
+        connectionManager.escalateUnreachable()
+        projectStatusFromController()
+    }
+
+    /** Enter typed recovery without manufacturing a VM-private status payload. */
+    private fun surfaceControllerRecovery(target: ConnectionTarget) {
+        connectionManager.escalateReconnecting(
+            controllerHostKey(target),
+            controllerSessionId(target),
+        )
+        projectStatusFromController()
+    }
+
+    /** Test setup still traverses the real controller reducer. */
+    private fun establishControllerLiveForTest() {
+        val host = HostKey("test")
+        val target = SessionId("test")
+        controllerStatusProjector.rememberEndpoint(
+            target,
+            ConnectionStatusProjection.Endpoint(
+                host = "test",
+                port = 0,
+                user = "test",
+            ),
+        )
+        connectionManager.enter(host, target)
+        connectionManager.revealLive(host, target)
+        connectionManager.observeSeedLanded(host, target, paneId = "%test-seed")
+        projectStatusFromController()
     }
 
     /** S6 (#1329): OPEN intent — controller decides warm→Attaching / cold→Connecting. */
@@ -1709,12 +1694,17 @@ public class TmuxSessionViewModel @Inject constructor(
         connectionManager.enter(controllerHostKey(target), controllerSessionId(target))
     }
 
+    /** Controller intent used only after a lease/session liveness check proved cold. */
+    private fun submitControllerColdOpen(target: ConnectionTarget) {
+        connectionManager.enterCold(controllerHostKey(target), controllerSessionId(target))
+    }
+
     /** S6 (#1329): same-host fast SWITCH intent (→ Attaching, no re-handshake). */
     private fun submitControllerSwitch(target: ConnectionTarget) {
         connectionManager.switchTo(controllerHostKey(target), controllerSessionId(target))
     }
 
-    /** S6 (#1329): REVEAL intent at each `setConnectionState(Live)` edge (retired `Live` arm). */
+    /** S6 (#1329): authoritative REVEAL intent after a seeded surface is live. */
     private fun revealControllerLive() {
         val (host, target) = controllerHostAndTarget()
         if (host != null && target != null) connectionManager.revealLive(host, target)
@@ -1722,20 +1712,54 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * EPIC #792 Slice E: feed the AUTHORITATIVE controller the REAL
-     * [com.pocketshell.core.connection.ConnectionEvent.SeedLanded] for a pane the write-path
-     * just captured. Keyed to the active/connecting target so a seed for the current session
-     * promotes it (Attaching/Reattaching → Live); the controller's own drop-by-id check ignores
-     * a seed for any other target. After it the displayed status is re-projected.
+     * [com.pocketshell.core.connection.ConnectionEvent.SeedLanded] for a pane that was
+     * captured during an attach. The caller supplies the attach target explicitly because
+     * cold/fast reveal clears [connectingTarget] before the final liveness boundary. The
+     * controller's own drop-by-id check ignores a seed for any other target. After it the
+     * displayed status is re-projected.
+     *
+     * This is deliberately called only AFTER [requireControlChannelAliveForReveal]. A
+     * capture can land while a later in-flight command has already closed the shared
+     * control channel; submitting SeedLanded at the capture point would promote
+     * Attaching→Live before the final reveal guard and recreate Issue #1863.
      */
-    private fun feedControllerSeedLanded(paneId: String) {
-        val target = activeTarget ?: connectingTarget ?: return
+    private fun feedControllerSeedLanded(
+        client: TmuxClient,
+        paneId: String,
+        target: ConnectionTarget? = activeTarget ?: connectingTarget,
+    ) {
+        // A late capture from a superseded/closed control client must not promote the
+        // current target to Live. The target id alone is insufficient here because a
+        // reconnect can legitimately reuse the same session identity.
+        if (clientRef !== client || client.disconnected.value) return
+        val resolvedTarget = target ?: return
+        val resolvedTargetId = controllerSessionId(resolvedTarget)
         connectionManager.observeSeedLanded(
-            controllerHostKey(target),
-            controllerSessionId(target),
+            controllerHostKey(resolvedTarget),
+            resolvedTargetId,
             paneId,
         )
         // The seed may have promoted the controller Attaching/Reattaching → Live;
         // re-project the displayed status (the controller is the single source).
+        projectStatusFromController()
+    }
+
+    /**
+     * Publish the controller's attach-ready edge after the final control-channel liveness check; it is separate from a non-empty content seed.
+     * Status can be Connected while the reveal machine keeps a blank or capture-failed surface in its loading hold.
+     */
+    private fun feedControllerAttachReady(
+        client: TmuxClient,
+        paneId: String,
+        target: ConnectionTarget? = activeTarget ?: connectingTarget,
+    ) {
+        if (clientRef !== client || client.disconnected.value) return
+        val resolvedTarget = target ?: return
+        connectionManager.observeAttachReady(
+            controllerHostKey(resolvedTarget),
+            controllerSessionId(resolvedTarget),
+            paneId,
+        )
         projectStatusFromController()
     }
 
@@ -1982,6 +2006,8 @@ public class TmuxSessionViewModel @Inject constructor(
     internal var activeTarget: ConnectionTarget? = null
     internal var connectingTarget: ConnectionTarget? = null
     internal var connectJob: Job? = null
+    private var trustResolutionJob: Job? = null
+    private var trustResolutionGeneration: Long = 0L
     internal var autoReconnectJob: Job? = null
 
     /**
@@ -2022,6 +2048,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var layoutCoalescerScope: CoroutineScope? = null
 
     private var outputOverflowJob: Job? = null
+    private var structuralOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
     private var lifecycleReattachNetworkCoalesce: LifecycleReattachNetworkCoalesce? = null
@@ -2613,11 +2640,91 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
-        // Issue #666 / #1155: internal guard so the existence preflight (below) can
-        // re-enter [connect] once it has confirmed the session is still alive
-        // without preflighting a second time. Never set by external callers.
-        skipExistencePreflight: Boolean = false,
     ) {
+        requestResolvedConnect(
+            target = ConnectionTarget(
+                hostId = hostId,
+                hostName = hostName,
+                host = host,
+                port = port,
+                user = user,
+                keyPath = keyPath,
+                passphrase = passphrase,
+                sessionName = sessionName,
+                startDirectory = startDirectory,
+                tmuxSessionId = tmuxSessionId,
+                sessionCreated = sessionCreated,
+            ),
+            trigger = trigger,
+            skipExistencePreflight = false,
+        )
+    }
+
+    /**
+     * Resolve Room-backed host trust before any runtime-cache or warm-lease observation.
+     *
+     * [SshLeaseManager.acquire] resolves again at its own pool boundary, but that is too late for this ViewModel;
+     * cache activation and the same-host fast-switch decision happen before acquire. Production always injects
+     * [hostDao]; only the deliberately dependency-light unit-test construction path bypasses it.
+     */
+    private fun requestResolvedConnect(
+        target: ConnectionTarget,
+        trigger: TmuxConnectTrigger,
+        skipExistencePreflight: Boolean,
+    ) {
+        if (hostDao == null) {
+            connectResolved(target, trigger, skipExistencePreflight)
+            return
+        }
+        val resolutionGeneration = ++trustResolutionGeneration
+        trustResolutionJob?.cancel()
+        trustResolutionJob = viewModelScope.launch {
+            val resolvedLeaseTarget = sshLeaseManager.resolveTarget(target.toSshLeaseTarget())
+                .getOrElse { failure ->
+                    if (resolutionGeneration != trustResolutionGeneration) return@launch
+                    connectingTarget = target
+                    refreshReconnectAvailability()
+                    // Surface trust failure through the controller, even from a cold VM.
+                    submitControllerOpen(target)
+                    surfaceControllerUnreachable(
+                        target = target,
+                        failureMessage = "connect failed: ${failure.message}",
+                    )
+                    return@launch
+                }
+            if (resolutionGeneration != trustResolutionGeneration) return@launch
+            val verified = resolvedLeaseTarget.knownHosts as? KnownHostsPolicy.VerifiedFingerprint
+                ?: error("tmux production trust resolver must return a fingerprint policy")
+            val resolvedTarget = target.copy(
+                trustedHostKeySha256 = verified.expectedSha256,
+            )
+            closeCachedRuntimesAsync(
+                runtimeCache.removeHostTrustMismatches(
+                    resolvedTarget.hostId,
+                    resolvedTarget.trustedHostKeySha256,
+                ),
+            )
+            connectResolved(resolvedTarget, trigger, skipExistencePreflight)
+        }
+    }
+
+    private fun connectResolved(
+        target: ConnectionTarget,
+        trigger: TmuxConnectTrigger,
+        // Guard recursive existence preflight.
+        skipExistencePreflight: Boolean,
+    ) {
+        val hostId = target.hostId
+        val hostName = target.hostName
+        val host = target.host
+        val port = target.port
+        val user = target.user
+        val keyPath = target.keyPath
+        val passphrase = target.passphrase
+        val sessionName = target.sessionName
+        val startDirectory = target.startDirectory
+        val tmuxSessionId = target.tmuxSessionId
+        val sessionCreated = target.sessionCreated
         val testTransportAvailable =
             syntheticUnrecoverableHostAllowsTransportReuse(forceUnrecoverableHostForTest)
         // Issue #666: a foreground cold-restore must NOT resurrect a session
@@ -2633,17 +2740,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // determination).
         if (trigger == TmuxConnectTrigger.ColdRestore && !skipExistencePreflight && testTransportAvailable) {
             preflightSessionExistence(
-                hostId = hostId,
-                hostName = hostName,
-                host = host,
-                port = port,
-                user = user,
-                keyPath = keyPath,
-                passphrase = passphrase,
-                sessionName = sessionName,
-                startDirectory = startDirectory,
-                tmuxSessionId = tmuxSessionId,
-                sessionCreated = sessionCreated,
+                target = target,
                 originalTrigger = TmuxConnectTrigger.ColdRestore,
             )
             return
@@ -2655,19 +2752,6 @@ public class TmuxSessionViewModel @Inject constructor(
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         lifecycleReattachNetworkCoalesce = null
-        val target = ConnectionTarget(
-            hostId = hostId,
-            hostName = hostName,
-            host = host,
-            port = port,
-            user = user,
-            keyPath = keyPath,
-            passphrase = passphrase,
-            sessionName = sessionName,
-            startDirectory = startDirectory,
-            tmuxSessionId = tmuxSessionId,
-            sessionCreated = sessionCreated,
-        )
         graceEffects.retireRecoveryOfSupersededSession(controllerSessionId(target), target, connectGeneration)
         // Issue #1072: an EXPLICIT manual Reconnect must be able to PREEMPT an
         // in-flight connect to the same target, never be deduped into a no-op. If a
@@ -2686,7 +2770,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (
             !interruptedPassiveRecovery &&
             !shouldForceFreshLease(trigger) &&
-            inlineConnectionStatus is ConnectionStatus.Connected &&
+            controllerIsLiveFor(target) &&
             activeTarget == target
         ) {
             return
@@ -2715,17 +2799,7 @@ public class TmuxSessionViewModel @Inject constructor(
             !runtimeCache.contains(target.toRuntimeKey())
         ) {
             preflightSessionExistence(
-                hostId = target.hostId,
-                hostName = target.hostName,
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                keyPath = target.keyPath,
-                passphrase = target.passphrase,
-                sessionName = target.sessionName,
-                startDirectory = target.startDirectory,
-                tmuxSessionId = target.tmuxSessionId,
-                sessionCreated = target.sessionCreated,
+                target = target,
                 originalTrigger = TmuxConnectTrigger.OpenExisting,
             )
             return
@@ -2745,7 +2819,14 @@ public class TmuxSessionViewModel @Inject constructor(
         navigateRevealTo(target)
 
         // S6 (#1329): submit the open/switch event — the controller decides the transition.
-        if (willFastSwitch) submitControllerSwitch(target) else submitControllerOpen(target)
+        if (willFastSwitch) {
+            submitControllerSwitch(target)
+        } else {
+            submitControllerOpen(target)
+            if (shouldForceFreshLease(effectiveTrigger)) {
+                surfaceControllerRecovery(target)
+            }
+        }
 
         // Issue #145: deterministic reconnect-loop signal. Every accepted
         // connect attempt increments a process-wide counter and emits a
@@ -2875,13 +2956,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 // still in flight — this open coalesces onto it, no second dial.
                 val warmOpen = testTransportAvailable && !shouldForceFreshLease(effectiveTrigger) &&
                     sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
-                setConnectionState(
-                    if (warmOpen) {
-                        ConnectionState.Attaching(host, port, user)
-                    } else {
-                        ConnectionState.Connecting(host, port, user)
-                    }
-                )
+                submitControllerOpen(target)
+                if (shouldForceFreshLease(effectiveTrigger)) {
+                    surfaceControllerRecovery(target)
+                } else {
+                    projectStatusFromController()
+                }
                 runConnect(target, attempt, effectiveTrigger, warmReveal = warmOpen)
             }
             return
@@ -2934,16 +3014,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // coroutine re-confirms authoritatively and downgrades to [Connecting]
         // if the lease turned out to be gone. A reconnect / network-reattach
         // deliberately forces a fresh transport, so it is never a warm open.
-        val warmOpenHint = testTransportAvailable && !willFastSwitch &&
-            !shouldForceFreshLease(effectiveTrigger) &&
-            liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
-        setConnectionState(
-            if (willFastSwitch || warmOpenHint) {
-                ConnectionState.Attaching(host, port, user)
-            } else {
-                ConnectionState.Connecting(host, port, user)
-            }
-        )
+        projectStatusFromController()
         // Issue #661: a cross-session fast switch must NOT paint the leaving
         // session's frame for even one Compose frame. Hide the terminal surface
         // SYNCHRONOUSLY (the screen shows a compact "Attaching" loading state
@@ -3089,6 +3160,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     // happens and the attach is instant.
                     val warmOpen = testTransportAvailable && !shouldForceFreshLease(effectiveTrigger) &&
                         sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
+                    // Re-submit the same typed Enter after teardown's authoritative warm
+                    // probe. The reducer, not a VM mirror, decides Attaching vs Connecting.
+                    submitControllerOpen(target)
+                    if (shouldForceFreshLease(effectiveTrigger)) {
+                        surfaceControllerRecovery(target)
+                    } else {
+                        projectStatusFromController()
+                    }
                     if (warmOpen) {
                         recordWarmSwitchMilestone(
                             attempt = attempt,
@@ -3098,20 +3177,17 @@ public class TmuxSessionViewModel @Inject constructor(
                             name = "warm_open_live_lease",
                             trigger = effectiveTrigger,
                         )
-                        // Confirm the green Switching affordance (the synchronous
-                        // [warmOpenHint] above already chose it for a live pooled
-                        // lease; re-assert here in case anything raced).
-                        if (inlineConnectionStatus !is ConnectionStatus.Switching) {
-                            setConnectionState(ConnectionState.Attaching(host, port, user))
-                        }
-                    } else if (inlineConnectionStatus is ConnectionStatus.Switching) {
+                        // The typed Enter above chose the green Switching affordance
+                        // from the latest warm-transport observation.
+                    } else if (connectionManager.state is CoreConnectionState.Attaching) {
                         // The synchronous hint said warm, but the authoritative
                         // pool probe found no live lease (it was evicted / closed
                         // between the hint and now). This is a genuine COLD dial:
                         // downgrade to the full-screen [Connecting] overlay and
                         // blank the (empty) pane area so the cold reveal path
                         // behaves exactly as a never-warm first connect.
-                        setConnectionState(ConnectionState.Connecting(host, port, user))
+                        submitControllerColdOpen(target)
+                        projectStatusFromController()
                         _panes.value = emptyList()
                         rebuildUnifiedPanes()
                     }
@@ -3213,6 +3289,19 @@ public class TmuxSessionViewModel @Inject constructor(
             client = client,
         )
     }
+
+    /**
+     * Reconcile may enrich the active/connecting target with tmux's exact session generation.
+     * All post-list-panes guards and controller feedback must use that enriched target, or
+     * the old name-only id will reject the otherwise-current seed as foreign.
+     */
+    private fun targetAfterExactSessionAdoption(target: ConnectionTarget): ConnectionTarget =
+        sequenceOf(activeTarget, connectingTarget)
+            .filterNotNull()
+            .firstOrNull { candidate ->
+                candidate.sessionName == target.sessionName && isSameHost(candidate, target)
+            }
+            ?: target
 
     private fun currentNetworkTransitionProbeGuard(target: ConnectionTarget): RuntimeRefreshGuard? {
         val client = clientRef ?: return null
@@ -3340,10 +3429,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * handshake / tmux client setup throws [CancellationException] and
      * unwinds — the existing #151 join-on-cancel machinery already
      * guarantees the transport tear-down does not race the still-live
-     * event loop). Flips [_connectionStatus] to
-     * [ConnectionStatus.Failed] with a "Connect cancelled" message so
-     * the screen renders a deterministic post-cancel state rather than
-     * staying stuck on Connecting.
+     * event loop). S7 (#766): it then submits the TYPED terminal event to the
+     * controller ([surfaceControllerUnreachable]) and re-projects, so the screen
+     * renders a deterministic post-cancel state rather than staying stuck on
+     * Connecting. The user-facing sentence is owned by the fused
+     * [com.pocketshell.core.connection.SessionSurfaceState] failure reason
+     * (`failureReasonSentence`), never by a VM-authored status message.
      *
      * Clears [connectingTarget] and refreshes [canReconnect] so the
      * screen's downstream affordances (Reconnect button, in-flight
@@ -3358,17 +3449,21 @@ public class TmuxSessionViewModel @Inject constructor(
      * state flow.
      */
     public fun cancelConnect(): Boolean {
-        val current = inlineConnectionStatus
-        if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
+        if (!controllerCanCancelConnect()) return false
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
+        trustResolutionJob?.cancel()
+        trustResolutionJob = null
+        trustResolutionGeneration += 1L
         connectJob?.cancel()
         connectJob = null
+        val cancelledTarget = connectingTarget ?: activeTarget
         connectingTarget = null
         refreshReconnectAvailability()
-        setConnectionState(
-            ConnectionState.Unreachable("Connect cancelled by user."),
+        surfaceControllerUnreachable(
+            target = cancelledTarget,
+            failureMessage = "Connect cancelled by user.",
         )
         return true
     }
@@ -3440,8 +3535,8 @@ public class TmuxSessionViewModel @Inject constructor(
         appActive = false
         // EPIC #766 Slice 2a: the BACKGROUND decision is now DRIVEN by the
         // [ConnectionController]'s `-> Backgrounded` EDGE (fired by the
-        // [ConnectionEffectDriver]'s `backgroundedEffect`), NOT by the inline
-        // inline background classifier. Feeding the AUTHORITATIVE controller the
+        // [ConnectionEffectDriver]'s `backgroundedEffect`), NOT by an inline
+        // background classifier. Feeding the AUTHORITATIVE controller the
         // Background event is the SOLE trigger: its transition INTO Backgrounded fires
         // [onControllerBackgrounded], which runs the inline-equivalent pause-vs-detach
         // bookkeeping AND the clean-detach teardown ([launchBackgroundDetachTeardown]),
@@ -3453,9 +3548,9 @@ public class TmuxSessionViewModel @Inject constructor(
         //
         // The inline background event arm is no longer consulted (Slice
         // 2a); the #685 trap is avoided because [onControllerBackgrounded] selects the arm
-        // through the connection-core [backgroundEffects] dispatcher, whose injected
-        // predicates re-read `clientRef`/`sessionRef`/`inlineConnectionStatus` — the
-        // controller edge is only the TRIGGER, not the divergent display-status gate.
+        // through the connection-core [backgroundEffects] dispatcher. The driver carries
+        // the exact typed pre-transition state across the edge while the effect reads only
+        // the VM-owned IO capabilities (`clientRef`/`sessionRef`) it still needs.
         connectionManager.observeBackground()
         // The controller moved to Backgrounded (mapped → Connected, the inline
         // "keep prior status on background" behavior); re-project after the effect ran.
@@ -3466,11 +3561,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #766 Slice 2a — the controller-EDGE-driven BACKGROUND effect. Fired by the
      * [ConnectionEffectDriver] when the [ConnectionController] transitions INTO
      * [ConnectionState.Backgrounded]. This is the re-home of the former inline
-     * inline background dispatch: the controller edge is the TRIGGER, but
+     * background dispatch: the controller edge is the TRIGGER, but
      * the pause-vs-detach SELECTION runs through the connection-core [backgroundEffects]
      * dispatcher so behavior is byte-identical (the #685 non-byte-identical-predicate trap —
      * the controller transitions to Backgrounded whenever it holds a host, e.g. even from
-     * `Reconnecting`, but the [backgroundEffects] arm also gates on the injected
+     * `Reconnecting`; the driver therefore supplies that exact pre-transition state while
+     * the [backgroundEffects] detach arm also gates on the injected
      * `hasLiveControlChannel` (`clientRef`/`sessionRef`) liveness, so the arm selection
      * re-reads VM state rather than trust the controller's display state).
      *
@@ -3481,16 +3577,16 @@ public class TmuxSessionViewModel @Inject constructor(
      * no-detach case — neither the bookkeeping nor the teardown runs, matching the inline
      * `else -> Unit` arm.
      */
-    private fun onControllerBackgrounded() {
-        backgroundEffects.dispatch()
+    private fun onControllerBackgrounded(previousControllerState: CoreConnectionState) {
+        backgroundEffects.dispatch(previousControllerState)
     }
 
     /**
      * EPIC #687 Slice 1 (#1047): the connection-core background-transition decision authority,
      * the hard-cut replacement for the deleted inline `reduceBackground()`. The predicates
-     * re-read the VM's live state each dispatch (the #685 re-read trap): `isReconnecting`
-     * reads `inlineConnectionStatus`, `hasTarget` reads `activeTarget`/`connectingTarget`, and
-     * the INJECTED [BackgroundEffects.hasLiveControlChannel] port feeds the
+     * receives the typed controller pre-transition state each dispatch (the #685
+     * predicate-order trap). `hasTarget` reads `activeTarget`/`connectingTarget`, and the
+     * INJECTED [BackgroundEffects.hasLiveControlChannel] port feeds the
      * `clientRef != null || sessionRef != null` liveness the controller's display state lacks
      * (a `Backgrounded` transition does not imply a live `-CC` channel). The arm bodies are the
      * VM's existing IO; the detach arm runs the [detachForBackground] bookkeeping FIRST then the
@@ -3499,10 +3595,9 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val backgroundEffects: BackgroundEffects =
         BackgroundEffects(
-            isReconnecting = { inlineConnectionStatus is ConnectionStatus.Reconnecting },
             hasTarget = { activeTarget != null || connectingTarget != null },
             hasLiveControlChannel = { clientRef != null || sessionRef != null },
-            pauseReconnectForBackground = { pauseReconnectForBackground() },
+            pauseReconnectForBackground = { reconnecting -> pauseReconnectForBackground(reconnecting) },
             detachForBackground = {
                 detachForBackground()
                 // The clean-detach teardown reads the bookkeeping just set above; run it
@@ -3549,8 +3644,8 @@ public class TmuxSessionViewModel @Inject constructor(
      * top of [onAppBackgrounded]. Unchanged behavior; only the decision moved to the
      * connection-core [backgroundEffects] dispatcher (#1047 Slice 1).
      */
-    private fun pauseReconnectForBackground() {
-        val reconnecting = inlineConnectionStatus as? ConnectionStatus.Reconnecting ?: return
+    private fun pauseReconnectForBackground(reconnecting: CoreConnectionState.Reconnecting) {
+        val reason = "Reconnecting…"
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget
@@ -3558,7 +3653,7 @@ public class TmuxSessionViewModel @Inject constructor(
             decision = "cancelled_due_to_background",
             target = target,
             trigger = latestConnectIntent?.trigger ?: TmuxConnectTrigger.AutoReconnect,
-            reason = reconnecting.reason,
+            reason = reason,
             cause = "app_background_lifecycle_pause",
             "attempt" to reconnecting.attempt,
             "maxAttempts" to reconnecting.maxAttempts,
@@ -3567,17 +3662,13 @@ public class TmuxSessionViewModel @Inject constructor(
         if (target != null) {
             pausedAutoReconnect = PausedAutoReconnect(
                 target = target,
-                reason = reconnecting.reason,
+                reason = reason,
             )
             activeTarget = target
             connectingTarget = target
             refreshReconnectAvailability()
         }
-        setConnectionState(
-            ConnectionState.Unreachable(
-                "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
-            ),
-        )
+        surfaceControllerUnreachable()
     }
 
     /**
@@ -3927,7 +4018,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * the normal foreground decision (a real reconnect path).
      */
     private fun canReseedWithinGraceForeground(): Boolean {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
+        if (!controllerIsLiveFor()) return false
         val client = clientRef ?: return false
         val session = sessionRef ?: return false
         if (client.disconnected.value) return false
@@ -4496,7 +4587,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun resumePausedAutoReconnect(paused: PausedAutoReconnect) {
         pausedAutoReconnect = null
         val target = paused.target
-        if (inlineConnectionStatus is ConnectionStatus.Connected && activeTarget == target) return
+        if (controllerIsLiveFor(target) && activeTarget == target) return
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-auto-reconnect-resume-on-foreground " +
@@ -4727,7 +4818,9 @@ public class TmuxSessionViewModel @Inject constructor(
             .filter { it.isNotEmpty() && it != baseTarget.sessionName }
             .distinct()
             .map(baseTarget::toNameOnlyPrewarmTarget)
-            .filterNot { runtimeCache.containsSession(it.hostId, it.sessionName) }
+            .filterNot {
+                runtimeCache.containsSession(it.hostId, it.sessionName, it.trustedHostKeySha256)
+            }
             .take(TMUX_SESSION_PREWARM_MAX_TARGETS)
             .toList()
         if (targets.isEmpty()) return
@@ -4737,7 +4830,13 @@ public class TmuxSessionViewModel @Inject constructor(
             for (target in targets) {
                 if (!isActive) return@launch
                 if (activeTarget?.let { isSameHost(it, target) } != true) return@launch
-                if (runtimeCache.containsSession(target.hostId, target.sessionName)) continue
+                if (
+                    runtimeCache.containsSession(
+                        target.hostId,
+                        target.sessionName,
+                        target.trustedHostKeySha256,
+                    )
+                ) continue
                 prewarmRuntime(target, foregroundSession)
             }
         }
@@ -4782,7 +4881,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 // cancelled on cache eviction / deactivate rather than leaking
                 // until whole-VM `bridgeScope` teardown.
                 paneSeedRecoveryJobs = panes.paneSeedRecoveryJobs,
-                paneAgentJobs = emptyMap(),
                 paneAgentInputs = emptyMap(),
                 agentConversations = emptyMap(),
                 remoteColumns = remoteColumns,
@@ -5089,32 +5187,12 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun onNetworkChanged(change: TerminalNetworkChange) {
         val target = activeTarget ?: connectingTarget ?: latestConnectIntent?.takeIf { acceptedRestoreTargetIsCurrent(it.generation, connectGeneration, revealController.sessionId(it.target), revealController.currentTargetId()) }?.target
         if (change.kind == com.pocketshell.app.connectivity.TerminalNetworkChangeKind.NetworkRestored && target != null && clientRef == null && sessionRef == null) return connectAcceptedNetworkRestore(target)
-        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the #548 validated-handoff
-        // signal it suppresses on (computed identically to the inline reducer).
-        //
-        // Issue #981: the controller flips Live → Reconnecting on a validated handoff,
-        // which drives the RevealStateMachine → the "Attaching…" overlay. That is a
-        // USER-VISIBLE disconnect glitch even when the inline reducer rides the flip
-        // through. So the controller signal MUST honor the SAME liveness gate: when the
-        // old transport is proven alive we report NO handoff to the controller, keeping
-        // it Live (no overlay), in lockstep with [NetworkChangeEffects].
-        // Issue #997: the bare-loss / restore signal is ORTHOGONAL to the #548
-        // validated-identity handoff — it must NOT be reported to the controller
-        // as a `validatedHandoff` (that flag is the identity-change overlay path).
-        // The loss/restore arms drive the UI via the loss-hold + the restore's
-        // own `scheduleAutoReconnect` → `setConnectionState`.
-        connectionManager.observeNetworkChanged(
-            validatedHandoff = shouldReportValidatedHandoffToController(
-                change = change,
-                transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },
-            ),
-        )
         NetworkChangeEffects(
             appActive = { appActive },
             hasTarget = { target != null },
             hasClientOrSession = { clientRef != null || sessionRef != null },
             autoReconnectActive = { autoReconnectJob?.isActive == true },
-            inlineConnected = { inlineConnectionStatus is ConnectionStatus.Connected },
+            controllerLive = { target != null && controllerIsLiveFor(target) },
             lifecycleCoalesces = {
                 val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
                 lifecycleCoalesce != null &&
@@ -5145,17 +5223,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (target != null) scheduleNetworkReconnectOnRestore(it, target)
             },
         ).dispatch(change)
-        // NOTE: the network-change reconnect/coalesce decision is INLINE EFFECT
-        // machinery (the #548 suppression + the post-grace deferred-replay COALESCE)
-        // that 1c-iv-b owns — it is NOT one of the two approved #685 display changes.
-        // The controller's `onNetworkChanged` is intentionally more eager (a validated
-        // handoff → Reconnecting) than the inline coalesce, so we do NOT project the
-        // controller's network-change transition here: when the inline path actually
-        // reconnects it goes through [setConnectionState] (which projects); when it
-        // COALESCES (deferred replay after a fresh lifecycle attach) the display
-        // correctly stays Connected. Driving the controller's eager reconnect here
-        // would regress the coalesce. The bridge still observes the event (above) for
-        // the 1c-iv-b effect flip.
+        // Suppressed/coalesced arms leave the controller Live. The reconnect arm submits
+        // the typed handoff before it schedules IO, so state and effect cannot disagree.
     }
 
     /**
@@ -5394,11 +5463,12 @@ public class TmuxSessionViewModel @Inject constructor(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
-        val current = inlineConnectionStatus as? ConnectionStatus.Connected ?: return
+        if (!controllerIsLiveFor(target)) return
         val reason = change.reason
         val realValidatedIdentityChange = true
         lifecycleReattachNetworkCoalesce = null
-        val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
+        val reconnectReason =
+            "Network changed; reconnecting ${target.user}@${target.host}:${target.port}."
         Log.i(
             ISSUE_548_NETWORK_TAG,
             "tmux-network-proactive-reconnect reason=$reason " +
@@ -5444,6 +5514,8 @@ public class TmuxSessionViewModel @Inject constructor(
             "activeAttempt" to activeAttachMilestone?.attempt,
         )
         unregisterCurrentClient()
+        connectionManager.observeNetworkChanged(validatedHandoff = true)
+        projectStatusFromController()
         scheduleAutoReconnect(
             target = target,
             reason = reconnectReason,
@@ -5486,6 +5558,18 @@ public class TmuxSessionViewModel @Inject constructor(
         onDeath = ::onParkedRuntimeDeath,
     )
 
+    init {
+        // Issue #2309: expiry cleanup is process-owned and can outlive this
+        // screen, while the exact parked-health binding is VM-owned. Clear the
+        // binding as soon as the cache wins the serialized expiry claim; when
+        // this VM is already gone its scope has already cancelled every binding.
+        viewModelScope.launch {
+            runtimeCache.expiryClaims.collect { claim ->
+                parkedRuntimeHealthEffects.onEvicted(claim.healthBinding)
+            }
+        }
+    }
+
     /**
      * Issue #1533: cross-episode amortization for the SAME-IDENTITY network-restore
      * redial (the "V2" busy-session flap) — the #928/#1522 debounce shape, distinct
@@ -5523,19 +5607,27 @@ public class TmuxSessionViewModel @Inject constructor(
             },
             onPaintBand = { graceMs ->
                 recordNetworkLossBandPainted(change, target, connectGeneration, graceMs)
-                setConnectionState(
-                    ConnectionState.Reconnecting(
-                        host = target.host,
-                        port = target.port,
-                        user = target.user,
-                        attempt = 0,
-                        maxAttempts = 0,
-                        retryDelayMs = graceMs,
-                        reason = "Network lost; waiting for it to come back.",
-                    ),
-                )
+                // The debounce owns only WHEN the band becomes visible. The controller
+                // owns the typed loss state itself, so restore and projection cannot
+                // diverge from the displayed decision.
+                connectionManager.observeNetworkLost()
+                projectStatusFromController()
             },
         )
+    }
+
+    /**
+     * Submit the completed restore-liveness decision through the live controller path. The
+     * controller reducer synchronously consumes this evidence while it is in its typed
+     * [CoreConnectionState.NetworkLossSuspended] state; no VM status writer is involved.
+     */
+    private fun observeControllerNetworkRestored(transportProvenAlive: Boolean) {
+        networkRestoreProvenAliveForController = transportProvenAlive
+        try {
+            connectionManager.observeNetworkRestored()
+        } finally {
+            networkRestoreProvenAliveForController = false
+        }
     }
 
     /**
@@ -5667,16 +5759,11 @@ public class TmuxSessionViewModel @Inject constructor(
             cause = cause,
             clientHash = clientRef?.let { System.identityHashCode(it) },
         )
+        observeControllerNetworkRestored(transportProvenAlive = true)
         // Clear the loss-hold "reconnecting" band: the surviving transport is alive,
         // so flip back to Live (the -CC client was never torn down).
         revealControllerLive()
-        setConnectionState(
-            ConnectionState.Live(
-                target.host,
-                target.port,
-                target.user,
-            ),
-        )
+        projectStatusFromController()
     }
 
     /**
@@ -5705,6 +5792,8 @@ public class TmuxSessionViewModel @Inject constructor(
             generation = connectGeneration,
             clientHash = clientRef?.let { System.identityHashCode(it) },
         )
+        observeControllerNetworkRestored(transportProvenAlive = false)
+        projectStatusFromController()
         unregisterCurrentClient()
         scheduleAutoReconnect(
             target = target,
@@ -5894,7 +5983,9 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: return emptyList()
         val client = clientRef ?: return emptyList()
         eventsJob?.cancel()
+        structuralOverflowJob?.cancel()
         eventsJob = null
+        structuralOverflowJob = null
         outputOverflowJob?.cancel()
         outputOverflowJob = null
         passiveDisconnectGraceJob?.cancel()
@@ -5915,7 +6006,6 @@ public class TmuxSessionViewModel @Inject constructor(
             paneProducerJobs = paneProducerJobs.toMap(),
             paneInputQueues = paneInputQueues.toMap(),
             paneInputJobs = paneInputJobs.toMap(),
-            paneAgentJobs = paneAgentJobs.toMap(),
             paneAgentInputs = paneAgentInputs.toMap(),
             agentConversations = _agentConversations.value,
             remoteColumns = remoteColumns,
@@ -6055,14 +6145,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // coroutine timeout cannot interrupt, the real Main park was the SUM of
         // the N per-runtime ceilings (a multi-second / ANR-class freeze on a
         // wedged transport). [closeCachedRuntime] still bounds its own suspending
-        // steps at SYNC_DETACH_TIMEOUT_MS; the outer ceiling here is a
-        // belt-and-suspenders guard that scales with the runtime count.
+        // steps at SYNC_DETACH_TIMEOUT_MS. Close all owners concurrently so a
+        // wedged first runtime cannot consume a batch-wide sequential ceiling
+        // before later runtimes close their clients and release their leases.
         runCatching {
-            withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS * runtimes.size) {
-                runtimes.forEach { runtime ->
-                    runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
-                }
-            }
+            closeCachedRuntimesConcurrently(runtimes, SYNC_DETACH_TIMEOUT_MS)
         }
     }
 
@@ -6163,13 +6250,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // never mount on a switch back to a cached session).
         promoteRevealLiveForActiveTarget()
         revealControllerLive()
-        setConnectionState(
-            ConnectionState.Live(
-                target.host,
-                target.port,
-                target.user,
-            ),
-        )
+        runtime.panes.firstOrNull()?.let { pane ->
+            // A cached runtime has no new capture to report, but its preserved pane list and
+            // still-live control client are an explicit attach-ready checkpoint. The reveal
+            // machine already owns the preserved content; the controller owns the status.
+            feedControllerAttachReady(runtime.client, pane.paneId, target)
+        }
+        projectStatusFromController()
         markSuccessfulAttachForNetworkCoalescing(target, trigger)
         // Issue #1083 (the ONE residual #874 black-screen structural gap): the
         // #874/#1004 dropped-Conversation-row re-seed only fired when the SCREEN
@@ -6358,11 +6445,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 port = port,
                 user = user,
                 credentialId = "$hostId:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = trustedHostKeySha256?.let { "host-key:$it" }
+                    ?: SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(trustedHostKeySha256),
         )
 
     private suspend fun runConnect(
@@ -6401,6 +6489,17 @@ public class TmuxSessionViewModel @Inject constructor(
             val lease = acquireLeaseForTmux(target, attempt, trigger, startedAtMs)
                 ?: return
             val session = lease.session
+            // Issue #178/#766: a dead lease discovered by the warm fast-switch
+            // path falls through to this cold attach. The lease manager's
+            // transport edge can transiently move the controller through
+            // Reattaching before this coroutine resumes; re-assert the
+            // controller-only cold intent after the acquire so that a fresh
+            // handshake cannot be projected as a warm Switching attach.
+            // Reconnect triggers retain their ladder-owned Reconnecting state.
+            if (!warmReveal && !trigger.isReconnectTrigger) {
+                submitControllerColdOpen(target)
+                projectStatusFromController()
+            }
             StartupTiming.mark(
                 "ssh-connected",
                 "attempt" to attempt,
@@ -6495,6 +6594,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
 
             maybeRefreshControlClientSize()
+            val attachTarget = targetAfterExactSessionAdoption(target)
             // Issue #553/#640: tmux `-CC` does not re-emit existing pane content
             // on a fresh control-client attach — only subsequent `%output`
             // deltas. Re-seed every visible pane from a `capture-pane` snapshot
@@ -6519,7 +6619,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 reseedAllVisiblePanes(
                     RuntimeRefreshGuard(
                         generation = connectGeneration,
-                        target = target,
+                        target = attachTarget,
                         client = client,
                     ),
                 )
@@ -6532,7 +6632,7 @@ public class TmuxSessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             val blankReseedGuard = RuntimeRefreshGuard(
                 generation = connectGeneration,
-                target = target,
+                target = attachTarget,
                 client = client,
             )
             // Issue #693/#661: NEVER reveal a black active pane on this cold/slow
@@ -6544,19 +6644,26 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #1863: never declare a wire live that died while this attach was
             // in flight — the throw routes into the catch below as a stale-channel
             // symptom (single ladder), instead of publishing `ready` over a corpse.
-            requireControlChannelAliveForReveal(client, target.sessionName, "connect")
+            requireControlChannelAliveForReveal(client, attachTarget.sessionName, "connect")
+            // S7/#1863: a seed proves the pane is ready only after the shared control
+            // channel has passed the final reveal-time liveness boundary. Captures are
+            // allowed to land before this point, but they must not publish Live over a
+            // channel that died during the remainder of the attach.
+            activeVisiblePane()?.let { pane ->
+                feedControllerAttachReady(client, pane.paneId, attachTarget)
+                if (activePaneSeeded) {
+                    feedControllerSeedLanded(client, pane.paneId, attachTarget)
+                }
+            }
             // EPIC #687 P1: when the active pane is seeded non-blank, the inline path
-            // reveals the target's surface — promote the reveal machine to Live for
-            // the target so the NEW-path reveal gate releases in lockstep.
-            if (activePaneSeeded) promoteRevealLiveForActiveTarget()
-            revealControllerLive()
-            setConnectionState(
-                ConnectionState.Live(
-                    target.host,
-                    target.port,
-                    target.user,
-                ),
-            )
+            // reveals the target's surface — promote the reveal machine and controller
+            // only inside the same real-seed fence. A blank attach remains Attaching while
+            // its blank-only watchdog works toward a real capture.
+            if (activePaneSeeded) {
+                promoteRevealLiveForActiveTarget()
+                revealControllerLive()
+            }
+            projectStatusFromController()
             if (!activePaneSeeded) {
                 armConnectedBlankWatchdog(blankReseedGuard, surfaceErrorOnExhaustion = true)
             }
@@ -6687,8 +6794,10 @@ public class TmuxSessionViewModel @Inject constructor(
      * "poisoned" lease, or kick off auto-recovery — the session is simply gone,
      * so retrying the same attach is pointless and (with `new-session -A`) would
      * recreate it, which is exactly the bug. We tear the half-open connection
-     * down, surface a [ConnectionStatus.Failed] "that session ended" message as
-     * a fallback for any surface that does not navigate, and emit the one-shot
+     * down, submit the TYPED `Gone` fact to the controller (S7/#766 — the
+     * "this session ended" sentence is owned by the fused
+     * [com.pocketshell.core.connection.SessionSurfaceState] failure reason, not by a
+     * VM-authored status message), and emit the one-shot
      * [sessionEnded] event so the Screen drops to the host/session list and the
      * app clears the persisted last-session snapshot.
      */
@@ -6727,9 +6836,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #1574: genuinely gone — clear the retained intent, no resurrection (#666).
         latestConnectIntent = null
         refreshReconnectAvailability()
-        setConnectionState(
-            ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
-        )
+        connectionManager.markGone(controllerSessionId(target))
+        projectStatusFromController()
         // Issue #1155 (Part B): this is the GENUINELY-GONE path — the attach failed
         // with a [TmuxSessionNotFoundException] (an absent tmux session), NOT a
         // transient reconnect blip (those go through [failConnectAttempt] and the
@@ -6797,11 +6905,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #1574: server gone — clear the retained intent (#998).
         latestConnectIntent = null
         refreshReconnectAvailability()
-        setConnectionState(
-            ConnectionState.Unreachable(
-                "The tmux server on ${target.hostName} restarted — all sessions ended.",
-            ),
-        )
+        connectionManager.markGone(controllerSessionId(target))
+        projectStatusFromController()
         _sessionEnded.tryEmit(target.sessionName)
     }
 
@@ -6834,17 +6939,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *   [runConnect] preflight is the second line of defence there.
      */
     private fun preflightSessionExistence(
-        hostId: Long,
-        hostName: String,
-        host: String,
-        port: Int,
-        user: String,
-        keyPath: String,
-        passphrase: CharArray?,
-        sessionName: String,
-        startDirectory: String?,
-        tmuxSessionId: String?,
-        sessionCreated: Long?,
+        target: ConnectionTarget,
         // Issue #1155: the trigger to RE-ENTER connect with once the session is
         // confirmed alive (ColdRestore for the resume path, OpenExisting for a
         // normal tree-row tap). The GONE branch is identical for both:
@@ -6852,19 +6947,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // recreate prompt.
         originalTrigger: TmuxConnectTrigger,
     ) {
-        val target = ConnectionTarget(
-            hostId = hostId,
-            hostName = hostName,
-            host = host,
-            port = port,
-            user = user,
-            keyPath = keyPath,
-            passphrase = passphrase,
-            sessionName = sessionName,
-            startDirectory = startDirectory,
-            tmuxSessionId = tmuxSessionId,
-            sessionCreated = sessionCreated,
-        )
+        val hostId = target.hostId
+        val host = target.host
+        val port = target.port
+        val user = target.user
+        val sessionName = target.sessionName
         // Cancel any in-flight connect so the preflight owns the decision, then
         // gate every downstream attach behind it. Mirrors the teardown the
         // normal connect entry does for its early state.
@@ -6879,7 +6966,7 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = target
         refreshReconnectAvailability()
         submitControllerOpen(target)
-        setConnectionState(ConnectionState.Connecting(host, port, user))
+        projectStatusFromController()
         connectJob = viewModelScope.launch {
             val leaseTarget = target.toSshLeaseTarget()
             val lease = sshLeaseManager.acquire(leaseTarget).getOrNull()
@@ -6890,18 +6977,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 // early-return guard.
                 connectJob = null
                 connectingTarget = null
-                connect(
-                    hostId = hostId,
-                    hostName = hostName,
-                    host = host,
-                    port = port,
-                    user = user,
-                    keyPath = keyPath,
-                    passphrase = passphrase?.copyOf(),
-                    sessionName = sessionName,
-                    startDirectory = startDirectory,
-                    tmuxSessionId = tmuxSessionId,
-                    sessionCreated = sessionCreated,
+                requestResolvedConnect(
+                    target = target.copy(passphrase = target.passphrase?.copyOf()),
                     trigger = originalTrigger,
                     skipExistencePreflight = true,
                 )
@@ -7018,14 +7095,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     runCatching { lease.release() }
                 }
                 sessionRef = null
-                submitControllerOpen(target)
-                setConnectionState(
-                    ConnectionState.Connecting(
-                        target.host,
-                        target.port,
-                        target.user,
-                    ),
-                )
+                submitControllerColdOpen(target)
+                projectStatusFromController()
                 _panes.value = emptyList()
                 rebuildUnifiedPanes()
                 runConnect(target, attempt, trigger)
@@ -7087,6 +7158,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
             )
 
+            val attachTarget = targetAfterExactSessionAdoption(target)
             connectingTarget = null
             refreshReconnectAvailability()
             // Issue #693/#661: NEVER reveal a black active pane. #661's O(1)
@@ -7096,25 +7168,29 @@ public class TmuxSessionViewModel @Inject constructor(
             // pane seed (bounded retries).
             val fastSwitchRevealGuard = RuntimeRefreshGuard(
                 generation = connectGeneration,
-                target = target,
+                target = attachTarget,
                 client = client,
             )
             val activePaneSeeded = awaitActivePaneSeededOrLoading(fastSwitchRevealGuard)
             // Issue #1863: same guard on the warm entry point (G2) — the fast-switch
             // catch below already routes a stale-channel symptom into the single ladder.
-            requireControlChannelAliveForReveal(client, target.sessionName, "fast switch")
+            requireControlChannelAliveForReveal(client, attachTarget.sessionName, "fast switch")
+            // S7/#1863: defer the authoritative SeedLanded promotion until the final
+            // reveal guard has accepted the shared control channel.
+            activeVisiblePane()?.let { pane ->
+                feedControllerAttachReady(client, pane.paneId, attachTarget)
+                if (activePaneSeeded) {
+                    feedControllerSeedLanded(client, pane.paneId, attachTarget)
+                }
+            }
             // EPIC #687 P1: the fast-switch reveal shows the target's seeded pane —
-            // promote the reveal machine to Live for the target so the NEW-path reveal
-            // gate releases in the same mutation (never holds on a warm switch).
-            if (activePaneSeeded) promoteRevealLiveForActiveTarget()
-            revealControllerLive()
-            setConnectionState(
-                ConnectionState.Live(
-                    target.host,
-                    target.port,
-                    target.user,
-                ),
-            )
+            // promote the reveal machine and controller only inside the same real-seed
+            // fence (never claim Live for a still-blank warm switch).
+            if (activePaneSeeded) {
+                promoteRevealLiveForActiveTarget()
+                revealControllerLive()
+            }
+            projectStatusFromController()
             if (!activePaneSeeded) {
                 armConnectedBlankWatchdog(fastSwitchRevealGuard, surfaceErrorOnExhaustion = true)
             }
@@ -7194,13 +7270,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // machine holds the surface), so the silent-corpse fallback never
                 // flashes the full-screen [Connecting] overlay + cleared panes.
                 submitControllerSwitch(target)
-                setConnectionState(
-                    ConnectionState.Attaching(
-                        target.host,
-                        target.port,
-                        target.user,
-                    ),
-                )
+                projectStatusFromController()
                 // The poisoned pooled lease was disconnected above and the
                 // cached runtimes were dropped, so the pool is empty: an
                 // [AutoReconnect] dial (which does NOT re-run the synchronous
@@ -7418,17 +7488,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // this failing job unwinds.
             connectingTarget = null
             refreshReconnectAvailability()
-            setConnectionState(
-                ConnectionState.Reattaching(
-                    host = target.host,
-                    port = target.port,
-                    user = target.user,
-                    attempt = 1,
-                    maxAttempts = 1,
-                    retryDelayMs = 0L,
-                    reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
-                ),
-            )
+            surfaceControllerRecovery(target)
             val recoverTarget = target
             connectJob = null
             launchContainedTeardown {
@@ -7492,22 +7552,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // target` early-return guard while this failing job unwinds.
             connectingTarget = null
             refreshReconnectAvailability()
-            // EPIC #687 slice 1b: this is the silent within-grace reattach, so it
-            // maps to the controller-parity [ConnectionState.Reattaching] — which
-            // projects to the SAME [ConnectionStatus.Reconnecting] band (the §1
-            // `Reattaching/Reconnecting → Reconnecting` mapping), so the surfaced
-            // status is byte-identical to before.
-            setConnectionState(
-                ConnectionState.Reattaching(
-                    host = target.host,
-                    port = target.port,
-                    user = target.user,
-                    attempt = 1,
-                    maxAttempts = 1,
-                    retryDelayMs = 0L,
-                    reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
-                ),
-            )
+            surfaceControllerRecovery(target)
             // Drop any cached runtimes for this host asynchronously (as the
             // fast-switch leave path does) so the upcoming re-dial never blocks
             // joining a leaving pane producer, and the [AutoReconnect] dial does
@@ -7556,7 +7601,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // terminalize — the loop + controller own advance-vs-exhaust (the deleted
         // over-exhaust guard masked this premature "Unreachable on rung 1").
         if (autoReconnectJob?.isActive == true) return
-        setConnectionState(ConnectionState.Unreachable(message))
+        val terminalMessage =
+            if (isNonRetryableConnectFailure(cause)) {
+                "Connection failed: ${nonRetryableReason(cause)}. Tap Reconnect to retry."
+            } else {
+                message
+            }
+        surfaceControllerUnreachable(target = target, failureMessage = terminalMessage)
         // Issue #1185 (two-holder safety net): drive the reveal machine DIRECTLY
         // to a terminal error for THIS exact target instead of relying solely on
         // the ConnectionController's synthetic drop→Unreachable ladder to deliver a
@@ -7841,6 +7892,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
+        structuralOverflowJob?.cancel()
 
         // Issue #576 (Slice A of #792): stand up a fresh coalescer + its
         // off-main drain scope for this client. Structural control events
@@ -7894,6 +7946,13 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         eventsJob = job
+        structuralOverflowJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            client.structuralEventOverflowGeneration.collect { generation ->
+                if (generation > 0L && clientRef === client) {
+                    coalescer.offerAuthoritativeRepair()
+                }
+            }
+        }
         outputOverflowJob?.cancel()
         outputOverflowJob = bridgeScope.launch {
             client.outputBacklogOverflows.collect { overflow ->
@@ -7986,7 +8045,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val client = drop.client
         val disconnectEvent = drop.disconnectEvent
         // Issue #895 (#766 down-payment): the passive-disconnect handler is
-        // STATUS-AGNOSTIC. The old `inlineConnectionStatus as? Connected ?: return`
+        // STATUS-AGNOSTIC. The old VM-status `Connected` early return
         // gate SWALLOWED a drop that landed while the VM was `Switching`
         // (Attaching) — exactly the switch-while-black freeze (R1): no recovery
         // ran, no escapable band surfaced, the user was stuck on a black pane with
@@ -8082,7 +8141,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // CALM Reconnecting — NOT the scary inline Failed/"control channel closed/Tap
         // Reconnect" band. Only after the silent reconnect ladder truly exhausts does
         // the controller reach Unreachable (→ the #720 calm "Tap to reconnect").
-        // Re-project after the inline effects ran (they read inlineConnectionStatus).
+        // Re-project after the recovery effects ran.
         projectStatusFromController()
     }
 
@@ -8305,29 +8364,48 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * Issue #693/#662 (#1539 VM-shrink extraction): re-seed every visible pane for a passive-grace
      * reattach onto [client] — the sequence BOTH rungs ran verbatim. A reattach is a fresh attach
-     * for REUSED panes, so the old seed flags no longer apply: clear them, re-capture every pane,
-     * then run the blank-net backstop for any whose capture came back empty.
+     * for REUSED panes, so the old seed flags no longer apply: clear them and re-capture every
+     * pane. The blank-net backstop is deferred until after the liveness-fenced controller edge.
      *
      * Issue #1353/#1539: runs AFTER the readiness verdict, bounded by
      * [PassiveReattachStageBudgets.reseedMs] but able to overrun WITHOUT failing the rung. At
      * ~10.4s/pane worst case, inside the readiness clock it deterministically blew the rung's
      * budget and killed proven-live transports. Overruns heal via [armConnectedBlankWatchdog].
+     *
+     * S7/#766: this pre-reveal stage owns only the full reseed pass. The blank-only backstop
+     * must not run here: a just-landed seed can still look blank until the terminal render
+     * drain catches up, and its per-pane heal lock can hold the recovery past the status
+     * await deadline. The controller's SeedLanded edge is fenced by the final liveness check
+     * below the callers; the blank backstop is deferred until after that edge.
      */
     private suspend fun reseedVisiblePanesForPassiveReattach(
         target: ConnectionTarget,
         client: TmuxClient,
         budgets: PassiveReattachStageBudgets,
     ) = withTimeoutOrNull(budgets.reseedMs) {
-        panesSeededThisAttach.clear()
-        panesSeedInFlightThisAttach.clear()
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
             target = target,
             client = client,
         )
         reseedAllVisiblePanes(guard)
-        reseedBlankVisiblePanes(guard)
         maybeRefreshControlClientSize()
+    }
+
+    /**
+     * Run the passive-recovery blank backstop only after the controller has been promoted by
+     * a liveness-validated replacement seed. A slow/contended blank heal must never delay the
+     * target-tagged SeedLanded edge or hold the VM in Switching until its stage budget expires.
+     */
+    private fun deferPassiveReattachBlankBackstop(target: ConnectionTarget, client: TmuxClient) {
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+        bridgeScope.launch {
+            reseedBlankVisiblePanes(guard)
+        }
     }
 
     /**
@@ -8366,6 +8444,8 @@ public class TmuxSessionViewModel @Inject constructor(
             val ready = withTimeoutOrNull(budgets.attachMs) {
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
+                structuralOverflowJob?.cancelAndJoin()
+                structuralOverflowJob = null
                 outputOverflowJob?.cancelAndJoin()
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
@@ -8384,6 +8464,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 runCatching { staleClient.close() }
                 bindClientObservers(replacement)
                 replacement.connect()
+                // A replacement attach starts a new seed epoch. Clear the old client's
+                // evidence BEFORE panes-ready so a seed captured by this replacement can be
+                // retained through the final liveness guard.
+                panesSeededThisAttach.clear()
+                panesSeedInFlightThisAttach.clear()
                 activeAttachMilestone = AttachMilestone(
                     attempt = TMUX_CONNECT_ATTEMPTS.get(),
                     sessionName = target.sessionName,
@@ -8408,6 +8493,11 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             reseedVisiblePanesForPassiveReattach(target, replacement, budgets)
             requireControlChannelAliveForReveal(replacement, target.sessionName, "silent reattach") // #1863 G2
+            // S7/#1863: only a seed that survived the final control-channel guard may
+            // promote the confirmed-dead recovery back to Live.
+            currentAttachSeededPaneId()?.let { paneId ->
+                feedControllerSeedLanded(replacement, paneId, target)
+            }
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -8428,13 +8518,7 @@ public class TmuxSessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             // #822: reseedVisiblePanesForPassiveReattach feeds the real target-tagged
             // SeedLanded edge. Never synthesize Live here if no authoritative seed landed.
-            setConnectionState(
-                ConnectionState.Live(
-                    target.host,
-                    target.port,
-                    target.user,
-                ),
-            )
+            projectStatusFromController()
             // Issue #693: never leave a reattached pane black on a live (green)
             // connection. If the active pane is still blank after the reconnect
             // reseed, keep re-seeding under the watchdog rather than showing a
@@ -8446,6 +8530,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     client = replacement,
                 ),
             )
+            deferPassiveReattachBlankBackstop(target, replacement)
             recordPassiveReattachSuccess(
                 target = target,
                 source = "silent_reattach",
@@ -8609,6 +8694,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 replacement = newClient
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
+                structuralOverflowJob?.cancelAndJoin()
+                structuralOverflowJob = null
                 outputOverflowJob?.cancelAndJoin()
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
@@ -8623,6 +8710,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 runCatching { staleClient?.close() }
                 bindClientObservers(newClient)
                 newClient.connect()
+                // Start a seed epoch for this replacement before panes-ready. The active pane
+                // preload is authoritative evidence for this client and must not be discarded
+                // by the post-attach reseed pass when that pass has no second capture to use.
+                panesSeededThisAttach.clear()
+                panesSeedInFlightThisAttach.clear()
                 activeAttachMilestone = AttachMilestone(
                     attempt = TMUX_CONNECT_ATTEMPTS.get(),
                     sessionName = target.sessionName,
@@ -8659,6 +8751,11 @@ public class TmuxSessionViewModel @Inject constructor(
             val newClient = replacement ?: return false
             reseedVisiblePanesForPassiveReattach(target, newClient, budgets)
             requireControlChannelAliveForReveal(newClient, target.sessionName, "transport reconnect") // #1863 G2
+            // S7/#1863: only a seed that survived the final control-channel guard may
+            // promote the confirmed-dead recovery back to Live.
+            currentAttachSeededPaneId()?.let { paneId ->
+                feedControllerSeedLanded(newClient, paneId, target)
+            }
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -8679,13 +8776,7 @@ public class TmuxSessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             // #822: only the real target-tagged capture seed above may promote the
             // confirmed-dead recovery from Reattaching back to Live.
-            setConnectionState(
-                ConnectionState.Live(
-                    target.host,
-                    target.port,
-                    target.user,
-                ),
-            )
+            projectStatusFromController()
             // Issue #693: never leave a reattached pane black on a live (green)
             // connection after a fresh-transport reconnect.
             armConnectedBlankWatchdog(
@@ -8695,6 +8786,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     client = newClient,
                 ),
             )
+            deferPassiveReattachBlankBackstop(target, newClient)
             recordPassiveReattachSuccess(
                 target = target,
                 source = "silent_transport_reattach",
@@ -8738,7 +8830,14 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget?,
         disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
     ) {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return
+        val state = connectionManager.state
+        if (
+            state !is CoreConnectionState.Live &&
+            state !is CoreConnectionState.Attaching &&
+            state !is CoreConnectionState.Reattaching &&
+            state !is CoreConnectionState.Reconnecting
+        ) return
+        if (target != null && state.targetIdOrNull() != controllerSessionId(target)) return
         if (clientRef !== client) return
         if (target != null && shouldAutoReconnectPassiveDisconnect(disconnectEvent)) {
             scheduleAutoReconnect(
@@ -8753,12 +8852,11 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return
         }
-        val current = inlineConnectionStatus as? ConnectionStatus.Connected
         Log.w(
             ISSUE_145_RECONNECT_TAG,
-            "tmux-mid-session-disconnect host=${current?.host ?: target?.host.orEmpty()} " +
-                "port=${current?.port ?: target?.port ?: 0} " +
-                "user=${current?.user ?: target?.user.orEmpty()}",
+            "tmux-mid-session-disconnect host=${target?.host.orEmpty()} " +
+                "port=${target?.port ?: 0} " +
+                "user=${target?.user.orEmpty()}",
         )
         DiagnosticEvents.record(
             "connection",
@@ -8774,9 +8872,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "passive_disconnect",
             "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
             "hostId" to target?.hostId,
-            "host" to (current?.host ?: target?.host.orEmpty()),
-            "port" to (current?.port ?: target?.port ?: 0),
-            "user" to (current?.user ?: target?.user.orEmpty()),
+            "host" to target?.host.orEmpty(),
+            "port" to (target?.port ?: 0),
+            "user" to target?.user.orEmpty(),
             "session" to (target?.sessionName ?: "unknown"),
             "clientHash" to System.identityHashCode(client),
             "generation" to connectGeneration,
@@ -8804,7 +8902,7 @@ public class TmuxSessionViewModel @Inject constructor(
             connectingTarget = null
             refreshReconnectAvailability()
         }
-        setConnectionState(ConnectionState.Unreachable(reason))
+        surfaceControllerUnreachable(target = target, failureMessage = reason)
     }
 
     private fun shouldAutoReconnectPassiveDisconnect(disconnectEvent: TmuxDisconnectEvent): Boolean =
@@ -8830,15 +8928,19 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectEvent: TmuxDisconnectEvent,
     ): String {
         val prefix = tmuxDisconnectReasonPrefix(disconnectEvent.reason)
-        // The user/host/port comes from the target; for the degenerate target-less
-        // path (the `attachClientForTest` seam) fall back to the inline Connected
-        // payload so the message stays identical to the pre-#895 behavior.
-        val connected = inlineConnectionStatus as? ConnectionStatus.Connected
-        val user = target?.user ?: connected?.user.orEmpty()
-        val host = target?.host ?: connected?.host.orEmpty()
-        val port = target?.port ?: connected?.port ?: 0
-        return "$prefix from $user@$host:$port. Tap Reconnect to retry."
+        val endpoint = target?.let {
+            ConnectionStatusProjection.Endpoint(
+                host = it.host,
+                port = it.port,
+                user = it.user,
+            )
+        } ?: controllerStatusProjector.endpointFor(connectionManager.state.targetIdOrNull())
+            ?: ConnectionStatusProjection.Endpoint.Empty
+        return "$prefix from ${endpoint.user}@${endpoint.host}:${endpoint.port}. Tap Reconnect to retry."
     }
+
+    private fun disconnectedFromMessage(target: ConnectionTarget): String =
+        "Disconnected from ${target.user}@${target.host}:${target.port}. Tap Reconnect to retry."
 
     private fun passiveAutoReconnectMessage(
         disconnectEvent: TmuxDisconnectEvent,
@@ -8927,18 +9029,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = trigger,
                     generation = generation,
                 )
-                // Carry the reason inline; attempt/max/delay MIRROR the controller.
-                setConnectionState(
-                    ConnectionState.Reconnecting(
-                        host = target.host,
-                        port = target.port,
-                        user = target.user,
-                        attempt = attemptNo,
-                        maxAttempts = maxAttempts,
-                        retryDelayMs = delayMs,
-                        reason = reason,
-                    ),
-                )
+                projectStatusFromController()
                 recordReconnectRungScheduled(
                     target = target,
                     trigger = trigger,
@@ -8988,7 +9079,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 connectingTarget = target
                 refreshReconnectAvailability()
                 runConnect(target, attempt, trigger)
-                if (inlineConnectionStatus is ConnectionStatus.Connected) {
+                if (controllerIsLiveFor(target)) {
                     autoReconnectJob = null
                     return@launch
                 }
@@ -9009,12 +9100,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     connectingTarget = target
                     refreshReconnectAvailability()
                     // Issue #1328 (S5): honest give-up — the reducer decides Unreachable.
-                    connectionManager.escalateUnreachable()
-                    setConnectionState(
-                        ConnectionState.Unreachable(
+                    surfaceControllerUnreachable(
+                        target = target,
+                        failureMessage =
                             "$reason Auto reconnect stopped: ${nonRetryableReason(failureCause)}. " +
                                 "Tap Reconnect to retry.",
-                        ),
                     )
                     recordAutoReconnectDecision(
                         decision = "suppressed_manual_only",
@@ -9039,15 +9129,12 @@ public class TmuxSessionViewModel @Inject constructor(
             // message set) surface the unified "Disconnected from …" band (#1098).
             connectingTarget = target
             refreshReconnectAvailability()
-            if (connectionManager.state is CoreConnectionState.Unreachable &&
-                inlineConnectionStatus !is ConnectionStatus.Failed
-            ) {
-                setConnectionState(
-                    ConnectionState.Unreachable(
-                        "Disconnected from ${target.user}@${target.host}:${target.port}. " +
-                            "Tap Reconnect to retry.",
-                    ),
+            if (connectionManager.state is CoreConnectionState.Unreachable) {
+                controllerStatusProjector.rememberFailure(
+                    target?.let(::controllerSessionId) ?: connectionManager.state.targetIdOrNull(),
+                    disconnectedFromMessage(target),
                 )
+                projectStatusFromController()
                 recordAutoReconnectDecision(
                     decision = "exhausted",
                     target = target,
@@ -9110,11 +9197,7 @@ public class TmuxSessionViewModel @Inject constructor(
             cause = cause,
             *diagnosticFields,
         )
-        setConnectionState(
-            ConnectionState.Unreachable(
-                "$reason Auto reconnect paused while PocketShell is in the background.",
-            ),
-        )
+        surfaceControllerUnreachable()
     }
 
     /**
@@ -9125,7 +9208,14 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun attachClientForTest(client: TmuxClient) {
         attachClient(client)
-        setConnectionState(ConnectionState.Live("test", 0, "test"))
+        // Most callers use this seam to install a standalone already-live fake runtime. During
+        // a real connect, however, a test may attach the client while only `connectingTarget` is
+        // present (the exact #2294 reconcile handoff). Do not replace that controller target
+        // with the synthetic test identity: production reconcile must keep publishing its
+        // target-tagged seed to the in-flight cold attach.
+        if (activeTarget == null && connectingTarget == null) {
+            establishControllerLiveForTest()
+        }
     }
 
     /** S6 (#1329): the AUTHORITATIVE controller state — a test asserts it DECIDED the transition. */
@@ -9149,7 +9239,18 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = null,
         )
         refreshReconnectAvailability()
-        setConnectionState(ConnectionState.Live("test", 0, "test"))
+        val target = activeTarget ?: return
+        submitControllerOpen(target)
+        revealControllerLive()
+        // This seam has no TmuxClient/capture path; the attached session itself is the fixture's
+        // explicit current-target seed checkpoint. Keep the controller transition real while
+        // making the helper's pre-existing "already attached" contract explicit.
+        connectionManager.observeSeedLanded(
+            controllerHostKey(target),
+            controllerSessionId(target),
+            paneId = "test-agent-retry-seed",
+        )
+        projectStatusFromController()
     }
 
     internal fun replaceClientForTest(
@@ -9165,6 +9266,7 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
         lease: SshLease? = null,
+        trustedHostKeySha256: String? = null,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -9178,6 +9280,7 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = null,
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
         // #1085: this synchronous test seam must close the replaced client before returning.
         closeCurrentConnection(deferTeardown = false)
@@ -9209,8 +9312,17 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         refreshReconnectAvailability()
         bindProjectRootsForHost(hostId)
+        submitControllerOpen(target)
         revealControllerLive()
-        setConnectionState(ConnectionState.Live(host, port, user))
+        // This seam injects an already-attached client without running the real capture path.
+        // Supply the controller's explicit seed checkpoint so the injected runtime has the
+        // same Live authority as a production attach after its current-target seed lands.
+        connectionManager.observeSeedLanded(
+            controllerHostKey(target),
+            controllerSessionId(target),
+            paneId = "test-replacement-seed",
+        )
+        projectStatusFromController()
         maybeRefreshControlClientSize()
     }
 
@@ -9287,13 +9399,13 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         connectingTarget = target
         refreshReconnectAvailability()
-        submitControllerSwitch(target)
         // Issue #437 (slice A) / #661: mirror production — a same-host fast
         // switch enters [Switching] (inline indicator), NOT the blanking
         // full-screen [Connecting] overlay; per #661 the reveal machine holds the
         // terminal surface so the leaving frame is never painted until the new
         // session's panes are seeded.
-        setConnectionState(ConnectionState.Attaching(host, port, user))
+        submitControllerSwitch(target)
+        projectStatusFromController()
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -9358,7 +9470,16 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #661: reveal the new session's surface at the Connected flip
         // (the reveal machine promotes to Live via the seed/promote path).
         revealControllerLive()
-        setConnectionState(ConnectionState.Live(host, port, user))
+        // This synchronous helper deliberately skips production list-panes/capture IO. Its
+        // caller-supplied connected fake therefore supplies an explicit target-tagged seed
+        // checkpoint here; removing it must leave the controller in Attaching and redden the
+        // helper's authority tests rather than manufacturing Live from reveal alone.
+        connectionManager.observeSeedLanded(
+            controllerHostKey(target),
+            controllerSessionId(target),
+            paneId = "test-fast-switch-seed",
+        )
+        projectStatusFromController()
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -9438,7 +9559,7 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         refreshReconnectAvailability()
         submitControllerOpen(target)
-        setConnectionState(ConnectionState.Connecting(host, port, user))
+        projectStatusFromController()
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -9477,10 +9598,19 @@ public class TmuxSessionViewModel @Inject constructor(
             panesSeedInFlightThisAttach.clear()
             awaitPanesReadyForAttach(target, attempt, startedAtMs, trigger)
             reseedAllVisiblePanes()
+            val attachTarget = targetAfterExactSessionAdoption(target)
             connectingTarget = null
             refreshReconnectAvailability()
-            revealControllerLive()
-            setConnectionState(ConnectionState.Live(host, port, user))
+            requireControlChannelAliveForReveal(client, attachTarget.sessionName, "test attach")
+            val seededPaneId = currentAttachSeededPaneId()
+            activeVisiblePane()?.let { pane ->
+                feedControllerAttachReady(client, pane.paneId, attachTarget)
+                seededPaneId?.let { feedControllerSeedLanded(client, it, attachTarget) }
+            }
+            if (seededPaneId != null) {
+                revealControllerLive()
+            }
+            projectStatusFromController()
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             recordWarmSwitchMilestone(
                 attempt = attempt,
@@ -9538,7 +9668,9 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
         refreshReconnectAvailability()
-        setConnectionState(ConnectionState.Connecting(host, port, user))
+        val target = connectingTarget ?: return job
+        submitControllerOpen(target)
+        projectStatusFromController()
         connectJob = job
         return job
     }
@@ -9764,6 +9896,7 @@ public class TmuxSessionViewModel @Inject constructor(
             originatingRuntime = refreshGuard,
             runtimeIsCurrent = ::isCurrentRuntime,
             revealIdentityAdopter = revealController::adoptTargetIdentity,
+            connectionIdentityAdopter = connectionManager::adoptTargetIdentity,
         )
 
         val nextById: MutableMap<String, TmuxPaneState> = LinkedHashMap()
@@ -10803,25 +10936,11 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Issue #1295 (test seam): drop the inline [ConnectionState] to a TRANSIENT
-     * `Reconnecting` band while KEEPING the runtime (`activeTarget`/`clientRef` intact),
-     * so a JVM test can drive the disconnect-recovery blank-watchdog case where the band
-     * is still settling on a live client. Sets `_connectionState` directly (no controller
-     * drive) so `inlineConnectionStatus` reads not-Connected on the next watchdog tick.
-     */
+    /** Issue #1295: drive the typed controller into recovery while retaining the runtime. */
     @androidx.annotation.VisibleForTesting
-    internal fun forceInlineReconnectingBandForTest() {
-        val target = activeTarget ?: return
-        _connectionState = ConnectionState.Reconnecting(
-            host = target.host,
-            port = target.port,
-            user = target.user,
-            attempt = 1,
-            maxAttempts = 3,
-            retryDelayMs = 1_000L,
-            reason = "test transient band (#1295)",
-        )
+    internal fun forceControllerReconnectingBandForTest() {
+        connectionManager.reportRemoteDrop("test transient band (#1295)")
+        projectStatusFromController()
     }
 
     private suspend fun preloadVisibleContentForNewPanes(
@@ -11133,6 +11252,29 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.value.firstOrNull() ?: paneRows.values.firstOrNull()
 
     /**
+     * Return the pane whose successful capture belongs to the current replacement attach.
+     *
+     * A cache-restore/reconcile can leave [_panes] briefly pointing at the prior visible row
+     * while [paneRows] already contains the replacement rows. The seed epoch is the authority
+     * for this handoff: use the visible row only when it is in that epoch, then resolve a
+     * current row from [paneRows]. A single remaining seed is the safe fallback for the
+     * synthetic one-pane and recorded-kind restore paths. This is evidence for the controller
+     * event, not a second lifecycle state.
+     */
+    private fun currentAttachSeededPaneId(): String? {
+        val visiblePaneId = activeVisiblePane()?.paneId
+        if (visiblePaneId != null && visiblePaneId in panesSeededThisAttach) {
+            return visiblePaneId
+        }
+        val currentRow = paneRows.values
+            .asSequence()
+            .filter { it.paneId in panesSeededThisAttach }
+            .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneId }))
+            .firstOrNull()
+        return currentRow?.paneId ?: panesSeededThisAttach.singleOrNull()
+    }
+
+    /**
      * Issue #693: never leave a `Connected` pane black. When a reveal had to
      * fall through with a still-blank active pane (the link stayed degraded past
      * [awaitActivePaneSeededOrLoading]'s bound), arm a bounded watchdog that
@@ -11161,7 +11303,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                if (!controllerHasCurrentRecoveryFor(refreshGuard.target)) {
                     // Issue #1295 (disconnect-recovery re-arm gap): a TRANSIENT reconnecting
                     // band during the blank window (a disconnect-recovery still settling on a
                     // still-live client + current runtime) must NOT strand the recovered
@@ -11232,7 +11374,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // infinite spinner.
             if (!isCurrentRuntime(refreshGuard)) return@launch
             if (clientRef?.disconnected?.value == true) return@launch
-            if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+            if (!controllerHasCurrentRecoveryFor(refreshGuard.target)) return@launch
             if (!surfaceErrorOnExhaustion) {
                 // Issue #1177 (black-screen GAP B): the passive/transport SILENT-
                 // REATTACH paths (:8077/:8319) arm this watchdog with
@@ -11314,7 +11456,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                if (!controllerHasCurrentRecoveryFor(refreshGuard.target)) {
                     // Paused mid-runtime (a transient reconnecting band): keep the
                     // watchdog alive but skip the heal until Connected resumes. Reset
                     // the back-off so the resume tick captures at the hot cadence.
@@ -11552,14 +11694,14 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     @androidx.annotation.VisibleForTesting
-    internal fun activePaneRenderOwnerSnapshotForTest(): ActivePaneRenderOwnerSnapshotForTest {
+    internal fun activePaneRenderDiagnosticsForTest(): ActivePaneRenderDiagnostics {
         val pane = checkNotNull(activeVisiblePane()) { "active visible pane is missing" }
         val ownerBefore = pane.terminalState.renderModelOwnerSnapshotForTesting()
         val rendered = pane.terminalState.renderedNonBlankCharCount(); val partial =
             pane.terminalState.visibleScreenIsPartiallyBlank(); val suspect = pane.terminalState.renderLooksSuspect()
         val ownerAfter = pane.terminalState.renderModelOwnerSnapshotForTesting(); val automaticHeal =
             automaticRenderHealTracker.snapshot()
-        return ActivePaneRenderOwnerSnapshotForTest(
+        return ActivePaneRenderDiagnostics(
             paneId = pane.paneId, windowId = pane.windowId, sessionId = pane.sessionId,
             targetSessionName = activeTarget?.sessionName, connectGeneration = connectGeneration,
             clientIdentity = clientRef?.let(System::identityHashCode),
@@ -11575,52 +11717,6 @@ public class TmuxSessionViewModel @Inject constructor(
             lastSeedAtMs = paneLastSeedAtMs[pane.paneId], renderedNonBlankChars = rendered,
             partiallyBlank = partial, renderLooksSuspect = suspect, coherent = ownerBefore == ownerAfter,
         )
-    }
-    @androidx.annotation.VisibleForTesting
-    internal fun appendToActivePaneRenderModelForTest(bytes: ByteArray, expectedOwner: ActivePaneRenderOwnerSnapshotForTest, afterAppendBeforeSnapshotForTest: (() -> Unit)? = null):
-        ActivePaneRenderOwnerSnapshotForTest {
-        val before = activePaneRenderOwnerSnapshotForTest()
-        check(expectedOwner.attachResizeSeedSettled) { "expected owner was not settled: $expectedOwner" }
-        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
-            "active render owner changed before injection: expected=$expectedOwner actual=$before"
-        }
-        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch) {
-            "active render model mutated before injection: expected=$expectedOwner actual=$before"
-        }
-        check(before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
-            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
-                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch &&
-            before.appliedColumns == expectedOwner.appliedColumns &&
-            before.appliedRows == expectedOwner.appliedRows
-        ) {
-            "attach/resize owner changed before injection: expected=$expectedOwner actual=$before"
-        }
-        val pane = checkNotNull(activeVisiblePane())
-        pane.terminalState.appendDirectlyToRenderModelForTesting(bytes)
-        afterAppendBeforeSnapshotForTest?.invoke()
-        val after = activePaneRenderOwnerSnapshotForTest()
-        check(after.coherent && after.sameOwnerAs(expectedOwner)) {
-            "active render owner changed during injection: expected=$expectedOwner actual=$after" }
-        check(after.modelMutationEpoch == expectedOwner.modelMutationEpoch + 1L) {
-            "unexpected concurrent model mutation during injection: expected=$expectedOwner actual=$after" }
-        check(after.automaticHealOperationsInFlight == 0 && after.automaticHealActivityEpoch ==
-            expectedOwner.automaticHealActivityEpoch) {
-            "automatic render heal raced injection: expected=$expectedOwner actual=$after" }
-        return after
-    }
-    @androidx.annotation.VisibleForTesting
-    internal suspend fun healActivePaneIfStaleRenderResultForTest(expectedOwner: ActivePaneRenderOwnerSnapshotForTest):
-        HealAttemptResult {
-        val before = activePaneRenderOwnerSnapshotForTest()
-        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
-            "active render owner changed before manual heal: expected=$expectedOwner actual=$before" }
-        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch &&
-            before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
-            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
-                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch
-        ) {
-            "active render model/resize changed before manual heal: expected=$expectedOwner actual=$before" }
-        return healActivePaneIfStaleRenderResultForTest()
     }
     @androidx.annotation.VisibleForTesting internal fun completeAutomaticRenderHealActivityCycleForTest() =
         automaticRenderHealTracker.begin().also(automaticRenderHealTracker::complete)
@@ -11651,12 +11747,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         connectingTarget = target
         refreshReconnectAvailability()
-        val where = target?.let { " ${it.user}@${it.host}:${it.port}" } ?: ""
-        setConnectionState(
-            ConnectionState.Unreachable(
-                "Session attach stalled$where. Tap Reconnect to retry.",
-            ),
-        )
+        surfaceControllerUnreachable()
     }
 
     public fun reseedVisiblePaneIfBlank(paneId: String) {
@@ -12170,12 +12261,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // `never_seeded` black-frame class from `capture_empty`. Diagnostic accounting
         // only — no write-path control-flow change.
         paneLastSeedAtMs[pane.paneId] = SystemClock.elapsedRealtime()
-        // EPIC #792 Slice E: feed the AUTHORITATIVE controller the REAL "seed/capture
-        // landed" signal at the EXISTING point a capture-pane lands for a pane — placed
-        // AFTER the panesSeededThisAttach write above, so it adds no write-path control
-        // flow. Combined with the real TransportLive feedback this is how the controller
-        // reaches Live from genuine signals (the active-pane landing promotes Attaching → Live).
-        feedControllerSeedLanded(pane.paneId)
+        // EPIC #792 Slice E / S7 (#766): the capture is recorded here, but the
+        // authoritative SeedLanded promotion is deferred to each attach's final
+        // reveal-time liveness boundary. Otherwise a later close during this attach
+        // could leave the controller Live over a dead shared control channel (#1863).
         // EPIC #687 P1: feed the id-tagged active-pane seed to the reveal state
         // machine at the SAME landing point. The captured `output` is non-empty
         // here (guarded above), so this reveals RevealState.Live ONLY for the
@@ -13706,13 +13795,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * Issue #968: is the [originTarget] snapshotted when the user tapped attach
      * still the active session at upload-completion time?
      *
-     * The warm `-CC` SSH session is shared across every tmux session on a host
-     * (D21), so the session-identity discriminator is the tmux **session name**
-     * (plus host), NOT the SSH lease key (which is per-host). If the user
-     * switched tmux sessions (A->B) during the upload await, the active target
-     * is now B and delivering the bytes here would misroute them into B's scope
-     * + composer. This returns `false` in exactly that case so the caller
-     * surfaces an error instead of misrouting.
+     * The warm `-CC` SSH session is shared across tmux sessions on a verified
+     * host (D21), but attachment authority belongs to the complete originating
+     * session identity. That includes the verified host-key fingerprint: after
+     * rekey, work snapshotted under the old trust must not complete against the
+     * replacement connection even when hostId and sessionName are unchanged.
      *
      * A null origin (no target was active at tap) and a null active target both
      * resolve against the `"tmux-session"` fallback scope, so a null==null pair
@@ -13722,8 +13809,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val active = activeTarget
         if (originTarget == null) return active == null
         if (active == null) return false
-        return active.hostId == originTarget.hostId &&
-            active.sessionName == originTarget.sessionName
+        return sameSessionIdentity(active, originTarget)
     }
 
     /**
@@ -13738,13 +13824,12 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun attachmentOriginStillActiveForTest(
-        originHostId: Long?,
-        originSessionName: String?,
+        originTarget: ConnectionTarget?,
     ): Boolean {
         val active = activeTarget
-        if (originHostId == null || originSessionName == null) return active == null
+        if (originTarget == null) return active == null
         if (active == null) return false
-        return active.hostId == originHostId && active.sessionName == originSessionName
+        return sameSessionIdentity(active, originTarget)
     }
 
     public suspend fun uploadQueuedAttachmentSidecars(
@@ -13945,27 +14030,27 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun isConnectInFlight(): Boolean =
         connectJob?.isActive == true ||
             autoReconnectJob?.isActive == true ||
-            inlineConnectionStatus is ConnectionStatus.Connecting ||
-            inlineConnectionStatus is ConnectionStatus.Reconnecting ||
-            inlineConnectionStatus is ConnectionStatus.Switching
+            controllerHasConnectInFlight()
 
     private fun liveSessionForAttachmentOrNull(): SshSession? {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return null
+        if (!controllerIsLiveFor()) return null
         return sessionRef?.takeIf { it.isConnected }
     }
 
     private suspend fun awaitLiveTmuxClientForSend(): TmuxClient? {
         liveTmuxClientForSendOrNull()?.let { return it }
         if (
-            inlineConnectionStatus is ConnectionStatus.Failed &&
+            (connectionManager.state is CoreConnectionState.Unreachable ||
+                connectionManager.state is CoreConnectionState.Gone) &&
             isNonRetryableConnectFailure(lastConnectFailureCause)
         ) {
             return null
         }
-        when (inlineConnectionStatus) {
-            is ConnectionStatus.Connecting,
-            is ConnectionStatus.Reconnecting,
-            is ConnectionStatus.Switching,
+        when (connectionManager.state) {
+            is CoreConnectionState.Connecting,
+            is CoreConnectionState.Attaching,
+            is CoreConnectionState.Reattaching,
+            is CoreConnectionState.Reconnecting,
             -> Unit
             else -> {
                 // ISSUE #872 / #785 twin: TRUST THE WARM LEASE ON SEND, DON'T REDIAL.
@@ -14046,10 +14131,11 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun liveTmuxClientForSendOrNullForTest(): TmuxClient? = liveTmuxClientForSendOrNull()
 
-    // #1686 seam: force a false NOT-Connected label without touching clientRef.
+    // #1686 seam: force typed recovery without touching clientRef.
     @androidx.annotation.VisibleForTesting
-    internal fun forceInlineReconnectingStatusKeepingClientForTest() {
-        _connectionState = ConnectionState.Reconnecting("t", 0, "t", 1, 5, 0L, "false-disconnect")
+    internal fun forceControllerReconnectingStatusKeepingClientForTest() {
+        connectionManager.reportRemoteDrop("false-disconnect")
+        projectStatusFromController()
     }
 
     internal suspend fun sendToAgentPaneResult(
@@ -14488,7 +14574,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 delay(reason.settleDelayMs)
                 if (clientRef !== client) return@launch
                 if (client.disconnected.value) return@launch
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+                if (!controllerIsLiveFor(guard.target)) return@launch
                 if (!isCurrentRuntime(guard)) return@launch
                 val activePane = activeVisiblePane() ?: return@launch
                 if (activePane.paneId != paneId) return@launch
@@ -14649,7 +14735,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     public fun retryAgentConversationStreamForPane(paneId: String): Boolean {
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
+        if (!controllerIsLiveFor()) return false
         val pane = paneRows[paneId] ?: return false
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
@@ -16759,6 +16845,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // probe tidy and ensures no late ping fires against a torn-down client.
         livenessProbe?.stop()
         connectionTmuxPort.setClient(null)
+        trustResolutionJob?.cancel()
+        trustResolutionJob = null
         connectJob?.cancel()
         connectJob = null
         assistant.dismiss()
@@ -16794,8 +16882,8 @@ public class TmuxSessionViewModel @Inject constructor(
         processForeground: Boolean,
     ): Boolean {
         if (processForeground) return false
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
         val target = activeTarget ?: return false
+        if (!controllerIsLiveFor(target)) return false
         val client = clientRef ?: return false
         if (client.disconnected.value) return false
         if (sessionRef?.isConnected == false) return false
@@ -16956,6 +17044,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        structuralOverflowJob?.cancelAndJoin()
+        structuralOverflowJob = null
         layoutChangeCoalescer?.stop()
         layoutChangeCoalescer = null
         layoutCoalescerScope?.cancel()
@@ -17111,6 +17201,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancel()
         eventsJob = null
+        structuralOverflowJob?.cancel()
+        structuralOverflowJob = null
         // Issue #576 (Slice A of #792): tear down the layout-change coalescer +
         // its off-main drain scope with the rest of the per-connection state.
         layoutChangeCoalescer?.stop()
@@ -17394,6 +17486,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val startDirectory: String?,
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
+        val trustedHostKeyAlgorithm: String? = null,
+        val trustedHostKeySha256: String? = null,
     ) {
         // Issue #1575: identity equality EXCLUDES the secret `passphrase` (sibling helpers).
         override fun equals(other: Any?): Boolean = connectionTargetIdentityEquals(this, other)
@@ -17523,56 +17617,5 @@ public class TmuxSessionViewModel @Inject constructor(
         ) : ConnectionStatus
         public data class Failed(val message: String) : ConnectionStatus
     }
-
-    /**
-     * EPIC #687 slice 1c-iv-a (THE STATUS FLIP): project the SHADOW
-     * [ConnectionController]'s core [com.pocketshell.core.connection.ConnectionState]
-     * onto the view-facing [ConnectionStatus] — the SINGLE source of the displayed
-     * status. The coarse SHAPE comes from the controller; the display PAYLOAD
-     * (host/port/user, reconnect attempt/reason, the failure message) is read from
-     * the inline [inlineState] the VM just constructed for this transition, because
-     * the controller's core state carries opaque [HostKey]/[SessionId], not the
-     * host/port/user/attempt the view needs.
-     *
-     * §1 seam table: `Connecting→Connecting`, `Attaching→Switching`, `Live→Connected`,
-     * `Backgrounded→Connected`, `Reattaching/Reconnecting→Reconnecting`,
-     * `Gone/Unreachable→Failed`. The two approved #685 divergences are intrinsic to
-     * the controller and surface here as the calmer status: a recoverable drop reads
-     * `Reconnecting` (the controller is `Reattaching`/`Reconnecting`, not the inline
-     * `Unreachable`), and a within-grace foreground reads `Connected` (the controller
-     * stays `Live`). #720: a controller `Unreachable` projects to a
-     * [ConnectionStatus.Failed] rendered by the calm tappable "Tap to reconnect"
-     * [FailedConnectionRow] band — never raw `TransportException`/SSH text and never
-     * "open the session again".
-     */
-    private fun connectionStatusForController(
-        controllerState: com.pocketshell.core.connection.ConnectionState,
-        inlineState: ConnectionState,
-    ): ConnectionStatus =
-        // The view-facing projection is the PURE seam
-        // [ConnectionStatusProjection.project] (extracted for #728 and pinned by
-        // `ConnectionStatusProjectionTest`). The VM supplies the seam's two pure
-        // inputs that need VM context: the INLINE-projected display payload
-        // (`connectionStatusFor(inlineState)`, a 1:1 map of the inline transition)
-        // and the host/port/user the view renders (`hostPortUserFor`, which can fall
-        // back to the active/connecting target for a payload-less terminal/idle case).
-        // Everything else — the controller→status SHAPE truth-table and the two
-        // approved #685 divergences — lives in the seam, byte-identical to the old
-        // inline body.
-        ConnectionStatusProjection.project(
-            controllerState = controllerState,
-            inlineStatus = connectionStatusFor(inlineState),
-            hpu = hostPortUserFor(inlineState),
-        )
-
-    /** Best-effort host/port/user for the view, from the inline transition payload
-     *  (the controller's core state does not carry it). Falls back to the active /
-     *  connecting target, then to blanks for a payload-less Idle/Gone. */
-    private fun hostPortUserFor(inlineState: ConnectionState): ConnectionStatusProjection.HostPortUser =
-        connectionStatusHostPortUserFor(
-            inlineState = inlineState,
-            activeTarget = activeTarget,
-            connectingTarget = connectingTarget,
-        )
 
 }

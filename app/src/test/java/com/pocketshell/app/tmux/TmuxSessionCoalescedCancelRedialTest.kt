@@ -106,9 +106,10 @@ class TmuxSessionCoalescedCancelRedialTest {
                 port = port,
                 user = user,
                 credentialId = "$hostId:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
             ),
             key = SshKey.Path(File(keyPath)),
+            knownHosts = com.pocketshell.core.ssh.KnownHostsPolicy.VerifiedFingerprint(null),
         )
 
     /**

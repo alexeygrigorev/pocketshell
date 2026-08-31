@@ -63,7 +63,10 @@ class ConnectionControllerNetworkChangedTest {
         // SSH is available again, but the replacement control channel is not
         // displayable until its target-tagged seed lands.
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }

@@ -26,7 +26,7 @@ internal suspend fun readAuthoritativeTmuxSessionIdentity(
         port = port,
         user = user,
         key = SshKey.Pem(key),
-        knownHosts = KnownHostsPolicy.AcceptAll,
+        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         timeoutMs = 15_000,
     ).getOrThrow().use { it.exec(command) }
     check(result.exitCode == 0) {

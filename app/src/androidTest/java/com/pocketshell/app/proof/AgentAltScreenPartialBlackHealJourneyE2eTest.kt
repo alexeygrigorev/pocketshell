@@ -28,6 +28,8 @@ import com.pocketshell.app.tmux.HealAttemptResult
 import com.pocketshell.app.tmux.HealOutcome
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.tmux.ActivePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.activePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.appendToActivePaneRenderModelForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -919,7 +921,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(script) } }
         val exec = result.getOrNull()
@@ -936,7 +938,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -959,7 +961,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true") }

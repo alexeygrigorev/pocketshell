@@ -8,6 +8,7 @@ import com.pocketshell.core.connection.ConnectionJournalPort
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.LivenessPort
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
@@ -29,7 +30,7 @@ import kotlinx.coroutines.flow.emptyFlow
  * The two reporters are already mutually exclusive BY CONSTRUCTION, so no guard is needed:
  * `scheduleAutoReconnectBody` CANCELS `passiveDisconnectGraceJob` as its FIRST act, before it
  * ever assigns `autoReconnectJob` — a ladder in flight therefore means the grace loop is
- * already dead and cannot reach its feed. (The loop's own `inlineConnectionStatus is Connected`
+ * already dead and cannot reach its feed. (The loop's own controller-live
  * exit enforces the same thing independently.)
  *
  * An `autoReconnectJob?.isActive != true` guard on that feed was carried in round 1, reasoned
@@ -83,12 +84,13 @@ internal enum class ReconnectRungFailureSource {
  * The controller's `TransportLive` / `TransportDropped` inputs are SUBMITTED by the owned
  * [ConnectionEffectDriver] from the REAL port flows — the lease `Up`/`Down` edges of
  * [SshLeaseTransportPort.transportEvents] and the [CurrentClientTmuxPort.disconnected]
- * oracle. The Live promotion also flows through the inline reveal ([revealLive]) and the
- * real [observeSeedLanded] feedback (idempotent).
+ * oracle. The inline reveal ([revealLive]) only confirms transport liveness; the
+ * current-target-tagged [observeAttachReady]/[observeSeedLanded] feedback is the only attach-time
+ * Live promotion.
  *
  * ## What the VM still SOURCES (the intent + the coupled IO bodies)
  * The controller must know WHICH host/target it is connecting/switching to before a
- * `TransportLive`/`SeedLanded` can promote it, so the VM sources the INTENT from its
+ * `TransportLive`/attach-readiness event can promote it, so the VM sources the INTENT from its
  * connection-state choke point. The deeply-VM-coupled IO BODIES (the warm fast-switch attach,
  * the grace teardown/reseed/heal, the reconnect ladder) stay as the `*Io` capabilities the VM
  * implements and passes in — the effect classes own the *dispatch/decision/single-entrypoint
@@ -102,9 +104,15 @@ class ConnectionManager(
      *  the effect driver observes. In PRODUCTION this is the REAL [SshLeaseTransportPort]
      *  over the VM's `SshLeaseManager`. */
     val transport: TransportPort,
+    liveness: LivenessPort = LivenessPort { false },
     journal: ConnectionJournalPort = ConnectionJournalDiagnostics,
 ) {
-    private val controller = ConnectionController(clock = clock, transport = transport, journal = journal)
+    private val controller = ConnectionController(
+        clock = clock,
+        transport = transport,
+        liveness = liveness,
+        journal = journal,
+    )
 
     /**
      * The `:shared:core-connection` reducer the facade owns. Exposed so the VM can wire the
@@ -119,7 +127,7 @@ class ConnectionManager(
      * is the injected non-suspending [warmSnapshot] the controller's grace predicate consults;
      * its [TransportPort.transportEvents] is empty and its suspend IO methods are never invoked
      * by the reducer (the facade feeds every transport EVENT explicitly). A TEST DOUBLE for the
-     * equivalence suite; production always injects the real [SshLeaseTransportPort].
+     * controller-authority tests; production always injects the real [SshLeaseTransportPort].
      */
     constructor(clock: Clock = SystemElapsedClock, warmSnapshot: (HostKey) -> Boolean = { true }) :
         this(
@@ -135,16 +143,6 @@ class ConnectionManager(
     /** The controller's current state as a flow — for the reveal machine / liveness gate. */
     val stateFlow: StateFlow<ConnectionState>
         get() = controller.state
-
-    /**
-     * The view-facing status NAME the equivalence tests compare against the inline
-     * `ConnectionStatus`. Maps the controller's [ConnectionState] onto the coarse view-facing
-     * vocabulary (`Idle/Connecting/Switching/Connected/Reconnecting/Failed`). The two approved
-     * divergences surface here as the calmer name (recoverable drop → `Reconnecting`,
-     * within-grace foreground → `Connected`).
-     */
-    val statusName: String
-        get() = statusNameFor(controller.state.value)
 
     /**
      * Submit a raw [ConnectionEvent] to the controller. Used by the [LivenessProbe] handler to
@@ -165,6 +163,15 @@ class ConnectionManager(
     }
 
     /**
+     * Re-enter a target after the current lease was verified dead. This is an explicit
+     * controller intent: a stale warm snapshot must not relabel a genuine SSH handshake
+     * as a warm same-host switch.
+     */
+    fun enterCold(host: HostKey, targetId: SessionId) {
+        controller.submit(ConnectionEvent.Enter(host, targetId, forceCold = true))
+    }
+
+    /**
      * INTENT: a same-host fast SWITCH. Submits [ConnectionEvent.Switch] when the controller
      * already holds a host (live-ish) so it re-targets to [ConnectionState.Attaching] WITHOUT a
      * re-handshake; from Idle (the warm same-host OPEN case) it is an [ConnectionEvent.Enter]
@@ -179,13 +186,24 @@ class ConnectionManager(
     }
 
     /**
-     * INTENT: the authoritative REVEAL moment. The VM only calls this once the active pane is
-     * seeded and the surface is revealed, so promoting the controller to [ConnectionState.Live]
-     * here flips the displayed `Connected` at exactly the inline reveal moment. The real
-     * [observeSeedLanded] / driver-fed `TransportLive` feeds REMAIN (idempotent).
+     * Retarget the current controller state after tmux supplies an exact session generation.
+     * This preserves the attach/recovery phase and its episode bookkeeping; it is not a new
+     * user switch. The VM uses it together with the reveal identity handoff at the same
+     * list-panes apply boundary.
+     */
+    fun adoptTargetIdentity(from: SessionId, to: SessionId) {
+        controller.submit(ConnectionEvent.TargetIdentityAdopted(from = from, to = to))
+    }
+
+    /**
+     * INTENT: the authoritative REVEAL checkpoint. The VM calls this after its final
+     * control-channel liveness check. Reveal may advance transport to [ConnectionState.Attaching],
+     * but it must not manufacture pane readiness: only real current-target-tagged
+     * [observeAttachReady]/[observeSeedLanded] feedback may promote the controller to
+     * [ConnectionState.Live].
      */
     fun revealLive(host: HostKey, targetId: SessionId) {
-        // Issue #1328 (S5): a reveal is the authoritative "we ARE connected" moment. If a
+        // Issue #1328 (S5): a reveal is the authoritative transport checkpoint. If a
         // prior failed attempt for this target left the controller in a TERMINAL state
         // (Unreachable/Gone), that state ABSORBS TransportLive/SeedLanded — so promoting
         // would leave the controller wrongly Unreachable while the pane is live on screen
@@ -196,7 +214,7 @@ class ConnectionManager(
             controller.submit(ConnectionEvent.Enter(host, targetId))
         }
         ensureTargeting(host, targetId)
-        promoteToLive(host, targetId)
+        submitTransportLiveForReveal(targetId)
     }
 
     /**
@@ -205,14 +223,14 @@ class ConnectionManager(
      * calm Reconnecting band, but does NOT advance the numbered attempt counter — issue
      * #1328 (S5) made the [ConnectionController] the SINGLE reconnect counter, so once it
      * is already Reattaching/Reconnecting this is a NO-OP. Attempt ADVANCEMENT is owned
-     * solely by the reconnect effect via [advanceReconnectLadder]; this entrypoint (the
-     * inline-transition mirror in `driveControllerIntent`) must never double-count.
+     * solely by the reconnect effect via [advanceReconnectLadder]; this entrypoint must never
+     * double-count.
      */
     fun escalateReconnecting(host: HostKey, targetId: SessionId) {
         ensureTargeting(host, targetId)
         val state = controller.state.value
         if (state is ConnectionState.Reattaching || state is ConnectionState.Reconnecting) return
-        // Issue #1666: a SYNTHETIC escalation intent (the inline-transition mirror), NOT a
+        // Issue #1666: a SYNTHETIC escalation intent, NOT a
         // self-inflicted transport teardown — it must walk the calm ladder, so it carries a
         // non-[DropCause.SelfInflicted] cause the reducer acts on.
         reportRemoteDrop("reconnect")
@@ -317,6 +335,16 @@ class ConnectionManager(
         controller.submit(ConnectionEvent.NetworkChanged(validatedHandoff))
     }
 
+    /** Network-loss hold resolved by the VM's debounced observer. */
+    fun observeNetworkLost() {
+        controller.submit(ConnectionEvent.NetworkLost)
+    }
+
+    /** Network restore resolved through the controller's injected liveness port. */
+    fun observeNetworkRestored() {
+        controller.submit(ConnectionEvent.NetworkRestored)
+    }
+
     /**
      * Within-grace foreground reattach promotion: the warm `-CC` channel was NEVER torn down,
      * so this explicit control-channel confirmation promotes [ConnectionState.Reattaching] →
@@ -345,6 +373,19 @@ class ConnectionManager(
         controller.submit(ConnectionEvent.SeedLanded(targetId, paneId))
     }
 
+    /**
+     * Observe that the current tmux attach crossed its control/list-panes readiness fence.
+     * Unlike [observeSeedLanded], this remains valid when capture produced no content or
+     * failed best-effort; the reveal reducer still holds the surface until real content lands.
+     */
+    fun observeAttachReady(
+        @Suppress("UNUSED_PARAMETER") host: HostKey,
+        targetId: SessionId,
+        paneId: String,
+    ) {
+        controller.submit(ConnectionEvent.AttachReady(targetId, paneId))
+    }
+
     private fun ensureTargeting(host: HostKey, targetId: SessionId) {
         val state = controller.state.value
         when {
@@ -356,14 +397,13 @@ class ConnectionManager(
         }
     }
 
-    private fun promoteToLive(host: HostKey, targetId: SessionId) {
+    private fun submitTransportLiveForReveal(targetId: SessionId) {
         if (controller.state.value.targetIdOrNull() != targetId) return
         controller.submit(ConnectionEvent.TransportLive)
-        controller.submit(ConnectionEvent.SeedLanded(targetId, paneId = "inline-reveal"))
     }
 
     /**
-     * A minimal TEST-DOUBLE [TransportPort] for the equivalence suite. The controller only
+     * A minimal TEST-DOUBLE [TransportPort] for controller-authority tests. The controller only
      * consults [isWarm] synchronously; the facade feeds every transport EVENT explicitly, so
      * [transportEvents] is empty. PRODUCTION never uses this — the VM injects the real
      * [SshLeaseTransportPort].
@@ -376,26 +416,4 @@ class ConnectionManager(
         override val transportEvents: Flow<TransportUpDown> = emptyFlow()
     }
 
-    companion object {
-        /**
-         * Project a controller [ConnectionState] onto the view-facing status name the
-         * equivalence tests compare against the inline `ConnectionStatus`. The §1 seam-table
-         * 1:1 mapping; the two approved divergences surface here as the calmer name (recoverable
-         * drop → `Reconnecting`, within-grace foreground → `Connected`).
-         */
-        fun statusNameFor(state: ConnectionState): String = when (state) {
-            is ConnectionState.Idle -> "Idle"
-            is ConnectionState.Connecting -> "Connecting"
-            is ConnectionState.Attaching -> "Switching"
-            is ConnectionState.Live -> "Connected"
-            // Backgrounded keeps the prior live surface in the inline VM; project to Connected
-            // for comparison parity.
-            is ConnectionState.Backgrounded -> "Connected"
-            is ConnectionState.NetworkLossSuspended -> "Connected"
-            is ConnectionState.Reattaching -> "Reconnecting"
-            is ConnectionState.Reconnecting -> "Reconnecting"
-            is ConnectionState.Gone -> "Failed"
-            is ConnectionState.Unreachable -> "Failed"
-        }
-    }
 }

@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.core.connection.ConnectionState
+
 /**
  * EPIC #687 Slice 1 (#1047) — the BACKGROUND-TRANSITION decision, the SECOND of the four
  * inline `TmuxSessionViewModel` `reduce*` selectors retired into the connection core under
@@ -36,7 +38,7 @@ enum class BackgroundArm {
  * (the #685 predicate-order trap — keep the EXACT inline precedence so behavior is
  * unchanged):
  *
- *   1. [isReconnecting] (an in-flight reconnect ladder)  -> [BackgroundArm.PauseReconnect]
+ *   1. prior controller state is Reconnecting             -> [BackgroundArm.PauseReconnect]
  *   2. NOT [hasTarget] (no active and no connecting target) -> [BackgroundArm.None]
  *   3. NOT [hasLiveControlChannel] (no live client and no session) -> [BackgroundArm.None]
  *   4. else (a live channel exists)                       -> [BackgroundArm.DetachForBackground]
@@ -46,11 +48,11 @@ enum class BackgroundArm {
  * `clientRef`/`sessionRef` liveness fed in as [hasLiveControlChannel].
  */
 fun selectBackgroundArm(
-    isReconnecting: Boolean,
+    controllerStateBeforeBackground: ConnectionState,
     hasTarget: Boolean,
     hasLiveControlChannel: Boolean,
 ): BackgroundArm = when {
-    isReconnecting -> BackgroundArm.PauseReconnect
+    controllerStateBeforeBackground is ConnectionState.Reconnecting -> BackgroundArm.PauseReconnect
     !hasTarget -> BackgroundArm.None
     !hasLiveControlChannel -> BackgroundArm.None
     else -> BackgroundArm.DetachForBackground
@@ -62,31 +64,31 @@ fun selectBackgroundArm(
  * it [selectBackgroundArm]s from the wired predicates and fires the matching VM-supplied IO
  * body.
  *
- * The predicates ([isReconnecting] / [hasTarget] / [hasLiveControlChannel]) re-read the VM's
- * live state at dispatch time (the #685 trap: the decision must read CURRENT state, not a
- * snapshot captured at construction), and the arm bodies are the VM's existing IO. This type
- * holds the DECISION; the VM holds the state + the IO.
+ * The typed controller transition supplies its own pre-Background state; the remaining
+ * effect-capability predicates ([hasTarget] / [hasLiveControlChannel]) re-read VM-owned IO
+ * resources at dispatch time. The lifecycle decision itself therefore never comes from a
+ * second VM status mirror.
  */
 class BackgroundEffects(
-    private val isReconnecting: () -> Boolean,
     private val hasTarget: () -> Boolean,
     private val hasLiveControlChannel: () -> Boolean,
-    private val pauseReconnectForBackground: () -> Unit,
+    private val pauseReconnectForBackground: (ConnectionState.Reconnecting) -> Unit,
     private val detachForBackground: () -> Unit,
     private val onNoArm: () -> Unit = {},
 ) {
     /**
-     * Select the background arm from the live predicates and fire its body. Returns the
-     * selected arm so the characterization test can assert on the decision directly.
+     * Select the background arm from the controller transition plus live effect capabilities
+     * and fire its body. Returns the selected arm for characterization tests.
      */
-    fun dispatch(): BackgroundArm {
+    fun dispatch(controllerStateBeforeBackground: ConnectionState): BackgroundArm {
         val arm = selectBackgroundArm(
-            isReconnecting = isReconnecting(),
+            controllerStateBeforeBackground = controllerStateBeforeBackground,
             hasTarget = hasTarget(),
             hasLiveControlChannel = hasLiveControlChannel(),
         )
         when (arm) {
-            BackgroundArm.PauseReconnect -> pauseReconnectForBackground()
+            BackgroundArm.PauseReconnect ->
+                pauseReconnectForBackground(controllerStateBeforeBackground as ConnectionState.Reconnecting)
             BackgroundArm.DetachForBackground -> detachForBackground()
             BackgroundArm.None -> onNoArm()
         }

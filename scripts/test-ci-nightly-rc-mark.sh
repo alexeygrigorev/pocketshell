@@ -32,25 +32,26 @@ sha_b="$(git -C "$SANDBOX/repo" rev-parse HEAD)"
 git -C "$SANDBOX/repo" push --quiet origin main
 
 # --- unknown SHA fails loudly ---
-if (cd "$SANDBOX/repo" && "$TARGET" --sha 0000000000000000000000000000000000dead --run-url "https://example/run/1" >/dev/null 2>&1); then
+if (cd "$SANDBOX/repo" && "$TARGET" --sha 0000000000000000000000000000000000dead --run-url "https://example/validation/1" --trigger-run-url "https://example/tests/1" >/dev/null 2>&1); then
   fail "expected non-zero exit for an unknown SHA"
 fi
 pass "unknown SHA fails loudly"
 
 # --- --dry-run makes no change ---
 before_local_tags="$(git -C "$SANDBOX/repo" tag -l)"
-(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_a" --run-url "https://example/run/1" --dry-run >/dev/null)
+(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_a" --run-url "https://example/validation/1" --trigger-run-url "https://example/tests/1" --dry-run >/dev/null)
 after_local_tags="$(git -C "$SANDBOX/repo" tag -l)"
 [[ "$before_local_tags" == "$after_local_tags" ]] || fail "--dry-run created a local tag"
 pass "--dry-run makes no local git change"
 
 # --- first mark creates the tag, pointing at sha_a, with SHA/run/timestamp in the message ---
-(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_a" --run-url "https://example/run/1" >/dev/null)
+(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_a" --run-url "https://example/validation/1" --trigger-run-url "https://example/tests/1" >/dev/null)
 resolved="$(git -C "$SANDBOX/repo" rev-list -n1 validated-rc)"
 [[ "$resolved" == "$sha_a" ]] || fail "validated-rc does not resolve to sha_a after first mark (got $resolved)"
 message="$(git -C "$SANDBOX/repo" for-each-ref --format='%(contents)' refs/tags/validated-rc)"
 [[ "$message" == *"SHA: $sha_a"* ]] || fail "tag message missing SHA line"
-[[ "$message" == *"Run: https://example/run/1"* ]] || fail "tag message missing run URL line"
+[[ "$message" == *"Release validation run: https://example/validation/1"* ]] || fail "tag message missing release-validation run URL line"
+[[ "$message" == *"Triggering Tests run: https://example/tests/1"* ]] || fail "tag message missing triggering Tests run URL line"
 [[ "$message" == *"Recorded: "*"Z"* ]] || fail "tag message missing an ISO-8601 UTC timestamp line"
 pass "first mark creates validated-rc at sha_a with SHA/run/timestamp"
 
@@ -64,7 +65,7 @@ clone_resolved="$(git -C "$clone_dir" rev-list -n1 validated-rc)"
 pass "validated-rc is pushed to origin and visible from a fresh clone"
 
 # --- second mark on a NEWER commit force-moves the SAME tag name (moving pointer, not append-only) ---
-(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_b" --run-url "https://example/run/2" >/dev/null)
+(cd "$SANDBOX/repo" && "$TARGET" --sha "$sha_b" --run-url "https://example/validation/2" --trigger-run-url "https://example/tests/2" >/dev/null)
 resolved2="$(git -C "$SANDBOX/repo" rev-list -n1 validated-rc)"
 [[ "$resolved2" == "$sha_b" ]] || fail "validated-rc did not move to sha_b on the second mark (got $resolved2)"
 tag_count="$(git -C "$SANDBOX/repo" tag -l 'validated-rc' | wc -l | tr -d ' ')"
@@ -108,7 +109,7 @@ git -C "$SANDBOX/repo" tag -d validated-rc >/dev/null 2>&1 || true
 git -C "$SANDBOX/repo" push --quiet --delete origin validated-rc >/dev/null 2>&1 || true
 noident_log="$SANDBOX/noident.log"
 if ! (cd "$SANDBOX/repo" && "${noident_env[@]}" bash "$TARGET" \
-        --sha "$sha_a" --run-url "https://example/run/3") > "$noident_log" 2>&1; then
+        --sha "$sha_a" --run-url "https://example/validation/3" --trigger-run-url "https://example/tests/3") > "$noident_log" 2>&1; then
   cat "$noident_log"
   fail "#2374: ci-nightly-rc-mark.sh cannot record the marker without an ambient git identity — this is what blocks record-validated-rc on every hosted runner"
 fi
@@ -128,7 +129,7 @@ git -C "$SANDBOX/repo" tag -d validated-rc >/dev/null 2>&1 || true
 git -C "$SANDBOX/repo" push --quiet --delete origin validated-rc >/dev/null 2>&1 || true
 ( cd "$SANDBOX/repo" && GIT_COMMITTER_NAME="Real Person" \
     GIT_COMMITTER_EMAIL="real@example.com" \
-    bash "$TARGET" --sha "$sha_b" --run-url "https://example/run/4" >/dev/null ) \
+    bash "$TARGET" --sha "$sha_b" --run-url "https://example/validation/4" --trigger-run-url "https://example/tests/4" >/dev/null ) \
   || fail "#2374: the script failed for a caller that DOES have an identity"
 tagger="$(git -C "$SANDBOX/repo" for-each-ref --format='%(taggeremail)' refs/tags/validated-rc)"
 [[ "$tagger" == "<real@example.com>" ]] \

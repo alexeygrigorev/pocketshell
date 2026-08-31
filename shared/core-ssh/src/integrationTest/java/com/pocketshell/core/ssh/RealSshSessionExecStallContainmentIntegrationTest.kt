@@ -131,7 +131,7 @@ class RealSshSessionExecStallContainmentIntegrationTest {
     ): RealSshSession = runBlocking {
         val connector = SshConnection.RealSshConnector
         val client = connector.createClient()
-        connector.applyKnownHostsPolicy(client, KnownHostsPolicy.AcceptAll)
+        connector.applyKnownHostsPolicy(client, TestOnlyAcceptAll)
         connector.connect(client, host, port, 15_000)
         connector.authenticate(client, "testuser", SshKey.Path(privateKeyFile), null)
         RealSshSession(client, execReadTimeoutMs = execReadTimeoutMs)

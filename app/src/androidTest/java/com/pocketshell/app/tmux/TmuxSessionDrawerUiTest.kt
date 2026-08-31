@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -84,6 +85,13 @@ class TmuxSessionDrawerUiTest {
             listOf("attach:fresh-work", "create", "refresh", "dismiss"),
             events,
         )
+        val close = compose.onNodeWithTag(TMUX_SESSION_DRAWER_CLOSE_TAG)
+            .assertContentDescriptionEquals("Close session drawer")
+            .assertHasClickAction()
+            .fetchSemanticsNode()
+        val minimumPx = 48f * compose.density.density
+        assertTrue(close.boundsInRoot.width >= minimumPx)
+        assertTrue(close.boundsInRoot.height >= minimumPx)
     }
 
     @Test

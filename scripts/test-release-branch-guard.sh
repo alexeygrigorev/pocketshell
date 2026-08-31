@@ -5,36 +5,25 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Release-line branch guard (docs/release.md)
+# Release-line branch guard (docs/release.md, issue #2430)
 #
 # WHAT THIS PINS
 # --------------
-# docs/release.md cuts a release on a `release/vX.Y.Z` candidate branch that
-# lives in its OWN worktree; the root checkout never leaves `main`. Both
-# scripts.that gate a release therefore have to accept two release lines:
+# docs/release.md stabilizes a `release/vX.Y.Z` candidate in its own worktree,
+# then fast-forwards that exact SHA onto main before publication. The two
+# release scripts deliberately have different branch contracts:
 #
 #   scripts/release-emulator-validation.sh  (require_clean_pushed_main)
-#   scripts/push-release-tag.sh             (its inline guard)
+#   scripts/push-release-tag.sh             (main only; publication boundary)
 #
-# Before this harness existed both hardcoded `main` and compared HEAD against
-# `origin/main`, so the documented worktree flow could not run at all: the
-# validation refused to start on the candidate branch, and the tag helper
-# refused to tag the very SHA the validation had passed.
+# It proves that:
 #
-# The loosening is exactly one axis wide, and this harness holds the rest of
-# the guard still. It proves that:
-#
-#   1. A `release/vX.Y.Z` branch at its pushed head is accepted by both.
-#   2. `main` at its pushed head is still accepted (no regression).
-#   3. An arbitrary branch (`feature/x`) is still REJECTED by both — the
-#      guard was widened to a second release line, not removed.
-#   4. The pushed-head check now binds to the branch's OWN remote: an
-#      unpushed local commit on the candidate is REJECTED, naming
-#      origin/release/vX.Y.Z rather than origin/main.
-#   5. The tag helper binds the summary's `Commit SHA:` to the CANDIDATE
-#      SHA. A summary produced for origin/main's SHA — which is what the
-#      pre-fix script demanded — is now correctly refused, so a release
-#      cannot be tagged on evidence gathered for a different commit.
+#   1. A `release/vX.Y.Z` branch is accepted for validation but rejected for
+#      tagging even when it is clean and pushed.
+#   2. `main` at `origin/main` is accepted by both scripts.
+#   3. An arbitrary branch is rejected by both.
+#   4. An unpushed main commit is rejected against `origin/main`.
+#   5. The tag helper binds the summary's `Commit SHA:` to `origin/main`.
 #
 # HOW (no network, no emulator, no Gradle)
 # ----------------------------------------
@@ -49,6 +38,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VALIDATION_SCRIPT="$ROOT_DIR/scripts/release-emulator-validation.sh"
 TAG_SCRIPT="$ROOT_DIR/scripts/push-release-tag.sh"
 DERIVE_SCRIPT="$ROOT_DIR/scripts/derive-version.sh"
+RELEASE_OWNER_PROMPT="$ROOT_DIR/.claude/agents/release-owner.md"
+RELEASE_DOC="$ROOT_DIR/docs/release.md"
+ROOT_README="$ROOT_DIR/README.md"
+DOC_INDEX="$ROOT_DIR/docs/README.md"
+EVIDENCE_GUARD="$ROOT_DIR/scripts/run-release-evidence-guards.sh"
 
 failures=0
 
@@ -58,12 +52,56 @@ fail_case() {
   failures=$((failures + 1))
 }
 
-for f in "$VALIDATION_SCRIPT" "$TAG_SCRIPT" "$DERIVE_SCRIPT"; do
+for f in \
+  "$VALIDATION_SCRIPT" \
+  "$TAG_SCRIPT" \
+  "$DERIVE_SCRIPT" \
+  "$RELEASE_OWNER_PROMPT" \
+  "$RELEASE_DOC" \
+  "$ROOT_README" \
+  "$DOC_INDEX" \
+  "$EVIDENCE_GUARD"; do
   [[ -f "$f" ]] || {
     printf 'FAIL: missing %s\n' "$f" >&2
     exit 1
   }
 done
+
+# The operator-facing summaries, canonical procedure, workflow wrapper, and
+# release-owner prompt must all preserve the publication boundary. This is a
+# deliberately structural check: executable branch rejection is insufficient
+# if the discoverability path still tells an operator to tag the candidate.
+release_order_contract_ok=true
+grep -Fq 'candidate branch, stabilize, fast-forward the exact SHA to main, push main, tag from main' \
+  "$ROOT_README" || release_order_contract_ok=false
+grep -Fq 'cut candidate, stabilize, fast-forward the exact SHA to main, push main, and tag from main' \
+  "$DOC_INDEX" || release_order_contract_ok=false
+grep -Fq 'Validation may run on the pushed candidate, but publication must fast-forward that exact SHA to main, push main, then tag from main.' \
+  "$EVIDENCE_GUARD" || release_order_contract_ok=false
+
+# Backticks below are literal Markdown, not shell expansion.
+# shellcheck disable=SC2016
+doc_merge_line="$(grep -nF '### 4. Merge the candidate back to `main`' "$RELEASE_DOC" | cut -d: -f1)"
+doc_tag_line="$(grep -nF '### 5. Tag the release' "$RELEASE_DOC" | cut -d: -f1)"
+# shellcheck disable=SC2016
+prompt_merge_line="$(grep -nF 'Fast-forward the validated candidate SHA to `main`' "$RELEASE_OWNER_PROMPT" | cut -d: -f1)"
+# shellcheck disable=SC2016
+prompt_tag_line="$(grep -nF 'Tag the pushed `origin/main` head' "$RELEASE_OWNER_PROMPT" | cut -d: -f1)"
+if [[ -z "$doc_merge_line" || -z "$doc_tag_line" || "$doc_merge_line" -ge "$doc_tag_line" ||
+      -z "$prompt_merge_line" || -z "$prompt_tag_line" || "$prompt_merge_line" -ge "$prompt_tag_line" ]]; then
+  release_order_contract_ok=false
+fi
+
+if grep -Eq 'stabilize, tag, merge back|stabilize, tag, and merge back|cut, stabilize, tag, and merge back' \
+  "$ROOT_README" "$DOC_INDEX" "$EVIDENCE_GUARD"; then
+  release_order_contract_ok=false
+fi
+
+if [[ "$release_order_contract_ok" == true ]]; then
+  pass 'release docs and owner prompt require merge and pushed main before tag'
+else
+  fail_case 'release docs or owner prompt regressed to candidate/tag-before-merge publication order'
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-release-branch-guard.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
@@ -171,13 +209,11 @@ expect_rejected() {
 
 # --- push-release-tag.sh ---------------------------------------------------
 
-# 1. The documented worktree flow: tag the candidate from the candidate branch.
+# 1. Candidate branches may be validated but never published directly.
 out="$(run_tag_helper release/v0.1.1 "$SUMMARY_CANDIDATE" v0.1.1)"
 rc=$?
-expect_ok 'push-release-tag.sh tags a release/vX.Y.Z candidate at its pushed head' "$out" "$rc"
-if [[ "$rc" -eq 0 && "$out" != *"$CANDIDATE_SHA"* ]]; then
-  fail_case 'push-release-tag.sh dry run did not name the CANDIDATE sha as the tag target'
-fi
+expect_rejected 'push-release-tag.sh rejects a release/vX.Y.Z candidate' \
+  "$out" "$rc" "release tags must be pushed from main, not 'release/v0.1.1'"
 # --dry-run must leave no tag behind, locally or on the remote.
 if git -C "$REPO" rev-parse -q --verify refs/tags/v0.1.1 >/dev/null 2>&1; then
   fail_case 'push-release-tag.sh --dry-run left a local tag behind'
@@ -191,30 +227,30 @@ out="$(run_tag_helper main "$SUMMARY_MAIN" v0.1.1)"
 rc=$?
 expect_ok 'push-release-tag.sh still tags from main at its pushed head' "$out" "$rc"
 
-# 3. The guard is two release lines wide, not open.
+# 3. Arbitrary branches are rejected too.
 out="$(run_tag_helper feature/x "$SUMMARY_MAIN" v0.1.1)"
 rc=$?
 expect_rejected 'push-release-tag.sh rejects an arbitrary branch' "$out" "$rc" \
-  'release tags must be pushed from main or a release/vX.Y.Z candidate branch'
+  "release tags must be pushed from main, not 'feature/x'"
 
-# 4. Evidence must be for the commit being tagged, not for origin/main.
-out="$(run_tag_helper release/v0.1.1 "$SUMMARY_MAIN" v0.1.1)"
+# 4. Evidence must be for origin/main, not for a candidate commit.
+out="$(run_tag_helper main "$SUMMARY_CANDIDATE" v0.1.1)"
 rc=$?
 expect_rejected 'push-release-tag.sh refuses a summary produced for a different commit' \
   "$out" "$rc" 'validation summary was not produced for'
 
-# 5. The pushed-head check binds to the candidate's OWN remote branch.
-git -C "$REPO" checkout -q release/v0.1.1
+# 5. The pushed-head check binds exclusively to origin/main.
+git -C "$REPO" checkout -q main
 printf 'unpushed\n' > "$REPO/UNPUSHED.md"
 git -C "$REPO" add -A
-git -C "$REPO" commit -qm 'unpushed candidate commit'
+git -C "$REPO" commit -qm 'unpushed main commit'
 UNPUSHED_SHA="$(git -C "$REPO" rev-parse HEAD)"
 write_summary "$WORK/summary-unpushed.md" "$UNPUSHED_SHA"
-out="$(run_tag_helper release/v0.1.1 "$WORK/summary-unpushed.md" v0.1.1)"
+out="$(run_tag_helper main "$WORK/summary-unpushed.md" v0.1.1)"
 rc=$?
-expect_rejected 'push-release-tag.sh refuses an unpushed candidate commit' "$out" "$rc" \
-  "must match origin/release/v0.1.1"
-git -C "$REPO" reset -q --hard "$CANDIDATE_SHA"
+expect_rejected 'push-release-tag.sh refuses an unpushed main commit' "$out" "$rc" \
+  "must match origin/main"
+git -C "$REPO" reset -q --hard "$MAIN_SHA"
 
 # --- release-emulator-validation.sh: require_clean_pushed_main --------------
 # Extracted from the production file, never transcribed.

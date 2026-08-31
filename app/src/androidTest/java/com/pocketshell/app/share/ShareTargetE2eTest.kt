@@ -131,7 +131,7 @@ class ShareTargetE2eTest {
                         port = DEFAULT_PORT,
                         user = DEFAULT_USER,
                         key = SshKey.Pem(key),
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         session.exec(
@@ -237,7 +237,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("cat \"$remotePath\"")
             }
@@ -352,7 +352,7 @@ class ShareTargetE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 ).getOrThrow().use { session ->
                     session.exec("cat \"$remotePath\"")
                 }
@@ -374,7 +374,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec(
                     "ls -1 \"\$HOME/inbox/pocketshell\" 2>/dev/null | grep \"$marker\" | wc -l",
@@ -475,7 +475,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("cat \"$remotePath\"")
             }
@@ -550,7 +550,7 @@ class ShareTargetE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).getOrThrow().use { session ->
                     session.exec("mkdir -p \"$projectPath\"")
@@ -563,7 +563,7 @@ class ShareTargetE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).getOrThrow()
             }
@@ -657,7 +657,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("cat \"$remotePath\"")
             }
@@ -730,7 +730,7 @@ class ShareTargetE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).getOrThrow().use { session ->
                     session.exec("mkdir -p \"$projectPath\"")
@@ -743,7 +743,7 @@ class ShareTargetE2eTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).getOrThrow()
             }
@@ -838,7 +838,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("cat \"$remotePath\"")
             }
@@ -870,7 +870,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("ls -1 \"$attachmentScopeDir\" 2>/dev/null | grep \"$marker\"")
             }
@@ -888,7 +888,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec(
                     "rm -rf \"\$HOME/.pocketshell/attachments/host-$hostId-$sessionName\"",
@@ -940,7 +940,7 @@ class ShareTargetE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         ).getOrThrow().use { session ->
             session.exec("printf '%s' \"\$HOME\"")
         }
@@ -958,7 +958,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("ls -1 \"$projectPath/.inbox\" 2>/dev/null | grep \"$marker\"")
             }
@@ -976,7 +976,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("rm -rf \"$projectPath\"")
             }
@@ -1031,7 +1031,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec(
                     "ls -1 \"\$HOME/inbox/pocketshell\" 2>/dev/null | grep \"$marker\"",
@@ -1053,7 +1053,7 @@ class ShareTargetE2eTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ).getOrThrow().use { session ->
                 session.exec("rm -rf \"\$HOME/inbox/pocketshell\"")
             }

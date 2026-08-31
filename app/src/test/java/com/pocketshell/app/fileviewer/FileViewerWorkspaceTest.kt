@@ -670,6 +670,7 @@ class FileViewerWorkspaceTest {
         port = port,
         username = username,
         keyPath = keyPath,
+        trustedHostKeySha256 = "SHA256:test",
         passphrase = null,
         path = path,
         cwd = cwd,

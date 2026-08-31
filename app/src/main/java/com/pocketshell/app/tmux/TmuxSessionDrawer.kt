@@ -41,6 +41,7 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.LabeledGlyphButton
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -116,23 +117,14 @@ internal fun TmuxSessionDrawer(
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }
-                    Box(
+                    LabeledGlyphButton(
+                        glyph = "\u00d7",
+                        contentDescription = "Close session drawer",
+                        onClick = onDismiss,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .size(36.dp)
-                            .testTag(TMUX_SESSION_DRAWER_CLOSE_TAG)
-                            .clickable(
-                                role = Role.Button,
-                                onClick = onDismiss,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "\u00d7",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 20.sp,
-                        )
-                    }
+                            .testTag(TMUX_SESSION_DRAWER_CLOSE_TAG),
+                    )
                 }
                 LazyColumn(
                     modifier = Modifier

@@ -128,8 +128,13 @@ internal object ConnectionJournalReplay {
         "enter" -> ConnectionEvent.Enter(
             HostKey(getString("eventHostFingerprint")),
             SessionId(getString("eventSessionFingerprint")),
+            forceCold = optBoolean("eventForceCold", false),
         )
         "switch" -> ConnectionEvent.Switch(SessionId(getString("eventSessionFingerprint")))
+        "target_identity_adopted" -> ConnectionEvent.TargetIdentityAdopted(
+            from = SessionId(getString("eventFromSessionFingerprint")),
+            to = SessionId(getString("eventToSessionFingerprint")),
+        )
         "foreground" -> ConnectionEvent.Foreground
         "background" -> ConnectionEvent.Background
         "transport_dropped" -> ConnectionEvent.TransportDropped(
@@ -150,6 +155,10 @@ internal object ConnectionJournalReplay {
             SessionId(getString("eventSessionFingerprint")),
             getString("paneId"),
         )
+        "attach_ready" -> ConnectionEvent.AttachReady(
+            SessionId(getString("eventSessionFingerprint")),
+            getString("paneId"),
+        )
         "reconnect_ladder_entered" -> ConnectionEvent.ReconnectLadderEntered
         "reconnect_failed" -> ConnectionEvent.ReconnectFailed
         "reconnect_gave_up" -> ConnectionEvent.ReconnectGaveUp
@@ -162,7 +171,12 @@ internal object ConnectionJournalReplay {
         return when (getString("${prefix}State")) {
             "idle" -> ConnectionState.Idle
             "connecting" -> ConnectionState.Connecting(host, session)
-            "attaching" -> ConnectionState.Attaching(host, session)
+            "attaching" -> ConnectionState.Attaching(
+                host,
+                session,
+                warm = optBoolean("${prefix}Warm", true),
+                recovering = optBoolean("${prefix}Recovering", false),
+            )
             "live" -> ConnectionState.Live(host, session)
             "backgrounded" -> ConnectionState.Backgrounded(host, session, getLong("${prefix}SinceMs"))
             "network_loss_suspended" ->

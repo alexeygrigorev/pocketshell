@@ -277,7 +277,7 @@ class Issue1710ConnectionJournalHostPullTest {
                 credentialId = "1710:/tmp/key",
             ),
             key = SshKey.Path(File("/tmp/key")),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         )
     }
 }

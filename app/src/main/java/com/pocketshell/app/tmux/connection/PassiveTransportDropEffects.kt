@@ -101,7 +101,7 @@ enum class PassiveDropArm {
  * (reader EOF/exception, command timeout, server exit) do.
  *
  * Issue #895 (#766 down-payment): STATUS-AGNOSTIC. There is intentionally NO
- * `inlineConnectionStatus !is Connected -> Ignore` gate — the old status gate swallowed a
+ * VM-private `not Connected -> Ignore` gate — the old status gate swallowed a
  * drop that landed during the `Switching` (Attaching) window (the R1 switch-while-black
  * freeze). The real protection against acting on the brief `-CC` close of a NORMAL fast
  * switch is the client-identity guard ([isCurrentClient]): during a healthy switch the old

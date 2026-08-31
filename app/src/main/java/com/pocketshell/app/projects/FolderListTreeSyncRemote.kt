@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -129,12 +130,36 @@ internal class FolderListTreeSyncRemote(
     }
 
     override suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult {
-        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Empty
+        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Unavailable
         val params = binding.params
-        val source = treeRemoteSource ?: return TreeRemoteSource.TreeResult.Empty
-        val session = awaitWarmSession(binding) ?: return TreeRemoteSource.TreeResult.Empty
-        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Empty
-        return source.getTree(session, params.hostName)
+        val source = treeRemoteSource ?: return TreeRemoteSource.TreeResult.Unavailable
+        val session = awaitWarmSession(binding) ?: return TreeRemoteSource.TreeResult.Unavailable
+        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Unavailable
+        val host = withContext(dispatcher()) { hostDao.getById(params.hostId) }
+            ?: return TreeRemoteSource.TreeResult.Unavailable
+        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Unavailable
+        return source.getTree(session, host.treeIdentity)
+    }
+
+    override suspend fun migrateLegacyTree(binding: TreeSyncBinding) {
+        if (!isCurrent(binding)) return
+        val params = binding.params
+        val source = treeRemoteSource ?: return
+        val host = withContext(dispatcher()) { hostDao.getById(params.hostId) } ?: return
+        val ownerId = withContext(dispatcher()) {
+            legacyRemoteTreeOwnerId(hostDao.getAll().first(), host.name)
+        }
+        // Before opaque IDs, equal display names shared one remote key. That
+        // already-ambiguous state is assigned once to the lowest stable host ID;
+        // other hosts start with independent empty owners and never merge it.
+        if (ownerId != null && ownerId != host.id) return
+        val session = awaitWarmSession(binding) ?: return
+        if (!isCurrent(binding)) return
+        source.migrateLegacyTree(
+            session = session,
+            legacyHost = host.name,
+            stableHost = host.treeIdentity,
+        )
     }
 
     override suspend fun reconcileTree(binding: TreeSyncBinding): TreeRemoteSource.ReconcileDelta? {
@@ -143,19 +168,25 @@ internal class FolderListTreeSyncRemote(
         val source = treeRemoteSource ?: return null
         val session = awaitWarmSession(binding) ?: return null
         if (!isCurrent(binding)) return null
-        return source.reconcileTree(session, params.hostName)
+        val host = withContext(dispatcher()) { hostDao.getById(params.hostId) } ?: return null
+        if (!isCurrent(binding)) return null
+        return source.reconcileTree(session, host.treeIdentity)
     }
 
     override suspend fun upsertTree(
         binding: TreeSyncBinding,
         nodes: List<TreeRemoteSource.TreeNode>,
-    ): Boolean {
-        if (!isCurrent(binding)) return false
+        expectedVersion: Long,
+    ): TreeRemoteSource.UpsertResult {
+        if (!isCurrent(binding)) return TreeRemoteSource.UpsertResult.Unavailable
         val params = binding.params
-        val source = treeRemoteSource ?: return false
-        val session = awaitWarmSession(binding) ?: return false
-        if (!isCurrent(binding)) return false
-        return source.upsertTree(session, params.hostName, nodes)
+        val source = treeRemoteSource ?: return TreeRemoteSource.UpsertResult.Unavailable
+        val session = awaitWarmSession(binding) ?: return TreeRemoteSource.UpsertResult.Unavailable
+        if (!isCurrent(binding)) return TreeRemoteSource.UpsertResult.Unavailable
+        val host = withContext(dispatcher()) { hostDao.getById(params.hostId) }
+            ?: return TreeRemoteSource.UpsertResult.Unavailable
+        if (!isCurrent(binding)) return TreeRemoteSource.UpsertResult.Unavailable
+        return source.upsertTree(session, host.treeIdentity, nodes, expectedVersion)
     }
 
     override suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): SshSession? =
@@ -290,3 +321,11 @@ internal class FolderListTreeSyncRemote(
         const val WARM_LEASE_RELEASE_TIMEOUT_MS: Long = 3_000L
     }
 }
+
+internal fun legacyRemoteTreeOwnerId(
+    hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
+    legacyName: String,
+): Long? = hosts
+    .filter { it.name == legacyName }
+    .minByOrNull { it.id }
+    ?.id

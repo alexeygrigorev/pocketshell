@@ -305,7 +305,6 @@ class LastSessionStoreOffMainTest {
         startDirectory = "/srv/app",
         tmuxSessionId = "\$3",
         sessionCreated = 1_700_000_000L,
-        composerDraft = "deploy please",
         savedAtMillis = 1_000L,
     )
 

@@ -685,11 +685,18 @@ jobs:
 
       # Issue #2374: #2356's validated-RC self-tests ran in NO gate, hiding a
       # hosted-runner "git has no tagger identity" break in the marker script.
-      - name: Nightly validated-RC marker guards (issues #2356, #2374)
+      - name: Nightly validated-RC marker guards (issues #2356, #2374, #2430)
         run: |
           scripts/test-ci-nightly-rc-mark.sh
           scripts/test-ci-nightly-rc-consecutive-check.sh
           scripts/test-ci-nightly-rc-issue.sh
+          bash scripts/test-release-validation-provenance.sh --self-test
+          bash scripts/test-release-validation-provenance.sh
+
+      # #2237's full mutation is review evidence; its cheap anchor/test-name
+      # validation belongs in the live harness lane so it cannot silently rot.
+      - name: Stale-dismiss mutation structural guard (issue #2237)
+        run: bash scripts/check-issue2237-stale-dismiss-mutation.sh --check
 
       # Issues #1800/#1919: the failure-SIGNATURE classifier that types the CI
       # swiftshader "real system input-method window never became visible"
@@ -1057,8 +1064,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install uv
-        run: pip install --upgrade uv
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.11"
+          enable-cache: true
 
       # test_send.py drives a real tmux and hard-fails (never skips) without it (#2122).
       - name: Ensure tmux is available (issue #2122)
@@ -1066,15 +1076,27 @@ jobs:
           command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
           tmux -V
 
-      - name: Install pocketshell + dev deps
-        working-directory: tools/pocketshell
+      - name: Verify frozen-lock CI wiring
         run: |
-          uv venv
-          uv pip install -e ".[dev]"
+          bash scripts/check-python-ci-lock.sh --self-test
+          bash scripts/check-python-ci-lock.sh
+
+      - name: Install pocketshell + dev deps from the committed lock
+        working-directory: tools/pocketshell
+        run: uv sync --frozen --group dev
 
       - name: Run pytest
         working-directory: tools/pocketshell
-        run: uv run pytest -v
+        run: uv run --frozen pytest -v
+
+      # Issue #2430 / audit F22: this proof used to be an uncalled top-level
+      # script. It removes the missing-window production guard in a copied tree,
+      # proves the affected test turns red while controls stay green, restores
+      # the source, and verifies the real worktree never changed.
+      - name: Usage missing-window mutation proof (issues #2274, #2430)
+        env:
+          POCKETSHELL_PYTHON: ${{ github.workspace }}/tools/pocketshell/.venv/bin/python
+        run: bash scripts/test-usage-missing-window-mutation.sh
 
       # Issue #948: fail at PR time when the app `versionName`
       # (app/build.gradle.kts) and the tools/pocketshell package `version`

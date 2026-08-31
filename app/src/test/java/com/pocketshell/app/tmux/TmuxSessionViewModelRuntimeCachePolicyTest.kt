@@ -53,24 +53,22 @@ class TmuxSessionViewModelRuntimeCachePolicyTest : TmuxSessionViewModelTestBase(
 
     @Test
     fun runtimeCacheEvictsExpiredRuntimesDeterministically() = runTest(scheduler) {
-        var nowMs = 0L
         val cache = TmuxSessionRuntimeCache(
             maxEntries = 2,
             ttlMs = 100L,
-            nowMs = { nowMs },
+            nowMs = { testScheduler.currentTime },
+            expiryScope = backgroundScope,
         )
         val expired = cachedRuntimeForTest("expired")
-        val fresh = cachedRuntimeForTest("fresh")
 
+        cache.onProcessForegrounded()
         assertTrue(cache.put(expired).isEmpty())
-        nowMs = 100L
+        testScheduler.advanceTimeBy(100L)
+        testScheduler.runCurrent()
 
-        val evicted = cache.put(fresh)
-
-        assertEquals(listOf(expired), evicted)
         assertFalse(cache.contains(expired.key))
-        assertTrue(cache.contains(fresh.key))
         assertNull(cache.activate(expired.key).runtime)
+        assertTrue((expired.client as FakeTmuxClient).closed)
     }
 
     private fun cachedRuntimeForTest(
@@ -96,7 +94,6 @@ class TmuxSessionViewModelRuntimeCachePolicyTest : TmuxSessionViewModelTestBase(
             paneProducerJobs = emptyMap(),
             paneInputQueues = emptyMap(),
             paneInputJobs = emptyMap(),
-            paneAgentJobs = emptyMap(),
             paneAgentInputs = emptyMap(),
             agentConversations = emptyMap(),
             remoteColumns = 0,

@@ -91,9 +91,22 @@ class GraceEffects(private val io: GraceIo) {
 
     /** Claim the bounded recovery window before either the reseed or dead-socket arm starts. */
     fun beginWithinGraceRecovery(claim: WithinGraceRecoveryClaim) {
+        val current = (recoveryOwnership as? GraceRecoveryOwnership.WithinGrace)?.claim
+        if (current == claim) {
+            // Repeated foreground delivery for the same target/client re-arms the
+            // same bounded owner. Its hold/heal jobs remain owned and therefore
+            // remain cancellable by a later superseding owner.
+            retiredClaim = null
+            return
+        }
+        if (current != null) {
+            recoveryJobs.forEach { it.cancel() }
+            retiredClaim = current
+        } else {
+            retiredClaim = null
+        }
         recoveryOwnership = GraceRecoveryOwnership.WithinGrace(claim)
         recoveryJobs = emptyList()
-        retiredClaim = null
     }
 
     /** Register a coroutine owned by the current bounded claim. */

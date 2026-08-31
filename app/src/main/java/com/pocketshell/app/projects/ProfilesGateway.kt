@@ -133,6 +133,8 @@ class SshProfilesGateway @Inject constructor(
                 username = host.username,
                 keyPath = keyPath,
                 passphrase = passphrase,
+                trustedHostKeyAlgorithm = host.trustedHostKeyAlgorithm,
+                trustedHostKeySha256 = host.trustedHostKeySha256,
             ),
             block = block,
         ).getOrElse { onConnectFail(it) }

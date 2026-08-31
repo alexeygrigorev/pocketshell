@@ -1,5 +1,8 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.core.connection.ConnectionState
+import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.SessionId
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -23,12 +26,16 @@ import org.junit.Test
  *    multi-session reconnect-ladder precedence).
  *
  * The inline `reduceBackground()` mapping this pins (now deleted from the VM):
- *   inlineConnectionStatus is Reconnecting              -> PauseReconnectForBackground
+ *   controller state is Reconnecting                     -> PauseReconnectForBackground
  *   activeTarget == null && connectingTarget == null    -> Ignore (None)
  *   clientRef == null && sessionRef == null             -> Ignore (None)
  *   else (a live channel exists)                         -> DetachForBackground
  */
 class BackgroundEffectsTest {
+    private val host = HostKey("host")
+    private val target = SessionId("target")
+    private val live = ConnectionState.Live(host, target)
+    private val reconnecting = ConnectionState.Reconnecting(host, target, attempt = 2)
 
     // ---- the PURE selector: class-coverage over the input combinations ----------------
 
@@ -37,7 +44,7 @@ class BackgroundEffectsTest {
         // Within-grace / in-flight reconnect ladder: pause wins, regardless of the rest.
         assertEquals(
             BackgroundArm.PauseReconnect,
-            selectBackgroundArm(isReconnecting = true, hasTarget = true, hasLiveControlChannel = true),
+            selectBackgroundArm(reconnecting, hasTarget = true, hasLiveControlChannel = true),
         )
     }
 
@@ -47,7 +54,7 @@ class BackgroundEffectsTest {
         // when there is no live client/session (exactly as the inline checked it first).
         assertEquals(
             BackgroundArm.PauseReconnect,
-            selectBackgroundArm(isReconnecting = true, hasTarget = false, hasLiveControlChannel = false),
+            selectBackgroundArm(reconnecting, hasTarget = false, hasLiveControlChannel = false),
         )
     }
 
@@ -55,7 +62,7 @@ class BackgroundEffectsTest {
     fun selector_noTarget_none() {
         assertEquals(
             BackgroundArm.None,
-            selectBackgroundArm(isReconnecting = false, hasTarget = false, hasLiveControlChannel = false),
+            selectBackgroundArm(live, hasTarget = false, hasLiveControlChannel = false),
         )
     }
 
@@ -67,7 +74,7 @@ class BackgroundEffectsTest {
         // detach.
         assertEquals(
             BackgroundArm.None,
-            selectBackgroundArm(isReconnecting = false, hasTarget = true, hasLiveControlChannel = false),
+            selectBackgroundArm(live, hasTarget = true, hasLiveControlChannel = false),
         )
     }
 
@@ -75,7 +82,7 @@ class BackgroundEffectsTest {
     fun selector_targetAndLiveControlChannel_detaches() {
         assertEquals(
             BackgroundArm.DetachForBackground,
-            selectBackgroundArm(isReconnecting = false, hasTarget = true, hasLiveControlChannel = true),
+            selectBackgroundArm(live, hasTarget = true, hasLiveControlChannel = true),
         )
     }
 
@@ -88,12 +95,10 @@ class BackgroundEffectsTest {
     }
 
     private fun effects(
-        isReconnecting: () -> Boolean,
         hasTarget: () -> Boolean,
         hasLiveControlChannel: () -> Boolean,
         rec: Recorder,
     ) = BackgroundEffects(
-        isReconnecting = isReconnecting,
         hasTarget = hasTarget,
         hasLiveControlChannel = hasLiveControlChannel,
         pauseReconnectForBackground = { rec.pause += 1 },
@@ -104,7 +109,7 @@ class BackgroundEffectsTest {
     @Test
     fun dispatch_reconnecting_firesPauseOnly() {
         val rec = Recorder()
-        val arm = effects({ true }, { true }, { true }, rec).dispatch()
+        val arm = effects({ true }, { true }, rec).dispatch(reconnecting)
         assertEquals(BackgroundArm.PauseReconnect, arm)
         assertEquals(1, rec.pause)
         assertEquals(0, rec.detach)
@@ -114,7 +119,7 @@ class BackgroundEffectsTest {
     @Test
     fun dispatch_liveChannel_firesDetachOnly() {
         val rec = Recorder()
-        val arm = effects({ false }, { true }, { true }, rec).dispatch()
+        val arm = effects({ true }, { true }, rec).dispatch(live)
         assertEquals(BackgroundArm.DetachForBackground, arm)
         assertEquals(0, rec.pause)
         assertEquals(1, rec.detach)
@@ -125,7 +130,7 @@ class BackgroundEffectsTest {
     fun dispatch_targetButNoLiveControlChannel_firesNoArmOnly() {
         // The INJECTED-PORT load-bearing case: target present, no live channel -> no-op.
         val rec = Recorder()
-        val arm = effects({ false }, { true }, { false }, rec).dispatch()
+        val arm = effects({ true }, { false }, rec).dispatch(live)
         assertEquals(BackgroundArm.None, arm)
         assertEquals(0, rec.pause)
         assertEquals(0, rec.detach)
@@ -135,7 +140,7 @@ class BackgroundEffectsTest {
     @Test
     fun dispatch_noTarget_firesNoArmOnly() {
         val rec = Recorder()
-        val arm = effects({ false }, { false }, { false }, rec).dispatch()
+        val arm = effects({ false }, { false }, rec).dispatch(live)
         assertEquals(BackgroundArm.None, arm)
         assertEquals(0, rec.pause)
         assertEquals(0, rec.detach)
@@ -150,7 +155,7 @@ class BackgroundEffectsTest {
     @Test
     fun dispatch_reconnectingWithLiveChannel_pausesNotDetaches() {
         val rec = Recorder()
-        val arm = effects({ true }, { true }, { true }, rec).dispatch()
+        val arm = effects({ true }, { true }, rec).dispatch(reconnecting)
         assertEquals(BackgroundArm.PauseReconnect, arm)
         assertEquals(1, rec.pause)
         assertEquals(0, rec.detach)
@@ -166,17 +171,16 @@ class BackgroundEffectsTest {
         val rec = Recorder()
         var hasChannel = true
         val fx = BackgroundEffects(
-            isReconnecting = { false },
             hasTarget = { true },
             hasLiveControlChannel = { hasChannel },
             pauseReconnectForBackground = { rec.pause += 1 },
             detachForBackground = { rec.detach += 1 },
             onNoArm = { rec.noArm += 1 },
         )
-        assertEquals(BackgroundArm.DetachForBackground, fx.dispatch())
+        assertEquals(BackgroundArm.DetachForBackground, fx.dispatch(live))
         // The detach tore down the live `-CC` channel: the live predicate is now false.
         hasChannel = false
-        assertEquals(BackgroundArm.None, fx.dispatch())
+        assertEquals(BackgroundArm.None, fx.dispatch(live))
         assertEquals(1, rec.detach)
         assertEquals(1, rec.noArm)
     }

@@ -196,6 +196,8 @@ class SshHostTmuxSessionsGateway internal constructor(
             username = username,
             keyPath = keyPath,
             passphrase = passphrase,
+            trustedHostKeyAlgorithm = trustedHostKeyAlgorithm,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
 
     private fun pathAware(command: String): String =

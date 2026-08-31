@@ -3,8 +3,12 @@ package com.pocketshell.app.hosts
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -31,6 +35,7 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class AddEditHostViewModelTest {
 
     @get:Rule
@@ -112,7 +117,7 @@ class AddEditHostViewModelTest {
         assertTrue(vm.state.value.saved)
         assertNotNull(vm.state.value.savedHostId)
 
-        vm.loadHost(requireNotNull(vm.state.value.savedHostId))
+        vm.bind(requireNotNull(vm.state.value.savedHostId))
 
         assertFalse(vm.state.value.saved)
         assertNull(vm.state.value.savedHostId)
@@ -316,7 +321,7 @@ class AddEditHostViewModelTest {
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.loadHost(hostId)
+        vm.bind(hostId)
         // Right after a load the baseline matches the form, so the
         // BackHandler should fall straight through to onDone().
         assertEquals(false, vm.isDirty())
@@ -348,7 +353,7 @@ class AddEditHostViewModelTest {
         // A second save with a blank usage command clears the override
         // back to null (the scheduler then falls back to the default).
         val vm2 = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm2.loadHost(hosts.single().id)
+        vm2.bind(hosts.single().id)
         vm2.updateState { it.copy(usageCommand = "   ") }
         vm2.save()
         assertNull(db.hostDao().getAll().first().single().usageCommandOverride)
@@ -377,7 +382,7 @@ class AddEditHostViewModelTest {
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.loadHost(hostId)
+        vm.bind(hostId)
         vm.updateState { it.copy(name = "renamed") }
         vm.save()
 
@@ -404,7 +409,7 @@ class AddEditHostViewModelTest {
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.loadHost(hostId)
+        vm.bind(hostId)
 
         // The UnconfinedTestDispatcher drains the launch synchronously,
         // so the state is hydrated by the time we read it back.
@@ -414,5 +419,125 @@ class AddEditHostViewModelTest {
         assertEquals("2200", loaded.port)
         assertEquals("deploy", loaded.username)
         assertEquals(keyId, loaded.selectedKeyId)
+    }
+
+    @Test
+    fun bind_editThenAdd_resetsIdentityAndInsertsWithoutOverwritingEditedHost() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val originalId = db.hostDao().insert(
+            com.pocketshell.core.storage.entity.HostEntity(
+                name = "original", hostname = "old.example", port = 22,
+                username = "old", keyId = keyId,
+            ),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.bind(originalId, entryId = 1L)
+        vm.bind(null, entryId = 2L)
+        assertEquals(HostFormState(), vm.state.value)
+        vm.updateState {
+            it.copy(name = "new", hostname = "new.example", username = "new", selectedKeyId = keyId)
+        }
+        vm.save()
+
+        val rows = db.hostDao().getAll().first().sortedBy { it.id }
+        assertEquals(2, rows.size)
+        assertEquals("original", rows.first().name)
+        assertEquals("new", rows.last().name)
+    }
+
+    @Test
+    fun bind_addThenAdd_resetsFieldsAndCreatesTwoDistinctHosts() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.bind(null, entryId = 1L)
+        vm.updateState {
+            it.copy(name = "one", hostname = "one.example", username = "u", selectedKeyId = keyId)
+        }
+        vm.save()
+        vm.consumeSaved()
+        vm.bind(null, entryId = 2L)
+        assertEquals(HostFormState(), vm.state.value)
+        vm.updateState {
+            it.copy(name = "two", hostname = "two.example", username = "u", selectedKeyId = keyId)
+        }
+        vm.save()
+
+        assertEquals(listOf("one", "two"), db.hostDao().getAll().first().map { it.name })
+    }
+
+    @Test
+    fun changingEndpointClearsPriorTrustBeforeTheMandatoryConnectionTest() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "host",
+                hostname = "old.example",
+                port = 22,
+                username = "u",
+                keyId = keyId,
+                trustedHostKeyAlgorithm = "ssh-ed25519",
+                trustedHostKeySha256 = "SHA256:old",
+            ),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.bind(hostId, entryId = 1L)
+        advanceUntilIdle()
+        vm.updateState { it.copy(hostname = "new.example") }
+        vm.save()
+        advanceUntilIdle()
+
+        val saved = requireNotNull(db.hostDao().getById(hostId))
+        assertNull(saved.trustedHostKeyAlgorithm)
+        assertNull(saved.trustedHostKeySha256)
+    }
+
+    @Test
+    fun bind_sameHostNewEntry_rejectsOlderEntryLoadAfterUserTypes() = runTest {
+        val host = HostEntity(
+            id = 7L,
+            name = "stored",
+            hostname = "stored.example",
+            port = 22,
+            username = "stored-user",
+            keyId = 1L,
+        )
+        val firstStarted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val hostDao = DelayedFirstReadHostDao(
+            delegate = db.hostDao(),
+            host = host,
+            firstStarted = firstStarted,
+            releaseFirst = releaseFirst,
+        )
+        val vm = AddEditHostViewModel(hostDao, db.sshKeyDao())
+
+        vm.bind(host.id, entryId = 1L)
+        firstStarted.await()
+        vm.bind(host.id, entryId = 2L)
+        advanceUntilIdle()
+        vm.updateState { it.copy(name = "typed in newer entry") }
+
+        releaseFirst.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals("typed in newer entry", vm.state.value.name)
+    }
+
+    private class DelayedFirstReadHostDao(
+        private val delegate: HostDao,
+        private val host: HostEntity,
+        private val firstStarted: CompletableDeferred<Unit>,
+        private val releaseFirst: CompletableDeferred<Unit>,
+    ) : HostDao by delegate {
+        private var calls = 0
+
+        override suspend fun getById(id: Long): HostEntity? {
+            calls += 1
+            if (calls == 1) {
+                firstStarted.complete(Unit)
+                releaseFirst.await()
+            }
+            return host.takeIf { it.id == id }
+        }
     }
 }

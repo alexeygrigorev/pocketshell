@@ -20,7 +20,7 @@ class NetworkChangeEffectsTest {
                 hasTarget = true,
                 hasClientOrSession = true,
                 autoReconnectActive = false,
-                inlineConnected = true,
+                controllerLive = true,
                 lifecycleCoalesces = { error("must not inspect lifecycle coalesce") },
                 transportKeepAliveProvenAlive = { error("must not inspect transport liveness") },
             ),
@@ -39,7 +39,7 @@ class NetworkChangeEffectsTest {
         // ONLY the keepalive-unproven loss below still holds (then the VM debounces it).
         assertEquals(
             NetworkChangeArm.HoldNetworkLost,
-            baseSelect(change = lostChange(), inlineConnected = false),
+            baseSelect(change = lostChange(), controllerLive = false),
         )
     }
 
@@ -92,13 +92,13 @@ class NetworkChangeEffectsTest {
     fun selector_networkRestored_recoversEvenWhenInlineStatusIsNotConnected() {
         assertEquals(
             NetworkChangeArm.ScheduleNetworkReconnectOnRestore,
-            baseSelect(change = restoredChange(), inlineConnected = false),
+            baseSelect(change = restoredChange(), controllerLive = false),
         )
     }
 
     @Test
     fun selector_validatedHandoff_requiresConnectedStateAndTargetAndLease() {
-        assertEquals(NetworkChangeArm.Ignore, baseSelect(inlineConnected = false))
+        assertEquals(NetworkChangeArm.Ignore, baseSelect(controllerLive = false))
         assertEquals(NetworkChangeArm.Ignore, baseSelect(hasTarget = false))
         assertEquals(NetworkChangeArm.Ignore, baseSelect(hasClientOrSession = false))
     }
@@ -232,7 +232,7 @@ class NetworkChangeEffectsTest {
         hasTarget: () -> Boolean = { true },
         hasClientOrSession: () -> Boolean = { true },
         autoReconnectActive: () -> Boolean = { false },
-        inlineConnected: () -> Boolean = { true },
+        controllerLive: () -> Boolean = { true },
         lifecycleCoalesces: () -> Boolean = { false },
         transportKeepAliveProvenAlive: () -> Boolean = { false },
     ): NetworkChangeEffects =
@@ -241,7 +241,7 @@ class NetworkChangeEffectsTest {
             hasTarget = hasTarget,
             hasClientOrSession = hasClientOrSession,
             autoReconnectActive = autoReconnectActive,
-            inlineConnected = inlineConnected,
+            controllerLive = controllerLive,
             lifecycleCoalesces = lifecycleCoalesces,
             transportKeepAliveProvenAlive = transportKeepAliveProvenAlive,
             suppressNetworkNotValidated = { recorder.notValidated += 1 },
@@ -259,7 +259,7 @@ class NetworkChangeEffectsTest {
         hasTarget: Boolean = true,
         hasClientOrSession: Boolean = true,
         autoReconnectActive: Boolean = false,
-        inlineConnected: Boolean = true,
+        controllerLive: Boolean = true,
         lifecycleCoalesces: () -> Boolean = { false },
         transportKeepAliveProvenAlive: () -> Boolean = { false },
     ): NetworkChangeArm =
@@ -269,7 +269,7 @@ class NetworkChangeEffectsTest {
             hasTarget = hasTarget,
             hasClientOrSession = hasClientOrSession,
             autoReconnectActive = autoReconnectActive,
-            inlineConnected = inlineConnected,
+            controllerLive = controllerLive,
             lifecycleCoalesces = lifecycleCoalesces,
             transportKeepAliveProvenAlive = transportKeepAliveProvenAlive,
         )

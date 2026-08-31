@@ -337,7 +337,7 @@ class RealAgentReleaseGateTest {
             port = REAL_AGENT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(command) } }
         val exec = result.getOrNull()
@@ -447,7 +447,7 @@ class RealAgentReleaseGateTest {
             port = REAL_AGENT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(command) }
@@ -525,7 +525,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use {
@@ -548,7 +548,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec("cat ${shellQuote(jsonlPath)}") }
@@ -620,7 +620,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec(findCommand) }
@@ -654,7 +654,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec(grepCommand) }
@@ -675,7 +675,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec("cat ${shellQuote(matchingPath)}") }
@@ -739,7 +739,7 @@ class RealAgentReleaseGateTest {
                 port = REAL_AGENT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).mapCatching { session ->
                 session.use { it.exec(cleanupCommand) }

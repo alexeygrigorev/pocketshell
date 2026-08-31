@@ -177,14 +177,6 @@ public fun TmuxSessionScreen(
     onOpenFiles: () -> Unit = {},
     /** Issue #528: open the browsable file explorer. */
     onBrowseFiles: (startDir: String) -> Unit = {},
-    // Issue #177 / #459: composer-draft persistence params — INERT here since
-    // #459 collapsed the Conversation composer onto the shared unified composer
-    // (which persists its own draft). MainActivity still passes them; they are
-    // intentionally unused in this screen. Kept so the sole production call site
-    // (MainActivity) is unchanged.
-    @Suppress("UNUSED_PARAMETER") initialComposerDraft: String = "",
-    @Suppress("UNUSED_PARAMETER") onInitialComposerDraftConsumed: () -> Unit = {},
-    @Suppress("UNUSED_PARAMETER") onComposerDraftChanged: (String) -> Unit = {},
     // Issue #560: share-into-session staged attachment path(s).
     initialComposerAttachments: List<String> = emptyList(),
     onInitialComposerAttachmentsConsumed: () -> Unit = {},

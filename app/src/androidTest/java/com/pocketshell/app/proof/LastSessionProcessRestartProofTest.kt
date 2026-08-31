@@ -74,7 +74,6 @@ class LastSessionProcessRestartProofTest {
             resolveLastSessionForStop(
                 currentDestination = predecessorRoute,
                 tmuxIntent = null,
-                composerDraft = "predecessor",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )
@@ -101,7 +100,6 @@ class LastSessionProcessRestartProofTest {
                     trigger = TmuxConnectTrigger.UserTap,
                     generation = 1L,
                 ),
-                composerDraft = "successor",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )
@@ -373,7 +371,7 @@ class LastSessionProcessRestartProofTest {
             port = fixture.host.port,
             user = fixture.host.username,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
 

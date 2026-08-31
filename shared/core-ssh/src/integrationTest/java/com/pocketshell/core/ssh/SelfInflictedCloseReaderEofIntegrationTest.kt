@@ -138,7 +138,7 @@ class SelfInflictedCloseReaderEofIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 15_000,
         ).getOrThrow()
     }

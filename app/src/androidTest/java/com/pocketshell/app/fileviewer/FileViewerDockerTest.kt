@@ -426,7 +426,7 @@ class FileViewerDockerTest {
             ),
             key = SshKey.Path(keyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         )
         val warmLease = withTimeout(30_000) { leasing.manager.acquire(warmTarget).getOrThrow() }
         val afterWarm = leasing.handshakeCount.get()
@@ -1076,7 +1076,7 @@ class FileViewerDockerTest {
         port = DEFAULT_PORT,
         user = DEFAULT_USER,
         key = sshKey,
-        knownHosts = KnownHostsPolicy.AcceptAll,
+        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         timeoutMs = 10_000,
     ).getOrNull()
 

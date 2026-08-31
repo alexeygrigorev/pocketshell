@@ -2,8 +2,10 @@ package com.pocketshell.app.di
 
 import com.pocketshell.app.sessions.SharedSshLeaseManager
 import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.storage.dao.HostDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -15,8 +17,13 @@ import javax.inject.Singleton
 object SshLeaseModule {
     @Provides
     @Singleton
-    internal fun provideAuthoritativeSshLeaseConnector(): AuthoritativeSshLeaseConnector =
-        AuthoritativeSshLeaseConnector()
+    internal fun provideAuthoritativeSshLeaseConnector(
+        hostDao: HostDao,
+        trustPromptRouter: HostKeyTrustPromptRouter,
+    ): AuthoritativeSshLeaseConnector = AuthoritativeSshLeaseConnector(
+        hostDao = hostDao,
+        trustPromptRouter = trustPromptRouter,
+    )
 
     @Provides
     @Singleton

@@ -8,9 +8,11 @@ package com.pocketshell.app.projects
  * The host-side tree registry remains the authoritative source.
  */
 internal interface TreeSyncCache {
-    fun peek(host: String): TreeClientCache.CachedTree?
+    suspend fun migrateLegacy(hostId: Long, legacyHostName: String) = Unit
 
-    fun read(host: String): TreeClientCache.CachedTree
+    fun peek(hostId: Long): TreeClientCache.CachedTree?
 
-    fun write(host: String, tree: TreeClientCache.CachedTree)
+    fun read(hostId: Long): TreeClientCache.CachedTree
+
+    fun write(hostId: Long, revision: Long, tree: TreeClientCache.CachedTree)
 }

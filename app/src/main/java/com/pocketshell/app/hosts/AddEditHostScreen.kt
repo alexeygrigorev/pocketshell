@@ -117,10 +117,12 @@ private const val PORT_SUPPORTING_TEXT = "Default: 22"
 @Composable
 fun AddEditHostScreen(
     hostId: Long?,
+    entryId: Long = 0L,
     onDone: () -> Unit,
     onScanQr: (() -> Unit)? = null,
     firstRunGuided: Boolean = false,
     onFirstRunHostSaved: (Long) -> Unit = {},
+    onHostSaved: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
     keyManagementViewModel: SshKeysViewModel = hiltViewModel(),
@@ -130,8 +132,8 @@ fun AddEditHostScreen(
     val sshKeys by viewModel.sshKeys.collectAsState()
     var selectedTab by remember { mutableStateOf(AddEditHostTab.Details) }
 
-    LaunchedEffect(hostId) {
-        if (hostId != null) viewModel.loadHost(hostId)
+    LaunchedEffect(hostId, entryId) {
+        viewModel.bind(hostId, entryId)
     }
     LaunchedEffect(state.saved) {
         if (state.saved) {
@@ -142,7 +144,9 @@ fun AddEditHostScreen(
             // tapping "Edit" on a failed guided test-connect, which would
             // otherwise bounce straight back and make Edit a dead end (#1243).
             viewModel.consumeSaved()
-            if (firstRunGuided && savedHostId != null) {
+            if (savedHostId != null && onHostSaved != null) {
+                onHostSaved(savedHostId)
+            } else if (firstRunGuided && savedHostId != null) {
                 onFirstRunHostSaved(savedHostId)
             } else {
                 onDone()

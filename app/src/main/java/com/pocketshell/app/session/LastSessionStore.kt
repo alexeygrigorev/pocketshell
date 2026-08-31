@@ -30,7 +30,7 @@ import kotlin.coroutines.EmptyCoroutineContext
  *
  * This is the same trade-off [com.pocketshell.app.settings.SettingsRepository]
  * already made: the payload is tiny (one host tuple + a session name +
- * a composer draft + a timestamp), write traffic is one-edit-per-app-stop,
+ * a timestamp), write traffic is one-edit-per-app-stop,
  * and SharedPreferences is already on the classpath transitively. A Room
  * entity would force a schema bump and migration for state that does not need
  * relational queries. DataStore would add a version-catalog entry without
@@ -146,8 +146,8 @@ class LastSessionStore @VisibleForTesting internal constructor(
      * Persisted snapshot of the last active `tmux -CC` session view.
      *
      * Only the fields needed to rebuild an
-     * [AppDestination.TmuxSession] plus the composer draft and the wall
-     * clock the snapshot was taken at (so [read] can age it out). The
+     * [AppDestination.TmuxSession] plus the wall clock the snapshot was taken
+     * at (so [read] can age it out). The
      * key passphrase is intentionally NOT stored — the reattach path
      * resolves the key from disk by path, same as a cold attach, so we
      * never write a secret into prefs.
@@ -163,7 +163,6 @@ class LastSessionStore @VisibleForTesting internal constructor(
         val startDirectory: String?,
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
-        val composerDraft: String,
         val savedAtMillis: Long,
     ) {
         /** The complete tmux identity, when this snapshot carried one. */
@@ -213,7 +212,6 @@ class LastSessionStore @VisibleForTesting internal constructor(
             putString(KEY_SESSION_NAME, session.sessionName)
             putString(KEY_START_DIR, session.startDirectory)
             putString(KEY_TMUX_SESSION_ID, session.tmuxSessionId)
-            putString(KEY_COMPOSER_DRAFT, session.composerDraft)
             putLong(KEY_SAVED_AT, session.savedAtMillis)
             if (session.sessionCreated != null) {
                 putLong(KEY_SESSION_CREATED, session.sessionCreated)
@@ -294,7 +292,6 @@ class LastSessionStore @VisibleForTesting internal constructor(
             startDirectory = prefs.safeString(KEY_START_DIR, null),
             tmuxSessionId = prefs.safeString(KEY_TMUX_SESSION_ID, null)?.trim()?.ifBlank { null },
             sessionCreated = prefs.safeLong(KEY_SESSION_CREATED, 0L)?.takeIf { it > 0L },
-            composerDraft = prefs.safeString(KEY_COMPOSER_DRAFT, "") ?: "",
             savedAtMillis = savedAt,
         )
     }
@@ -524,7 +521,6 @@ class LastSessionStore @VisibleForTesting internal constructor(
         private const val KEY_START_DIR = "start_dir"
         private const val KEY_TMUX_SESSION_ID = "tmux_session_id"
         private const val KEY_SESSION_CREATED = "session_created"
-        private const val KEY_COMPOSER_DRAFT = "composer_draft"
         private const val KEY_SAVED_AT = "saved_at"
 
         private const val DEFAULT_SSH_PORT = 22

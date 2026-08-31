@@ -89,6 +89,15 @@ class Issue2377MultiSocketSessionListDockerTest {
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
     private lateinit var db: AppDatabase
+    // Issue #2445 — `waitForSshFixtureReady` now probes with
+    // `KnownHostsPolicy.VerifiedFingerprint(null)` and returns the real
+    // presented fingerprint (see AndroidSshTestFixtures.kt, issue #2444/#2433's
+    // "Enforce SSH host key trust and rekey flows"). The production
+    // `SshFolderListGateway` used by [bindProductionViewModel] enforces
+    // `HostEntity.hostKeyTrustBinding()` on every connect, so this fixture's
+    // `HostEntity` must carry the trusted fingerprint or every connect throws
+    // `UnknownHostKeyException`.
+    private lateinit var trustedHostKeySha256: String
     private val viewModelStore = ViewModelStore()
     private val tmuxClientScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var ccSession: SshSession? = null
@@ -114,7 +123,7 @@ class Issue2377MultiSocketSessionListDockerTest {
             instrumentation.targetContext,
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -553,6 +562,11 @@ class Issue2377MultiSocketSessionListDockerTest {
                 port = DEFAULT_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                // Issue #2445: without an explicit trusted fingerprint the
+                // production gateway's host-key verifier throws
+                // UnknownHostKeyException on every connect (see the
+                // trustedHostKeySha256 field doc above).
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = db.hostDao().getById(hostId)!!

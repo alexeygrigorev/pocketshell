@@ -251,6 +251,8 @@ public class SshHostUsageFetcher : HostUsageFetcher {
                 username = host.username,
                 keyPath = keyPath,
                 passphrase = null,
+                trustedHostKeyAlgorithm = host.trustedHostKeyAlgorithm,
+                trustedHostKeySha256 = host.trustedHostKeySha256,
             ),
             block = block,
         ).getOrElse { onFail() }

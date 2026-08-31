@@ -93,7 +93,7 @@ class SshAddressFallbackIntegrationTest {
             port = container!!.getMappedPort(CONTAINER_SSH_PORT),
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 8_000,
         )
 

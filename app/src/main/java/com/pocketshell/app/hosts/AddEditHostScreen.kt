@@ -122,6 +122,7 @@ fun AddEditHostScreen(
     onScanQr: (() -> Unit)? = null,
     firstRunGuided: Boolean = false,
     onFirstRunHostSaved: (Long) -> Unit = {},
+    onHostSaved: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
     keyManagementViewModel: SshKeysViewModel = hiltViewModel(),
@@ -143,7 +144,9 @@ fun AddEditHostScreen(
             // tapping "Edit" on a failed guided test-connect, which would
             // otherwise bounce straight back and make Edit a dead end (#1243).
             viewModel.consumeSaved()
-            if (firstRunGuided && savedHostId != null) {
+            if (savedHostId != null && onHostSaved != null) {
+                onHostSaved(savedHostId)
+            } else if (firstRunGuided && savedHostId != null) {
                 onFirstRunHostSaved(savedHostId)
             } else {
                 onDone()

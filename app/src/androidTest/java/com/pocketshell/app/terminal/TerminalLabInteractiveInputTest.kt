@@ -54,7 +54,7 @@ class TerminalLabInteractiveInputTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val hostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         ActivityScenario.launch<TerminalLabActivity>(
             TerminalLabActivity.intent(
@@ -63,6 +63,7 @@ class TerminalLabInteractiveInputTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 privateKeyPem = key,
+                hostKeySha256 = hostKeySha256,
             ),
         ).use { scenario ->
             waitForVisibleTerminalText(scenario, "initial shell output") { it.isNotBlank() }

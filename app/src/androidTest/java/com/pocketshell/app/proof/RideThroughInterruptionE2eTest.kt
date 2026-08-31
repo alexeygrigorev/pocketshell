@@ -867,7 +867,7 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = OBSERVER_CONNECT_TIMEOUT_MS.toInt(),
             ).getOrThrow()
         }
@@ -880,7 +880,7 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
                 port = NETWORK_FAULT_SSH_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = PROXY_SENTINEL_CONNECT_TIMEOUT_MS,
             ).getOrThrow()
         }

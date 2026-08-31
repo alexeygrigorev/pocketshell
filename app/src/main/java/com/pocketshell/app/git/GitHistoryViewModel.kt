@@ -517,7 +517,7 @@ class GitHistoryViewModel @Inject constructor(
         /**
          * Issue #699: build the lease key the SAME way the live session screen
          * does — `credentialId = "$hostId:$keyPath"`, `knownHostsId =
-         * "accept-all"` — so an already-warm host transport is reused rather
+         * verified host-key identity — so an already-warm host transport is reused rather
          * than a fresh handshake dialed.
          */
         fun toLeaseTarget(): SshLeaseTarget =
@@ -527,11 +527,11 @@ class GitHistoryViewModel @Inject constructor(
                     port = port,
                     user = username,
                     credentialId = "$hostId:$keyPath",
-                    knownHostsId = "accept-all",
+                    knownHostsId = SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
                 ),
                 key = SshKey.Path(File(keyPath)),
                 passphrase = passphrase?.copyOf(),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
             )
 
         override fun equals(other: Any?): Boolean {

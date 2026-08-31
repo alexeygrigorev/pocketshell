@@ -133,7 +133,14 @@ public class SshLeaseManager(
      */
     private fun SshSession.isLiveForLease(): Boolean = isConnected && !isCloseInitiated
 
-    public suspend fun acquire(target: SshLeaseTarget): Result<SshLease> {
+    public suspend fun acquire(requestedTarget: SshLeaseTarget): Result<SshLease> {
+        val targetResolver = connector as? SshLeaseTargetResolver
+        val target = if (targetResolver != null) {
+            runCatching { targetResolver.resolveTarget(requestedTarget) }
+                .getOrElse { return Result.failure(it) }
+        } else {
+            requestedTarget
+        }
         val key = target.leaseKey
 
         // Decide our role under the lock: reuse a live entry, await an
@@ -821,6 +828,7 @@ public class SshLeaseManager(
          */
         public const val DEFAULT_CONNECT_TIMEOUT_MILLIS: Long = 35_000L
         private const val STATE_EVENT_BUFFER_CAPACITY: Int = 64
+        public const val UNCONFIRMED_HOST_KEY_ID: String = "host-key:unconfirmed"
     }
 }
 
@@ -878,19 +886,24 @@ public data class SshLeaseKey(
     val port: Int,
     val user: String,
     val credentialId: String,
-    val knownHostsId: String = "accept-all",
+    val knownHostsId: String = SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
 )
 
 public data class SshLeaseTarget(
     val leaseKey: SshLeaseKey,
     val key: SshKey,
     val passphrase: CharArray? = null,
-    val knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
+    val knownHosts: KnownHostsPolicy = KnownHostsPolicy.RejectAll,
     val timeoutMs: Int = SshConnection.DEFAULT_TIMEOUT_MS,
 )
 
 public fun interface SshLeaseConnector {
     public suspend fun connect(target: SshLeaseTarget): Result<SshSession>
+}
+
+/** Resolves durable trust before the manager chooses a cache key or reuses a session. */
+public interface SshLeaseTargetResolver {
+    public suspend fun resolveTarget(target: SshLeaseTarget): SshLeaseTarget
 }
 
 public class DefaultSshLeaseConnector : SshLeaseConnector {

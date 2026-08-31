@@ -48,7 +48,7 @@ class SshConnectionFailureTest {
             port = 1,
             user = "nobody",
             key = SshKey.Pem("not a real key"),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 2_000,
             connector = connector,
         )
@@ -73,7 +73,7 @@ class SshConnectionFailureTest {
             port = 1,
             user = "nobody",
             key = SshKey.Pem("not a real key"),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 2_000,
             connector = connector,
         )
@@ -97,7 +97,7 @@ class SshConnectionFailureTest {
             port = 1,
             user = "nobody",
             key = SshKey.Pem("not a real key"),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 2_000,
             connector = connector,
         )

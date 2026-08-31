@@ -293,6 +293,14 @@ class AddEditHostViewModel @Inject constructor(
                     username = s.username.trim(),
                     keyId = checkNotNull(s.selectedKeyId),
                     usageCommandOverride = usageOverride,
+                    trustedHostKeyAlgorithm = existing.trustedHostKeyAlgorithm.takeIf {
+                        existing.hostname.equals(s.hostname.trim(), ignoreCase = true) &&
+                            existing.port == s.port.toInt()
+                    },
+                    trustedHostKeySha256 = existing.trustedHostKeySha256.takeIf {
+                        existing.hostname.equals(s.hostname.trim(), ignoreCase = true) &&
+                            existing.port == s.port.toInt()
+                    },
                 )
             } else {
                 HostEntity(

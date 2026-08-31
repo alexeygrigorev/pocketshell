@@ -123,7 +123,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                         port = DEFAULT_PORT,
                         user = DEFAULT_USER,
                         key = sshKey,
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         for (name in createdSessions) {
@@ -150,7 +150,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { s ->
                 s.exec("mkdir -p $folder")
@@ -184,7 +184,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).getOrThrow()
         } }
@@ -274,7 +274,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { s ->
                 s.exec("tmux kill-window -t $targetWindowId")

@@ -383,7 +383,7 @@ class Issue796ImeRecompositionProofTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -423,7 +423,7 @@ class Issue796ImeRecompositionProofTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(script) } }
         val exec = result.getOrNull()
@@ -440,7 +440,7 @@ class Issue796ImeRecompositionProofTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("touch '$REMOTE_TRIGGER'") }

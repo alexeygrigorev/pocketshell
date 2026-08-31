@@ -410,6 +410,7 @@ class FileViewerReviewSubmitTest {
         port = 2222,
         username = "tester",
         keyPath = "/tmp/key",
+        trustedHostKeySha256 = "SHA256:test",
         passphrase = null,
         path = path,
         cwd = null,

@@ -125,7 +125,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                         port = fixturePort,
                         user = DEFAULT_USER,
                         key = sshKey,
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         for (name in createdSessions) {
@@ -145,7 +145,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                         port = DAEMON_PORT,
                         user = DEFAULT_USER,
                         key = sshKey,
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         for (name in daemonCreatedSessions) {
@@ -174,7 +174,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = fixturePort,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 session.exec("mkdir -p $folder")
@@ -365,7 +365,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = DAEMON_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 session.exec("mkdir -p $folder")
@@ -420,7 +420,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = DAEMON_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 session.exec("tmux kill-session -t $sessionName")
@@ -532,7 +532,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = host.port,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 val result = source.getTree(session, host.treeIdentity)

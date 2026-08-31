@@ -55,6 +55,7 @@ import com.pocketshell.app.hosts.FirstHostTestConnectScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
 import com.pocketshell.app.fileexplorer.FileExplorerScreen
@@ -245,8 +246,10 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var sshKeyDao: SshKeyDao
 
-    /** Issue #177: the navigator's current top destination, reported up by
-     * [AppNavigator] so `onStop` can persist it. */
+    @Inject
+    internal lateinit var hostKeyTrustPromptRouter: HostKeyTrustPromptRouter
+
+    /** Issue #177: the navigator's current top destination, persisted on stop. */
     private var currentTopDestination: AppDestination = AppDestination.HostList
     private var restoredTmuxDestination: AppDestination.TmuxSession? = null
 
@@ -526,6 +529,7 @@ class MainActivity : FragmentActivity() {
                         // return to this host's sessions?" dialog — including on the
                         // cold-restore path.
                         staleSessionPromptController = staleSessionPromptController,
+                        hostKeyTrustPromptRouter = hostKeyTrustPromptRouter,
                     )
                 }
             }
@@ -916,6 +920,7 @@ private fun AppNavigator(
     // where the folder tree was never opened. Null in previews/tests that do not
     // exercise the recovery dialog.
     staleSessionPromptController: com.pocketshell.app.tmux.StaleSessionPromptController? = null,
+    hostKeyTrustPromptRouter: HostKeyTrustPromptRouter? = null,
 ) {
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
@@ -998,6 +1003,23 @@ private fun AppNavigator(
         retainedNavigationState.current = dest
         onCurrentDestinationCaptured(dest)
         reportDestination(dest)
+    }
+
+    LaunchedEffect(hostKeyTrustPromptRouter) {
+        hostKeyTrustPromptRouter?.pendingHostId?.collect { hostId ->
+            hostId ?: return@collect
+            val trustDestination = AppDestination.FirstHostTestConnect(
+                hostId = hostId,
+                firstRunGuided = false,
+            )
+            val alreadyConfirmingThisHost =
+                (current as? AppDestination.FirstHostTestConnect)?.hostId == hostId
+            if (!alreadyConfirmingThisHost) {
+                backStack += current
+                setCurrentDestination(trustDestination)
+            }
+            hostKeyTrustPromptRouter.consume(hostId)
+        }
     }
 
     LaunchedEffect(requestedDestination) {
@@ -1208,6 +1230,9 @@ private fun AppNavigator(
             entryId = retainedNavigationState.entryId,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
+            onHostSaved = { hostId ->
+                replace(AppDestination.FirstHostTestConnect(hostId, firstRunGuided = false))
+            },
         )
 
         AppDestination.AddFirstHost -> AddEditHostScreen(
@@ -1222,7 +1247,13 @@ private fun AppNavigator(
         is AppDestination.FirstHostTestConnect -> FirstHostTestConnectScreen(
             hostId = dest.hostId,
             onBack = ::back,
-            onEditHost = { id -> replace(AppDestination.EditFirstHost(id)) },
+            onEditHost = { id ->
+                replace(
+                    if (dest.firstRunGuided) AppDestination.EditFirstHost(id)
+                    else AppDestination.EditHost(id),
+                )
+            },
+            firstRunGuided = dest.firstRunGuided,
             onOpenHost = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.FolderList(
@@ -1250,6 +1281,9 @@ private fun AppNavigator(
             hostId = dest.hostId,
             entryId = retainedNavigationState.entryId,
             onDone = ::back,
+            onHostSaved = { hostId ->
+                replace(AppDestination.FirstHostTestConnect(hostId, firstRunGuided = false))
+            },
         )
 
         // Issue #129 + #290: live camera QR scanner. It is launched
@@ -2520,7 +2554,8 @@ internal fun AppDestination.timingName(): String = when (this) {
     AppDestination.HostList -> "HostList"
     AppDestination.AddHost -> "AddHost"
     AppDestination.AddFirstHost -> "AddFirstHost"
-    is AppDestination.FirstHostTestConnect -> "FirstHostTestConnect(hostId=$hostId)"
+    is AppDestination.FirstHostTestConnect ->
+        "FirstHostTestConnect(hostId=$hostId,firstRunGuided=$firstRunGuided)"
     is AppDestination.EditFirstHost -> "EditFirstHost(hostId=$hostId)"
     is AppDestination.EditHost -> "EditHost"
     AppDestination.Scan -> "Scan"

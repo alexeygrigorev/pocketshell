@@ -141,7 +141,7 @@ class FolderListBootstrapSkipTreeLoadsDockerTest {
                 port = OLD_CLI_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(keyText),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 val treeProbe = session.exec("printf '%s' '{\"host\":\"h\"}' | pocketshell tree get")

@@ -9,6 +9,7 @@ import com.pocketshell.core.connection.RuntimeHealthKey
 import com.pocketshell.core.connection.RuntimeInstanceToken
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.Job
@@ -534,6 +535,7 @@ internal data class TmuxRuntimeKey(
     val keyPath: String,
     val sessionName: String,
     val durableSessionKey: String? = null,
+    val trustedHostKeySha256: String? = null,
 )
 
 private fun TmuxRuntimeKey.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =
@@ -541,7 +543,10 @@ private fun TmuxRuntimeKey.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =
         port == leaseKey.port &&
         username == leaseKey.user &&
         "$hostId:$keyPath" == leaseKey.credentialId &&
-        leaseKey.knownHostsId == "accept-all"
+        (
+            trustedHostKeySha256?.let { leaseKey.knownHostsId == "host-key:$it" }
+                ?: (leaseKey.knownHostsId == SshLeaseManager.UNCONFIRMED_HOST_KEY_ID)
+        )
 
 private fun CachedTmuxRuntime.matchesLeaseKey(leaseKey: SshLeaseKey): Boolean =
     lease?.key == leaseKey || key.matchesLeaseKey(leaseKey)

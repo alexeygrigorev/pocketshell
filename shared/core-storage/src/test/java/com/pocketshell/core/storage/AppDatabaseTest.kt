@@ -595,6 +595,15 @@ class AppDatabaseTest {
         if (targetVersion <= 15) return
 
         applyMigration15To16Schema(db) // -> v16
+        if (targetVersion <= 16) return
+
+        applyMigration16To17Schema(db) // -> v17
+        if (targetVersion <= 17) return
+
+        applyMigration17To18Schema(db) // -> v18
+        if (targetVersion <= 18) return
+
+        applyMigration18To19Schema(db) // -> v19
     }
 
     private fun insertHostRowForVersion(db: SQLiteDatabase, version: Int) {
@@ -624,16 +633,26 @@ class AppDatabaseTest {
                 "INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt) " +
                     "VALUES(1, 'key-v$version', '/keys/k', 'sha256:v$version', 1, 100)",
             )
+            val extraColumns = when {
+                version >= 19 -> ", treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256"
+                version >= 18 -> ", treeIdentity"
+                else -> ""
+            }
+            val extraValues = when {
+                version >= 19 -> ", 'tree-v$version', 'ssh-ed25519', 'SHA256:trusted-v$version'"
+                version >= 18 -> ", 'tree-v$version'"
+                else -> ""
+            }
             db.execSQL(
                 """
                 INSERT INTO hosts(
                     id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
                     scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
                     lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
-                    usageCommandOverride
+                    usageCommandOverride$extraColumns
                 ) VALUES(
                     1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
-                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'$extraValues
                 )
                 """.trimIndent(),
             )
@@ -1122,6 +1141,40 @@ class AppDatabaseTest {
         db.execSQL("DROP TABLE hosts")
         db.execSQL("ALTER TABLE hosts_v16 RENAME TO hosts")
         db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+
+    private fun applyMigration16To17Schema(db: SQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS sessions")
+        db.execSQL("DROP TABLE IF EXISTS agent_sessions")
+    }
+
+    private fun applyMigration17To18Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN treeIdentity TEXT NOT NULL DEFAULT ''")
+        db.execSQL("UPDATE hosts SET treeIdentity = lower(hex(randomblob(16))) WHERE treeIdentity = ''")
+    }
+
+    private fun applyMigration18To19Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeyAlgorithm TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeySha256 TEXT")
+    }
+
+    @Test
+    fun migrationFromVersionEighteen_preservesHostAndStartsUntrusted() = runTest {
+        val databaseName = "v18-host-key-trust-${System.nanoTime()}.db"
+        seedSchemaAtVersionWithHostRow(databaseName, 18)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+            val host = requireNotNull(migratedDb.hostDao().getById(1))
+            assertEquals("host-v18", host.name)
+            assertTrue(host.treeIdentity.isNotBlank())
+            assertNull(host.trustedHostKeyAlgorithm)
+            assertNull(host.trustedHostKeySha256)
+        } finally {
+            migratedDb.close()
+            context.deleteDatabase(databaseName)
+        }
     }
 
     @Test

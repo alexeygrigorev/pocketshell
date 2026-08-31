@@ -111,7 +111,7 @@ class FolderListKillSessionDockerTest {
                         port = DEFAULT_PORT,
                         user = DEFAULT_USER,
                         key = sshKey,
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         for (name in createdSessions) {
@@ -142,7 +142,7 @@ class FolderListKillSessionDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 session.exec("mkdir -p $folder")
@@ -284,7 +284,7 @@ class FolderListKillSessionDockerTest {
                     port = DEFAULT_PORT,
                     user = DEFAULT_USER,
                     key = sshKey,
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 10_000,
                 ).getOrThrow().use { session ->
                     val doomedExit = session.exec("tmux has-session -t $doomed 2>/dev/null").exitCode

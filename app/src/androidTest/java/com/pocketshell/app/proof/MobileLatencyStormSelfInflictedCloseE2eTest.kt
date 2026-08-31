@@ -619,7 +619,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session -> session.use { it.exec(command) } }.getOrThrow()
 
@@ -630,7 +630,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
             port = NETWORK_FAULT_SSH_PORT,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
 

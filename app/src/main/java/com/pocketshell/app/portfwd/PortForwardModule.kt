@@ -28,7 +28,7 @@ annotation class DefaultDispatcher
 @InstallIn(SingletonComponent::class)
 abstract class PortForwardModule {
     @Binds
-    abstract fun bindPortForwardConnector(
+    internal abstract fun bindPortForwardConnector(
         connector: DefaultPortForwardConnector,
     ): PortForwardConnector
 

@@ -23,7 +23,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 18
+const val APP_DATABASE_SCHEMA_VERSION = 19
 
 /**
  * The PocketShell Room database.
@@ -275,6 +275,14 @@ val MIGRATION_17_18: Migration = object : Migration(17, 18) {
     }
 }
 
+/** Issue #2433: durable, app-private SSH server identity confirmation. */
+val MIGRATION_18_19: Migration = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeyAlgorithm TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeySha256 TEXT")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -293,6 +301,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_15_16,
     MIGRATION_16_17,
     MIGRATION_17_18,
+    MIGRATION_18_19,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

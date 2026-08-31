@@ -12,6 +12,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.sendBracketedPaste
 import com.pocketshell.app.tmux.tmuxQuotedArgument
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.hostKeyTrustBinding
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -274,18 +275,18 @@ internal class ShareViewModel internal constructor(
         passphrase: CharArray?,
         leasePurpose: String?,
     ): SshLeaseTarget =
-        SshLeaseTarget(
+        hostKeyTrustBinding().let { trust -> SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
                 credentialId = shareCredentialId(keyPath, leasePurpose),
-                knownHostsId = "accept-all",
+                knownHostsId = trust.leaseIdentity,
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        )
+            knownHosts = trust.policy,
+        ) }
 
     private fun HostEntity.shareCredentialId(keyPath: String, leasePurpose: String?): String {
         val base = "$id:$keyPath"

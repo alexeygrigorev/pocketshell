@@ -2143,10 +2143,10 @@ class HostListViewModelTest {
                 port = port,
                 user = username,
                 credentialId = "$id:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = "host-key:unconfirmed",
             ),
             key = SshKey.Path(File(keyPath)),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         )
 
     private companion object {

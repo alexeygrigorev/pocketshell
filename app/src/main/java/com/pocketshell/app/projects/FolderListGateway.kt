@@ -16,6 +16,7 @@ import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.hostKeyTrustBinding
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -906,18 +907,18 @@ class SshFolderListGateway internal constructor(
         passphrase: CharArray?,
         leasePurpose: String? = null,
     ): SshLeaseTarget =
-        SshLeaseTarget(
+        hostKeyTrustBinding().let { trust -> SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
                 credentialId = buildCredentialId(id, keyPath, leasePurpose),
-                knownHostsId = "accept-all",
+                knownHostsId = trust.leaseIdentity,
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        )
+            knownHosts = trust.policy,
+        ) }
 
     internal suspend fun listSessionsFromNativeOrPocketshell(
         session: SshSession,

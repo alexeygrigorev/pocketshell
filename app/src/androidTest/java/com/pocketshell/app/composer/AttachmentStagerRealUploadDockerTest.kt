@@ -174,7 +174,7 @@ class AttachmentStagerRealUploadDockerTest {
                         port = DEFAULT_PORT,
                         user = DEFAULT_USER,
                         key = SshKey.Pem(key),
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         session.exec("rm -rf \"\$HOME/$dir\" 2>/dev/null || true")
@@ -239,7 +239,7 @@ class AttachmentStagerRealUploadDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).getOrThrow()
         }
@@ -371,7 +371,7 @@ class AttachmentStagerRealUploadDockerTest {
                 port = DEFAULT_PORT,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 15_000,
             ).getOrThrow()
         }

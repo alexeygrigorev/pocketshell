@@ -103,6 +103,7 @@ class TerminalLabActivity : FragmentActivity() {
         const val EXTRA_PORT: String = "com.pocketshell.app.terminal.PORT"
         const val EXTRA_USER: String = "com.pocketshell.app.terminal.USER"
         const val EXTRA_KEY_PEM: String = "com.pocketshell.app.terminal.KEY_PEM"
+        const val EXTRA_HOST_KEY_SHA256: String = "com.pocketshell.app.terminal.HOST_KEY_SHA256"
 
         fun intent(
             context: Context,
@@ -110,11 +111,13 @@ class TerminalLabActivity : FragmentActivity() {
             port: Int,
             user: String,
             privateKeyPem: String,
+            hostKeySha256: String? = null,
         ): Intent = Intent(context, TerminalLabActivity::class.java)
             .putExtra(EXTRA_HOST, host)
             .putExtra(EXTRA_PORT, port)
             .putExtra(EXTRA_USER, user)
             .putExtra(EXTRA_KEY_PEM, privateKeyPem)
+            .putExtra(EXTRA_HOST_KEY_SHA256, hostKeySha256)
     }
 }
 
@@ -130,6 +133,7 @@ data class TerminalLabTarget(
     val port: Int,
     val user: String,
     val key: SshKey.Pem,
+    val hostKeySha256: String? = null,
 ) {
     companion object {
         fun fromIntent(context: Context, intent: Intent): TerminalLabTarget {
@@ -139,6 +143,7 @@ data class TerminalLabTarget(
                 port = intent.getIntExtra(TerminalLabActivity.EXTRA_PORT, SessionDefaults.PORT),
                 user = intent.getStringExtra(TerminalLabActivity.EXTRA_USER) ?: SessionDefaults.USER,
                 key = if (keyPem != null) SshKey.Pem(keyPem) else SshKey.Pem(readKeyFromRawResource(context)),
+                hostKeySha256 = intent.getStringExtra(TerminalLabActivity.EXTRA_HOST_KEY_SHA256),
             )
         }
     }
@@ -185,7 +190,9 @@ class TerminalLabController(
                     port = target.port,
                     user = target.user,
                     key = target.key,
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = KnownHostsPolicy.VerifiedFingerprint(
+                        target.hostKeySha256,
+                    ),
                 ).getOrThrow()
                 sessionRef = session
                 val shell = withContext(Dispatchers.IO) {

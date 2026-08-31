@@ -932,7 +932,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("tmux kill-session -t '$sessionName' 2>/dev/null || true") }
@@ -954,7 +954,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -1006,7 +1006,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -1068,7 +1068,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -1097,7 +1097,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -1179,7 +1179,7 @@ class TmuxSessionOpencodeInputDockerTest {
                     port = sshPort,
                     user = DEFAULT_USER,
                     key = sshKey,
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).mapCatching { session ->
                     session.use {
@@ -1248,7 +1248,7 @@ class TmuxSessionOpencodeInputDockerTest {
             port = sshPort,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {

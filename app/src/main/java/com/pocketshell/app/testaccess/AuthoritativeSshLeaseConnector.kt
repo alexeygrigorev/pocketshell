@@ -5,7 +5,11 @@ import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.SshLeaseTargetResolver
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.app.ssh.hostKeyTrustBinding
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -20,7 +24,9 @@ import java.util.concurrent.atomic.AtomicReference
  */
 internal class AuthoritativeSshLeaseConnector(
     private val delegate: SshLeaseConnector = DefaultSshLeaseConnector(),
-) : SshLeaseConnector {
+    private val hostDao: HostDao? = null,
+    private val trustPromptRouter: HostKeyTrustPromptRouter? = null,
+) : SshLeaseConnector, SshLeaseTargetResolver {
     private val lastObservedKey = AtomicReference<SshLeaseKey?>(null)
     private val activeOutage = AtomicReference<LeaseOutageForTest?>(null)
     private val nextOutageId = AtomicLong(1L)
@@ -31,6 +37,9 @@ internal class AuthoritativeSshLeaseConnector(
             return blocked(outage)
         }
         val result = delegate.connect(target)
+        result.exceptionOrNull()?.let { failure ->
+            trustPromptRouter?.report(target.hostIdOrNull(), failure)
+        }
         // Fence a dial that entered the physical delegate just before the test armed the
         // outage. It must not become a manager-owned fresh lease during the offline interval.
         activeOutage.get()?.takeIf { it.leaseKey == target.leaseKey }?.let { outage ->
@@ -38,6 +47,22 @@ internal class AuthoritativeSshLeaseConnector(
             return blocked(outage)
         }
         return result
+    }
+
+    private fun SshLeaseTarget.hostIdOrNull(): Long? =
+        leaseKey.credentialId.substringBefore(':').toLongOrNull()
+
+    override suspend fun resolveTarget(target: SshLeaseTarget): SshLeaseTarget {
+        val hostId = target.leaseKey.credentialId.substringBefore(':').toLongOrNull() ?: return target
+        val host = hostDao?.getById(hostId) ?: return target
+        if (!host.hostname.equals(target.leaseKey.host, ignoreCase = true) ||
+            host.port != target.leaseKey.port
+        ) return target
+        val binding = host.hostKeyTrustBinding()
+        return target.copy(
+            leaseKey = target.leaseKey.copy(knownHostsId = binding.leaseIdentity),
+            knownHosts = binding.policy,
+        )
     }
 
     private fun blocked(outage: LeaseOutageForTest): Result<SshSession> {

@@ -99,4 +99,7 @@ data class HostEntity(
     val usageCommandOverride: String? = null,
     /** Stable opaque owner for host-side durable state; display-name edits never change it. */
     val treeIdentity: String = UUID.randomUUID().toString(),
+    /** Explicitly confirmed server identity for this exact hostname and port. */
+    val trustedHostKeyAlgorithm: String? = null,
+    val trustedHostKeySha256: String? = null,
 )

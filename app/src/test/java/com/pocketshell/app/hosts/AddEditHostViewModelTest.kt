@@ -466,6 +466,32 @@ class AddEditHostViewModelTest {
     }
 
     @Test
+    fun changingEndpointClearsPriorTrustBeforeTheMandatoryConnectionTest() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "host",
+                hostname = "old.example",
+                port = 22,
+                username = "u",
+                keyId = keyId,
+                trustedHostKeyAlgorithm = "ssh-ed25519",
+                trustedHostKeySha256 = "SHA256:old",
+            ),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.bind(hostId, entryId = 1L)
+        advanceUntilIdle()
+        vm.updateState { it.copy(hostname = "new.example") }
+        vm.save()
+        advanceUntilIdle()
+
+        val saved = requireNotNull(db.hostDao().getById(hostId))
+        assertNull(saved.trustedHostKeyAlgorithm)
+        assertNull(saved.trustedHostKeySha256)
+    }
+
+    @Test
     fun bind_sameHostNewEntry_rejectsOlderEntryLoadAfterUserTypes() = runTest {
         val host = HostEntity(
             id = 7L,

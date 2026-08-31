@@ -5,6 +5,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.ssh.ChangedHostKeyException
+import com.pocketshell.core.ssh.UnknownHostKeyException
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,6 +67,86 @@ class FirstHostTestConnectViewModelTest {
         assertEquals("Lab", state.host?.name)
         assertEquals("lab", state.key?.name)
         assertEquals(1, tester.calls)
+    }
+
+    @Test
+    fun unknownHostKey_requiresExplicitConfirmation_thenPersistsAndReconnects() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "lab", privateKeyPath = "/tmp/lab"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "Lab", hostname = "127.0.0.1", port = 2222, username = "test", keyId = keyId),
+        )
+        val unknown = UnknownHostKeyException("127.0.0.1", 2222, "ssh-ed25519", "SHA256:first")
+        val tester = QueueTester(listOf(Result.failure(unknown), Result.success(Unit)))
+        val vm = FirstHostTestConnectViewModel(db.hostDao(), db.sshKeyDao(), tester)
+
+        vm.start(hostId)
+        assertEquals(unknown, (vm.state.value.status as FirstHostTestStatus.ConfirmHostKey).failure)
+
+        vm.confirmPresentedHostKey()
+        advanceUntilIdle()
+
+        assertEquals(FirstHostTestStatus.Success, vm.state.value.status)
+        val persisted = requireNotNull(db.hostDao().getById(hostId))
+        assertEquals("ssh-ed25519", persisted.trustedHostKeyAlgorithm)
+        assertEquals("SHA256:first", persisted.trustedHostKeySha256)
+        assertEquals("SHA256:first", tester.seenHosts.last().trustedHostKeySha256)
+        assertEquals(2, tester.calls)
+    }
+
+    @Test
+    fun knownHostKeyReconnectsWithoutConfirmation() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "lab", privateKeyPath = "/tmp/lab"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "Lab",
+                hostname = "known.example",
+                port = 22,
+                username = "test",
+                keyId = keyId,
+                trustedHostKeyAlgorithm = "ssh-ed25519",
+                trustedHostKeySha256 = "SHA256:known",
+            ),
+        )
+        val tester = RecordingTester(Result.success(Unit))
+        val vm = FirstHostTestConnectViewModel(db.hostDao(), db.sshKeyDao(), tester)
+
+        vm.start(hostId)
+
+        assertEquals(FirstHostTestStatus.Success, vm.state.value.status)
+        assertEquals("SHA256:known", tester.lastHost?.trustedHostKeySha256)
+        assertEquals(1, tester.calls)
+    }
+
+    @Test
+    fun changedHostKeyIsRejectedUntilReplacementIsExplicitlyConfirmed() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "lab", privateKeyPath = "/tmp/lab"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "Lab",
+                hostname = "changed.example",
+                port = 22,
+                username = "test",
+                keyId = keyId,
+                trustedHostKeyAlgorithm = "ssh-ed25519",
+                trustedHostKeySha256 = "SHA256:old",
+            ),
+        )
+        val changed = ChangedHostKeyException(
+            "changed.example", 22, "ssh-ed25519", "SHA256:old", "SHA256:new",
+        )
+        val tester = QueueTester(listOf(Result.failure(changed), Result.success(Unit)))
+        val vm = FirstHostTestConnectViewModel(db.hostDao(), db.sshKeyDao(), tester)
+
+        vm.start(hostId)
+        val confirmation = vm.state.value.status as FirstHostTestStatus.ConfirmHostKey
+        assertEquals(changed, confirmation.failure)
+        assertEquals("SHA256:old", db.hostDao().getById(hostId)?.trustedHostKeySha256)
+
+        vm.confirmPresentedHostKey()
+        advanceUntilIdle()
+
+        assertEquals(FirstHostTestStatus.Success, vm.state.value.status)
+        assertEquals("SHA256:new", db.hostDao().getById(hostId)?.trustedHostKeySha256)
     }
 
     @Test
@@ -159,9 +242,12 @@ class FirstHostTestConnectViewModelTest {
     ) : FirstHostConnectionTester() {
         var calls: Int = 0
             private set
+        var lastHost: HostEntity? = null
+            private set
 
         override suspend fun test(host: HostEntity, key: SshKeyEntity): Result<Unit> {
             calls++
+            lastHost = host
             return result
         }
     }
@@ -172,9 +258,11 @@ class FirstHostTestConnectViewModelTest {
         private val remaining = ArrayDeque(results)
         var calls: Int = 0
             private set
+        val seenHosts = mutableListOf<HostEntity>()
 
         override suspend fun test(host: HostEntity, key: SshKeyEntity): Result<Unit> {
             calls++
+            seenHosts += host
             return remaining.removeFirst()
         }
     }

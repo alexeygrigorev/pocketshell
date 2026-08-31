@@ -406,11 +406,11 @@ class FolderListGatewayExecTimeoutTest {
                     port = HOST.port,
                     user = HOST.username,
                     credentialId = SshFolderListGateway.buildCredentialId(HOST.id, KEY_PATH, null),
-                    knownHostsId = "accept-all",
+                    knownHostsId = "host-key:unconfirmed",
                 ),
                 key = SshKey.Path(File(KEY_PATH)),
                 passphrase = null,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             ),
         ).getOrThrow()
 

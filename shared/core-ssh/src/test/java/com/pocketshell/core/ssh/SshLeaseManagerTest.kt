@@ -62,6 +62,30 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `changing verified host key identity cannot reuse a stale warm connection`() = runTest {
+        val oldSession = FakeSshSession()
+        val newSession = FakeSshSession()
+        val connector = QueueLeaseConnector(oldSession, newSession)
+        val manager = leaseManager(connector)
+        val oldTarget = TARGET.copy(
+            leaseKey = TARGET.leaseKey.copy(knownHostsId = "host-key:SHA256:old"),
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint("SHA256:old"),
+        )
+        val newTarget = oldTarget.copy(
+            leaseKey = oldTarget.leaseKey.copy(knownHostsId = "host-key:SHA256:new"),
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint("SHA256:new"),
+        )
+
+        manager.acquire(oldTarget).getOrThrow().release()
+        val replacement = manager.acquire(newTarget).getOrThrow()
+
+        assertEquals(2, connector.connectCount)
+        assertSame(newSession, replacement.session)
+        assertNotSame(oldSession, replacement.session)
+        replacement.release()
+    }
+
+    @Test
     fun `released idle session closes after ttl`() = runTest {
         val session = FakeSshSession()
         val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 1_000)

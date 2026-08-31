@@ -229,7 +229,7 @@ class TerminalLabDockerTest {
             .getString("terminalWorkbenchSshPort")
             ?.toIntOrNull()
             ?: DEFAULT_PORT
-        waitForSshFixtureReady(sshKey, port = port)
+        val hostKeySha256 = waitForSshFixtureReady(sshKey, port = port)
 
         val marker = "${markerPrefix}${System.currentTimeMillis()}"
         val intent = TerminalLabActivity.intent(
@@ -238,6 +238,7 @@ class TerminalLabDockerTest {
             port = port,
             user = DEFAULT_USER,
             privateKeyPem = key,
+            hostKeySha256 = hostKeySha256,
         )
 
         launchedActivity = ActivityScenario.launch(intent)

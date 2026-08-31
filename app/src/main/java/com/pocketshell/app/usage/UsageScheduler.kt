@@ -427,6 +427,8 @@ public class UsageScheduler @Inject constructor(
                 username = host.username,
                 keyPath = key.privateKeyPath,
                 passphrase = null,
+                trustedHostKeyAlgorithm = host.trustedHostKeyAlgorithm,
+                trustedHostKeySha256 = host.trustedHostKeySha256,
             ),
         ) { session ->
             when (val result = remoteSource.fetchUsage(session, commandOverride = host.usageCommandOverride)) {

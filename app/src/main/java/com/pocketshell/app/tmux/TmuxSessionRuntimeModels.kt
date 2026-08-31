@@ -91,6 +91,7 @@ internal fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         keyPath = keyPath,
         sessionName = sessionName,
         durableSessionKey = durableSessionKey(),
+        trustedHostKeySha256 = trustedHostKeySha256,
     )
 
 /** Picker rows provide names only, so a derived target must not inherit another session's identity. */
@@ -131,6 +132,8 @@ internal fun ConnectionTarget.toLeaseSessionTarget(): LeaseSessionTarget =
         username = user,
         keyPath = keyPath,
         passphrase = passphrase,
+        trustedHostKeyAlgorithm = trustedHostKeyAlgorithm,
+        trustedHostKeySha256 = trustedHostKeySha256,
     )
 
 internal fun ConnectionTarget.sessionCardsTargetKey(): String =

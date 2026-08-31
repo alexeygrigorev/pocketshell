@@ -1315,6 +1315,7 @@ class FileViewerViewModel @Inject constructor(
         val passphrase: CharArray?,
         val path: String?,
         val cwd: String?,
+        val trustedHostKeySha256: String? = null,
     ) {
         internal fun toLeaseTarget(): LeaseSessionTarget =
             LeaseSessionTarget(
@@ -1324,6 +1325,7 @@ class FileViewerViewModel @Inject constructor(
                 username = username,
                 keyPath = keyPath,
                 passphrase = passphrase,
+                trustedHostKeySha256 = trustedHostKeySha256,
             )
 
         override fun equals(other: Any?): Boolean {
@@ -1336,6 +1338,7 @@ class FileViewerViewModel @Inject constructor(
             if (keyPath != other.keyPath) return false
             if (path != other.path) return false
             if (cwd != other.cwd) return false
+            if (trustedHostKeySha256 != other.trustedHostKeySha256) return false
             if (passphrase != null) {
                 if (other.passphrase == null) return false
                 if (!passphrase.contentEquals(other.passphrase)) return false
@@ -1351,6 +1354,7 @@ class FileViewerViewModel @Inject constructor(
             result = 31 * result + keyPath.hashCode()
             result = 31 * result + path.hashCode()
             result = 31 * result + (cwd?.hashCode() ?: 0)
+            result = 31 * result + (trustedHostKeySha256?.hashCode() ?: 0)
             result = 31 * result + (passphrase?.contentHashCode() ?: 0)
             return result
         }

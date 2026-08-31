@@ -33,8 +33,11 @@ sealed interface AppDestination {
      */
     data object AddFirstHost : AppDestination
 
-    /** Test the freshly-created first host before dropping the user on the list. */
-    data class FirstHostTestConnect(val hostId: Long) : AppDestination
+    /** Test/enrol a saved host. Guided first-run additionally continues into setup. */
+    data class FirstHostTestConnect(
+        val hostId: Long,
+        val firstRunGuided: Boolean = true,
+    ) : AppDestination
 
     /** Edit a first-run host, then return to the guided connection test. */
     data class EditFirstHost(val hostId: Long) : AppDestination

@@ -132,7 +132,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 15_000,
         )
         assertTrue(
@@ -156,7 +156,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -183,7 +183,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Pem(pem),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         )
         assertTrue(
             "PEM-string connect should succeed; got ${result.exceptionOrNull()}",
@@ -204,7 +204,7 @@ class SshIntegrationTest {
             user = "no-such-user",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 10_000,
         )
         assertTrue("expected failure, got success", result.isFailure)
@@ -226,7 +226,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -301,7 +301,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
         session.close()
         // Issue #1149 / #1135 / #1139: close() is NON-BLOCKING on the caller —
@@ -339,7 +339,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         assertTrue("a live session must be connected", session.isConnected)
@@ -384,7 +384,7 @@ class SshIntegrationTest {
                     credentialId = privateKeyFile.absolutePath,
                 ),
                 key = SshKey.Path(privateKeyFile),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = TestOnlyAcceptAll,
             )
 
             try {
@@ -455,7 +455,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -494,7 +494,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -516,7 +516,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -538,7 +538,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -577,7 +577,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         session.use {
@@ -631,7 +631,7 @@ class SshIntegrationTest {
                 user = "testuser",
                 key = SshKey.Path(privateKeyFile),
                 passphrase = null,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = TestOnlyAcceptAll,
             ).getOrThrow()
 
             val logMarkStartLen = container!!.logs.length
@@ -773,7 +773,7 @@ class SshIntegrationTest {
                 user = "testuser",
                 key = SshKey.Path(privateKeyFile),
                 passphrase = null,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = TestOnlyAcceptAll,
             ).getOrThrow()
 
             val logMarkStartLen = container!!.logs.length
@@ -881,7 +881,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         assertTrue(session.isConnected)
@@ -922,7 +922,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
         session.close()
 
@@ -969,7 +969,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(privateKeyFile),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
         ).getOrThrow()
 
         // Enter the #1222 async-close window deterministically: close initiated but
@@ -1010,7 +1010,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(encrypted),
             passphrase = null,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 15_000,
         )
         assertTrue(
@@ -1035,7 +1035,7 @@ class SshIntegrationTest {
             user = "testuser",
             key = SshKey.Path(encrypted),
             passphrase = PASSPHRASE.toCharArray(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = TestOnlyAcceptAll,
             timeoutMs = 15_000,
         )
         assertTrue(
@@ -1097,7 +1097,7 @@ class SshIntegrationTest {
                 leaseKey = leaseKey,
                 key = SshKey.Path(encrypted),
                 passphrase = PASSPHRASE.toCharArray(),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = TestOnlyAcceptAll,
                 timeoutMs = 15_000,
             ),
         ).getOrThrow()
@@ -1110,7 +1110,7 @@ class SshIntegrationTest {
                     leaseKey = leaseKey,
                     key = SshKey.Path(encrypted),
                     passphrase = null,
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = TestOnlyAcceptAll,
                     timeoutMs = 15_000,
                 ),
             ).getOrThrow()

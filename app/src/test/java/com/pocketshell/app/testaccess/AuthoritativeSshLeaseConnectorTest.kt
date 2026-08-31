@@ -4,11 +4,18 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.ssh.ChangedHostKeyException
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -16,6 +23,58 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AuthoritativeSshLeaseConnectorTest {
+    @Test
+    fun typedChangedKeyFromAnyPooledCallerRoutesToSharedReplacementUi() = runTest {
+        val router = HostKeyTrustPromptRouter()
+        val connector = AuthoritativeSshLeaseConnector(
+            delegate = SshLeaseConnector {
+                Result.failure(
+                    ChangedHostKeyException(
+                        "trusted.example", 2202, "ssh-ed25519", "SHA256:old", "SHA256:new",
+                    ),
+                )
+            },
+            trustPromptRouter = router,
+        )
+
+        connector.connect(target(SshLeaseKey("trusted.example", 2202, "user", "7:/key")))
+
+        assertEquals(7L, router.pendingHostId.value)
+    }
+
+    @Test
+    fun productionConnectorResolvesPersistedTrustBeforePhysicalDial() = runTest {
+        var delegated: SshLeaseTarget? = null
+        val host = HostEntity(
+            id = 7,
+            name = "trusted",
+            hostname = "trusted.example",
+            port = 2202,
+            username = "testuser",
+            keyId = 1,
+            trustedHostKeyAlgorithm = "ssh-ed25519",
+            trustedHostKeySha256 = "SHA256:persisted",
+        )
+        val connector = AuthoritativeSshLeaseConnector(
+            delegate = SshLeaseConnector { target ->
+                delegated = target
+                Result.failure(IllegalStateException("stop after capture"))
+            },
+            hostDao = SingleHostDao(host),
+        )
+        val requested = target(
+            SshLeaseKey("trusted.example", 2202, "testuser", "7:/key", "host-key:unconfirmed"),
+        )
+
+        delegated = connector.resolveTarget(requested)
+
+        assertEquals("host-key:SHA256:persisted", delegated?.leaseKey?.knownHostsId)
+        assertEquals(
+            KnownHostsPolicy.VerifiedFingerprint("SHA256:persisted"),
+            delegated?.knownHosts,
+        )
+    }
+
     @Test
     fun outageBlocksOnlyItsExactLeaseKeyUntilExactHandleEnds() = runTest {
         val delegated = mutableListOf<SshLeaseKey>()
@@ -77,4 +136,14 @@ class AuthoritativeSshLeaseConnectorTest {
         leaseKey = key,
         key = SshKey.Pem("not-used"),
     )
+
+    private class SingleHostDao(private var host: HostEntity) : HostDao {
+        override fun getAll(): Flow<List<HostEntity>> = flowOf(listOf(host))
+        override suspend fun getById(id: Long): HostEntity? = host.takeIf { it.id == id }
+        override fun getEnabled(): Flow<List<HostEntity>> = flowOf(listOf(host))
+        override suspend fun insert(host: HostEntity): Long = host.id.also { this.host = host }
+        override suspend fun update(host: HostEntity) { this.host = host }
+        override suspend fun delete(host: HostEntity) = Unit
+        override suspend fun deleteById(id: Long) = Unit
+    }
 }

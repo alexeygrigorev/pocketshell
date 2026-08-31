@@ -25,12 +25,14 @@ import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
 import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -109,7 +111,7 @@ class FirstHostWizardE2eTest {
     @Test
     fun guidedFirstHostWizard_realConnectSucceeds_reachesSetupHandoff() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val expectedHostKey = waitForSshFixtureReady(SshKey.Pem(key))
         val storedKey = seedFixtureKeyViaHilt(key, "first-host-wizard-key-${System.nanoTime()}")
 
         launchOnEmptyState()
@@ -136,7 +138,19 @@ class FirstHostWizardE2eTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
 
-        // 4. The REAL Docker connect SUCCEEDS → the wizard advances to the
+        // 4. The first real handshake is rejected and surfaces the exact key
+        //    observed by the independent fixture probe. Trust requires an
+        //    explicit user action; only then may the real connect succeed.
+        compose.waitUntil(timeoutMillis = 30_000) {
+            compose.onAllNodesWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText(expectedHostKey, substring = true, useUnmergedTree = true)
+            .assertExists()
+        compose.onNodeWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true)
+            .performClick()
+
+        // The verified Docker connect SUCCEEDS → the wizard advances to the
         //    Setup step with the success copy + the "Finish setup" handoff.
         //    This is the load-bearing assertion: it is driven by the real
         //    SshConnection.connect against agents:2222, not an injected state.
@@ -165,6 +179,85 @@ class FirstHostWizardE2eTest {
             reachedSetupOrWorkingHost(),
         )
         capture("03-setup-handoff")
+    } }
+
+    @Test
+    fun ordinaryAddHost_requiresExplicitFingerprintThenReturnsToHostList() { runBlocking {
+        val key = readFixtureKey()
+        val expectedHostKey = waitForSshFixtureReady(SshKey.Pem(key))
+        val storedKey = seedFixtureKeyViaHilt(key, "ordinary-add-key-${System.nanoTime()}")
+        launchOnEmptyState()
+
+        compose.onNodeWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodesWithTag(ADD_HOST_NAME_FIELD_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        fillHostForm(
+            "Ordinary host ${System.nanoTime().toString(36)}",
+            DEFAULT_HOST,
+            DEFAULT_PORT,
+            DEFAULT_USER,
+            storedKey.name,
+        )
+        compose.onNodeWithTag(ADD_HOST_CTA_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(30_000) {
+            compose.onAllNodesWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText(expectedHostKey, substring = true, useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(30_000) {
+            compose.onAllNodesWithText("Connection works.", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Done", useUnmergedTree = true).performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodesWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+    } }
+
+    @Test
+    fun existingSavedHostWithStaleFingerprint_requiresExplicitReplacement() { runBlocking {
+        val key = readFixtureKey()
+        val expectedHostKey = waitForSshFixtureReady(SshKey.Pem(key))
+        val storedKey = seedFixtureKeyViaHilt(key, "rekey-host-key-${System.nanoTime()}")
+        val stale = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val hostDao = testAccess().appDatabase().hostDao()
+        val hostId = hostDao.insert(
+            HostEntity(
+                name = "Rekey host",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyId = storedKey.id,
+                trustedHostKeyAlgorithm = "ssh-ed25519",
+                trustedHostKeySha256 = stale,
+            ),
+        )
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag(HOST_ROW_TAG_PREFIX + hostId, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(HOST_ROW_TAG_PREFIX + hostId, useUnmergedTree = true).performClick()
+
+        compose.waitUntil(30_000) {
+            compose.onAllNodesWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Replace trusted key", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(stale, substring = true, useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(expectedHostKey, substring = true, useUnmergedTree = true).assertExists()
+        assertEquals(stale, hostDao.getById(hostId)?.trustedHostKeySha256)
+
+        compose.onNodeWithTag(FIRST_HOST_TEST_CONNECT_TRUST_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(30_000) {
+            compose.onAllNodesWithText("Connection works.", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals(expectedHostKey, hostDao.getById(hostId)?.trustedHostKeySha256)
     } }
 
     /**

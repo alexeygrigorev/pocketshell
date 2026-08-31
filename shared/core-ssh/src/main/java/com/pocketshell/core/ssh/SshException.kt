@@ -15,6 +15,44 @@ public open class SshException(
     cause: Throwable? = null,
 ) : Exception(message, cause)
 
+public sealed class HostKeyVerificationException(
+    public val host: String,
+    public val port: Int,
+    public val algorithm: String,
+    public val presentedSha256: String,
+    message: String,
+) : SshException(message)
+
+public class UnknownHostKeyException(
+    host: String,
+    port: Int,
+    algorithm: String,
+    presentedSha256: String,
+) : HostKeyVerificationException(
+    host = host,
+    port = port,
+    algorithm = algorithm,
+    presentedSha256 = presentedSha256,
+    message = "Unknown SSH host key for $host:$port ($algorithm $presentedSha256). " +
+        "Confirm this fingerprint before connecting.",
+)
+
+public class ChangedHostKeyException(
+    host: String,
+    port: Int,
+    algorithm: String,
+    public val expectedSha256: String,
+    presentedSha256: String,
+) : HostKeyVerificationException(
+    host = host,
+    port = port,
+    algorithm = algorithm,
+    presentedSha256 = presentedSha256,
+    message = "SSH host key changed for $host:$port. Expected $expectedSha256 but received " +
+        "$presentedSha256. Verify the server, then open Edit host and run Test connection " +
+        "before replacing the trusted key.",
+)
+
 /**
  * Thrown by [SshSession.downloadFile] when the remote path does not exist or
  * is not a regular file. A subclass of [SshException] so existing catch-all

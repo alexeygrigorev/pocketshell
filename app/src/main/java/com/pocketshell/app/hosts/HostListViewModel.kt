@@ -35,6 +35,7 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.hostKeyTrustBinding
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -1911,17 +1912,18 @@ internal class LeaseBackedHostSessionOpener(
         val file = File(keyPath)
         val exists = withContext(Dispatchers.IO) { file.exists() }
         if (!exists) return null
+        val trust = host.hostKeyTrustBinding()
         val target = SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = host.hostname,
                 port = host.port,
                 user = host.username,
                 credentialId = "${host.id}:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = trust.leaseIdentity,
             ),
             key = SshKey.Path(file),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = trust.policy,
         )
         val lease = sshLeaseManager.acquire(target).getOrNull() ?: return null
         if (lease.isNewConnection) {

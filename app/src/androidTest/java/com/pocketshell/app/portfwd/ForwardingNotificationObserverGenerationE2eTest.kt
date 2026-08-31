@@ -509,7 +509,7 @@ class ForwardingNotificationObserverGenerationE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = SSH_TIMEOUT_MS,
         ).getOrThrow()
         openedSessions += session
@@ -539,7 +539,7 @@ class ForwardingNotificationObserverGenerationE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = SSH_TIMEOUT_MS,
         ).getOrThrow().use { session ->
             val result = session.exec(
@@ -556,7 +556,7 @@ class ForwardingNotificationObserverGenerationE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = SSH_TIMEOUT_MS,
         ).getOrNull()?.use { session ->
             session.exec("tmux kill-session -t $FIXTURE_SESSION 2>/dev/null || true")

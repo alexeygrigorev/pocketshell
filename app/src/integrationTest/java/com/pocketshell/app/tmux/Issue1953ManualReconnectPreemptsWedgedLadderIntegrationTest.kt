@@ -592,7 +592,7 @@ class Issue1953ManualReconnectPreemptsWedgedLadderIntegrationTest {
             port = fixture.getMappedPort(SSH_PORT),
             user = SSH_USER,
             key = SshKey.Path(privateKeyFile),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
     }

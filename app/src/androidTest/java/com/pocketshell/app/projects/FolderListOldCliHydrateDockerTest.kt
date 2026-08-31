@@ -115,7 +115,7 @@ class FolderListOldCliHydrateDockerTest {
                         port = OLD_CLI_PORT,
                         user = DEFAULT_USER,
                         key = sshKey,
-                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                         timeoutMs = 10_000,
                     ).getOrNull()?.use { session ->
                         for (name in createdSessions) {
@@ -149,7 +149,7 @@ class FolderListOldCliHydrateDockerTest {
                 port = OLD_CLI_PORT,
                 user = DEFAULT_USER,
                 key = sshKey,
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 // Confirm the fixture really is an OLD CLI: `tree get` must error

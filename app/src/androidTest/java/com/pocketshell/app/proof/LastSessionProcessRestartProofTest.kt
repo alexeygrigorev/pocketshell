@@ -371,7 +371,7 @@ class LastSessionProcessRestartProofTest {
             port = fixture.host.port,
             user = fixture.host.username,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
 

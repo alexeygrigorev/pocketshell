@@ -526,7 +526,7 @@ class ForwardingNotificationE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = fixtureKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
         try {
@@ -637,7 +637,7 @@ class ForwardingNotificationE2eTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = key,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrNull()?.use { session ->
             session.exec("tmux kill-session -t issue1933-forward 2>/dev/null || true")

@@ -546,10 +546,10 @@ class FolderListViewModelHostUpgradeTest {
                 port = HOST.port,
                 user = HOST.username,
                 credentialId = "${HOST.id}:$KEY_PATH",
-                knownHostsId = "accept-all",
+                knownHostsId = "host-key:unconfirmed",
             ),
             key = SshKey.Path(java.io.File(KEY_PATH)),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
         )
 
     private class Rig(

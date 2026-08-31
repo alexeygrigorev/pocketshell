@@ -364,11 +364,11 @@ class FolderListViewModelConnectTimeoutInversionTest {
                     port = this.host.port,
                     user = this.host.username,
                     credentialId = "${this.host.id}:$keyPath",
-                    knownHostsId = "accept-all",
+                    knownHostsId = "host-key:unconfirmed",
                 ),
                 key = SshKey.Path(File(keyPath)),
                 passphrase = passphrase?.copyOf(),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             )
             val lease: SshLease = manager.acquire(target)
                 .getOrElse { return FolderListResult.ConnectFailed(it) }

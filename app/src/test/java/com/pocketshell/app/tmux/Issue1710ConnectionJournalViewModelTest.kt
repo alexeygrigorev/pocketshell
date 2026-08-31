@@ -185,9 +185,10 @@ class Issue1710ConnectionJournalViewModelTest : TmuxSessionViewModelTestBase() {
                 port = 2222,
                 user = "testuser",
                 credentialId = "$HOST_ID:$KEY_PATH",
+                knownHostsId = SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
             ),
             key = SshKey.Path(File(KEY_PATH)),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
         )
     }
 }

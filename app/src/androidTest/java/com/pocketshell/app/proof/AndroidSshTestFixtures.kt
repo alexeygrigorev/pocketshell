@@ -9,6 +9,7 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.UnknownHostKeyException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -147,29 +148,39 @@ suspend fun waitForSshFixtureReady(
     key: SshKey.Pem,
     port: Int = DEFAULT_PORT,
     timeout: Duration = 45.seconds,
-) {
+): String {
     val deadline = SystemClock.elapsedRealtime() + timeout.inWholeMilliseconds
     val failures = mutableListOf<String>()
     var attempt = 0
     while (SystemClock.elapsedRealtime() < deadline) {
         attempt += 1
-        val result = SshConnection.connect(
+        val probe = SshConnection.connect(
             host = DEFAULT_HOST,
             port = port,
             user = DEFAULT_USER,
             key = key,
-            knownHosts = com.pocketshell.core.ssh.KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
             timeoutMs = 10_000,
-        ).mapCatching { session ->
+        )
+        val fingerprint = (probe.exceptionOrNull() as? UnknownHostKeyException)?.presentedSha256
+        val result = if (fingerprint == null) probe else SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = port,
+            user = DEFAULT_USER,
+            key = key,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(fingerprint),
+            timeoutMs = 10_000,
+        )
+        val verified = result.mapCatching { session ->
             session.use { it.exec("printf 'android ssh fixture ready '; tmux -V") }
         }
-        val execResult = result.getOrNull()
+        val execResult = verified.getOrNull()
         if (execResult?.exitCode == 0) {
             println("WALKTHROUGH_SSH_FIXTURE_READY attempt=$attempt output=${execResult.stdout.trim()}")
-            return
+            return requireNotNull(fingerprint)
         }
         failures += "attempt $attempt: " +
-            (result.exceptionOrNull()?.toString() ?: "exit=${execResult?.exitCode} stderr=${execResult?.stderr}")
+            (verified.exceptionOrNull()?.toString() ?: "exit=${execResult?.exitCode} stderr=${execResult?.stderr}")
         SystemClock.sleep(1_000)
     }
     error("SSH fixture on $DEFAULT_HOST:$port was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
@@ -220,7 +231,7 @@ suspend fun execRemoteSetupUntilReady(
                     port = port,
                     user = user,
                     key = key,
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).mapCatching { session ->
                     session.use { it.exec(command) }

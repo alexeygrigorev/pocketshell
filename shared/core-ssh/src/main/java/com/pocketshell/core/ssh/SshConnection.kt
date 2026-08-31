@@ -17,13 +17,19 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.Buffer
+import net.schmizz.sshj.common.KeyType
+import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider
 import net.schmizz.sshj.userauth.password.PasswordUtils
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
+import java.security.PublicKey
 import java.security.Security
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
@@ -80,8 +86,8 @@ public object SshConnection {
      * the live [SshSession] is delivered, the underlying client is
      * disconnected.
      *
-     * The host key policy defaults to [KnownHostsPolicy.AcceptAll]. Production
-     * callers should pass [KnownHostsPolicy.KnownHostsFile] explicitly.
+     * Host-key verification fails closed unless the caller supplies an explicit
+     * trusted policy.
      */
     @JvmOverloads
     @JvmStatic
@@ -91,7 +97,7 @@ public object SshConnection {
         user: String,
         key: SshKey,
         passphrase: CharArray? = null,
-        knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
+        knownHosts: KnownHostsPolicy = KnownHostsPolicy.RejectAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
     ): Result<SshSession> = connect(
         host = host,
@@ -110,7 +116,7 @@ public object SshConnection {
         user: String,
         key: SshKey,
         passphrase: CharArray? = null,
-        knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
+        knownHosts: KnownHostsPolicy = KnownHostsPolicy.RejectAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
         connector: SshConnector<C>,
         nowNanos: () -> Long = System::nanoTime,
@@ -248,7 +254,10 @@ public object SshConnection {
                 } catch (e: Throwable) {
                     disconnectClientBestEffort()
                     if (continuation.isActive) {
-                        continuation.resume(Result.failure(wrap(e, host, port, user)))
+                        val hostKeyFailure = e.causeSequence()
+                            .filterIsInstance<HostKeyVerificationException>()
+                            .firstOrNull()
+                        continuation.resume(Result.failure(hostKeyFailure ?: wrap(e, host, port, user)))
                     }
                 }
             }
@@ -333,11 +342,45 @@ public object SshConnection {
 
     private fun applyKnownHostsPolicy(client: SSHClient, policy: KnownHostsPolicy) {
         when (policy) {
-            is KnownHostsPolicy.AcceptAll ->
+            is KnownHostsPolicy.RejectAll ->
+                client.addHostKeyVerifier(RejectingHostKeyVerifier)
+            is TestOnlyAcceptAll ->
                 client.addHostKeyVerifier(PromiscuousVerifier())
+            is KnownHostsPolicy.VerifiedFingerprint ->
+                client.addHostKeyVerifier(VerifiedFingerprintHostKeyVerifier(policy.expectedSha256))
             is KnownHostsPolicy.KnownHostsFile ->
                 client.loadKnownHosts(policy.file)
         }
+    }
+
+    private data object RejectingHostKeyVerifier : HostKeyVerifier {
+        override fun verify(hostname: String, port: Int, key: PublicKey): Boolean = false
+        override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
+    }
+
+    private class VerifiedFingerprintHostKeyVerifier(
+        private val expectedSha256: String?,
+    ) : HostKeyVerifier {
+        override fun verify(hostname: String, port: Int, key: PublicKey): Boolean {
+            val presented = sha256HostKeyFingerprint(key)
+            val algorithm = KeyType.fromKey(key).toString()
+            val expected = expectedSha256
+            if (expected == null) {
+                throw UnknownHostKeyException(hostname, port, algorithm, presented)
+            }
+            if (expected != presented) {
+                throw ChangedHostKeyException(hostname, port, algorithm, expected, presented)
+            }
+            return true
+        }
+
+        override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
+    }
+
+    internal fun sha256HostKeyFingerprint(key: PublicKey): String {
+        val wireKey = Buffer.PlainBuffer().putPublicKey(key).compactData
+        val digest = MessageDigest.getInstance("SHA-256").digest(wireKey)
+        return "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(digest)
     }
 
     private fun loadKeyProvider(
@@ -448,8 +491,9 @@ public object SshConnection {
 
         override fun isAddressFailureRetryable(failure: Throwable): Boolean =
             failure.causeSequence().none { cause ->
-                cause is net.schmizz.sshj.common.SSHException &&
-                    cause.disconnectReason == net.schmizz.sshj.common.DisconnectReason.HOST_KEY_NOT_VERIFIABLE
+                cause is HostKeyVerificationException ||
+                    (cause is net.schmizz.sshj.common.SSHException &&
+                        cause.disconnectReason == net.schmizz.sshj.common.DisconnectReason.HOST_KEY_NOT_VERIFIABLE)
             }
 
         override fun prepareAuthentication(client: SSHClient, timeoutMs: Int) {

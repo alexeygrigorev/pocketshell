@@ -3,6 +3,7 @@ package com.pocketshell.app.projects
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import java.io.File
 
@@ -49,10 +50,10 @@ internal data class BoundParams(
                 port = port,
                 user = username,
                 credentialId = "$hostId:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
         )
 }

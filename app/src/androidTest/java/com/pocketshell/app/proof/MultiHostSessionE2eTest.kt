@@ -256,7 +256,7 @@ class MultiHostSessionE2eTest {
             port = port,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec(script) }
@@ -279,7 +279,7 @@ class MultiHostSessionE2eTest {
                     port = port,
                     user = DEFAULT_USER,
                     key = SshKey.Pem(key),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                     timeoutMs = 15_000,
                 ).mapCatching { session ->
                     session.use {
@@ -350,7 +350,7 @@ class MultiHostSessionE2eTest {
             port = port,
             user = DEFAULT_USER,
             key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
@@ -477,7 +477,7 @@ class MultiHostSessionE2eTest {
                 port = port,
                 user = DEFAULT_USER,
                 key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+                knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
                 timeoutMs = 10_000,
             ).getOrThrow().use { session ->
                 session.exec("ps -eo args | grep '[s]shd: testuser' | wc -l")

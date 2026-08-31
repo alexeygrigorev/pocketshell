@@ -6387,15 +6387,16 @@ public class TmuxSessionViewModel @Inject constructor(
                 port = port,
                 user = user,
                 credentialId = "$hostId:$keyPath",
-                knownHostsId = "accept-all",
+                knownHostsId = trustedHostKeySha256?.let { "host-key:$it" }
+                    ?: "host-key:unconfirmed",
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = KnownHostsPolicy.VerifiedFingerprint(trustedHostKeySha256),
         )
 
     private suspend fun runConnect(
-        target: ConnectionTarget,
+        requestedTarget: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
         // Issue #634: a "warm open" reuses an already-live pooled SSH lease,
@@ -6409,6 +6410,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // is preserved unchanged.
         warmReveal: Boolean = false,
     ) {
+        val trustedHost = hostDao?.getById(requestedTarget.hostId)
+        val target = if (trustedHost != null &&
+            trustedHost.hostname.equals(requestedTarget.host, ignoreCase = true) &&
+            trustedHost.port == requestedTarget.port
+        ) {
+            requestedTarget.copy(
+                trustedHostKeyAlgorithm = trustedHost.trustedHostKeyAlgorithm,
+                trustedHostKeySha256 = trustedHost.trustedHostKeySha256,
+            )
+        } else {
+            requestedTarget
+        }
         val startedAtMs = SystemClock.elapsedRealtime()
         // Issue #440: a fresh attempt starts with no recorded failure so a
         // stale cause from a previous attempt never influences the retry
@@ -17455,6 +17468,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val startDirectory: String?,
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
+        val trustedHostKeyAlgorithm: String? = null,
+        val trustedHostKeySha256: String? = null,
     ) {
         // Issue #1575: identity equality EXCLUDES the secret `passphrase` (sibling helpers).
         override fun equals(other: Any?): Boolean = connectionTargetIdentityEquals(this, other)

@@ -209,6 +209,18 @@ abstract class NetworkFaultProofBase {
         hostName: String,
         port: Int = NETWORK_FAULT_SSH_PORT,
     ): String {
+        // Issue #2445 — `4b5be0d8`'s "Enforce SSH host key trust and rekey
+        // flows" made the production connect path (AuthoritativeSshLeaseConnector /
+        // TmuxSessionViewModel via HostEntity.hostKeyTrustBinding()) reject an
+        // unconfirmed host with UnknownHostKeyException instead of connecting.
+        // Capture the real fingerprint for THIS port (the proxy front-end port
+        // the seeded HostEntity actually points at, which can differ from the
+        // direct fixture port already probed by prepareProxyAndRemoteSession /
+        // preparePacketLossProxyAndRemoteSession) using the same capture-probe
+        // idiom as waitForSshFixtureReady, then persist it on the fixture so
+        // the app's own real first-connect journey does not fail before the
+        // network fault is even injected.
+        val trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = port)
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -239,6 +251,7 @@ abstract class NetworkFaultProofBase {
                     pocketshellVersionCompatible = true,
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

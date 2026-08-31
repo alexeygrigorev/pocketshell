@@ -4,6 +4,7 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -137,7 +138,7 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = { ExecResult(stdout = "", stderr = "can't find session", exitCode = 1) },
+            execHandler = { absentResult("can't find session") },
         )
         val client = RealTmuxClient(session, scope, sessionName = "deploy", createIfMissing = false)
         try {
@@ -147,7 +148,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxSessionNotFoundException,
             )
             assertEquals(
-                listOf("tmux has-session -t '=deploy'"),
+                listOf(TmuxSessionSocketLocator.locateCommand("'=deploy'")),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -164,14 +165,46 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
+            execHandler = { locatedResult(TmuxSessionSocketLocator.DEFAULT_SOCKET_TOKEN) },
         )
         val client = RealTmuxClient(session, scope, sessionName = "deploy", createIfMissing = false)
         try {
             client.connect()
             awaitClientWrite(shell)
             assertEquals(
-                listOf("tmux has-session -t '=deploy'"),
+                listOf(TmuxSessionSocketLocator.locateCommand("'=deploy'")),
+                session.execCommands.toList(),
+            )
+            // Issue #2387: a LOCATED session is ATTACHED, never re-issued through
+            // `new-session -A` — the sweep already proved it exists, so there is
+            // nothing left to "attach-or-create" about.
+            assertEquals(
+                "tmux -CC attach-session -t '=deploy'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `default create-if-missing connect sweeps first, then creates when absent everywhere`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { absentResult("can't find session") },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "deploy")
+        try {
+            client.connect()
+            awaitClientWrite(shell)
+            // Issue #2387: the sweep now runs on EVERY connect(), including the
+            // ordinary create-if-missing "open this session" path — that path is
+            // exactly how the maintainer's orphan was hit (a session created
+            // moments earlier through the app's own create path can already be
+            // sitting on its own tmuxctl socket by the time this fires).
+            assertEquals(
+                listOf(TmuxSessionSocketLocator.locateCommand("'=deploy'")),
                 session.execCommands.toList(),
             )
             assertEquals(
@@ -184,16 +217,21 @@ class TmuxClientConnectionTest {
     }
 
     @Test
-    fun `default create-if-missing connect skips the has-session preflight`() = runBlocking {
+    fun `connect locates a session on a dedicated tmuxctl socket and attaches there, not default`() = runBlocking {
+        // Issue #2387 — the exact reported mechanism at the JVM level: a
+        // session that only exists on its own `tmuxctl-<name>` socket must be
+        // reached THERE, never mistaken for absent and re-minted on default.
         val shell = FakeShell()
-        val session = FakeSession(shell)
+        val session = FakeSession(
+            shell,
+            execHandler = { locatedResult("/tmp/tmux-1000/tmuxctl-deploy") },
+        )
         val client = RealTmuxClient(session, scope, sessionName = "deploy")
         try {
             client.connect()
             awaitClientWrite(shell)
-            assertTrue("no has-session preflight expected", session.execCommands.isEmpty())
             assertEquals(
-                "tmux -CC new-session -A -s 'deploy'\n",
+                "tmux -S '/tmp/tmux-1000/tmuxctl-deploy' -CC attach-session -t '=deploy'\n",
                 shell.stdinAsString(),
             )
         } finally {
@@ -206,13 +244,7 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = {
-                ExecResult(
-                    stdout = "",
-                    stderr = "no server running on /tmp/tmux-1000/default",
-                    exitCode = 1,
-                )
-            },
+            execHandler = { absentResult("no server running on /tmp/tmux-1000/default") },
         )
         val client = RealTmuxClient(
             session,
@@ -232,7 +264,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxSessionNotFoundException,
             )
             assertEquals(
-                listOf("tmux has-session -t '=work'"),
+                listOf(TmuxSessionSocketLocator.locateCommand("'=work'")),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -249,9 +281,7 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = {
-                ExecResult(stdout = "", stderr = "can't find session: work", exitCode = 1)
-            },
+            execHandler = { absentResult("can't find session: work") },
         )
         val client = RealTmuxClient(
             session,
@@ -271,7 +301,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxServerDeadException,
             )
             assertEquals(
-                listOf("tmux has-session -t '=work'"),
+                listOf(TmuxSessionSocketLocator.locateCommand("'=work'")),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -288,7 +318,7 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
+            execHandler = { locatedResult(TmuxSessionSocketLocator.DEFAULT_SOCKET_TOKEN) },
         )
         val client = RealTmuxClient(
             session,
@@ -301,11 +331,14 @@ class TmuxClientConnectionTest {
             client.connect()
             awaitClientWrite(shell)
             assertEquals(
-                listOf("tmux has-session -t '=work'"),
+                listOf(TmuxSessionSocketLocator.locateCommand("'=work'")),
                 session.execCommands.toList(),
             )
+            // Issue #2387: LOCATED -> attach, never `new-session -A` — the two
+            // intents ("attach to a known session" vs "create fresh") are now
+            // distinct commands, so a reattach can never silently resurrect.
             assertEquals(
-                "tmux -CC new-session -A -s 'work'\n",
+                "tmux -CC attach-session -t '=work'\n",
                 shell.stdinAsString(),
             )
         } finally {
@@ -318,13 +351,7 @@ class TmuxClientConnectionTest {
         val shell = FakeShell()
         val session = FakeSession(
             shell,
-            execHandler = {
-                ExecResult(
-                    stdout = "",
-                    stderr = "no server running on /tmp/tmux-1000/default",
-                    exitCode = 1,
-                )
-            },
+            execHandler = { absentResult("no server running on /tmp/tmux-1000/default") },
         )
         val client = RealTmuxClient(session, scope, sessionName = "work", createIfMissing = false)
         try {
@@ -343,14 +370,167 @@ class TmuxClientConnectionTest {
     }
 
     @Test
-    fun `default explicit-new connect never probes server liveness (fresh server allowed)`() = runBlocking {
+    fun `default explicit-new connect never fails on a dead-everywhere sweep (fresh server allowed)`() = runBlocking {
         val shell = FakeShell()
-        val session = FakeSession(shell)
+        val session = FakeSession(
+            shell,
+            execHandler = { absentResult("no server running on /tmp/tmux-1000/default") },
+        )
         val client = RealTmuxClient(session, scope, sessionName = "work")
         try {
             client.connect()
             awaitClientWrite(shell)
-            assertTrue("explicit-new must not preflight", session.execCommands.isEmpty())
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `attach-only connect refuses to create when the sweep output is garbled, not throwing`() = runBlocking {
+        // Issue #2387 review gap (round 2): a sweep exec that SUCCEEDS (exit
+        // 0) but whose stdout does not match either the LOCATED or ABSENT
+        // shape — e.g. a foreign/old host's shell injecting a login banner
+        // ahead of the sweep's own `printf` output, matching the reviewer's
+        // exact reproduction shape — must NOT be treated as "sweep found
+        // nothing" and silently degrade to `new-session -A` on an
+        // attach-only cold-restore (`createIfMissing = false`), the exact
+        // intent #666 exists to protect. Before the fix this test reproduced
+        // the resurrection bug: `AssertionError: expected TmuxClientException`.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { garbledResult() },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "work", createIfMissing = false)
+        try {
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            assertTrue(
+                "expected a #666/#998-style refusal exception for an unclassifiable " +
+                    "sweep result on an attach-only connect, got $thrown",
+                thrown is TmuxClientException,
+            )
+            assertEquals(
+                listOf(TmuxSessionSocketLocator.locateCommand("'=work'")),
+                session.execCommands.toList(),
+            )
+            assertTrue(
+                "no creating command should be written, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `reattach preflight refuses to create when the sweep output is garbled, not throwing`() = runBlocking {
+        // Same gap, other reattach-required trigger: `probeServerLiveness =
+        // true` (lifecycle reattach / reconnect), independent of
+        // `createIfMissing`.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { garbledResult() },
+        )
+        val client = RealTmuxClient(
+            session,
+            scope,
+            sessionName = "work",
+            createIfMissing = true,
+            probeServerLiveness = true,
+        )
+        try {
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            assertTrue(
+                "expected a #666/#998-style refusal exception for an unclassifiable " +
+                    "sweep result on a reattach-required connect, got $thrown",
+                thrown is TmuxClientException,
+            )
+            assertEquals(
+                listOf(TmuxSessionSocketLocator.locateCommand("'=work'")),
+                session.execCommands.toList(),
+            )
+            assertTrue(
+                "no creating command should be written, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `explicit-new connect degrades to a plain create when the sweep output is garbled`() = runBlocking {
+        // Contrast case: the explicit "new session" intent
+        // (`createIfMissing && !probeServerLiveness`) legitimately wants a
+        // fresh server when the sweep cannot be classified — this must keep
+        // working exactly like the exec-throws degrade path already covered
+        // by `explicit-new connect degrades to a plain default-socket create
+        // when the sweep cannot run`.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { garbledResult() },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "work")
+        try {
+            client.connect()
+            awaitClientWrite(shell)
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `connect never hangs forever when the sweep exec is wedged`() = runBlocking {
+        // Issue #2387 self-guard: this exact shape (a blanket execHandler that
+        // never returns, exercised by RealTmuxClient's own exec-lane tests)
+        // discovered a real hang the #2387 sweep introduced — `connect()`
+        // used to run ZERO execs for the explicit-new intent, so it could
+        // never be blocked by a wedged transport; the sweep changed that,
+        // and without its own bound a wedged host would hang `connect()`
+        // forever instead of degrading to `Unknown` and proceeding to
+        // create. Bounded to comfortably less than [CONNECTION_AWAIT_TIMEOUT_MS]
+        // so a regression here fails this test instead of hanging the suite.
+        val shell = FakeShell()
+        val neverReturns = CompletableDeferred<ExecResult>()
+        val session = FakeSession(shell, execHandler = { neverReturns.await() })
+        val client = RealTmuxClient(session, scope, sessionName = "work")
+        try {
+            withTimeout(CONNECTION_AWAIT_TIMEOUT_MS) {
+                client.connect()
+            }
+            awaitClientWrite(shell)
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            neverReturns.cancel()
+            client.close()
+        }
+    }
+
+    @Test
+    fun `explicit-new connect degrades to a plain default-socket create when the sweep cannot run`() = runBlocking {
+        // Issue #2387: a foreign/old host whose shell cannot run the sweep (or
+        // any transport hiccup on that single exec) must not BLOCK the
+        // explicit "new session" intent — it degrades to exactly the
+        // pre-#2387 behaviour instead.
+        val shell = FakeShell()
+        val session = FakeSession(shell) // no execHandler -> exec() throws
+        val client = RealTmuxClient(session, scope, sessionName = "work")
+        try {
+            client.connect()
+            awaitClientWrite(shell)
             assertEquals(
                 "tmux -CC new-session -A -s 'work'\n",
                 shell.stdinAsString(),
@@ -409,6 +589,42 @@ class TmuxClientConnectionTest {
             while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
         }
     }
+
+    /**
+     * Issue #2387: canned [TmuxSessionSocketLocator] sweep answers matching
+     * exactly what [TmuxSessionSocketLocator.parse] expects, so these tests
+     * exercise the real parser/command-builder instead of a hand-rolled
+     * stand-in for it.
+     */
+    private fun locatedResult(socketOrDefaultToken: String): ExecResult =
+        ExecResult(
+            stdout = "${TmuxSessionSocketLocator.LOCATED_PREFIX}$socketOrDefaultToken\n",
+            stderr = "",
+            exitCode = 0,
+        )
+
+    private fun absentResult(defaultSocketError: String): ExecResult =
+        ExecResult(
+            stdout = "${TmuxSessionSocketLocator.ABSENT_PREFIX} $defaultSocketError\n",
+            stderr = "",
+            exitCode = 1,
+        )
+
+    /**
+     * Issue #2387 review gap (round 2): the reviewer's exact reproduction
+     * shape — a sweep exec that SUCCEEDS (exit 0) but whose stdout is
+     * neither [TmuxSessionSocketLocator.LOCATED_PREFIX] nor
+     * [TmuxSessionSocketLocator.ABSENT_PREFIX], as a foreign/old host's
+     * login banner/MOTD would produce ahead of the sweep's own `printf`.
+     * [TmuxSessionSocketLocator.parse] classifies this as
+     * [TmuxSessionLocation.Unknown].
+     */
+    private fun garbledResult(): ExecResult =
+        ExecResult(
+            stdout = "Welcome to Ubuntu 22.04\n",
+            stderr = "",
+            exitCode = 0,
+        )
 
     private class FakeSession(
         private val shell: SshShell,

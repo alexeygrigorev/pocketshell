@@ -371,6 +371,101 @@ class TmuxClientIntegrationTest {
     }
 
     @Test
+    fun `connect reaches a session on a dedicated socket instead of minting an empty one on default`() = runBlocking {
+        // Issue #2387 — the real-tmux proof. On a tmuxctl host every real
+        // session lives on ITS OWN dedicated socket (`tmuxctl-<name>`), not
+        // the default one tmuxctl itself creates dedicated sockets with a
+        // plain `tmux -S <path> new-session -d`, so this reproduces the exact
+        // mechanism without depending on the `tmuxctl` package being present.
+        //
+        // Before the fix, `TmuxClient.connect` ran a bare (no `-S`)
+        // `tmux -CC new-session -A -s '<name>'`, which can never see this
+        // socket. Because `-A` is attach-OR-create, that silently MINTED a
+        // brand-new, empty, same-named session on the DEFAULT socket instead
+        // of reaching the real one — the maintainer's reported orphan.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val stamp = System.nanoTime()
+                val target = "dedicated-$stamp"
+                // [TmuxSessionSocketLocator]'s sweep only globs
+                // `$TMUX_TMPDIR/tmux-<uid>/*` — the exact directory tmux
+                // itself (and tmuxctl's `tmuxctl-<name>` sockets) use — so the
+                // dedicated socket for this test MUST live there too, or the
+                // sweep can never find it regardless of the fix under test.
+                val socketDir = session.exec(
+                    "printf '%s' \"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\"",
+                ).stdout.trim()
+                session.exec("mkdir -p '$socketDir'")
+                val socket = "$socketDir/it-dedicated-$stamp"
+                session.exec("rm -f '$socket'")
+                // A real dedicated server, holding a REAL pre-existing pane —
+                // typed BEFORE the app ever connects, exactly like a session
+                // the maintainer had open on the host already.
+                val marker = "marker-$stamp"
+                // The pane's COMMAND prints the marker itself (rather than
+                // typing it in via a later `send-keys`) — the initial pane
+                // command here is `sleep`, not a shell, so keystrokes typed
+                // into it would go straight to `sleep`'s (ignored) stdin and
+                // never appear in the pane's output.
+                assertEquals(
+                    "dedicated-socket session must start cleanly",
+                    0,
+                    session.exec(
+                        "tmux -S '$socket' new-session -d -s '$target' " +
+                            "\"sh -c 'echo $marker; sleep 600'\"",
+                    ).exitCode,
+                )
+                delay(300)
+
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = target,
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val response = withTimeout(10_000) {
+                        it.sendCommand("list-sessions")
+                    }
+                    assertFalse(
+                        "list-sessions must not be an error response; got `${response.output}`",
+                        response.isError,
+                    )
+                    assertNotNull(
+                        "the -CC client must be attached to the REAL session `$target` " +
+                            "on its dedicated socket, not a fresh one; got ${response.output}",
+                        response.output.firstOrNull { line -> line.startsWith("$target:") },
+                    )
+                }
+                // The pre-existing pane content (the marker typed before connect)
+                // must still be there — proof this is the SAME pane, not a fresh
+                // empty session.
+                val capture = session.exec(
+                    "tmux -S '$socket' capture-pane -p -t '=$target:'",
+                )
+                assertTrue(
+                    "expected the pre-existing marker `$marker` in the attached pane " +
+                        "(proves we reached the REAL session, not a fresh empty one); " +
+                        "captured=`${capture.stdout}`",
+                    capture.stdout.contains(marker),
+                )
+                // REGRESSION (#2387): the default socket must NOT have grown a
+                // same-named orphan.
+                assertFalse(
+                    "REGRESSION (#2387): connect() minted an orphan `$target` on the " +
+                        "DEFAULT socket instead of reaching the dedicated one",
+                    session.exec("tmux has-session -t '=$target'").exitCode == 0,
+                )
+                session.exec("tmux -S '$socket' kill-server >/dev/null 2>&1 || true")
+                Unit
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `sendCommand error response surfaces with isError true`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {

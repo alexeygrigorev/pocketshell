@@ -415,6 +415,91 @@ class Issue2377MultiSocketSessionListDockerTest {
         )
     } }
 
+    /**
+     * Issue #2387 — the companion mechanism: `TmuxClient.connect` attaching
+     * with no `-S` can never reach a session that lives on its own dedicated
+     * `tmuxctl-<name>` socket. On the reported host that meant an attach
+     * silently minted a brand-new, empty, same-named session on the DEFAULT
+     * socket (`new-session -A` is attach-OR-create) instead of reaching the
+     * real one — the upstream half of the #2377 undercount (a live client
+     * landing on the wrong socket in the first place).
+     *
+     * Drives the PRODUCTION [TmuxClientFactory]/[TmuxClient] against a real
+     * pre-existing session on a dedicated `tmuxctl-*` socket (seeded the same
+     * way [seedHost] seeds every other socket in this class) and asserts the
+     * `-CC` client reaches THAT session — not a fresh empty one on default.
+     */
+    @Test
+    fun connectAttachesToTheDedicatedSocketSessionNeverMintsAnOrphanOnDefault(): Unit { runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val target = "issue2387-target-$suffix"
+        val marker = "issue2387-marker-$suffix"
+        withTimeout(30_000L) {
+            connect().use { session ->
+                val created = session.exec(
+                    "tmux -L $TMUXCTL_PREFIX$target new-session -d -s $target -c /tmp",
+                )
+                check(created.exitCode == 0) {
+                    "failed to seed dedicated-socket session $target: ${created.stderr}"
+                }
+                socketSessions += target
+                // A REAL pre-existing pane, typed BEFORE the app ever connects —
+                // exactly like a session the maintainer had open on the host
+                // already.
+                val typed = session.exec(
+                    "tmux -L $TMUXCTL_PREFIX$target send-keys -t '=$target:' 'echo $marker' Enter",
+                )
+                check(typed.exitCode == 0) { "failed to seed marker: ${typed.stderr}" }
+                delay(300)
+                // Precondition (anti-vacuous): confirm the DEFAULT socket does
+                // NOT already know this name, so a later default-socket hit can
+                // only be the fix's absence, not fixture leakage.
+                val defaultBefore = session.exec("tmux has-session -t '=$target'")
+                check(defaultBefore.exitCode != 0) {
+                    "fixture regression: `$target` already exists on the default socket " +
+                        "before connect() ran"
+                }
+            }
+        }
+
+        val session = withTimeout(30_000L) { connect(timeoutMs = 15_000) }
+        val client: TmuxClient = TmuxClientFactory(tmuxClientScope).create(
+            session = session,
+            sessionName = target,
+        )
+        try {
+            withTimeout(30_000L) { client.connect() }
+            val response = withTimeout(15_000L) { client.sendCommand("list-sessions") }
+            assertTrue(
+                "ISSUE2387_ORPHAN list-sessions must show the real `$target`, got " +
+                    "${response.output}",
+                response.output.any { line -> line.startsWith("$target:") },
+            )
+            withTimeout(30_000L) {
+                connect().use { probe ->
+                    val capture = probe.exec(
+                        "tmux -L $TMUXCTL_PREFIX$target capture-pane -p -t '=$target:'",
+                    )
+                    assertTrue(
+                        "ISSUE2387_ORPHAN expected the pre-existing marker `$marker` in the " +
+                            "attached pane (proves the REAL session was reached, not a fresh " +
+                            "empty one); captured=`${capture.stdout}`",
+                        capture.stdout.contains(marker),
+                    )
+                    val defaultAfter = probe.exec("tmux has-session -t '=$target'")
+                    assertTrue(
+                        "ISSUE2387_ORPHAN connect() minted an orphan `$target` on the DEFAULT " +
+                            "socket instead of reaching the dedicated one",
+                        defaultAfter.exitCode != 0,
+                    )
+                }
+            }
+        } finally {
+            client.close()
+            session.close()
+        }
+    } }
+
     private suspend fun awaitPickerRows(
         vm: HostTmuxSessionPickerViewModel,
         required: Set<String>,

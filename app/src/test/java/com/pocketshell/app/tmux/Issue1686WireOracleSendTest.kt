@@ -25,7 +25,7 @@ import org.junit.Test
  * (gate-wired in the `Unit tests` job).
  *
  * RED reproduction (reviewer): restore the enum gate in
- * `liveTmuxClientForSendOrNull` (`if (inlineConnectionStatus !is Connected) return
+ * `liveTmuxClientForSendOrNull` (the removed VM-private not-Connected return
  * null`) and [admitsLiveWritableClientWhenEnumFalselyNotConnected] fails — the live
  * client is refused on the false `Reconnecting` label.
  */
@@ -40,7 +40,7 @@ class Issue1686WireOracleSendTest : TmuxSessionViewModelTestBase() {
 
         // Model the #1680 false-disconnect: the enum flips to `Reconnecting` while
         // the `-CC` transport (clientRef) stays live + writable.
-        vm.forceInlineReconnectingStatusKeepingClientForTest()
+        vm.forceControllerReconnectingStatusKeepingClientForTest()
 
         assertNotNull(
             "the WIRE is the oracle: a live, writable clientRef must be admitted even " +

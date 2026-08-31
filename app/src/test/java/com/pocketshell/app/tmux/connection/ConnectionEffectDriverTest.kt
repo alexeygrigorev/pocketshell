@@ -233,7 +233,7 @@ class ConnectionEffectDriverTest {
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
-            backgroundedEffect = { detachTriggers += 1 },
+            backgroundedEffect = { _ -> detachTriggers += 1 },
             sink = { recorded += it },
         ).also { it.start() }
 
@@ -247,11 +247,11 @@ class ConnectionEffectDriverTest {
         assertEquals("driver triggers the clean detach on Backgrounded entry", 1, detachTriggers)
 
         // Foreground within grace then re-background: a SECOND background entry fires
-        // the effect again (once per entry), never on the Reattaching/Live in between.
+        // the effect again (once per entry), never on the typed recovery state in between.
         clock.now = 1_000L
         controller.submit(ConnectionEvent.Foreground) // -> Reattaching
-        controller.submit(ConnectionEvent.TransportLive) // -> Live
-        assertEquals("no extra trigger across fg/reattach/live", 1, detachTriggers)
+        controller.submit(ConnectionEvent.TransportLive) // recovery Attaching until seed
+        assertEquals("no extra trigger across fg/typed-recovery", 1, detachTriggers)
         controller.submit(ConnectionEvent.Background)
         assertEquals("a fresh background entry re-fires the detach trigger", 2, detachTriggers)
 
@@ -270,7 +270,7 @@ class ConnectionEffectDriverTest {
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
-            backgroundedEffect = { detachTriggers += 1 },
+            backgroundedEffect = { _ -> detachTriggers += 1 },
         ).also { it.start() }
 
         // A full open/switch/drop lifecycle WITHOUT a Background never triggers detach.
@@ -281,6 +281,32 @@ class ConnectionEffectDriverTest {
         controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop"))) // -> Reattaching
 
         assertEquals("detach trigger only on Backgrounded entry", 0, detachTriggers)
+        scope.cancel()
+    }
+
+    @Test
+    fun backgroundedEffectReceivesTheExactTypedPreTransitionState() = runTest {
+        val scope = driverScope()
+        val controller = ConnectionController(
+            clock = TestClock(),
+            transport = InertTransportPort(warm = true),
+        )
+        val observed = mutableListOf<ConnectionState>()
+        ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = InertTmuxPort(),
+            transportPort = InertTransportPort(warm = true),
+            scope = scope,
+            backgroundedEffect = { observed += it },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        controller.submit(ConnectionEvent.ReconnectLadderEntered)
+        val reconnecting = controller.state.value as ConnectionState.Reconnecting
+        controller.submit(ConnectionEvent.Background)
+
+        assertEquals(listOf(reconnecting), observed)
         scope.cancel()
     }
 
@@ -754,7 +780,10 @@ class ConnectionEffectDriverTest {
         )
 
         transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
-        assertEquals(ConnectionState.Attaching(host, sessionA), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, sessionA, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(sessionA, "%0"))
         assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
         assertEquals(
@@ -890,7 +919,10 @@ class ConnectionEffectDriverTest {
 
         transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
 
-        assertEquals(ConnectionState.Attaching(host, sessionA), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, sessionA, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(sessionA, "%0"))
         assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
         assertEquals(
@@ -1040,7 +1072,7 @@ class ConnectionEffectDriverTest {
      * that false-Live window was where the one-interval oracle landed.
      */
     @Test
-    fun leaseUpDuringRecoveryWaitsInAttachingUntilTmuxReveal() = runTest {
+    fun leaseUpDuringRecoveryStaysTypedUntilTmuxReveal() = runTest {
         val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 
@@ -1056,9 +1088,9 @@ class ConnectionEffectDriverTest {
         h.transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
 
         assertTrue(
-            "issue #1887: SSH lease Up must wait in Attaching; only the replacement " +
+            "issue #1887: SSH lease Up must remain in typed recovery; only the replacement " +
                 "tmux attach/reveal may publish Live — got ${h.controller.state.value}",
-            h.controller.state.value is ConnectionState.Attaching,
+            (h.controller.state.value as? ConnectionState.Attaching)?.recovering == true,
         )
         assertEquals(
             listOf("Idle", "Attaching", "Live", "Reattaching", "Attaching"),

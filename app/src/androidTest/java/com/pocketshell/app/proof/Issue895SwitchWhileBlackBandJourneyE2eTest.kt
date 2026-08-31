@@ -53,12 +53,12 @@ import java.io.File
  * Reproduces the R1 trigger on the REAL screen: a session is attached LIVE, then
  * the VM is driven into the `Switching` (Attaching) window — exactly the window a
  * same-host fast switch holds — and a transport drop lands mid-switch (the
- * synthetic-injection #780 model, via [TmuxSessionViewModel.forceAttachingStateForTest]
+ * synthetic-injection #780 model, via [TmuxSessionViewModel.forceControllerAttachingForTest]
  * + [TmuxSessionViewModel.triggerCleanPassiveDropForTest], which drive the SAME
  * production `handlePassiveClientDisconnect` + controller projection the live UI
  * renders from).
  *
- * Defect: the old `inlineConnectionStatus as? Connected ?: return` swallow gate
+ * Defect: the old VM-private `Connected` swallow gate
  * dropped the Switching-window drop on the floor — the user was left frozen on a
  * black pane with NO escapable affordance ("it froze, had to restart").
  *
@@ -137,11 +137,11 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         captureJourneyArtifacts("switch-pre-drop-live")
 
         // Drive the VM into the Switching (Attaching) window — the window a
-        // same-host fast switch holds before the Live flip. inlineConnectionStatus
+        // same-host fast switch holds before the Live flip. The controller state
         // now projects to Switching (the user-visible "switching" state).
         val vm = currentViewModel()
         compose.activityRule.scenario.onActivity {
-            vm.forceAttachingStateForTest(DEFAULT_HOST, DEFAULT_PORT, DEFAULT_USER)
+            vm.forceControllerAttachingForTest()
         }
         compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Switching

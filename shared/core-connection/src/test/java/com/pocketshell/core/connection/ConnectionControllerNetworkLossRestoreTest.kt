@@ -134,19 +134,20 @@ class ConnectionControllerNetworkLossRestoreTest {
     }
 
     @Test
-    fun `submit treats NetworkLost and NetworkRestored as inert vocabulary while Live`() {
+    fun `submit owns NetworkLost and NetworkRestored while Live`() {
         val transport = FakeTransportPort()
-        val controller = controller(transport).bringLive(transport)
+        val liveness = FakeLivenessPort(provenAlive = true)
+        val controller = controller(transport, liveness).bringLive(transport)
         assertEquals(ConnectionState.Live(host, target), controller.state.value)
-        val reveal = controller.revealGate.value
 
         controller.submit(ConnectionEvent.NetworkLost)
-        assertEquals(ConnectionState.Live(host, target), controller.state.value)
-        assertEquals(reveal, controller.revealGate.value)
+        assertEquals(
+            ConnectionState.NetworkLossSuspended(host, target, sinceMs = 0L),
+            controller.state.value,
+        )
 
         controller.submit(ConnectionEvent.NetworkRestored)
         assertEquals(ConnectionState.Live(host, target), controller.state.value)
-        assertEquals(reveal, controller.revealGate.value)
     }
 
     @Test
@@ -197,7 +198,8 @@ class ConnectionControllerNetworkLossRestoreTest {
 
     private fun controller(
         transport: FakeTransportPort = FakeTransportPort(),
-    ) = ConnectionController(FakeClock(), transport)
+        liveness: FakeLivenessPort = FakeLivenessPort(),
+    ) = ConnectionController(FakeClock(), transport, liveness = liveness)
 
     private fun ConnectionController.bringLive(transport: FakeTransportPort): ConnectionController {
         transport.setWarm(host, false)

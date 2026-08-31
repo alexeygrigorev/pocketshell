@@ -83,7 +83,7 @@ import java.io.File
  *     [TmuxSessionViewModel] with a genuinely-writable `clientRef`),
  *  2. injects the EXACT false-disconnect the storm produces — the #780
  *     synthetic-injection model, deterministic, no self-skip:
- *     [TmuxSessionViewModel.forceInlineReconnectingStatusKeepingClientForTest]
+ *     [TmuxSessionViewModel.forceControllerReconnectingStatusKeepingClientForTest]
  *     flips the inline enum to `Reconnecting` (the admission gate's oracle) while
  *     the real `clientRef` stays live, and the drain runs with `sessionLive=false`
  *     (the drain gate's enum oracle). BOTH enum labels are false; the wire is
@@ -100,7 +100,7 @@ import java.io.File
  *     to the real pane.
  *
  * RED reproduction (reviewer, this run):
- *  - revert the admission hunk (restore `if (inlineConnectionStatus !is Connected)
+ *  - revert the admission hunk (restore the removed VM-private not-Connected
  *    return null` in [TmuxSessionViewModel.liveTmuxClientForSendOrNull]) → the send
  *    is refused on the false `Reconnecting` label → the marker NEVER reaches the
  *    pane (the clog) → this test times out red.
@@ -164,7 +164,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
             // --- Inject the EXACT false-disconnect (the #1680 storm): the inline
             //     enum flips to `Reconnecting` (admission oracle) while the real
             //     `clientRef` stays live + writable.
-            onMainUnit { liveVm.forceInlineReconnectingStatusKeepingClientForTest() }
+            onMainUnit { liveVm.forceControllerReconnectingStatusKeepingClientForTest() }
 
             // The WIRE is the oracle: it must report the transport truth over the
             // real socket even though the ConnectionStatus enum now says not-Connected.
@@ -237,7 +237,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
 
             val liveVm = liveTmuxViewModel()
             val paneId = awaitAttachedPaneId(liveVm)
-            onMainUnit { liveVm.forceInlineReconnectingStatusKeepingClientForTest() }
+            onMainUnit { liveVm.forceControllerReconnectingStatusKeepingClientForTest() }
 
             val queue = InMemoryOutboundQueueStore()
             val composer = newComposerVm(queue)
@@ -331,7 +331,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
 
             val liveVm = liveTmuxViewModel()
             val paneId = awaitAttachedPaneId(liveVm)
-            onMainUnit { liveVm.forceInlineReconnectingStatusKeepingClientForTest() }
+            onMainUnit { liveVm.forceControllerReconnectingStatusKeepingClientForTest() }
             assertTrue("precondition: the real transport is writable", liveVm.isSendTransportWritable())
 
             val queue = InMemoryOutboundQueueStore()

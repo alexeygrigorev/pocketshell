@@ -94,14 +94,31 @@ sealed interface RevealDecision {
 /**
  * Events the [ConnectionController] consumes. Foreground/Background,
  * TransportDropped/Live, and Enter/Switch are the only real-world inputs;
- * TargetGone/SeedLanded are feedback from the ports.
+ * identity adoption, target-gone, attach-ready, and seed-landed events are
+ * feedback from the ports.
  */
 sealed interface ConnectionEvent {
     /** User navigated to a host/session — a genuine (possibly cold) open. */
-    data class Enter(val host: HostKey, val targetId: SessionId) : ConnectionEvent
+    data class Enter(
+        val host: HostKey,
+        val targetId: SessionId,
+        /** A verified dead lease requires a cold dial even if the warm snapshot is stale. */
+        val forceCold: Boolean = false,
+    ) : ConnectionEvent
 
     /** Same-host fast switch to a different session (select-window + reseed). */
     data class Switch(val targetId: SessionId) : ConnectionEvent
+
+    /**
+     * The pane listing enriched a name-only target with tmux's exact generation.
+     * This is an identity handoff for the same runtime, not a new open/switch
+     * intent; the reducer preserves the current lifecycle phase while changing
+     * the id used by subsequent target-tagged feedback.
+     */
+    data class TargetIdentityAdopted(
+        val from: SessionId,
+        val to: SessionId,
+    ) : ConnectionEvent
 
     /** App moved to foreground. */
     data object Foreground : ConnectionEvent
@@ -147,17 +164,17 @@ sealed interface ConnectionEvent {
      * [NetworkChanged]: there is no validated replacement network to redial onto,
      * so Slice S4 holds the existing lease/content in [ConnectionState.NetworkLossSuspended].
      *
-     * In this prep slice the event is vocabulary only: [ConnectionController.submit]
-     * treats it as a no-op until VM/app wiring migrates the network reducer.
+     * The VM submits this after its network-loss debounce, so the controller owns the
+     * typed hold rather than a second VM-only status mirror.
      */
     data object NetworkLost : ConnectionEvent
 
     /**
-     * Device network connectivity was restored after [NetworkLost]. Slice S4 will
-     * decide between ride-through and silent reconnect with an injected [LivenessPort].
+     * Device network connectivity was restored after [NetworkLost]. The controller
+     * decides between ride-through and silent reconnect with its injected [LivenessPort].
      *
-     * In this prep slice the event is vocabulary only: [ConnectionController.submit]
-     * treats it as a no-op until VM/app wiring migrates the network reducer.
+     * The controller resolves this through its injected [LivenessPort] and either
+     * rides through to [ConnectionState.Live] or enters the reconnect ladder.
      */
     data object NetworkRestored : ConnectionEvent
 
@@ -166,6 +183,14 @@ sealed interface ConnectionEvent {
 
     /** A capture completed for ([targetId], [paneId]) — feeds the reseed gate. */
     data class SeedLanded(val targetId: SessionId, val paneId: String) : ConnectionEvent
+
+    /**
+     * The current tmux attach completed its control/list-panes readiness fence.
+     * This is deliberately separate from [SeedLanded]: a blank or failed
+     * capture can leave the reveal surface held while the transport is still
+     * live and the connection status is already ready.
+     */
+    data class AttachReady(val targetId: SessionId, val paneId: String) : ConnectionEvent
 
     /**
      * The VM reconnect effect ENTERED its numbered ladder (attempt 1). The reducer
@@ -222,7 +247,14 @@ sealed interface ConnectionState {
      * Warm: lease is up (or in-flight); opening / `select-window` + seeding the
      * target pane. NO full-screen overlay (this is the old `Switching`).
      */
-    data class Attaching(val host: HostKey, val targetId: SessionId) : ConnectionState
+    data class Attaching(
+        val host: HostKey,
+        val targetId: SessionId,
+        /** True only for an attach over an already-warm carrier. */
+        val warm: Boolean = true,
+        /** True when this attach is completing an existing recovery episode. */
+        val recovering: Boolean = false,
+    ) : ConnectionState
 
     /** Attached, input enabled. */
     data class Live(val host: HostKey, val targetId: SessionId) : ConnectionState
@@ -243,8 +275,8 @@ sealed interface ConnectionState {
      * without redialing or surfacing an honest error; probes/effects can suspend
      * until [ConnectionEvent.NetworkRestored] resolves the state.
      *
-     * This state is inert in this prep slice: [ConnectionController.submit] never
-     * transitions into it. The pure network-loss reducer owns the future contract.
+     * [ConnectionController.submit] enters this state only after the VM's debounced
+     * loss observation, preserving the existing lease and content without a redial.
      */
     data class NetworkLossSuspended(
         val host: HostKey,
@@ -254,7 +286,9 @@ sealed interface ConnectionState {
 
     /**
      * Foreground within grace OR a transient `disconnected` drop: heal-and-retry
-     * silently, content preserved. NO error band.
+     * silently, content preserved. A replacement transport remains in this typed
+     * recovery phase until target-tagged attach readiness/seed feedback promotes it
+     * to [Live]. NO error band.
      */
     data class Reattaching(val host: HostKey, val targetId: SessionId) : ConnectionState
 

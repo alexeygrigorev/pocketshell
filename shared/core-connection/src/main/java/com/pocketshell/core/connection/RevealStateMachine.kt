@@ -66,6 +66,8 @@ class RevealStateMachine {
      *  [navigate] so a leaving target's panes never bleed into the new one. */
     private val panes = mutableListOf<Seed>()
 
+    private var seedMayPrecedeLifecycle: Boolean = false
+
     /** Optional agent label for the current target's active pane — only allowed to
      *  override the leaf label in [RevealState.Live]. */
     private var agentName: String? = null
@@ -119,6 +121,7 @@ class RevealStateMachine {
         }
         panes.clear()
         agentName = null
+        seedMayPrecedeLifecycle = false
         // Issue #2338: a genuine renavigation ends any previous identity handoff.
         // Keeping a stale adoption would let the render fence retarget a screen
         // whose route was never the adopted `from`.
@@ -183,6 +186,14 @@ class RevealStateMachine {
             return
         }
         val targetName = _state.value.targetNameOrNull() ?: return
+        if (
+            connectionState is ConnectionState.Reattaching ||
+            connectionState is ConnectionState.Reconnecting ||
+            connectionState is ConnectionState.Gone ||
+            connectionState is ConnectionState.Unreachable
+        ) {
+            seedMayPrecedeLifecycle = false
+        }
 
         val next = when (connectionState) {
             is ConnectionState.Idle,
@@ -191,11 +202,17 @@ class RevealStateMachine {
             -> _state.value // no reveal change
 
             is ConnectionState.Connecting,
-            -> RevealState.Seeding(target, targetName)
+            -> if (panes.isNotEmpty() && seedMayPrecedeLifecycle) {
+                RevealState.Live(target, targetName, panes.toList(), agentName)
+            } else {
+                RevealState.Seeding(target, targetName)
+            }
 
             is ConnectionState.Attaching ->
                 if (connectionProjection == ConnectionProjection.SilentWithinGraceRecovery) {
                     _state.value
+                } else if (panes.isNotEmpty() && seedMayPrecedeLifecycle) {
+                    RevealState.Live(target, targetName, panes.toList(), agentName)
                 } else {
                     RevealState.Seeding(target, targetName)
                 }
@@ -276,6 +293,7 @@ class RevealStateMachine {
         } else {
             panes.add(seed)
         }
+        seedMayPrecedeLifecycle = true
         val targetName = _state.value.targetNameOrNull() ?: return
         _state.value = RevealState.Live(target, targetName, panes.toList(), agentName)
     }
@@ -305,6 +323,7 @@ class RevealStateMachine {
             return
         }
         val targetName = _state.value.targetNameOrNull() ?: return
+        seedMayPrecedeLifecycle = false
         val next = RevealState.Error(target, targetName, retrying = false, reason = reason)
         if (next != _state.value) {
             _state.value = next

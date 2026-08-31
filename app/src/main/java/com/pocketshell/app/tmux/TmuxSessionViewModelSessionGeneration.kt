@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.core.connection.SessionId
+
 import com.pocketshell.core.connection.RevealIdentityAdoption
 import kotlinx.coroutines.flow.StateFlow
 
@@ -47,6 +49,7 @@ internal fun TmuxSessionViewModel.adoptExactSessionGenerationFromPanes(
     originatingRuntime: RuntimeRefreshGuard?,
     runtimeIsCurrent: (RuntimeRefreshGuard) -> Boolean,
     revealIdentityAdopter: ((TmuxSessionViewModel.ConnectionTarget, TmuxSessionViewModel.ConnectionTarget) -> Unit)? = null,
+    connectionIdentityAdopter: ((SessionId, SessionId) -> Unit)? = null,
 ): RuntimeRefreshGuard? {
     val observedTarget = target ?: activeTarget ?: connectingTarget ?: return originatingRuntime
     // Adoption is destructive metadata promotion: it can become the
@@ -114,6 +117,20 @@ internal fun TmuxSessionViewModel.adoptExactSessionGenerationFromPanes(
         ?.takeIf(::isCurrentSession)
     return adoptedTarget?.let { adopted ->
         revealIdentityAdopter?.invoke(observedTarget, adopted)
+        connectionIdentityAdopter?.invoke(
+            tmuxTargetSessionId(
+                observedTarget.hostId,
+                observedTarget.sessionName,
+                observedTarget.tmuxSessionId,
+                observedTarget.sessionCreated,
+            ),
+            tmuxTargetSessionId(
+                adopted.hostId,
+                adopted.sessionName,
+                adopted.tmuxSessionId,
+                adopted.sessionCreated,
+            ),
+        )
         originatingRuntime.copy(target = adopted)
     } ?: originatingRuntime
 }

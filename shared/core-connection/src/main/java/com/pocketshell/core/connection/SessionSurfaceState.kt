@@ -16,9 +16,10 @@ package com.pocketshell.core.connection
  * The pill, the surface and the band all derive from a single `when (state)`, so a
  * contradictory (pill, surface, band) triple is no longer type-representable.
  *
- * This is the VIEW-axis consolidation only (S3). It deliberately does NOT collapse
- * the parallel projection authority (that is S7 / #766) — the inline machine keeps
- * feeding the [ConnectionPhase]; S3 just makes the RENDER read one state.
+ * S3 established the view-axis consolidation. Issue #766 S7 then hard-cut the
+ * parallel lifecycle projection: [ConnectionPhase] is now projected from the same
+ * typed [ConnectionController] authority that drives the connection effects. This
+ * type remains the single fusion boundary for controller phase + id-keyed reveal.
  */
 sealed interface SessionSurfaceState {
     /** Before the first navigation — no target, empty surface. */

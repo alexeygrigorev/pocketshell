@@ -23,6 +23,64 @@ import kotlin.random.Random
 class ConnectionJournalRoundTripTest {
 
     @Test
+    fun `force-cold enter and cold attach state survive journal replay`() {
+        val clock = CountingClock()
+        val transport = ScriptableWarmTransport().apply { warm = true }
+        val journal = RecordingConnectionJournal()
+        val controller = ConnectionController(
+            clock = clock,
+            transport = transport,
+            journal = journal,
+        )
+
+        controller.submit(ConnectionEvent.Enter(HOST_A, SESSION_A, forceCold = true))
+        assertEquals(ConnectionState.Connecting(HOST_A, SESSION_A), controller.state.value)
+        controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(
+            ConnectionState.Attaching(HOST_A, SESSION_A, warm = false),
+            controller.state.value,
+        )
+
+        val report = ConnectionJournalReplay.replay(
+            journal.entries.mapIndexed { index, entry ->
+                encodeEnvelope(index.toLong() + 1L, entry)
+            },
+        )
+        val submits = journal.entries.filterIsInstance<ConnectionJournalEntry.Submit>()
+        assertEquals(2, report.submitCount)
+        assertEquals(submits.map { it.postState }, report.postStateTrail)
+    }
+
+    @Test
+    fun `identity adoption and attach readiness survive journal replay`() {
+        val exact = SessionId("tmux:7:%0:1700000003")
+        val journal = RecordingConnectionJournal()
+        val controller = ConnectionController(
+            clock = CountingClock(),
+            transport = ScriptableWarmTransport(),
+            journal = journal,
+        )
+
+        controller.submit(ConnectionEvent.Enter(HOST_A, SESSION_A, forceCold = true))
+        controller.submit(ConnectionEvent.TargetIdentityAdopted(SESSION_A, exact))
+        controller.submit(ConnectionEvent.AttachReady(exact, "%0"))
+
+        assertEquals(ConnectionState.Live(HOST_A, exact), controller.state.value)
+        val submits = journal.entries.filterIsInstance<ConnectionJournalEntry.Submit>()
+        assertEquals(3, submits.size)
+        assertTrue(submits[1].event is ConnectionEvent.TargetIdentityAdopted)
+        assertTrue(submits[2].event is ConnectionEvent.AttachReady)
+
+        val report = ConnectionJournalReplay.replay(
+            journal.entries.mapIndexed { index, entry ->
+                encodeEnvelope(index.toLong() + 1L, entry)
+            },
+        )
+        assertEquals(submits.map { it.postState }, report.postStateTrail)
+        assertEquals(submits.map { it.internals }, report.internalsTrail)
+    }
+
+    @Test
     fun `randomized journal round trip reproduces every state and episode checkpoint`() {
         repeat(PROPERTY_SEEDS) { seed ->
             val random = Random(seed)
@@ -263,6 +321,8 @@ class ConnectionJournalRoundTripTest {
             ConnectionEvent.NetworkRestored,
             ConnectionEvent.TargetGone(SESSION_A),
             ConnectionEvent.SeedLanded(SESSION_B, "%1"),
+            ConnectionEvent.TargetIdentityAdopted(SESSION_A, SessionId("tmux:7:%0:1700000003")),
+            ConnectionEvent.AttachReady(SESSION_B, "%2"),
             ConnectionEvent.ReconnectLadderEntered,
             ConnectionEvent.ReconnectFailed,
             ConnectionEvent.ReconnectGaveUp,
@@ -270,7 +330,7 @@ class ConnectionJournalRoundTripTest {
     }
 
     private fun randomizedEvent(random: Random, seed: Int): ConnectionEvent =
-        when (random.nextInt(18)) {
+        when (random.nextInt(20)) {
             0 -> ConnectionEvent.Enter(if (random.nextBoolean()) HOST_A else HOST_B, randomSession(random))
             1 -> ConnectionEvent.Switch(randomSession(random))
             2 -> ConnectionEvent.Foreground
@@ -285,9 +345,14 @@ class ConnectionJournalRoundTripTest {
             11 -> ConnectionEvent.NetworkRestored
             12 -> ConnectionEvent.TargetGone(randomSession(random))
             13 -> ConnectionEvent.SeedLanded(randomSession(random), "%${random.nextInt(4)}")
-            14 -> ConnectionEvent.ReconnectLadderEntered
-            15 -> ConnectionEvent.ReconnectFailed
-            16 -> ConnectionEvent.ReconnectGaveUp
+            14 -> ConnectionEvent.TargetIdentityAdopted(
+                randomSession(random),
+                SessionId("tmux:7:%${random.nextInt(4)}:1700000003"),
+            )
+            15 -> ConnectionEvent.AttachReady(randomSession(random), "%${random.nextInt(4)}")
+            16 -> ConnectionEvent.ReconnectLadderEntered
+            17 -> ConnectionEvent.ReconnectFailed
+            18 -> ConnectionEvent.ReconnectGaveUp
             else -> ConnectionEvent.Enter(HOST_A, SessionId("/srv/private/property-$seed"))
         }
 

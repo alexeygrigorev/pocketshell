@@ -1,7 +1,6 @@
 package com.pocketshell.app.tmux
 
 import android.os.SystemClock
-import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 
@@ -99,34 +98,4 @@ internal fun tmuxDisconnectReasonPrefix(reason: TmuxDisconnectReason): String =
         TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
         TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
         TmuxDisconnectReason.Unknown -> "Disconnected"
-    }
-
-internal fun connectionStatusHostPortUserFor(
-    inlineState: ConnectionState,
-    activeTarget: TmuxSessionViewModel.ConnectionTarget?,
-    connectingTarget: TmuxSessionViewModel.ConnectionTarget?,
-): ConnectionStatusProjection.HostPortUser =
-    when (inlineState) {
-        is ConnectionState.Connecting ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Attaching ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Live ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Backgrounded ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Reattaching ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Reconnecting ->
-            ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-        is ConnectionState.Idle,
-        is ConnectionState.Gone,
-        is ConnectionState.Unreachable -> {
-            val target = activeTarget ?: connectingTarget
-            if (target != null) {
-                ConnectionStatusProjection.HostPortUser(target.host, target.port, target.user)
-            } else {
-                ConnectionStatusProjection.HostPortUser("", 0, "")
-            }
-        }
     }

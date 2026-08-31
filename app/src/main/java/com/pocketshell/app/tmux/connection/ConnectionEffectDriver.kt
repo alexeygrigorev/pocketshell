@@ -115,9 +115,11 @@ import kotlinx.coroutines.launch
  * @param scope the scope the three collectors run in (the VM supplies its
  *   `viewModelScope`; tests supply a `TestScope`'s scope).
  * @param backgroundedEffect fired SYNCHRONOUSLY when the controller transitions INTO
- *   [ConnectionState.Backgrounded]. The VM supplies the clean-detach body (its full
- *   `closeCurrentConnectionAndJoin` teardown). Defaults to a no-op so the
- *   observe-only test harness keeps its inert contract.
+ *   [ConnectionState.Backgrounded], with the exact typed state immediately before that
+ *   transition. The VM uses that payload to preserve reconnect-ladder bookkeeping after
+ *   the controller has already moved to Backgrounded; it supplies the clean-detach body
+ *   for every other live shape. Defaults to a no-op so the observe-only test harness keeps
+ *   its inert contract.
  * @param foregroundReattachEffect fired SYNCHRONOUSLY when the controller transitions
  *   [ConnectionState.Backgrounded] -> [ConnectionState.Reattaching] — the within-grace
  *   foreground return (#754, slice 1c-iv-c). The VM supplies the RESEED-ONLY body: the
@@ -166,7 +168,7 @@ class ConnectionEffectDriver(
     private val tmuxPort: TmuxPort,
     private val transportPort: TransportPort,
     private val scope: CoroutineScope,
-    private val backgroundedEffect: () -> Unit = {},
+    private val backgroundedEffect: (ConnectionState) -> Unit = {},
     private val foregroundReattachEffect: () -> Unit = {},
     // Issue #1545 (Fable race audit R1, extends #904): the driver's reattach-edge
     // suppression predicate. When it returns true a `pendingReattach` (the stashed
@@ -273,14 +275,21 @@ class ConnectionEffectDriver(
         states.collect { current ->
             // Only record genuine transitions, not the initial replay of an
             // unchanged StateFlow value.
-            if (previous != null && current == previous) return@collect
-            record(Observation.StateTransition(from = previous, to = current))
+            val before = previous
+            if (before != null && current == before) return@collect
+            record(Observation.StateTransition(from = before, to = current))
             // Slice 1c-iv-b-B1 (#738): the driver OWNS the clean background detach.
             // On a transition INTO Backgrounded (from a non-Backgrounded state),
             // fire the VM-supplied teardown effect SYNCHRONOUSLY in this collector
             // resumption — the sole detach trigger now the inline one is deleted.
-            if (current is ConnectionState.Backgrounded && previous !is ConnectionState.Backgrounded) {
-                backgroundedEffect()
+            // S7 (#766): the exact typed PRE-transition state rides the edge, so the
+            // effect never has to consult a second VM status mirror to pick its arm.
+            if (
+                before != null &&
+                current is ConnectionState.Backgrounded &&
+                before !is ConnectionState.Backgrounded
+            ) {
+                backgroundedEffect(before)
             }
             // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
             // The within-grace foreground return is the controller's

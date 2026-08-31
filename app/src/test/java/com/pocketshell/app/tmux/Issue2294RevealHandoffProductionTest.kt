@@ -1,14 +1,17 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.app.tmux.connection.hostKeyFor
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
@@ -99,6 +102,20 @@ class Issue2294RevealHandoffProductionTest : TmuxSessionViewModelTestBase() {
         val live = vm.revealState.value as? RevealState.Live
             ?: error("the production reconcile/seed handoff must reveal: ${vm.revealState.value}")
         assertEquals(SessionId("tmux:42:\$7:$sessionCreated"), live.targetId)
+        assertEquals(
+            ConnectionState.Live(
+                hostKeyFor(
+                    SshLeaseKey(
+                        host = "10.0.2.2",
+                        port = 2222,
+                        user = "alex",
+                        credentialId = "42:/keys/a",
+                    ),
+                ),
+                SessionId("tmux:42:\$7:$sessionCreated"),
+            ),
+            vm.connectionControllerStateForTest(),
+        )
         assertEquals(listOf("%0"), live.panes.map { it.paneId })
         assertEquals("reveal-live", live.panes.single().frame)
         assertTrue(
@@ -165,10 +182,25 @@ class Issue2294RevealHandoffProductionTest : TmuxSessionViewModelTestBase() {
             // enters the production list-panes/apply/seed path.
             vm.attachClientForTest(client)
             assertTrue(vm.reconcilePanesForTest() is PaneReconcileResult.Ready)
+            runCurrent()
 
             val live = vm.revealState.value as? RevealState.Live
                 ?: error("connecting-only reconcile must reveal: ${vm.revealState.value}")
             assertEquals(SessionId("tmux:42:\$8:$sessionCreated"), live.targetId)
+            assertEquals(
+                ConnectionState.Connecting(
+                    hostKeyFor(
+                        SshLeaseKey(
+                            host = "10.0.2.2",
+                            port = 2222,
+                            user = "alex",
+                            credentialId = "42:/keys/a",
+                        ),
+                    ),
+                    SessionId("tmux:42:\$8:$sessionCreated"),
+                ),
+                vm.connectionControllerStateForTest(),
+            )
             assertEquals(listOf("%0"), live.panes.map { it.paneId })
             assertEquals("shell prompt", live.panes.single().frame)
             assertTrue(client.sentCommands.any { it.startsWith("capture-pane") })

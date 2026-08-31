@@ -59,7 +59,7 @@ class ConnectionControllerTest {
         assertEquals(ConnectionState.Connecting(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(ConnectionState.Attaching(host, a, warm = false), controller.state.value)
 
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
@@ -72,7 +72,7 @@ class ConnectionControllerTest {
         transport.setWarm(host, true)
 
         controller.submit(ConnectionEvent.Enter(host, a))
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(ConnectionState.Attaching(host, a, warm = true), controller.state.value)
     }
 
     // --- Within-grace foreground = NO reconnect (#685 Bug-A) --------------
@@ -96,7 +96,10 @@ class ConnectionControllerTest {
         // It heals silently, never entering Reconnecting. The preserved control
         // channel must still be confirmed before the target is revealed.
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
@@ -133,7 +136,10 @@ class ConnectionControllerTest {
         // Silent: no error band. SSH-up waits for the replacement control
         // channel's target-tagged seed before resolving to Live.
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
@@ -257,7 +263,10 @@ class ConnectionControllerTest {
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(
+            ConnectionState.Attaching(host, a, warm = false, recovering = true),
+            controller.state.value,
+        )
         controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }

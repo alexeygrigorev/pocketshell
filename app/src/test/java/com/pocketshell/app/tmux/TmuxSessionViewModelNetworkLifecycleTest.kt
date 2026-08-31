@@ -5,6 +5,7 @@ import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseTarget
@@ -683,6 +684,10 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
             "a sustained bare loss surfaces the calm Reconnecting band after the debounce",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
+        assertTrue(
+            "the loss band must be backed by the controller's typed NetworkLossSuspended state",
+            vm.connectionControllerStateForTest() is CoreConnectionState.NetworkLossSuspended,
+        )
         assertEquals("no redial during the loss window — lease is held", 0, connector.connectCount)
 
         // No churn: even after more time passes nothing redials (no ladder running).
@@ -807,6 +812,7 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
             client = FakeTmuxClient(),
         )
         runCurrent()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
         // Keepalive can NOT vouch (so a sustained loss paints); the socket is alive so
         // each restore rides through with no redial (isolating the reload cadence).
         vm.forceTransportProvenAliveForTest = false
@@ -827,10 +833,19 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
             "1st sustained loss paints the band after the base grace",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
+        assertTrue(
+            "the sustained loss must enter the controller's typed NetworkLossSuspended state",
+            vm.connectionControllerStateForTest() is CoreConnectionState.NetworkLossSuspended,
+        )
         // Link flaps back up briefly (ride-through, no redial). Use runCurrent so the
         // 30s quiet-reset does NOT fire and reset the backoff before the next loss.
         hook.onNetworkChanged(networkRestore(sequence = 2L))
         runCurrent()
+        assertTrue(
+            "an alive restore must resolve NetworkLossSuspended to typed controller Live; " +
+                "got ${vm.connectionControllerStateForTest()}",
+            vm.connectionControllerStateForTest() is CoreConnectionState.Live,
+        )
         assertTrue(
             "the restore rides through back to Connected (no redial)",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
@@ -910,6 +925,10 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
         assertTrue(
             "loss leaves the session in the loss-suspended Reconnecting state after the debounce",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertTrue(
+            "the loss must be represented by the controller's typed NetworkLossSuspended state",
+            vm.connectionControllerStateForTest() is CoreConnectionState.NetworkLossSuspended,
         )
         assertEquals(0, connector.connectCount)
 
@@ -1305,6 +1324,10 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
         assertTrue(
             "the loss leaves the session in the loss-suspended Reconnecting state",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertTrue(
+            "the post-Doze loss must be represented by the controller's typed state",
+            vm.connectionControllerStateForTest() is CoreConnectionState.NetworkLossSuspended,
         )
         registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
         advanceUntilIdle()

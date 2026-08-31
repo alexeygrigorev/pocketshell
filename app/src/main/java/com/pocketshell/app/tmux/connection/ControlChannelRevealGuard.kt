@@ -20,7 +20,7 @@ import com.pocketshell.core.tmux.TmuxClientException
  * — so it walked to the end of its happy path and published `tmux-connect-ready`
  * + `ConnectionState.Live` over a client whose `disconnected` latch was already
  * set. Downstream that reads as a healthy session: the next open of the same
- * identity is deduped as a no-op (`inlineConnectionStatus is Connected &&
+ * identity is deduped as a no-op (the prior VM status was Connected and
  * activeTarget == target`, which is why `tmux-connect-attempt` stayed at 1), and
  * the liveness gate was closed by the very `disconnected` flag it should have
  * been reacting to.

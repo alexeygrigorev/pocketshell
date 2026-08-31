@@ -146,7 +146,7 @@ class Issue1863DeadWireAfterCancelledConnectTest {
         // reveal lit the green dot over the corpse. This is the user-visible symptom.
         assertFalse(
             "issue #1863: a connect that resolved over a CLOSED control channel must not " +
-                "publish a live session — got ${vm.connectionStatus.value}",
+            "publish a live session — got ${vm.connectionStatus.value}",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
         completeSpawnedRecoveryBeforeTheQuiescenceOracle(

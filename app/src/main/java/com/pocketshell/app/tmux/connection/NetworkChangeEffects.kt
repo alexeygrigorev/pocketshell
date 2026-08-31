@@ -74,7 +74,7 @@ internal fun selectNetworkChangeArm(
     hasTarget: Boolean,
     hasClientOrSession: Boolean,
     autoReconnectActive: Boolean,
-    inlineConnected: Boolean,
+    controllerLive: Boolean,
     lifecycleCoalesces: () -> Boolean,
     transportKeepAliveProvenAlive: () -> Boolean,
 ): NetworkChangeArm {
@@ -108,7 +108,7 @@ internal fun selectNetworkChangeArm(
     }
 
     if (autoReconnectActive) return NetworkChangeArm.Ignore
-    if (!inlineConnected) return NetworkChangeArm.Ignore
+    if (!controllerLive) return NetworkChangeArm.Ignore
     if (!hasTarget) return NetworkChangeArm.Ignore
     if (!hasClientOrSession) return NetworkChangeArm.Ignore
 
@@ -128,7 +128,7 @@ internal class NetworkChangeEffects(
     private val hasTarget: () -> Boolean,
     private val hasClientOrSession: () -> Boolean,
     private val autoReconnectActive: () -> Boolean,
-    private val inlineConnected: () -> Boolean,
+    private val controllerLive: () -> Boolean,
     private val lifecycleCoalesces: () -> Boolean,
     private val transportKeepAliveProvenAlive: () -> Boolean,
     private val suppressNetworkNotValidated: (TerminalNetworkChange) -> Unit,
@@ -146,7 +146,7 @@ internal class NetworkChangeEffects(
             hasTarget = hasTarget(),
             hasClientOrSession = hasClientOrSession(),
             autoReconnectActive = autoReconnectActive(),
-            inlineConnected = inlineConnected(),
+            controllerLive = controllerLive(),
             lifecycleCoalesces = lifecycleCoalesces,
             transportKeepAliveProvenAlive = transportKeepAliveProvenAlive,
         )

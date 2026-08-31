@@ -520,7 +520,7 @@ class Issue1295WatchdogArmingLivenessTest {
         // The recovery is still SETTLING: a transient reconnecting band over a still-live client
         // + current runtime (the disconnect-recovery gap). The blank watchdog's first tick sees
         // not-Connected.
-        vm.forceInlineReconnectingBandForTest()
+        vm.forceControllerReconnectingBandForTest()
         val guard = requireNotNull(vm.currentRuntimeGuardForTest())
         vm.armConnectedBlankWatchdogForTest(guard)
         advanceTimeBy(CONNECTED_BLANK_WATCHDOG_TICK_MS + 100)

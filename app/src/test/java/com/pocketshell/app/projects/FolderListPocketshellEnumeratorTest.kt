@@ -15,7 +15,10 @@ import org.junit.Test
  * Mutation that must redden [jsonHangDoesNotFallThroughToHuman]: catching a
  * JSON timeout/throw and falling through to `pocketshell sessions list --by
  * activity`. That second exec is what turns a 3.5s bounded miss into a 7s
- * serial stall on the 12s mobile reconcile path.
+ * serial stall on the 12s mobile reconcile path. Issue #2377 added the second
+ * half of that assertion: the hang must resolve to [Fetch.Unavailable], not
+ * [Fetch.Empty] — collapsing "we could not read it" into "the host has none"
+ * is what let a narrower enumeration ship as the truth.
  *
  * Mutation that must redden [jsonExitZeroHumanTableDoesNotExecHumanFallback]:
  * JSON exit 0 with `IDX  SESSION…` stdout (the 0.4.45 agents fixture) falling
@@ -94,9 +97,14 @@ class FolderListPocketshellEnumeratorTest {
             humanCommand = HUMAN_CMD,
         )
 
-        assertTrue(fetched is FolderListPocketshellEnumerator.Fetch.Empty)
+        assertTrue(
+            "issue #2377: a hung enumerator is UNAVAILABLE (unknown), never Empty " +
+                "(authoritatively no sessions) — Empty let the caller publish the " +
+                "default-socket subset as the whole host",
+            fetched is FolderListPocketshellEnumerator.Fetch.Unavailable,
+        )
         assertEquals(
-            "a hung JSON enumerator must fail-safe to empty, not spend a second exec",
+            "a hung JSON enumerator must not spend a second exec",
             emptyList<FolderSessionRow>(),
             fetched.rows,
         )

@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+# Issue #2377: minimal `a` (aplexer) fixture for the Docker `agents` image.
+#
+# The real host CLI probes `a --json sessions` and folds the result into
+# `pocketshell sessions list` as a SECOND session manager (see
+# tools/pocketshell/src/pocketshell/{aplexer,session_enum}.py). Without an `a`
+# on the fixture, no connected journey could carry an aplexer-managed row, so
+# the reported "phone shows 1 of 10 sessions" shape (7 tmuxctl + 3 aplexer) was
+# unreproducible on device.
+#
+# State lives in a per-user snapshot file so a journey seeds it over the same
+# SSH session it already has:
+#
+#   printf '%s' '{"sessions":[{"name":"aplexer-follow:yolo","id":"…"}]}' \
+#     > ~/.pocketshell-fixture-aplexer.json
+#
+# Absent file => `{"sessions": []}`, which is what every pre-existing journey
+# sees: the fixture behaves exactly as before this binary existed.
+
+snapshot="${POCKETSHELL_FIXTURE_APLEXER_FILE:-$HOME/.pocketshell-fixture-aplexer.json}"
+
+json=false
+for arg in "$@"; do
+  case "$arg" in
+    --json) json=true ;;
+  esac
+done
+
+verb=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *)
+      if [ -z "$verb" ]; then verb="$arg"; fi
+      ;;
+  esac
+done
+
+case "$verb" in
+  sessions)
+    if [ "$json" != true ]; then
+      printf 'aplexer fixture only implements `a --json sessions`\n' >&2
+      exit 64
+    fi
+    if [ -r "$snapshot" ]; then
+      cat "$snapshot"
+    else
+      printf '{"sessions": []}\n'
+    fi
+    exit 0
+    ;;
+  --version | version)
+    printf 'aplexer fixture 0.0.0\n'
+    exit 0
+    ;;
+esac
+
+printf 'aplexer fixture supports: --json sessions\n' >&2
+exit 64

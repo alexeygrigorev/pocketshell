@@ -974,79 +974,19 @@ internal class RealTmuxClient(
         if (connected) return
         if (closed) throw TmuxClientException("client is closed")
         val resolvedSessionName = sessionName.trim().ifBlank { DEFAULT_SESSION_NAME }
-        // Issue #666: attach-only restore. Before opening any shell or writing
-        // a single byte, probe whether the target session still exists. tmux
-        // `has-session` exits 0 when the session is alive and non-zero when it
-        // is gone. A gone session must NOT be recreated — throw a distinct
-        // signal so the caller drops to the host/session list instead of
-        // resurrecting it via the `new-session -A` spawn below. We run this on
-        // a separate `exec` channel (not the control shell) so the absence
-        // check never touches the control-mode wire and never spawns tmux.
-        // Issue #666 (attach-only cold-restore) + Issue #998 (reattach
-        // server-death). Run the `has-session` preflight whenever we are
-        // reattaching to a session we EXPECT to already exist — either an
-        // attach-only cold restore (`!createIfMissing`) or a reconnect/lifecycle
-        // reattach (`probeServerLiveness`). We do NOT run it for the explicit
-        // user "new session" intent (`createIfMissing && !probeServerLiveness`),
-        // which legitimately wants a fresh server if none is running.
-        if (!createIfMissing || probeServerLiveness) {
-            val probe = try {
-                withContext(Dispatchers.IO) {
-                    // #1820 [TmuxTarget]: EXACT target — a bare `-t` prefix-matches a
-                    // live `<name>-2`, so a GONE `<name>` reads "alive" and the
-                    // `new-session -A` below RESURRECTS it (breaks #666/#998).
-                    session.exec("tmux has-session -t '${escapeSingleQuoted(TmuxTarget.session(resolvedSessionName))}'")
-                }
-            } catch (t: Throwable) {
-                throw TmuxClientException(
-                    "failed to preflight tmux has-session for '$resolvedSessionName': ${t.message}",
-                    t,
-                )
-            }
-            if (probe.exitCode != 0) {
-                // Issue #998: a dead SERVER (`no server running on <socket>`) is
-                // categorically different from one gone SESSION (`can't find
-                // session`). On a dead server EVERY session vanished, so a
-                // `new-session -A` reattach would silently boot a fresh empty
-                // server — the resurrection bug. Surface it as server-death so
-                // the caller drops to the list and never recreates. We classify
-                // server-death FIRST because it dominates: even on the
-                // attach-only restore path a dead server is server-death, not a
-                // single-session-ended.
-                if (isTmuxServerDeadStderr(probe.stderr)) {
-                    Log.i(
-                        ISSUE_105_DIAG_TAG,
-                        "tmux-server-dead session=$resolvedSessionName exit=${probe.exitCode} " +
-                            "stderr=${probe.stderr.trim()}",
-                    )
-                    throw TmuxServerDeadException()
-                }
-                // Server alive but the TARGET session is gone. Issue #666 REOPEN
-                // (2026-07-06): a session that no longer exists at reattach time
-                // ENDED — a reattach must NEVER recreate it. Previously ONLY the
-                // attach-only cold-restore path (`!createIfMissing`) refused to
-                // recreate here; the reattach path (`createIfMissing &&
-                // probeServerLiveness`: LifecycleReattach / AutoReconnect /
-                // Reconnect / NetworkReconnect) FELL THROUGH to `new-session -A`
-                // (attach-OR-create) and silently resurrected the killed session —
-                // the exact dogfood bug ("I removed it on the computer, but the app
-                // created it again"). We hard-cut that branch (D22): whenever the
-                // preflight ran (`!createIfMissing || probeServerLiveness`) and the
-                // specific session is gone on a LIVE server, throw
-                // [TmuxSessionNotFoundException] so the caller drops to the list —
-                // identically for cold-restore AND every reattach. The only path
-                // that legitimately create-if-missing is the explicit user "new
-                // session" intent (`createIfMissing && !probeServerLiveness`), which
-                // never enters this preflight at all.
-                Log.i(
-                    ISSUE_105_DIAG_TAG,
-                    "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode} " +
-                        "createIfMissing=$createIfMissing probeServerLiveness=$probeServerLiveness " +
-                        "— refusing to recreate, dropping to list",
-                )
-                throw TmuxSessionNotFoundException(resolvedSessionName)
-            }
-        }
+        // Issue #666/#998/#2387: figure out what to WRITE before opening any
+        // shell — a `has-session`/multi-socket sweep on a separate `exec`
+        // channel, never the control-mode wire — then throw the #666/#998
+        // reattach-refusal exceptions, or return the exact `attach-session` /
+        // `new-session -A` command line to write. See [resolveTmuxAttachCommand]
+        // (extracted to its own file to keep this one under the size ratchet).
+        val commandLine = resolveTmuxAttachCommand(
+            session = session,
+            resolvedSessionName = resolvedSessionName,
+            startDirectory = startDirectory,
+            createIfMissing = createIfMissing,
+            probeServerLiveness = probeServerLiveness,
+        )
         // Open the SSH shell and launch the reader. We do not synchronously
         // wait for tmux to emit a marker before returning — control mode
         // produces events asynchronously and the caller may immediately want
@@ -1063,25 +1003,9 @@ internal class RealTmuxClient(
         // tmux's initial notifications. The reader is suspendable on the
         // first read, so launching it doesn't race with the write below.
         readerJob = clientScope.launch { readerLoop(sh) }
-        // Write the tmux -CC command. `new-session -A -s <name>` attaches to
-        // an existing session with that name if it exists, otherwise creates
-        // a new one — the right behaviour for "reattach across phone
-        // reconnects" which is the whole point of running tmux remotely.
         try {
-            val resolvedStartDirectory = startDirectory?.trim().orEmpty()
-            val command = buildString {
-                append("tmux -CC new-session -A -s '")
-                append(escapeSingleQuoted(resolvedSessionName))
-                append("'")
-                if (resolvedStartDirectory.isNotEmpty()) {
-                    append(" -c '")
-                    append(escapeSingleQuoted(resolvedStartDirectory))
-                    append("'")
-                }
-                append('\n')
-            }
             withContext(Dispatchers.IO) {
-                sh.writeStdin(command.toByteArray(Charsets.UTF_8))
+                sh.writeStdin("$commandLine\n".toByteArray(Charsets.UTF_8))
             }
         } catch (t: Throwable) {
             readerJob?.cancel()

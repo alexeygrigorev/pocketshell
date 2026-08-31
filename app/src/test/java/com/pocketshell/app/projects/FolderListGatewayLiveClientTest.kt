@@ -4,7 +4,6 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
-import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.ssh.ExecResult
@@ -37,7 +36,7 @@ class FolderListGatewayLiveClientTest {
     }
 
     @Test
-    fun sameHostLiveClientListsFolderRowsWithoutOpeningSsh() = runTest {
+    fun sameHostLiveClientListsFolderRowsFromOneControlRoundTrip() = runTest {
         val client = FakeTmuxClient()
         client.responses += CommandResponse(
             number = 1L,
@@ -68,15 +67,34 @@ class FolderListGatewayLiveClientTest {
             keyPath = KEY_PATH,
             client = client,
         )
+        // Issue #2377: the lease still runs the host-wide tmuxctl+aplexer
+        // enumerator (this host reports none), but must NOT re-run
+        // list-sessions / list-panes — the live client already did that in one
+        // control round-trip, which is #692's actual guarantee.
+        val leaseSession = RecordingSshSession()
         val gateway = SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = SshLeaseManager(
+                connector = object : SshLeaseConnector {
+                    override suspend fun connect(target: SshLeaseTarget) =
+                        Result.success<SshSession>(leaseSession)
+                },
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
         )
 
         val result = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
 
         val rows = (result as FolderListResult.Sessions).rows
         assertEquals(listOf("git-cable-world", "git-cable-world-map"), rows.map { it.sessionName })
+        assertTrue(
+            "lease must not re-enumerate tmux sessions/panes; got ${leaseSession.execCommands}",
+            leaseSession.execCommands.none {
+                it.contains(LIST_SESSIONS_HEAD) || it.contains(LIST_PANES_HEAD)
+            },
+        )
         assertEquals(listOf("/home/testuser/git/cable-world/app", "/tmp/cable-world-map"), rows.map { it.cwd })
         // Issue #716: the live-client path runs no detector, so each session's
         // kind falls back to the AFFIRMATIVE-shell-aware resolution of its
@@ -96,7 +114,6 @@ class FolderListGatewayLiveClientTest {
         assertEquals(listOf("shell", "claude"), rows[0].windows.map { it.name })
         assertEquals(listOf(false, true), rows[0].windows.map { it.active })
         assertEquals(listOf("/home/testuser/git/cable-world", "/home/testuser/git/cable-world/app"), rows[0].windows.map { it.cwd })
-        assertEquals(0, SshOpenTelemetry.count(SSH_SOURCE_FOLDER_LIST_PROBE))
         assertEquals(
             listOf(
                 SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND,
@@ -147,9 +164,13 @@ class FolderListGatewayLiveClientTest {
         val gateway = SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = activeTmuxClients,
+            // Issue #2377: the live path DOES dial the (pooled) lease now — it
+            // must, to read the host-wide tmuxctl+aplexer enumerator that the
+            // single-socket control client cannot see.
             sshLeaseManager = SshLeaseManager(
-                connector = SshLeaseConnector {
-                    Result.failure(IllegalStateException("live path must not dial"))
+                connector = object : SshLeaseConnector {
+                    override suspend fun connect(target: SshLeaseTarget) =
+                        Result.success<SshSession>(RecordingSshSession())
                 },
                 scope = this,
                 idleTtlMillis = 0L,

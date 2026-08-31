@@ -120,6 +120,20 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
      * directory matches [projectPath] (the current pane's cwd). When the
      * host has no live client yet, the previously-known sibling list is
      * retained so the dropdown still opens instantly.
+     *
+     * Issue #2377 — KNOWN, DELIBERATE LIMITATION: a `tmux -CC` client is
+     * attached to exactly ONE tmux server, so these siblings are scoped to the
+     * ATTACHED server. On a tmuxctl host (one `tmuxctl-*` socket per session)
+     * the dropdown can therefore list fewer project siblings than the folder
+     * list shows for the same project. That undercount is fixed in
+     * [HostTmuxSessionsGateway.listSessions] (both session LISTS now union the
+     * host-wide enumerator), but it is left standing HERE on purpose: #463
+     * bought the switcher's "instant" property precisely by never opening an
+     * SSH connection on this path, and the sibling dropdown is a convenience
+     * shortcut, not the app's answer to "what sessions does this host have".
+     * The session picker ([load]) and the folder list are that answer, and both
+     * are complete. Do not "fix" this by calling [HostTmuxSessionsGateway.listSessions]
+     * here without re-deciding the latency contract.
      */
     fun refreshProjectSiblings(
         host: HostEntity,

@@ -308,3 +308,22 @@ com.pocketshell.app.proof.FolderSessionRowNavigatorTest	39
 # real CI attempt-1 elapsed time once they have run there.
 com.pocketshell.app.projects.EngineAvailabilityPickerUiTest	31
 com.pocketshell.app.projects.EngineAvailabilityPickerDockerTest	36
+# PR #2443 (#2377/#2387 merge): com.pocketshell.app.projects.
+# Issue2377MultiSocketSessionListDockerTest is a brand-new selector (4
+# @Test methods in one class) with no GitHub Actions history yet, so the
+# retry-budget guard's (aa) check fails closed on it. Measured on the
+# dev-box emulator via `scripts/connected-test.sh --suffix i2377tsv
+# -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.
+# projects.Issue2377MultiSocketSessionListDockerTest` on 2026-08-31, real
+# Docker `agents` fixture (port 2222): first invocation (cold androidTest
+# compile) BUILD SUCCESSFUL in 2m 31s, 4/4 executed, 0 failed; second,
+# warm-cache invocation (only the 9 install/run tasks re-executed, 304
+# up-to-date) BUILD SUCCESSFUL in 1m 16s, 4/4 executed, 0 failed. This row
+# uses ceil(warm wrapper wall time)=76s, matching the JOURNEY_PASS
+# wall-time convention used for the Issue2338/#2380/#2276 rows above (the
+# wrapper wall time, not the in-suite JUnit time, is what CI's shard
+# actually spends once its own androidTest compile is already warm). Not
+# yet a GitHub Actions run (this repo's per-PR runs skip the Emulator
+# journey subset job, per G7); refresh with a real CI attempt-1 elapsed
+# time once this class has run there.
+com.pocketshell.app.projects.Issue2377MultiSocketSessionListDockerTest	76

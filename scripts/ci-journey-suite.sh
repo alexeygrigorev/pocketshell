@@ -318,6 +318,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.AgentLaunchVersionMismatchHintE2eTest"  # #853 #848 #759 epic ): the OUTDATED-host agent-launch friendly-hint guard…
   "com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest"  # #849 #848 #847 epic ): the OLD-CLI cold-start tree-HYDRATE connect proof
   "com.pocketshell.app.projects.Issue1876FolderListMobileRttDockerTest"  # #1876 D34/G9/G10: production FolderListViewModel + real sshj over ~400ms RTT, jitter, 5% loss must leave Loading with the full 18-session/3-root tree under the unchanged 12s reconcile bound
+  "com.pocketshell.app.projects.Issue2377MultiSocketSessionListDockerTest"  # #2377 D31/D33/G9/G10 (#2348 recurrence): real tmuxctl-* sockets + an aplexer manager + a LIVE tmux -CC client attached to the default socket — BOTH session lists — the production FolderListViewModel's rendered tree AND the HostTmuxSessionPickerViewModel's rendered picker rows — must equal `pocketshell sessions list --json`, on cold load, on refresh, and right after an in-app create (the reported "1 of 10 sessions"); also #2387 D28/D29/G9/G10 companion: the production TmuxClientFactory/TmuxClient reaches a session on its own dedicated tmuxctl-* socket, never mints an orphan on default
   "com.pocketshell.app.projects.FolderListBootstrapSkipTreeLoadsDockerTest"  # #849 #848 #847 #788 epic ): the OLD-CLI bootstrap-Skip → tree connect JOURNEY
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"  # #867 the stale-while-revalidate INSTANT-RENDER journey. A cold co…
   "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"  # #965 the SCALE ANR proof — the folder list at
@@ -599,8 +600,8 @@ source "$CI_JOURNEY_CORE_TERMINAL_HELPER"
 
 # Issue #2110: partition the core-terminal proofs across the CI matrix by the
 # same #1862 name hash the journey classes use, so each proof runs on exactly ONE
-# leg per push instead of all six. Six legs of the same commit re-running the
-# same device-independent in-process proof produced one verdict and five copies.
+# leg per push instead of all of them. N legs of the same commit re-running the
+# same device-independent in-process proof produced one verdict and N-1 copies.
 # A proof this leg does not own is marked OTHER_SHARD before its block below and
 # skipped there; see the helper for why OTHER_SHARD is neither a pass nor a skip.
 # Unsharded runs (no matrix vars) select every proof, unchanged.

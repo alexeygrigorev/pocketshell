@@ -224,7 +224,15 @@ class LastSessionProcessRestartProofTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(keyText)
-        waitForSshFixtureReady(sshKey, port = PRODUCER_PORT)
+        // Issue #2446: `listProductionNavigationTarget` below feeds this
+        // `fixture.host` through `SshHostTmuxSessionsGateway.listSessions`,
+        // the real production trust-checked path — capture the presented
+        // fingerprint. (Phase 2's `readPhaseOneArtifact` reconstructs its OWN
+        // `HostEntity` from the artifact file, but that copy only ever
+        // reaches the raw `connectToFixture`/`TEST_ACCEPT_ALL_HOST_KEYS`
+        // cleanup helper, never a trust-checked production path, so it needs
+        // no fingerprint.)
+        val trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = PRODUCER_PORT)
 
         val keyFile = File(context.cacheDir, "issue2264-$namespace-key").apply {
             parentFile?.mkdirs()
@@ -239,6 +247,7 @@ class LastSessionProcessRestartProofTest {
                 port = PRODUCER_PORT,
                 username = DEFAULT_USER,
                 keyId = PRODUCER_KEY_ID,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
             keyPath = keyFile.absolutePath,
             sessionName = "issue2264-$namespace",

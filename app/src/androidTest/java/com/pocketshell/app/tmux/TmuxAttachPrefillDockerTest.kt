@@ -86,6 +86,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxAttachPrefillDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -114,7 +115,7 @@ class TmuxAttachPrefillDockerTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val sessionName = SEEDED_TMUX_SESSION
         val firstSeedLine = "issue103-seed-line-001"
@@ -364,7 +365,7 @@ class TmuxAttachPrefillDockerTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val sessionName = "issue259-spinner-${System.currentTimeMillis()}"
         val longFrame = "Beboppin... (30.6k tokens thinking)"
@@ -679,6 +680,7 @@ class TmuxAttachPrefillDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

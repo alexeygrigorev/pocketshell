@@ -88,6 +88,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class AgentApprovalQuickReplyJourneyDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
@@ -143,7 +144,7 @@ class AgentApprovalQuickReplyJourneyDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killSession(sshKey, sshPort)
         seedAgentApprovalSession(sshKey, sshPort)
 
@@ -379,6 +380,7 @@ class AgentApprovalQuickReplyJourneyDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

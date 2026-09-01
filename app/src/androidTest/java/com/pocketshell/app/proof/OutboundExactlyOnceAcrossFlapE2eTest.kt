@@ -116,9 +116,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         val key = OutboundExactlyOnceFixture.readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         OutboundExactlyOnceFixture.seedFakeAgentSession(key, testName.methodName)
-        hostRowTag = OutboundExactlyOnceFixture.seedDockerHost(key)
+        hostRowTag = OutboundExactlyOnceFixture.seedDockerHost(key, trustedHostKeySha256)
     }
 
     @Before

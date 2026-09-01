@@ -138,6 +138,7 @@ import java.util.Locale
  */
 @RunWith(AndroidJUnit4::class)
 class LongRunningSessionStabilityTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -161,7 +162,7 @@ class LongRunningSessionStabilityTest {
     fun tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth() { runBlocking {
         assumeLongRunningTestEnabled()
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // Clear logcat before the test starts so the reconnect-counter
         // parse below operates on a slice that belongs to THIS run only.
@@ -339,7 +340,7 @@ class LongRunningSessionStabilityTest {
     @Test
     fun steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         execShellCommand("logcat -c")
 
@@ -442,6 +443,7 @@ class LongRunningSessionStabilityTest {
                     pocketshellCliVersion = appVersion,
                     pocketshellExpectedCliVersion = appVersion,
                     pocketshellVersionCompatible = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

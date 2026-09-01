@@ -79,6 +79,7 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class Issue2338SecondLaunchTerminalAttachJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: launch-owned `createAndroidComposeRule<MainActivity>()` with
     // seed-before-launch via the RuleChain — NOT `createEmptyComposeRule()` + a hand-rolled
@@ -99,7 +100,7 @@ class Issue2338SecondLaunchTerminalAttachJourneyE2eTest {
         TmuxSessionLatencyTelemetry.resetForTest()
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedShellSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -249,6 +250,7 @@ class Issue2338SecondLaunchTerminalAttachJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

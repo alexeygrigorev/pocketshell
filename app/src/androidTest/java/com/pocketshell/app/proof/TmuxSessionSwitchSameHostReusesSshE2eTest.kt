@@ -85,6 +85,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionSwitchSameHostReusesSshE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -131,7 +132,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     @Test
     fun sameHostSessionSwitchReusesSshTransport() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue178 Same Host")
@@ -289,7 +290,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     @Test
     fun dashboardSameHostSessionTapReusesSshTransport() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue278 Dashboard Same Host")
@@ -369,7 +370,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     @Test
     fun sameHostWarmSwitchBenchmarkReportsRepeatedStats() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue337 Warm Switch Budget")
@@ -507,6 +508,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

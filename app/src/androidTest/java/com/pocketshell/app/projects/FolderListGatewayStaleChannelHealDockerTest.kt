@@ -65,6 +65,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListGatewayStaleChannelHealDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -86,7 +87,7 @@ class FolderListGatewayStaleChannelHealDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -231,14 +232,19 @@ class FolderListGatewayStaleChannelHealDockerTest {
         }
     }
 
-    private companion object {
-        val HOST: HostEntity = HostEntity(
+    // Issue #2446: was a companion-object `val` initialized eagerly at class
+    // load, before `trustedHostKeySha256` is known — moved to an
+    // instance-level computed property so every access (all from inside
+    // `@Test` methods, which run after `setUp()` has captured the real
+    // presented fingerprint) rebuilds it with the current trust binding.
+    private val HOST: HostEntity
+        get() = HostEntity(
             id = 1L,
             name = "issue680-heal-test",
             hostname = DEFAULT_HOST,
             port = DEFAULT_PORT,
             username = DEFAULT_USER,
             keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
-    }
 }

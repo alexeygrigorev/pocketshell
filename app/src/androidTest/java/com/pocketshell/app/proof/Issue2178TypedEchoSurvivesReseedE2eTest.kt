@@ -116,6 +116,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2178TypedEchoSurvivesReseedE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: launch-owned rule so the Compose clock and the real
     // TerminalView interop child share one MainActivity, with the Docker tmux
@@ -133,7 +134,7 @@ class Issue2178TypedEchoSurvivesReseedE2eTest {
 
     private suspend fun seedBeforeLaunch() {
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSessions(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey, "Issue2178 Reseed")
         forceFlatHostDetailViewMode()
@@ -420,6 +421,7 @@ class Issue2178TypedEchoSurvivesReseedE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

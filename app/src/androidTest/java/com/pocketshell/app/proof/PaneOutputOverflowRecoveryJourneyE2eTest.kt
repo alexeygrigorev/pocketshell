@@ -107,6 +107,7 @@ import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
  */
 @RunWith(AndroidJUnit4::class)
 class PaneOutputOverflowRecoveryJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: launch-owned `createAndroidComposeRule<MainActivity>()` (NOT
     // `createEmptyComposeRule()` + a hand-rolled `ActivityScenario.launch`) so the Compose test
@@ -137,7 +138,7 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
         TmuxSessionLatencyTelemetry.resetForTest()
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedBannerSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -733,6 +734,7 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

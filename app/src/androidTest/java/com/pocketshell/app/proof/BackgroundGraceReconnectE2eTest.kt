@@ -67,6 +67,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class BackgroundGraceReconnectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
     // clock drives the SAME foreground activity the Termux TerminalView interop
@@ -131,7 +132,7 @@ class BackgroundGraceReconnectE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -1372,6 +1373,7 @@ class BackgroundGraceReconnectE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

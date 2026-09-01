@@ -167,6 +167,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionOpencodeInputDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
@@ -228,7 +229,7 @@ class TmuxSessionOpencodeInputDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         // Kill any leftover session of the same name so the test starts
         // from a deterministic state (no stale pane from a prior failed
         // run).
@@ -409,7 +410,7 @@ class TmuxSessionOpencodeInputDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
         killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME)
         seedIssue303AgentSession(sshKey, sshPort, recordOwnedKind = true)
@@ -710,7 +711,7 @@ class TmuxSessionOpencodeInputDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
         seedIssue303AgentSession(sshKey, sshPort)
 
@@ -834,7 +835,7 @@ class TmuxSessionOpencodeInputDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killTmuxSession(sshKey, sshPort, ISSUE_297_SESSION_NAME)
         installIssue297AgentShimAndSeedSession(sshKey, sshPort)
 
@@ -1135,6 +1136,7 @@ class TmuxSessionOpencodeInputDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

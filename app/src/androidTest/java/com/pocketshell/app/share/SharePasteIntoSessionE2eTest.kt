@@ -62,6 +62,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class SharePasteIntoSessionE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -125,7 +126,7 @@ class SharePasteIntoSessionE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = System.currentTimeMillis().toString()
         val sessionName = "issue193-$marker"
@@ -314,6 +315,7 @@ class SharePasteIntoSessionE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         } finally {

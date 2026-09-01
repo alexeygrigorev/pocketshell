@@ -81,6 +81,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class Issue887TerminalFixedUnderImeE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -116,7 +117,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
     @Test
     fun terminalDoesNotPanOrResizeWhenSoftKeyboardShows() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedShellSession(key)
         val hostRowTag = seedDockerHost(key, "Issue887 Terminal Fixed")
         // Issue #788: flat host-detail mode + seed BEFORE launch so the session
@@ -623,6 +624,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

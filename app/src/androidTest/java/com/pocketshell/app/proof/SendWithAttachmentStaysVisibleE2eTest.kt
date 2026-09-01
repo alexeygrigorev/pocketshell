@@ -100,6 +100,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class SendWithAttachmentStaysVisibleE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Launch-owned MainActivity rule (#788/#848): the Compose test clock drives the SAME
     // foreground MainActivity the Termux TerminalView interop child is placed into.
@@ -137,7 +138,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedFullFrameSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -792,6 +793,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

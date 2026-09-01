@@ -55,6 +55,7 @@ import java.util.Locale
  */
 @RunWith(AndroidJUnit4::class)
 class EmulatorWorkflowE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -113,7 +114,7 @@ class EmulatorWorkflowE2eTest {
         // assertion tolerates the soft wrap — and only the soft wrap. A missing
         // byte still fails, which is exactly how #1845 was caught.
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "t${System.currentTimeMillis().toString(36).takeLast(5)}"
         val sessionName = "claude-main"
         val hostRowTag = seedDockerHost(key, "Workflow Tmux Docker $marker")
@@ -187,6 +188,7 @@ class EmulatorWorkflowE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

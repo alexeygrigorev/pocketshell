@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class WarmLeaseReuseDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private class CountingConnector(
         private val delegate: SshLeaseConnector,
@@ -59,7 +60,7 @@ class WarmLeaseReuseDockerTest {
         val keyContent = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         val key = SshKey.Pem(keyContent)
-        waitForSshFixtureReady(key)
+        trustedHostKeySha256 = waitForSshFixtureReady(key)
 
         val keyPath = writeKeyToFile(keyContent)
         val connector = CountingConnector(DefaultSshLeaseConnector())
@@ -72,6 +73,7 @@ class WarmLeaseReuseDockerTest {
             port = DEFAULT_PORT,
             username = DEFAULT_USER,
             keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
 
         // --- Surface 1: start-directory autocomplete (worst offender) ---

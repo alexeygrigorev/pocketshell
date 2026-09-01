@@ -48,6 +48,7 @@ import java.io.FileOutputStream
 /** Issue #1832 production-screen proof: failed attach -> real New-session sheet -> real Toast. */
 @RunWith(AndroidJUnit4::class)
 class TmuxCreateAfterAttachFailureDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -82,7 +83,7 @@ class TmuxCreateAfterAttachFailureDockerTest {
     @Test
     fun failedAttachKeepsNewSessionSurfaceReachableAndShowsToastWithoutCreating() { runBlocking {
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         val suffix = System.nanoTime().toString().takeLast(7)
         val healthySession = "issue1832-live-$suffix"
         val createFolder = "/tmp/issue1832-create-$suffix"
@@ -269,6 +270,7 @@ class TmuxCreateAfterAttachFailureDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + healthyHostId

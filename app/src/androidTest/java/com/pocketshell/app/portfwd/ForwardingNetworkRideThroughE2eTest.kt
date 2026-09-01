@@ -69,6 +69,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class ForwardingNetworkRideThroughE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createEmptyComposeRule()
 
@@ -109,7 +110,7 @@ class ForwardingNetworkRideThroughE2eTest {
     @Test
     fun cellularHandoffLossRestoreRidesThroughWhenTunnelSurvived_redialsWhenDead() {
         val key = readFixtureKey()
-        runBlocking { waitForSshFixtureReady(SshKey.Pem(key)) }
+        trustedHostKeySha256 = runBlocking { waitForSshFixtureReady(SshKey.Pem(key)) }
 
         // 1. Seed an ENABLED host pointing at the agents fixture into the real
         //    singleton DB (the same instance the running app flows observe),
@@ -133,6 +134,7 @@ class ForwardingNetworkRideThroughE2eTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     enabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         }

@@ -69,6 +69,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ForwardingResumeOnLaunchE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createEmptyComposeRule()
 
@@ -108,7 +109,7 @@ class ForwardingResumeOnLaunchE2eTest {
     @Test
     fun persistedEnabledHost_resumesForwardingAndShowsIndicatorOnLaunch() {
         val key = readFixtureKey()
-        runBlocking { waitForSshFixtureReady(SshKey.Pem(key)) }
+        trustedHostKeySha256 = runBlocking { waitForSshFixtureReady(SshKey.Pem(key)) }
 
         // 1. Seed an ENABLED host pointing at the agents fixture into the real
         //    singleton DB (the same instance the app's running flows observe),
@@ -136,6 +137,7 @@ class ForwardingResumeOnLaunchE2eTest {
                     keyId = storedKey.id,
                     // The persisted intent that origin/main never read back.
                     enabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         }

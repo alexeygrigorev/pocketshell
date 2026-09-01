@@ -84,6 +84,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class ServerDeathReconnectNoResurrectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -121,7 +122,7 @@ class ServerDeathReconnectNoResurrectE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         // Seed TWO sessions so the multi-session class (every session vanishes on
         // server-death) is exercised, then confirm the server is alive.
         seedTmuxSessions(key)
@@ -317,6 +318,7 @@ class ServerDeathReconnectNoResurrectE2eTest {
                 // #2000: this journey owns the exact persisted intent that can
                 // be re-adopted later and pin the reconnect grace forever.
                 enabled = true,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         return HOST_ROW_TAG_PREFIX + forwardingHostId

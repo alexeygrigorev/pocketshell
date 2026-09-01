@@ -71,6 +71,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class ProjectSwitcherDropdownE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -94,7 +95,7 @@ class ProjectSwitcherDropdownE2eTest {
     @Test
     fun projectCrumbDropdownWarmSwitchesToSiblingSession() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue463 Project Switcher")
@@ -264,6 +265,7 @@ class ProjectSwitcherDropdownE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

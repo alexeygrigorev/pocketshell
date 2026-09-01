@@ -77,6 +77,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2192ComposerLauncherAfterReconnectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -97,7 +98,7 @@ class Issue2192ComposerLauncherAfterReconnectE2eTest {
 
     private suspend fun seedBeforeLaunch() {
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         baselineSshdPids = listSshdPidsForTestuser(fixtureKey)
         seedTmuxSessions(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey, "Issue2192 Launcher")
@@ -563,6 +564,7 @@ class Issue2192ComposerLauncherAfterReconnectE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

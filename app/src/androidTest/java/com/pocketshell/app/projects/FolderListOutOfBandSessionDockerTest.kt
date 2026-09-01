@@ -76,6 +76,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListOutOfBandSessionDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -106,7 +107,7 @@ class FolderListOutOfBandSessionDockerTest {
             InstrumentationRegistry.getInstrumentation().targetContext,
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -172,6 +173,7 @@ class FolderListOutOfBandSessionDockerTest {
                 port = DEFAULT_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = db.hostDao().getById(hostId)!!

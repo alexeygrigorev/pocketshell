@@ -47,6 +47,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ManualKindWriterDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -69,7 +70,7 @@ class ManualKindWriterDockerTest {
     @Test
     fun foreignSessionStartsUnknownThenManualPickAndChangeAreDurable(): Unit { runBlocking {
         bootstrapKey()
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
 
         val suffix = System.currentTimeMillis().toString().takeLast(8)
         val session = "issue821-manual-$suffix"
@@ -107,6 +108,7 @@ class ManualKindWriterDockerTest {
             port = DEFAULT_PORT,
             username = DEFAULT_USER,
             keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
 
         // (1) Foreign session reads back with NO recorded kind — the Unknown

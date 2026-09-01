@@ -73,6 +73,7 @@ import java.security.MessageDigest
  */
 @RunWith(AndroidJUnit4::class)
 class ConnectionJournalHostPullJourneyDockerTest {
+    private lateinit var trustedHostKeySha256: String
     val compose = createAndroidComposeRule<MainActivity>()
 
     @get:Rule
@@ -310,7 +311,7 @@ class ConnectionJournalHostPullJourneyDockerTest {
         clearLastSessionPrefs()
         fixtureKey = readFixtureKey()
         markerPrefix = "issue1710-${System.currentTimeMillis().toString(36)}"
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedRemoteSession()
         hostRowTag = seedDockerHost()
         SettingsRepository(InstrumentationRegistry.getInstrumentation().targetContext)
@@ -557,6 +558,7 @@ class ConnectionJournalHostPullJourneyDockerTest {
                     pocketshellVersionCompatible = true,
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             "$HOST_ROW_TAG_PREFIX$hostId"

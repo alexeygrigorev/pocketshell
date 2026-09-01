@@ -19,6 +19,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.hosts.HOST_LIST_APP_UPDATE_WARNING_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
@@ -423,7 +424,12 @@ class HostBootstrapScenarioSuiteTest {
         withTimeout(60_000) {
             context.resetRemote()
             try {
-                context.seedAppDatabase()
+                // Issue #2446: `tapSeededHost()` below drives the REAL
+                // production bootstrap flow (SshLeaseManager-backed), which
+                // enforces host-key trust — capture the presented fingerprint
+                // for this scenario's port before seeding the HostEntity.
+                val trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = definition.port)
+                context.seedAppDatabase(trustedHostKeySha256)
                 context.block()
             } finally {
                 context.recordTiming("scenario_elapsed_ms", SystemClock.elapsedRealtime() - scenarioStartMs)
@@ -444,7 +450,7 @@ class HostBootstrapScenarioSuiteTest {
         private var keyId: Long? = null
         private val timings = mutableListOf<String>()
 
-        fun seedAppDatabase() {
+        fun seedAppDatabase(trustedHostKeySha256: String) {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
             val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
                 .fallbackToDestructiveMigration(dropAllTables = true)
@@ -465,6 +471,7 @@ class HostBootstrapScenarioSuiteTest {
                             port = definition.port,
                             username = DEFAULT_USER,
                             keyId = storedKey.id,
+                            trustedHostKeySha256 = trustedHostKeySha256,
                         ),
                     )
                 }

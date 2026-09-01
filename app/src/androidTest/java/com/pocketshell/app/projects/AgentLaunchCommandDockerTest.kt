@@ -52,6 +52,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class AgentLaunchCommandDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -75,7 +76,7 @@ class AgentLaunchCommandDockerTest {
             instrumentation.targetContext.getExternalFilesDir(null),
             "agent-launch-command",
         ).apply { mkdirs() }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -258,5 +259,6 @@ class AgentLaunchCommandDockerTest {
         port = DEFAULT_PORT,
         username = DEFAULT_USER,
         keyId = 1L,
+        trustedHostKeySha256 = trustedHostKeySha256,
     )
 }

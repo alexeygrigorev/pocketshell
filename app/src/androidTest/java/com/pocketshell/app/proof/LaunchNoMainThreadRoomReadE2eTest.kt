@@ -13,6 +13,7 @@ import com.pocketshell.app.diagnostics.StrictModeInstaller
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
@@ -199,6 +200,12 @@ class LaunchNoMainThreadRoomReadE2eTest {
                 content = key,
             )
             keyId = storedKey.id
+            // Issue #2446: the auto-open assertion below requires a REAL
+            // successful production connect (FolderList must land, not the
+            // "Trust and connect" screen), so this seeded host needs a
+            // pre-verified fingerprint, exactly like every other real-fixture
+            // seed helper.
+            val trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             hostId = db.hostDao().insert(
                 HostEntity(
                     name = hostName,
@@ -210,6 +217,7 @@ class LaunchNoMainThreadRoomReadE2eTest {
                     pocketshellInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
                     pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         }

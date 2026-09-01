@@ -119,6 +119,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -316,7 +317,7 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
         notificationManager.cancelAll()
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSession(fixtureKey, altScreen)
         hostRowTag = seedDockerHost(fixtureKey)
     }
@@ -651,6 +652,7 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             pinnedHostId = hostId

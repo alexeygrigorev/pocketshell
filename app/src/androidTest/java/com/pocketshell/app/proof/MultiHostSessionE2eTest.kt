@@ -169,8 +169,8 @@ class MultiHostSessionE2eTest {
         val key = readFixtureKey()
         fixtureKey = key
         val pem = SshKey.Pem(key)
-        waitForSshFixtureReady(pem, port = AGENTS_PORT)
-        waitForSshFixtureReady(pem, port = TMUX_PORT)
+        val trustedHostKeyShaA = waitForSshFixtureReady(pem, port = AGENTS_PORT)
+        val trustedHostKeyShaB = waitForSshFixtureReady(pem, port = TMUX_PORT)
 
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         sessionA = "issue147-a-$suffix"
@@ -180,7 +180,7 @@ class MultiHostSessionE2eTest {
         baselineHostA = sshdProcessCount(key, AGENTS_PORT)
         baselineHostB = sshdProcessCount(key, TMUX_PORT)
         Log.i(LOG_TAG, "sshd baseline: hostA=$baselineHostA hostB=$baselineHostB")
-        seededHosts = seedDockerHosts(key)
+        seededHosts = seedDockerHosts(key, trustedHostKeyShaA, trustedHostKeyShaB)
     }
 
     private fun readFixtureKey(): String =
@@ -191,7 +191,11 @@ class MultiHostSessionE2eTest {
             .bufferedReader()
             .use { it.readText() }
 
-    private suspend fun seedDockerHosts(key: String): SeededHosts {
+    private suspend fun seedDockerHosts(
+        key: String,
+        trustedHostKeyShaA: String,
+        trustedHostKeyShaB: String,
+    ): SeededHosts {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -204,7 +208,7 @@ class MultiHostSessionE2eTest {
                 name = "issue147-key-${System.currentTimeMillis()}",
                 content = key,
             )
-            fun host(name: String, port: Int): HostEntity =
+            fun host(name: String, port: Int, trustedHostKeySha256: String): HostEntity =
                 HostEntity(
                     name = name,
                     hostname = DEFAULT_HOST,
@@ -219,12 +223,13 @@ class MultiHostSessionE2eTest {
                     // Keep the setup cache internally complete so HostList does
                     // not route the tmux-only host-B fixture into a setup sheet.
                     pocketshellVersionCompatible = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 )
 
             val hostAName = "Issue147 Host A"
             val hostBName = "Issue147 Host B"
-            val hostAId = db.hostDao().insert(host(hostAName, AGENTS_PORT))
-            val hostBId = db.hostDao().insert(host(hostBName, TMUX_PORT))
+            val hostAId = db.hostDao().insert(host(hostAName, AGENTS_PORT, trustedHostKeyShaA))
+            val hostBId = db.hostDao().insert(host(hostBName, TMUX_PORT, trustedHostKeyShaB))
             SeededHosts(
                 hostAName = hostAName,
                 hostBName = hostBName,

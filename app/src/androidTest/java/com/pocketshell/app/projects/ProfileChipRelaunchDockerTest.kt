@@ -53,6 +53,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ProfileChipRelaunchDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -74,7 +75,7 @@ class ProfileChipRelaunchDockerTest {
     @Test
     fun zaiSessionRelaunchedAsDefaultClaudeDropsTheStaleProfileChip(): Unit { runBlocking {
         bootstrapKey()
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
 
         val suffix = System.currentTimeMillis().toString().takeLast(8)
         val session = "issue889-git-pocketshell-$suffix"
@@ -91,6 +92,7 @@ class ProfileChipRelaunchDockerTest {
             port = DEFAULT_PORT,
             username = DEFAULT_USER,
             keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
         val tree = HostTreeModel()
         tree.bindHost(host.id)

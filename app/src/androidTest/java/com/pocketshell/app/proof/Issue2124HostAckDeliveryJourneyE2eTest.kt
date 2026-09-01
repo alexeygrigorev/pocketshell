@@ -114,6 +114,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2124HostAckDeliveryJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -156,7 +157,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
         // cache namespace; the journey still exercises the real host/port path.
         fixtureHostName = "$HOST_NAME_PREFIX ${testName.methodName} ${System.currentTimeMillis()}"
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = seededPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = seededPort)
         seedFramedFakeAgentSession(fixtureKey, seededPort)
         hostRowTag = seedDockerHost(fixtureKey, seededPort)
     }
@@ -785,6 +786,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

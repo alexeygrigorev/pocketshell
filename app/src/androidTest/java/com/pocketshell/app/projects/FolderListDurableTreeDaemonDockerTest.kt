@@ -116,6 +116,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListDurableTreeDaemonDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createComposeRule()
@@ -156,7 +157,7 @@ class FolderListDurableTreeDaemonDockerTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
     } }
 
     @After
@@ -256,6 +257,7 @@ class FolderListDurableTreeDaemonDockerTest {
                 port = DAEMON_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         // Persist the watched root so the live tree buckets the two sessions under
@@ -466,6 +468,7 @@ class FolderListDurableTreeDaemonDockerTest {
                 port = DAEMON_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         db.projectRootDao().insert(
@@ -730,6 +733,7 @@ class FolderListDurableTreeDaemonDockerTest {
                 port = DAEMON_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         db.projectRootDao().insert(

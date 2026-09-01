@@ -123,6 +123,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class SessionSwipeSwitchE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -178,7 +179,7 @@ class SessionSwipeSwitchE2eTest {
     @Test
     fun swipeDownPagerSwitchesSessionAndActivatesCachedRuntimeOnReturn() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue237 Swipe")
@@ -661,7 +662,7 @@ class SessionSwipeSwitchE2eTest {
      */
     private suspend fun attachToSessionAForCaptureProof(): String {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue1994 Capture")
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -815,6 +816,7 @@ class SessionSwipeSwitchE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

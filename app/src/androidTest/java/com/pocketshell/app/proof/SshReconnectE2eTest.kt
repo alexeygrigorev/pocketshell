@@ -118,6 +118,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class SshReconnectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -140,7 +141,7 @@ class SshReconnectE2eTest {
         // The fixture kills each accepted SSH session after ~12s, but
         // `waitForSshFixtureReady` opens its own short-lived `exec`
         // session that completes in well under that window.
-        waitForSshFixtureReady(SshKey.Pem(key), port = FLAKY_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = FLAKY_PORT)
 
         val marker = "r${System.currentTimeMillis().toString(36).takeLast(5)}"
         // The flaky-agent container's entrypoint seeds this exact name
@@ -400,6 +401,7 @@ class SshReconnectE2eTest {
                     // skips past.
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

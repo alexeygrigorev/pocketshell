@@ -58,6 +58,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class SnippetPickerTmuxZOrderDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
@@ -97,7 +98,7 @@ class SnippetPickerTmuxZOrderDockerTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killStaleTmuxSession(sshKey, sshPort)
         seedTmuxSession(sshKey, sshPort, SESSION_NAME)
 
@@ -289,6 +290,7 @@ class SnippetPickerTmuxZOrderDockerTest {
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
                     pocketshellVersionCompatible = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             db.snippetDao().insert(

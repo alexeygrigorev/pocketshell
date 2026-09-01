@@ -64,6 +64,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class CodexOverflowNoReconnectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -97,7 +98,7 @@ class CodexOverflowNoReconnectE2eTest {
     fun codexStyleTerminalFloodWithComposerSendKeysDoesNotShowReconnect() { runBlocking<Unit> {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedCodexOverflowSession(key)
         val hostRowTag = seedDockerHost(key, "Issue576 Codex Overflow")
@@ -469,6 +470,7 @@ class CodexOverflowNoReconnectE2eTest {
                     pocketshellVersionCompatible = true,
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

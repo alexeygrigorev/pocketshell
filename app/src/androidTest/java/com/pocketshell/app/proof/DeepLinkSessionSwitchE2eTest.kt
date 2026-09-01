@@ -75,6 +75,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class DeepLinkSessionSwitchE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -97,7 +98,7 @@ class DeepLinkSessionSwitchE2eTest {
     @Test
     fun deepLinkAttachShowsCorrectSessionContentWithoutPickerAndSwitchesCleanly() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
 
         val seeded = seedDockerHost(key, "Issue470 DeepLink")
@@ -228,6 +229,7 @@ class DeepLinkSessionSwitchE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             SeededHost(

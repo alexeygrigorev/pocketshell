@@ -57,13 +57,20 @@ class FileViewerTabsJourneyDockerTest {
     private lateinit var leasing: CountingLeaseManager
     private val seededPaths = mutableListOf<String>()
 
+    /**
+     * Issue #2458 (host-key-trust fixture gap): backs [leasing]'s resolver
+     * with a real fixture host row — see [FileViewerLeaseTestSupport.kt] and
+     * the sibling fix in `FileViewerDockerTest`. Without it every real
+     * connect this journey drives throws `UnknownHostKeyException`.
+     */
+    private lateinit var trustDb: com.pocketshell.core.storage.AppDatabase
+
     @Before
     fun setUp() {
         runBlocking {
             val keyText = InstrumentationRegistry.getInstrumentation()
                 .context.assets.open("test_key").bufferedReader().use { it.readText() }
             sshKey = SshKey.Pem(keyText)
-            leasing = CountingLeaseManager()
             val cacheDir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
             keyFile = File(cacheDir, "issue1715-file-tabs-key").apply {
                 parentFile?.mkdirs()
@@ -71,7 +78,29 @@ class FileViewerTabsJourneyDockerTest {
                 FileOutputStream(this).use { it.write(keyText.toByteArray()) }
                 setReadable(true, true)
             }
-            waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+            val fingerprint = waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+            trustDb = androidx.room.Room.inMemoryDatabaseBuilder(
+                InstrumentationRegistry.getInstrumentation().targetContext,
+                com.pocketshell.core.storage.AppDatabase::class.java,
+            ).allowMainThreadQueries().build()
+            val trustKeyId = trustDb.sshKeyDao().insert(
+                com.pocketshell.core.storage.entity.SshKeyEntity(
+                    name = "file-viewer-tabs-journey-test",
+                    privateKeyPath = keyFile.absolutePath,
+                ),
+            )
+            trustDb.hostDao().insert(
+                com.pocketshell.core.storage.entity.HostEntity(
+                    id = TEST_HOST_ID,
+                    name = "file-viewer-tabs-journey-test-host",
+                    hostname = DEFAULT_HOST,
+                    port = DAEMON_PORT,
+                    username = DEFAULT_USER,
+                    keyId = trustKeyId,
+                    trustedHostKeySha256 = fingerprint,
+                ),
+            )
+            leasing = CountingLeaseManager(hostDao = trustDb.hostDao())
             resetDaemonWorkspace()
         }
     }
@@ -91,6 +120,7 @@ class FileViewerTabsJourneyDockerTest {
             }
             runCatching { keyFile.delete() }
             runCatching { leasing.manager.close() }
+            runCatching { trustDb.close() }
         }
     }
 

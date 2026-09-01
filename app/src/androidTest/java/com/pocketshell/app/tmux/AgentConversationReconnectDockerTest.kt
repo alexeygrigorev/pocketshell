@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.os.SystemClock
+import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.connectivity.TerminalNetworkChange
@@ -13,11 +14,16 @@ import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.tmux.TmuxClientFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -134,6 +140,7 @@ class AgentConversationReconnectDockerTest {
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val timings = mutableListOf<String>()
     private val cleanupCommands = mutableListOf<String>()
+    private val trustedFixtures = mutableListOf<TrustedFixture>()
 
     @After
     fun tearDown() {
@@ -142,8 +149,65 @@ class AgentConversationReconnectDockerTest {
                 runCatching { execRemote(readFixtureKey(), cleanupCommands.joinToString("\n")) }
             }
         }
+        trustedFixtures.forEach { runCatching { it.close() } }
         factoryScope.cancel()
         writeTimings()
+    }
+
+    /**
+     * Issue #2458 (host-key-trust fixture gap): [TmuxSessionViewModel.connect]
+     * only resolves host-key trust when this ViewModel's `hostDao` is set AND
+     * its `sshLeaseManager`'s connector implements `SshLeaseTargetResolver`.
+     * Production wires that resolver (`AuthoritativeSshLeaseConnector`) via
+     * Hilt (`app/di/SshLeaseModule.kt`); this file constructs
+     * `TmuxSessionViewModel` directly and bypasses Hilt entirely, so — with
+     * neither `hostDao` nor a resolver-backed `sshLeaseManager` supplied —
+     * every real connect() built a `VerifiedFingerprint(null)` policy and the
+     * fixture's real (never-before-seen-by-this-process) host key tripped
+     * `UnknownHostKeyException` on EVERY attempt (100% failure, all 4
+     * methods, confirmed on `main` @ 21fc4b95). This mirrors the production
+     * wiring: an in-memory host row per test-local `hostId`, carrying the
+     * fingerprint [waitForSshFixtureReady] already discovers (and this file
+     * used to discard), plus a resolver-backed lease manager so
+     * `TmuxSessionViewModel.requestResolvedConnect` finds it.
+     */
+    private fun trustedFixture(hostIds: List<Long>, fingerprint: String, keyPath: String): TrustedFixture {
+        val db = Room.inMemoryDatabaseBuilder(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+            AppDatabase::class.java,
+        ).allowMainThreadQueries().build()
+        runBlocking {
+            val keyId = db.sshKeyDao().insert(
+                SshKeyEntity(name = "agent-conversation-reconnect-key", privateKeyPath = keyPath),
+            )
+            hostIds.forEach { id ->
+                db.hostDao().insert(
+                    HostEntity(
+                        id = id,
+                        name = "agent-conversation-reconnect-$id",
+                        hostname = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        username = DEFAULT_USER,
+                        keyId = keyId,
+                        trustedHostKeySha256 = fingerprint,
+                    ),
+                )
+            }
+        }
+        val manager = SshLeaseManager(connector = AuthoritativeSshLeaseConnector(hostDao = db.hostDao()))
+        return TrustedFixture(db, manager).also { trustedFixtures += it }
+    }
+
+    private class TrustedFixture(
+        private val db: AppDatabase,
+        val sshLeaseManager: SshLeaseManager,
+    ) : AutoCloseable {
+        val hostDao get() = db.hostDao()
+
+        override fun close() {
+            sshLeaseManager.close()
+            db.close()
+        }
     }
 
     @Test
@@ -153,9 +217,10 @@ class AgentConversationReconnectDockerTest {
         val key = readFixtureKey()
         // agents:2222 readiness — so a not-yet-up fixture is the loud failure,
         // not the cause of a later hang.
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val fingerprint = waitForSshFixtureReady(SshKey.Pem(key))
 
         val keyPath = writeKeyFile(key)
+        val trust = trustedFixture(listOf(495L), fingerprint, keyPath)
         val sessionName = "issue495-reconnect-${System.currentTimeMillis().toString().takeLast(8)}"
         val processDir = "/tmp/issue495-claude-${System.nanoTime()}"
         val wrapperPath = "$processDir/claude"
@@ -234,6 +299,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = registry,
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
         // Issue #2111: pin the open-time default to Terminal (the real #818
         // opt-out). This is what makes the reattach memory restore the ONLY
@@ -528,9 +595,10 @@ class AgentConversationReconnectDockerTest {
     @Test
     fun conversationTapIsHonouredBeforeDetectionLands(): Unit { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val fingerprint = waitForSshFixtureReady(SshKey.Pem(key))
 
         val keyPath = writeKeyFile(key)
+        val trust = trustedFixture(listOf(778L), fingerprint, keyPath)
         val sessionName = "issue778-tap-${System.currentTimeMillis().toString().takeLast(8)}"
         // A plain shell pane in the writable home dir — no agent, no /workspace.
         val cwd = "/home/$DEFAULT_USER"
@@ -554,6 +622,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
 
         try {
@@ -671,9 +741,10 @@ class AgentConversationReconnectDockerTest {
     @Test
     fun agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow(): Unit { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val fingerprint = waitForSshFixtureReady(SshKey.Pem(key))
 
         val keyPath = writeKeyFile(key)
+        val trust = trustedFixture(listOf(807L, 809L, 808L), fingerprint, keyPath)
         val suffix = System.currentTimeMillis().toString().takeLast(8)
         val agentSessionName = "issue807-agent-$suffix"
         val shellSessionName = "issue807-shell-$suffix"
@@ -756,6 +827,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
         try {
             agentVm.connect(
@@ -976,6 +1049,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
         agentTerminalVm.setDefaultAgentSessionViewForTest(
             com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
@@ -1024,6 +1099,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
         try {
             shellVm.connect(
@@ -1110,9 +1187,10 @@ class AgentConversationReconnectDockerTest {
     @Test
     fun reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice(): Unit { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val fingerprint = waitForSshFixtureReady(SshKey.Pem(key))
 
         val keyPath = writeKeyFile(key)
+        val trust = trustedFixture(listOf(874L), fingerprint, keyPath)
         val sessionName = "issue874-void-${System.currentTimeMillis().toString().takeLast(8)}"
         val cwd = "/home/$DEFAULT_USER"
         cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
@@ -1137,6 +1215,8 @@ class AgentConversationReconnectDockerTest {
             tmuxClientFactory = TmuxClientFactory(factoryScope),
             activeTmuxClients = ActiveTmuxClients(),
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+            hostDao = trust.hostDao,
+            sshLeaseManager = trust.sshLeaseManager,
         )
         // The open-time default is Conversation (the black-screen cure) — the
         // exact state where the residual void appears.

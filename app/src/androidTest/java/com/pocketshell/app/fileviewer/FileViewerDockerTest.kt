@@ -98,6 +98,15 @@ class FileViewerDockerTest {
      */
     private lateinit var leasing: CountingLeaseManager
 
+    /**
+     * Issue #2458 (host-key-trust fixture gap): an in-memory host row carrying
+     * the real fixture fingerprint, backing [leasing]'s resolver. Without it,
+     * [CountingLeaseManager]'s connector cannot resolve host-key trust and
+     * every real connect throws `UnknownHostKeyException` against a fixture
+     * host key this process has never seen — see [FileViewerLeaseTestSupport.kt].
+     */
+    private lateinit var trustDb: com.pocketshell.core.storage.AppDatabase
+
     /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
     private var journeyEntryFocus: InheritedJourneyFocus? = null
     private val focusOwner by lazy {
@@ -117,7 +126,6 @@ class FileViewerDockerTest {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
-        leasing = CountingLeaseManager()
         val cacheDir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
         keyFile = File(cacheDir, "issue497-file-viewer-key").apply {
             parentFile?.mkdirs()
@@ -125,7 +133,29 @@ class FileViewerDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        val fingerprint = waitForSshFixtureReady(sshKey)
+        trustDb = androidx.room.Room.inMemoryDatabaseBuilder(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+            com.pocketshell.core.storage.AppDatabase::class.java,
+        ).allowMainThreadQueries().build()
+        val trustKeyId = trustDb.sshKeyDao().insert(
+            com.pocketshell.core.storage.entity.SshKeyEntity(
+                name = "file-viewer-docker-test",
+                privateKeyPath = keyFile.absolutePath,
+            ),
+        )
+        trustDb.hostDao().insert(
+            com.pocketshell.core.storage.entity.HostEntity(
+                id = TEST_HOST_ID,
+                name = "file-viewer-docker-test-host",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyId = trustKeyId,
+                trustedHostKeySha256 = fingerprint,
+            ),
+        )
+        leasing = CountingLeaseManager(hostDao = trustDb.hostDao())
     } }
 
     @After
@@ -149,6 +179,7 @@ class FileViewerDockerTest {
         }
         runCatching { keyFile.delete() }
         runCatching { leasing.manager.close() }
+        runCatching { trustDb.close() }
     } }
 
     @Test

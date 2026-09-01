@@ -10,11 +10,13 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
 import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -212,6 +214,17 @@ class FolderListKillWindowDockerTest {
             hostDao = db.hostDao(),
             folderListGateway = SshFolderListGateway(),
             sessionLifecycleSignals = signals,
+            // Issue #2458: TmuxSessionViewModel's own connect() resolves host-key
+            // trust through `sshLeaseManager.resolveTarget`, which no-ops unless
+            // the connector implements SshLeaseTargetResolver. Production wires
+            // that resolver (AuthoritativeSshLeaseConnector) via Hilt
+            // (app/di/SshLeaseModule.kt); this direct construction bypasses Hilt,
+            // so passing `hostDao` alone left every connect() building a
+            // VerifiedFingerprint(null) policy that rejects the fixture's real
+            // (never-before-seen-by-this-process) host key on every attempt.
+            sshLeaseManager = SshLeaseManager(
+                connector = AuthoritativeSshLeaseConnector(hostDao = db.hostDao()),
+            ),
         )
         try {
             tmuxVm.connect(

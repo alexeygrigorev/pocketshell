@@ -342,16 +342,15 @@ jobs:
           wait_for_container_healthy tests/docker/real-agent/compose.yml real-agents /tmp/real-agents-health.log 120
           cat /tmp/real-agents-health.log
 
+      # #2454-postmortem: this step used to duplicate tests.yml's inline SSH
+      # probe. It drifted out of sync (tests.yml's copy was extracted into
+      # scripts/ci-verify-agent-ssh-tool-surface.sh and fixed there) and the
+      # nightly fault gate blocked on the stale copy. Call the same script
+      # tests.yml calls so the two workflows can never diverge again.
       - name: Verify agent SSH target tool surface
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2222 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=2 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+          chmod +x scripts/ci-verify-agent-ssh-tool-surface.sh
+          scripts/ci-verify-agent-ssh-tool-surface.sh
 
       # Confirm the 2238 fixture really IS an old CLI (rejects `tree` with a
       # non-zero exit) while staying live (tmux works), so the regression tests
@@ -359,14 +358,8 @@ jobs:
       # fixture that silently accepted the new subcommand (mirrors tests.yml #849).
       - name: Verify agents-old-cli is a CLI mismatch (issue #849)
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2238 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=3 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'pocketshell tree get </dev/null; rc=$?; if [ "$rc" -eq 0 ]; then echo "old-cli fixture unexpectedly accepted tree get (rc=0)" >&2; exit 1; fi; tmux -V >/dev/null && echo "old-cli mismatch confirmed: tree get rc=$rc, host still live"'
+          chmod +x scripts/ci-verify-agents-old-cli-mismatch.sh
+          scripts/ci-verify-agents-old-cli-mismatch.sh
 
       # Confirm the 2239 fixture really IS the REAL daemon: `pocketshell tree`
       # round-trips a persist (upsert then get over a fresh exec returns the
@@ -374,19 +367,8 @@ jobs:
       # letting the durable-tree journey pass vacuously (mirrors tests.yml #839).
       - name: Verify agents-daemon real `pocketshell tree` persists (issue #839)
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2239 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=3 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'set -e;
-             printf "%s" "{\"host\":\"ci\",\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
-             got="$(printf "%s" "{\"host\":\"ci\"}" | pocketshell tree get)";
-             echo "$got" | grep -q "\"session\": \"s\"" || { echo "agents-daemon tree did NOT persist: $got" >&2; exit 1; };
-             echo "$got" | grep -q "\"collapsed\": true" || { echo "agents-daemon tree dropped the collapse: $got" >&2; exit 1; };
-             echo "agents-daemon real-tree persist confirmed: $got"'
+          chmod +x scripts/ci-verify-agents-daemon-tree-persists.sh
+          scripts/ci-verify-agents-daemon-tree-persists.sh
 
       - name: Run extensive connected journey/E2E + network-fault + bootstrap scenarios
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0

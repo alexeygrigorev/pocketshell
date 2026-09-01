@@ -133,7 +133,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
 
     @Test
     fun mirrorWritesConnectionLogOverTheWarmLeaseOnReconnect() { runBlocking {
-        waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
+        val trustFingerprint = waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
         val marker = "k${System.currentTimeMillis().toString(36).takeLast(6)}"
         val hostId = 972L
@@ -150,7 +150,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
 
         // 2. The production VM, with a handshake-counting lease manager + the real
         //    recorder, its activeTarget set to the agents:2222 host.
-        val vm = buildViewModelTargetingFixture(hostId, recorder)
+        val vm = buildViewModelTargetingFixture(hostId, recorder, trustFingerprint)
 
         // Clear any stale host log from a prior run so the assertion is about THIS
         // write landing, not a leftover file.
@@ -159,7 +159,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
         // 3. PRE-WARM the lease for the EXACT key the VM's activeTarget maps to.
         //    One cold handshake; the ref is kept alive so the transport stays warm
         //    for the mirror's borrow.
-        val warmLease = leaseManager.acquire(fixtureLeaseTarget(hostId)).getOrThrow()
+        val warmLease = leaseManager.acquire(fixtureLeaseTarget(hostId, trustFingerprint)).getOrThrow()
         assertEquals(
             "pre-warm must dial exactly one cold handshake",
             1,
@@ -304,6 +304,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
     private fun buildViewModelTargetingFixture(
         hostId: Long,
         recorder: DiagnosticRecorder,
+        trustedHostKeySha256: String,
     ): TmuxSessionViewModel {
         leaseManager = countingLeaseManager(handshakeCount)
         val vm = TmuxSessionViewModel(
@@ -314,7 +315,12 @@ class ConnectionLogHostMirrorReconnectDockerTest {
         )
         // Set activeTarget to the agents:2222 host (the reconnect-completed state).
         // An inert client is sufficient — the mirror glue only reads activeTarget
-        // and the lease manager; it issues no tmux commands.
+        // and the lease manager; it issues no tmux commands. The trusted host-key
+        // fingerprint must be threaded through so the production
+        // ConnectionTarget.toLeaseSessionTarget() mapping the mirror glue uses
+        // builds a VERIFIED (not "unconfirmed") known-hosts policy — otherwise the
+        // real warm-lease borrow below fails with UnknownHostKeyException instead
+        // of reusing the pre-warmed transport (issue #2446-class gap).
         vm.replaceClientForTest(
             hostId = hostId,
             hostName = "Connection Log Mirror $hostId",
@@ -324,6 +330,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
             keyPath = keyFile.absolutePath,
             sessionName = "mirror-main",
             client = InertTmuxClient(),
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
         viewModel = vm
         return vm
@@ -331,14 +338,26 @@ class ConnectionLogHostMirrorReconnectDockerTest {
 
     /**
      * The [SshLeaseTarget] the VM's `activeTarget.toLeaseSessionTarget()` maps to.
-     * Encoded here the SAME way the production [com.pocketshell.app.sessions.LeaseSessionTarget.toSshLeaseTarget]
-     * does (`credentialId = "$hostId:$keyPath"`, `knownHostsId = "accept-all"`) so
-     * the pre-warm holds the EXACT key the production mapping yields. If the VM's
-     * `toLeaseSessionTarget()` mapped any field wrong, the VM's borrow key would
-     * diverge from THIS pre-warmed key and the warm-reuse assertion would go red.
+     * Built via the SAME [com.pocketshell.app.sessions.LeaseSessionTarget.toSshLeaseTarget]
+     * production code the VM's mapping calls (not a hand-rolled `SshLeaseTarget`),
+     * with the trust fingerprint threaded through so `knownHostsId` /
+     * `knownHosts` land on the VERIFIED variant — matching what
+     * `replaceClientForTest(trustedHostKeySha256 = ...)` makes the VM's own
+     * `activeTarget.toLeaseSessionTarget()` produce. If the VM's mapping ever
+     * diverged (a wrong field, or a dropped fingerprint), the borrow key would
+     * diverge from THIS pre-warmed key and the warm-reuse assertion below would
+     * go red.
      */
-    private fun fixtureLeaseTarget(hostId: Long): SshLeaseTarget =
-        productionLeaseTarget(hostId, DEFAULT_PORT)
+    private fun fixtureLeaseTarget(hostId: Long, trustedHostKeySha256: String): SshLeaseTarget =
+        com.pocketshell.app.sessions.LeaseSessionTarget(
+            hostId = hostId,
+            hostname = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            username = DEFAULT_USER,
+            keyPath = keyFile.absolutePath,
+            passphrase = null,
+            trustedHostKeySha256 = trustedHostKeySha256,
+        ).toSshLeaseTarget()
 
     private fun productionLeaseTarget(hostId: Long, port: Int): SshLeaseTarget =
         SshLeaseTarget(

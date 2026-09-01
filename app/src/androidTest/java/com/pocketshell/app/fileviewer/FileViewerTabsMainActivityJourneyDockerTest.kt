@@ -685,8 +685,19 @@ class FileViewerTabsMainActivityJourneyDockerTest {
             "printf '%s' '{\"tabs\":[],\"active_path\":null}' | pocketshell tree workspace-upsert >/dev/null",
         )
         assertEquals("real daemon workspace reset must be acknowledged", 0, result.exitCode)
+        // `tree upsert` now requires `expected_version` (optimistic concurrency):
+        // an absent field raises inside the daemon (exit != 0), not a `conflict`
+        // response. resetDaemonState() runs multiple times against the SAME
+        // shared $HOST_NAME across this class's tests (setUp + tearDown), so a
+        // hardcoded `0` would only ever work on the very first call — fetch the
+        // real current version first so every reset actually lands as `ok`.
+        val currentVersion = session.exec(
+            "printf '%s' '{\"host\":\"$HOST_NAME\"}' | pocketshell tree get",
+        ).stdout.let { out ->
+            Regex("\"version\":\\s*(\\d+)").find(out)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        }
         val treeResult = session.exec(
-            "printf '%s' '{\"host\":\"$HOST_NAME\",\"nodes\":[]}' | " +
+            "printf '%s' '{\"host\":\"$HOST_NAME\",\"expected_version\":$currentVersion,\"nodes\":[]}' | " +
                 "pocketshell tree upsert >/dev/null",
         )
         assertEquals("real daemon host-tree reset must be acknowledged", 0, treeResult.exitCode)

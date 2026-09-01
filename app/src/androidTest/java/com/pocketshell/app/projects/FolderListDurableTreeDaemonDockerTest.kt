@@ -229,7 +229,7 @@ class FolderListDurableTreeDaemonDockerTest {
                 // vacuous, so fail loud here.
                 val probeHost = "issue839-probe-$suffix"
                 session.exec(
-                    "printf '%s' '{\"host\":\"$probeHost\",\"nodes\":" +
+                    "printf '%s' '{\"host\":\"$probeHost\",\"expected_version\":0,\"nodes\":" +
                         "[{\"session\":\"p\",\"order\":0,\"folder_path\":\"/x\",\"collapsed\":true}]}' " +
                         "| pocketshell tree upsert",
                 )
@@ -301,9 +301,17 @@ class FolderListDurableTreeDaemonDockerTest {
             var sawCollapse = false
             val deadline = System.currentTimeMillis() + 15_000
             while (System.currentTimeMillis() < deadline) {
+                // #2243: the daemon-side registry is keyed by the host's OPAQUE
+                // stable owner id (`host.treeIdentity`), not its display name —
+                // production's upsertTree() writes there
+                // (FolderListTreeSyncRemote.upsertTree() -> host.treeIdentity).
+                // Querying by $hostName here was stale pre-#2243 test code: it
+                // polled a key production never wrote to, so this phase could
+                // never observe the real persist and would fail even though the
+                // collapse landed correctly under the real key.
                 val got = connect().use { session ->
                     session.exec(
-                        "printf '%s' '{\"host\":\"$hostName\"}' | pocketshell tree get",
+                        "printf '%s' '{\"host\":\"${host.treeIdentity}\"}' | pocketshell tree get",
                     )
                 }
                 if (got.exitCode == 0 &&

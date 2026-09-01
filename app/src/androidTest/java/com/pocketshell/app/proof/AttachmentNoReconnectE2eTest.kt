@@ -117,9 +117,9 @@ class AttachmentNoReconnectE2eTest {
                 runBlocking {
                     val key = readFixtureKey()
                     seededKey = key
-                    waitForSshFixtureReady(SshKey.Pem(key))
+                    val trustedFingerprint = waitForSshFixtureReady(SshKey.Pem(key))
                     seedTmuxSession(key)
-                    seededHostRowTag = seedDockerHost(key)
+                    seededHostRowTag = seedDockerHost(key, trustedFingerprint)
                 }
                 base.evaluate()
             }
@@ -447,7 +447,7 @@ class AttachmentNoReconnectE2eTest {
             .commit()
     }
 
-    private suspend fun seedDockerHost(key: String): String {
+    private suspend fun seedDockerHost(key: String, trustedHostKeySha256: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -469,6 +469,29 @@ class AttachmentNoReconnectE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    // Regression (audit-fixes #4b5be0d8 / host-key trust enforcement):
+                    // `LeaseBackedHostSessionOpener` now requires a pre-verified
+                    // fingerprint before the app's own SSH connect (and the silent
+                    // background reprobe) will proceed — an unset fingerprint is
+                    // treated as a first-use probe that ALWAYS fails and routes the
+                    // user to the FirstHostTestConnect trust screen via
+                    // `HostKeyTrustPromptRouter`, hijacking navigation away from the
+                    // host list before this journey can ever tap the seeded host row.
+                    trustedHostKeySha256 = trustedHostKeySha256,
+                    // Companion fixture gap: with the fingerprint fixed, the host's
+                    // pocketshell-CLI setup state is still `Unknown` (only
+                    // tmuxInstalled is seeded), so `HostListViewModel.
+                    // reprobeUnknownHostsOnce()` fires a real background SSH probe
+                    // (`checkTmux`/`checkServerSetup`) that holds the per-host
+                    // `probeLock` for well over a minute against this fixture,
+                    // blocking the foreground tap-to-open behind it. Pre-seeding a
+                    // fresh, compatible pocketshell result (matching what a real host
+                    // looks like after FirstHostTestConnect/bootstrap already ran)
+                    // resolves `HostSetupState` away from `Unknown` so neither the
+                    // reprobe nor the foreground open re-probes at all.
+                    pocketshellInstalled = true,
+                    pocketshellVersionCompatible = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

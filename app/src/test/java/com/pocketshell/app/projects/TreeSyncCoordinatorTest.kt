@@ -470,7 +470,11 @@ class TreeSyncCoordinatorTest {
         }
         val remote = FolderListTreeSyncRemote(
             gateway = unusedProxy(),
-            hostDao = unusedProxy(),
+            // Issue #2455: replaceWarmLease now resolves the real host-key trust
+            // fingerprint via hostDao.getById BEFORE dialing, same as every other
+            // tree RPC on this class already did — so this scenario's warm-lease
+            // acquire needs a working fake, not the "must not be called" proxy.
+            hostDao = hostDaoFor(PARAMS, OTHER_PARAMS),
             treeRemoteSource = treeSource,
             sshLeaseManager = leaseManager,
             activeTmuxClients = null,

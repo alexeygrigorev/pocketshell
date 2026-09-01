@@ -127,6 +127,12 @@ class FolderListViewModelPrewarmLeaseTest {
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
         )
+        // Issue #2455: replaceWarmLease now resolves trust via a hostDao.getById
+        // hop on `ioDispatcher` before dialing (same pattern the class's other tree
+        // RPCs already use) — pin it to the virtual-clock test dispatcher so
+        // `runCurrent()` deterministically drains that hop, matching the sibling
+        // `stopPollingReleasesPrewarmLeaseIntoLeaseManagerTtl` test above.
+        vm.ioDispatcher = StandardTestDispatcher(testScheduler)
         vm.warmLeaseAcquiredForTest = {
             throw CancellationException("cancelled after prewarm acquire")
         }

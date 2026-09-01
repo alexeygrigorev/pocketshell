@@ -271,9 +271,27 @@ internal class FolderListTreeSyncRemote(
         if (!isCurrent(binding)) return
         releaseWarmFor(binding)
         if (!isCurrent(binding)) return
+        // Issue #2455: BoundParams never carries a resolved fingerprint on its
+        // own (the ViewModel's synchronous, non-suspend bind() cannot await a
+        // Room read without turning bind() into a blocking DB round-trip — see
+        // the class doc on TreeSyncCoordinator.bind and FolderListViewModel.bind).
+        // Resolve the REAL trust here instead, right before the warm lease is
+        // actually acquired: this suspend fun already does an identical
+        // `hostDao.getById` off-Main read for every other tree RPC
+        // (getTree/reconcileTree/upsertTree/migrateLegacyTree), so this adds no
+        // new round-trip shape, just reuses it for the lease target too. The
+        // resolved params are used ONLY for this local target build — never
+        // written back into TreeSyncCoordinator's own `bound`/`binding` state —
+        // so a same-host re-bind before resolution completes never sees a
+        // spurious "host changed" from BoundParams equality.
+        val trustedHost = withContext(dispatcher()) { hostDao.getById(binding.params.hostId) }
+        if (!isCurrent(binding)) return
+        val leaseTarget = binding.params
+            .withTrustedHostKeySha256(trustedHost?.trustedHostKeySha256)
+            .toSshLeaseTarget()
         var acquiredLease: SshLease? = null
         try {
-            val lease = sshLeaseManager.acquire(binding.params.toSshLeaseTarget()).getOrNull() ?: return
+            val lease = sshLeaseManager.acquire(leaseTarget).getOrNull() ?: return
             acquiredLease = lease
             onWarmSessionAcquired()
             withContext(NonCancellable) {

@@ -114,6 +114,11 @@ class RealAgentReleaseGateTest {
     fun seedDockerHostWritesCompleteReadyBootstrapCache() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
+        // `seedDockerHost` persists `trustedHostKeySha256` into the HostEntity,
+        // so the fixture's real fingerprint has to be resolved first — the other
+        // three tests in this class already do this and this one did not, which
+        // is why it threw `UninitializedPropertyAccessException` (4b5be0d8 sweep).
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
         val hostRowTag = seedDockerHost(key, "Real Agent Ready Cache")
         val hostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
         val host = readSeededHost(hostId) ?: error("seeded host $hostId was not persisted")

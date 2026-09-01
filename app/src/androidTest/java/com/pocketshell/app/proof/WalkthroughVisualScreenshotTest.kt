@@ -93,8 +93,13 @@ class WalkthroughVisualScreenshotTest {
             val tmuxSessionName = "visual-$marker"
             val sshKey = SshKey.Pem(key)
 
-            val hostRowTag = seedWalkthroughHostAndSnippets(key)
+            // The fixture's real host-key fingerprint must be resolved BEFORE
+            // the host row is written: `seedWalkthroughHostAndSnippets` persists
+            // `trustedHostKeySha256` into the HostEntity, so seeding first threw
+            // `UninitializedPropertyAccessException` (see the 4b5be0d8 host-key
+            // trust sweep).
             trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
+            val hostRowTag = seedWalkthroughHostAndSnippets(key)
             // Issue #761: kill any leaked sessions from a prior failed run AND
             // seed a fresh one. The seeded session is torn down in `finally`
             // below so it does not accumulate on the shared `agents:2222`

@@ -1,0 +1,130 @@
+name: Nightly Extensive red-run notify
+
+# Issue #2459: the `Nightly Extensive Tests` sibling of
+# .github/workflows/full-suite-notify.yml (issue #2353's scheduled `Tests`
+# red-run tracker). Nightly Extensive Tests previously had NO red-run
+# notifier of its own — this fills that gap, reusing the exact same
+# bounded-retry-and-compare mechanism (scripts/ci-retry-gate.sh,
+# scripts/ci-retry-signature.py, scripts/ci-retry-classify.sh,
+# scripts/ci-retry-notify.sh) with its OWN tracking-issue marker/title
+# (scripts/ci-nightly-extensive-red-issue.sh) and its own journey-artifact
+# prefix (`nightly-extensive-android-test-reports-shard-`, the artifact the
+# `extensive` matrix job already uploads per shard — no
+# nightly-extensive.yml change required to produce it).
+#
+# On the first red scheduled run (run_attempt == 1): file/update the
+# tracking issue, capture the failure signature, store it, and trigger
+# exactly one full `gh run rerun`. When the retry's own completion re-fires
+# this event (same run id, run_attempt >= 2), compare it against the stored
+# signature and post the verdict — citing both run URLs — as a follow-up
+# comment. See scripts/ci-retry-gate.sh's header for the full PHASE state
+# table and why a retry can never trigger a second retry.
+#
+# Deliberately a SEPARATE workflow, triggered by `workflow_run` once Nightly
+# Extensive Tests concludes (same rationale as full-suite-notify.yml: no
+# job-level `needs:` access into a sibling workflow's jobs is possible or
+# needed — everything is re-derived from the GitHub API against the
+# now-completed run).
+#
+# Only fires for a SCHEDULED run — never for the `workflow_dispatch`
+# force-run trigger nightly-extensive.yml also has (that has no "last known
+# green nightly run" concept to bisect against, same reasoning
+# full-suite-notify.yml already applies to Tests' own workflow_dispatch
+# runs). A guard-skipped nightly run (no new commits in 24h) still concludes
+# `success`, so it never reaches this workflow's `first_red`/`retry_red`
+# branches — only a genuinely red run (or the bounded retry of one) does.
+
+on:
+  workflow_run:
+    workflows: ["Nightly Extensive Tests"]
+    types: [completed]
+
+jobs:
+  notify:
+    name: File/update red nightly tracking issue + bounded retry (#2459)
+    if: github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+
+      - id: gate
+        run: |
+          scripts/ci-retry-gate.sh \
+            --run-attempt "${{ github.event.workflow_run.run_attempt }}" \
+            --conclusion "${{ github.event.workflow_run.conclusion }}"
+
+      # issue #2459: this run's failure signature (failed job names, plus
+      # failing test class names for the nightly extensive journey shards),
+      # needed both to build the first-red tracking-issue body and to compare
+      # against on the retry's own completion.
+      - id: signature
+        if: steps.gate.outputs.phase == 'first_red' || steps.gate.outputs.phase == 'retry_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci-retry-signature.py \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --journey-artifact-prefix "nightly-extensive-android-test-reports-shard-" \
+            --out artifacts/ci-retry-signature.txt
+
+      - id: failed_jobs
+        if: steps.gate.outputs.phase == 'first_red'
+        run: |
+          failed="$(grep '^job:' artifacts/ci-retry-signature.txt | sed 's/^job://' | paste -sd ';' - | sed 's/;/; /g')"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+      - id: green
+        if: steps.gate.outputs.phase == 'first_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-skip-check.sh \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.event.workflow_run.head_sha }}" \
+            --workflow-file nightly-extensive.yml
+
+      - name: File or update the tracking issue (first red)
+        if: steps.gate.outputs.phase == 'first_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-nightly-extensive-red-issue.sh \
+            --repo "${{ github.repository }}" \
+            --run-url "${{ github.event.workflow_run.html_url }}/attempts/1" \
+            --sha "${{ github.event.workflow_run.head_sha }}" \
+            --last-green-sha "${{ steps.green.outputs.last_green_sha }}" \
+            --failed-jobs "${{ steps.failed_jobs.outputs.failed }}"
+
+      - name: Store the signature and trigger the one bounded retry (#2459)
+        if: steps.gate.outputs.phase == 'first_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-retry-notify.sh store \
+            --repo "${{ github.repository }}" \
+            --marker "pocketshell-nightly-extensive-red-marker" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --signature-file artifacts/ci-retry-signature.txt
+          gh run rerun "${{ github.event.workflow_run.id }}" --repo "${{ github.repository }}"
+
+      - name: Compare the bounded retry's outcome and classify (#2459)
+        if: steps.gate.outputs.phase == 'retry_red' || steps.gate.outputs.phase == 'retry_clean'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-retry-notify.sh report \
+            --repo "${{ github.repository }}" \
+            --marker "pocketshell-nightly-extensive-red-marker" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --original-run-url "${{ github.event.workflow_run.html_url }}/attempts/1" \
+            --retry-run-url "${{ github.event.workflow_run.html_url }}/attempts/${{ github.event.workflow_run.run_attempt }}" \
+            --retry-conclusion "${{ github.event.workflow_run.conclusion }}" \
+            --retry-signature-file "artifacts/ci-retry-signature.txt"

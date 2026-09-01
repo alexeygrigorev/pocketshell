@@ -105,6 +105,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class SlowClassifyKeepsSharedLeaseJourneyDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -128,7 +129,7 @@ class SlowClassifyKeepsSharedLeaseJourneyDockerTest {
     private suspend fun seedRemoteAndDb() {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         // Make the host classify genuinely slow BEFORE the app can fire it, so
         // the very first in-app classify already overruns the 3.5s bound.
         writeClassifyDelay(key, CLASSIFY_DELAY_SECS)
@@ -509,6 +510,7 @@ class SlowClassifyKeepsSharedLeaseJourneyDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

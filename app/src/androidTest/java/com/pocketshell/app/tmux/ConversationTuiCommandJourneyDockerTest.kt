@@ -122,6 +122,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ConversationTuiCommandJourneyDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -477,7 +478,7 @@ class ConversationTuiCommandJourneyDockerTest {
         val key = readFixtureKey()
         seededKey = key
         clearLastSessionPrefs()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val sessionName = when (methodName) {
             "modelCommandFromConversationShowsNoticeNoEchoBubbleThenTapOpensTerminal" ->
                 seedMaskedLiveClaudeSession(key)
@@ -670,6 +671,7 @@ class ConversationTuiCommandJourneyDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

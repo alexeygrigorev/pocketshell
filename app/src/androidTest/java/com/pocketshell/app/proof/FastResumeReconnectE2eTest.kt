@@ -101,6 +101,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class FastResumeReconnectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -139,7 +140,7 @@ class FastResumeReconnectE2eTest {
     @Test
     fun resumeAfterBackgroundRestoresCachedViewFastThenReconnects() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
 
         val hostRowTag = seedDockerHost(key)
@@ -288,6 +289,7 @@ class FastResumeReconnectE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

@@ -142,6 +142,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class ReconnectPartialBlankReseedJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -170,7 +171,7 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
     fun withinGraceReattachRestoresFullViewportNotJustTheLiveLine() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
 
         val hostRowTag = seedDockerHost(key)
@@ -301,7 +302,7 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
     private suspend fun runBeyondGraceFullyRepaintsJourney(altScreen: Boolean, namePrefix: String) {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedBeyondGraceTmuxSession(key, altScreen)
 
         val hostRowTag = seedDockerHost(key)
@@ -713,6 +714,7 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

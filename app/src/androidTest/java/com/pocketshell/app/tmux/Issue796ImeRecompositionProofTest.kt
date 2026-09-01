@@ -133,6 +133,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class Issue796ImeRecompositionProofTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -159,7 +160,7 @@ class Issue796ImeRecompositionProofTest {
             .bufferedReader()
             .use { it.readText() }
         val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey, port = sshPort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = sshPort)
         killSession(sshKey, sshPort)
         seedTriggerGatedRedrawSession(sshKey, sshPort)
 
@@ -473,6 +474,7 @@ class Issue796ImeRecompositionProofTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

@@ -121,6 +121,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class WithinGraceSocketDropForegroundJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -154,7 +155,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
     fun withinGraceForegroundAfterSocketDropRetainsViewportAndRetryRecoversSameSession() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // Baseline sshd workers BEFORE the app connects so we can identify the
         // app's `-CC` worker by set-difference once it attaches.
@@ -685,6 +686,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

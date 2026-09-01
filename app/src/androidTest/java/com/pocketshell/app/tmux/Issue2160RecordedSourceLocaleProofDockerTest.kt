@@ -59,6 +59,7 @@ import kotlinx.coroutines.withTimeout
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2160RecordedSourceLocaleProofDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private val cleanupCommands = mutableListOf<String>()
@@ -77,7 +78,7 @@ class Issue2160RecordedSourceLocaleProofDockerTest {
         val keyText = InstrumentationRegistry.getInstrumentation().context.assets
             .open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -412,6 +413,7 @@ class Issue2160RecordedSourceLocaleProofDockerTest {
                         port = DEFAULT_PORT,
                         username = DEFAULT_USER,
                         keyId = 1L,
+                        trustedHostKeySha256 = trustedHostKeySha256,
                     ),
                     keyPath = "/unused-the-connector-holds-the-pem",
                     passphrase = null,

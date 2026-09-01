@@ -160,6 +160,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ShowKeyboardChipE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -193,7 +194,7 @@ class ShowKeyboardChipE2eTest {
         clearLastSessionPrefs()
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
         seedTmuxSession(key)
         seededHostRowTag = seedDockerHost(key)
     }
@@ -779,6 +780,7 @@ class ShowKeyboardChipE2eTest {
                     // the folders/session surface.
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

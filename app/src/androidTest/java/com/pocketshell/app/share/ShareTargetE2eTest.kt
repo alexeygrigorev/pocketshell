@@ -58,6 +58,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ShareTargetE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -153,7 +154,7 @@ class ShareTargetE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = "psshare${System.currentTimeMillis()}"
         val hostId = seedHost(targetContext, key, marker)
@@ -275,7 +276,7 @@ class ShareTargetE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = "psmulti${System.currentTimeMillis()}"
         val hostId = seedHost(targetContext, key, marker)
@@ -407,7 +408,7 @@ class ShareTargetE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = "psproj${System.currentTimeMillis()}"
         // A project path under $HOME. `.inbox/` is created on demand by
@@ -521,7 +522,7 @@ class ShareTargetE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = "pssession${System.currentTimeMillis()}"
         val sessionName = "issue507-$marker"
@@ -699,7 +700,7 @@ class ShareTargetE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         val marker = "psinto${System.currentTimeMillis()}"
         val sessionName = "issue560-$marker"
@@ -1009,6 +1010,7 @@ class ShareTargetE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             db.projectRootDao().insert(
@@ -1090,6 +1092,7 @@ class ShareTargetE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         } finally {

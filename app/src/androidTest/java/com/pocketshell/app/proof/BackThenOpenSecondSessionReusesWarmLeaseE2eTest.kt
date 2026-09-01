@@ -108,6 +108,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
     // clock drives the SAME foreground activity the Termux TerminalView interop
@@ -156,7 +157,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
         SshFolderListGateway.forcedStaleChannelSymptoms.set(0)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
         // Seed a watched root so the picker discovery poll ALWAYS runs the
         // SSH-lease path (the watched-root expansion), which is the lease the
@@ -409,6 +410,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             // One watched root so the picker's discovery poll ALWAYS runs the

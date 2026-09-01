@@ -124,6 +124,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxDetachOnBackgroundE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createEmptyComposeRule()
 
@@ -167,7 +168,7 @@ class TmuxDetachOnBackgroundE2eTest {
     @Test
     fun backgroundingTheAppDetachesTmuxAndDesktopGetsFullSize() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
         clearLogcat()
 
@@ -434,6 +435,7 @@ class TmuxDetachOnBackgroundE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

@@ -83,6 +83,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class AgentSubmitAckJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -119,7 +120,7 @@ class AgentSubmitAckJourneyE2eTest {
                 runBlocking {
                     val key = readFixtureKey()
                     seededKey = key
-                    waitForSshFixtureReady(SshKey.Pem(key))
+                    trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
                     seedFakeAgentSession(key)
                     seededHostRowTag = seedDockerHost(key)
                 }
@@ -629,6 +630,7 @@ class AgentSubmitAckJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

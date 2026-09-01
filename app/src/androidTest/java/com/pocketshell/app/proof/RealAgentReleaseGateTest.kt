@@ -78,6 +78,7 @@ import java.util.Locale
  */
 @RunWith(AndroidJUnit4::class)
 class RealAgentReleaseGateTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -145,7 +146,7 @@ class RealAgentReleaseGateTest {
     fun realClaudeCliRunsInTmuxPaneAndProducesJsonlConversationLog() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
 
         val marker = shortMarker()
         val workDir = "/tmp/ps-real-c-$marker"
@@ -200,7 +201,7 @@ class RealAgentReleaseGateTest {
     fun realCodexCliRunsInTmuxPaneAndProducesJsonlRolloutLog() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
 
         val marker = shortMarker()
         val workDir = "/tmp/ps-real-x-$marker"
@@ -272,7 +273,7 @@ class RealAgentReleaseGateTest {
     fun collapsedPasteChipFormatMatchesShippedClaudeBinaryAndProductionRecogniser() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
 
         val templates = extractRealClaudePasteChipTemplates(key)
         assertTrue(
@@ -404,6 +405,7 @@ class RealAgentReleaseGateTest {
                     pocketshellVersionCompatible = true,
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

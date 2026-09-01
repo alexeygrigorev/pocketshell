@@ -85,6 +85,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class AgentAltScreenPartialBlackHealJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: `createAndroidComposeRule<MainActivity>()` (NOT
     // `createEmptyComposeRule()` + a hand-rolled `ActivityScenario.launch`) so the
@@ -126,7 +127,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedAltScreenSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -880,6 +881,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

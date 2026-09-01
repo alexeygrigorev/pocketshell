@@ -106,19 +106,27 @@ class SiblingSuffixExactTargetDockerTest {
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
     private val createdSessions = mutableListOf<String>()
+    private lateinit var trustedHostKeySha256: String
 
     private val gateway = SshFolderListGateway()
 
     private val clientScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val host = HostEntity(
-        id = 1L,
-        name = "issue1820-sibling-suffix",
-        hostname = DEFAULT_HOST,
-        port = DEFAULT_PORT,
-        username = DEFAULT_USER,
-        keyId = 1L,
-    )
+    // Issue #2446: was an eagerly-initialized `val`, constructed before
+    // `trustedHostKeySha256` is known (property initializers run before
+    // `@Before`) — a computed property so every access (all from `@Test`
+    // methods, after `setUp()` captured the real presented fingerprint)
+    // rebuilds it with the current trust binding.
+    private val host: HostEntity
+        get() = HostEntity(
+            id = 1L,
+            name = "issue1820-sibling-suffix",
+            hostname = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            username = DEFAULT_USER,
+            keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
+        )
 
     @Before
     fun setUp() { runBlocking {
@@ -138,7 +146,7 @@ class SiblingSuffixExactTargetDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After

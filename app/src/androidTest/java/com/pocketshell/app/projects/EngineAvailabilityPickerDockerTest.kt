@@ -59,6 +59,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class EngineAvailabilityPickerDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createComposeRule()
@@ -82,7 +83,7 @@ class EngineAvailabilityPickerDockerTest {
         }
 
         val engines = runBlocking {
-            waitForSshFixtureReady(sshKey)
+            trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
             val leaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector())
             try {
                 val host = HostEntity(
@@ -92,6 +93,7 @@ class EngineAvailabilityPickerDockerTest {
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
                     keyId = 2276L,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 )
                 val result = withTimeout(30_000) {
                     SshEnginesGateway(leaseManager).listEngines(

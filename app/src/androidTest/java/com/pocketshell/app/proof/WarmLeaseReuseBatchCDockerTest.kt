@@ -54,6 +54,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class WarmLeaseReuseBatchCDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private class CountingConnector(
         private val delegate: SshLeaseConnector,
@@ -70,7 +71,7 @@ class WarmLeaseReuseBatchCDockerTest {
         val keyContent = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         val key = SshKey.Pem(keyContent)
-        waitForSshFixtureReady(key)
+        trustedHostKeySha256 = waitForSshFixtureReady(key)
 
         val keyPath = writeKeyToFile(keyContent)
         val connector = CountingConnector(DefaultSshLeaseConnector())
@@ -92,6 +93,7 @@ class WarmLeaseReuseBatchCDockerTest {
                 port = DEFAULT_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             )
             db.hostDao().insert(host)
 

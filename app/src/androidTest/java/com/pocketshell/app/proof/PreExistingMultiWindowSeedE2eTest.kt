@@ -80,6 +80,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class PreExistingMultiWindowSeedE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -222,7 +223,7 @@ class PreExistingMultiWindowSeedE2eTest {
         val key = readFixtureKey()
         seededKey = key
         try {
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
             // Seed a fresh session with TWO windows, each with a distinct marker
             // printed once and then left idle. The idle shells emit no further
@@ -258,6 +259,7 @@ class PreExistingMultiWindowSeedE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

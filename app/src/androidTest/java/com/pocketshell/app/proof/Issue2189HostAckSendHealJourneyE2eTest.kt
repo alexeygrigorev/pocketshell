@@ -64,6 +64,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2189HostAckSendHealJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -86,7 +87,7 @@ class Issue2189HostAckSendHealJourneyE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedFullFrameSession(key)
         hostRowTag = seedDockerHost(key)
     }
@@ -557,6 +558,7 @@ class Issue2189HostAckSendHealJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

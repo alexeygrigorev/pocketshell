@@ -92,6 +92,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ComposerAlwaysPresentSwitchJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -120,7 +121,7 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
     @Test
     fun composerLauncherPresentAndContainedAfterEverySwitchAcrossAgentAndShell() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // Seed: A = agent-detected (claude in /workspace/pocketshell), B + C =
         // plain shells. So the journey exercises the composer presence in BOTH
@@ -295,6 +296,7 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

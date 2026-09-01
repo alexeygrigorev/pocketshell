@@ -85,6 +85,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class ReconnectRepaintE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: createAndroidComposeRule<MainActivity>() (not
     // createEmptyComposeRule + hand-rolled ActivityScenario.launch) fixes the
@@ -130,7 +131,7 @@ class ReconnectRepaintE2eTest {
     private suspend fun seedBeforeLaunch() {
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         baselineSshdPids = listSshdPidsForTestuser(key)
         seedAltScreenSession(key)
         hostRowTag = seedDockerHost(key)
@@ -246,6 +247,7 @@ class ReconnectRepaintE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

@@ -102,6 +102,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class VoiceSendActivePaneStaysVisibleE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -383,7 +384,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
         val key = readFixtureKey()
         seededKey = key
         try {
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedTmuxSession(key)
             seededHostRowTag = seedDockerHost(key)
         } catch (t: Throwable) {
@@ -414,6 +415,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

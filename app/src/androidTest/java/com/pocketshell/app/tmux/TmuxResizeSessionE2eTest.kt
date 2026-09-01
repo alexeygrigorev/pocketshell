@@ -64,6 +64,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxResizeSessionE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -91,7 +92,7 @@ class TmuxResizeSessionE2eTest {
     @Test
     fun attachAutomaticallySizesTmuxToPhoneViewport() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedDesktopSizedSession(key)
         val seededWindowDims = readRemoteDims(key)
         assertEquals(
@@ -234,7 +235,7 @@ class TmuxResizeSessionE2eTest {
     @Test
     fun cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedDesktopSizedSession(key)
         val hostRowTag = seedDockerHost(key, "Issue1169 Agent Cut")
 
@@ -375,6 +376,7 @@ class TmuxResizeSessionE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

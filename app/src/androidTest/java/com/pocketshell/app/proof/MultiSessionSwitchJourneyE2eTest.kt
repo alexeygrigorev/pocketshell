@@ -141,6 +141,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class MultiSessionSwitchJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: `createAndroidComposeRule<MainActivity>()` (NOT
     // `createEmptyComposeRule()` + a hand-rolled `ActivityScenario.launch`) so
@@ -216,7 +217,7 @@ class MultiSessionSwitchJourneyE2eTest {
     private suspend fun seedForCurrentTest(methodName: String) {
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         when (methodName) {
             "backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb" -> {
                 seedTmuxSessionsInDistinctProjects(key)
@@ -1732,6 +1733,7 @@ class MultiSessionSwitchJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

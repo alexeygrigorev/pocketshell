@@ -74,6 +74,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class EmulatorDockerSshSmokeTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createEmptyComposeRule()
 
@@ -102,7 +103,7 @@ class EmulatorDockerSshSmokeTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         withTimeout(20_000) {
             val connection = SshConnection.connect(
@@ -259,7 +260,7 @@ class EmulatorDockerSshSmokeTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "pswalkthrough${System.currentTimeMillis()}"
         val tmpDir = "/tmp/pocketshell-$marker"
         val sessionName = "pocketshell-$marker"
@@ -301,6 +302,7 @@ class EmulatorDockerSshSmokeTest {
                     // UsageScheduler emit no host-list banners/strip in
                     // this tmux-only walkthrough.
                     usageCommandOverride = "printf ''",
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

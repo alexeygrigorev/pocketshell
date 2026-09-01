@@ -80,6 +80,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListClientCacheInstantRenderDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -111,7 +112,7 @@ class FolderListClientCacheInstantRenderDockerTest {
             .allowMainThreadQueries()
             .build()
         cache = TreeClientCache(context)
-        waitForSshFixtureReady(sshKey, port = fixturePort)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = fixturePort)
     } }
 
     @After
@@ -223,6 +224,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = fixturePort,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = db.hostDao().getById(hostId)!!
@@ -332,7 +334,7 @@ class FolderListClientCacheInstantRenderDockerTest {
     @Test
     fun lastSessionEmptySurvivesColdOwnerRecreationBeforeUnavailableReconcile() {
         runBlocking {
-            waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+            trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val sessionName = "issue2243-last-$suffix"
         val folder = "/tmp/$sessionName"
@@ -347,6 +349,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 port = DAEMON_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = requireNotNull(db.hostDao().getById(hostId))

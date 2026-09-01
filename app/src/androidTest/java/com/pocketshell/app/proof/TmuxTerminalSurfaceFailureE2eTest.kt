@@ -206,6 +206,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxTerminalSurfaceFailureE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: launch-owned rule so the Compose clock and the real
     // TerminalView interop child share one MainActivity. Seed the Docker tmux
@@ -233,7 +234,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
 
     private suspend fun seedBeforeLaunch() {
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSession(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey, "Issue423 Surface")
         forceFlatHostDetailViewMode()
@@ -509,6 +510,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

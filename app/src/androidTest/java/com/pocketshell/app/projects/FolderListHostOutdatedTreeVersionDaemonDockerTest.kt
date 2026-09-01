@@ -90,6 +90,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListHostOutdatedTreeVersionDaemonDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -117,7 +118,7 @@ class FolderListHostOutdatedTreeVersionDaemonDockerTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
     } }
 
     @After
@@ -178,6 +179,7 @@ class FolderListHostOutdatedTreeVersionDaemonDockerTest {
                 port = DAEMON_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = db.hostDao().getById(hostId)!!

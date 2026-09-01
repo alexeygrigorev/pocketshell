@@ -80,6 +80,7 @@ import org.junit.rules.RuleChain
  */
 @RunWith(AndroidJUnit4::class)
 class VoiceGestureCoachmarkMainActivityDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private val compose = createAndroidComposeRule<MainActivity>()
 
@@ -213,7 +214,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
         clearLastSessionPrefs()
         clearEducationPreference()
         clearVoiceApiKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSession(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey)
         forceFlatHostDetailViewMode()
@@ -249,6 +250,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

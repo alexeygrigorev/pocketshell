@@ -106,6 +106,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxOrphanClientCleanupE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createEmptyComposeRule()
 
@@ -153,7 +154,7 @@ class TmuxOrphanClientCleanupE2eTest {
     @Test
     fun closingTheAppDoesNotLeaveAnOrphanCcClient() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // ---- Seed the session with a long-running tail so the session
         // outlives the test body (a `sleep` is enough — the actual pane
@@ -357,7 +358,7 @@ class TmuxOrphanClientCleanupE2eTest {
     @Test
     fun aForeignClientOnTheSameSessionIsNotReportedAsPocketShellsOrphan() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
 
         val foreign = attachForeignPlainClient(key, SEEDED_SESSION)
@@ -508,7 +509,7 @@ class TmuxOrphanClientCleanupE2eTest {
     fun aLeakedAlwaysOnForwardingPinIsIsolatedNamedAndReleasedInsteadOfBlamedOnTheProduct() {
         runBlocking {
             val key = readFixtureKey()
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedTmuxSession(key)
             val foreignBaseline = listClientNames(key, SEEDED_SESSION)
 
@@ -896,6 +897,7 @@ class TmuxOrphanClientCleanupE2eTest {
                     pocketshellVersionCompatible = true,
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

@@ -88,6 +88,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionSwitchE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -115,7 +116,7 @@ class TmuxSessionSwitchE2eTest {
     @Test
     fun switchingBetweenTmuxSessionsViaDrawerDoesNotCrash() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // Seed both sessions fresh on the fixture so the picker has them
         // ready and the test is hermetic against earlier runs.
@@ -241,7 +242,7 @@ class TmuxSessionSwitchE2eTest {
     @Test
     fun backThenTapSessionRowLandsInThatSessionNotAnotherOne() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
 
         val hostRowTag = seedDockerHost(key, "Issue652 Wrong Project")
@@ -384,6 +385,7 @@ class TmuxSessionSwitchE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

@@ -98,6 +98,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxShellComposerOcclusionE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -135,7 +136,7 @@ class TmuxShellComposerOcclusionE2eTest {
     @Test
     fun shellComposerControlsAreVisibleAndReachableInBothKeyboardStates() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedShellSession(key)
         val hostRowTag = seedDockerHost(key, "Issue641 Shell Composer")
 
@@ -868,6 +869,7 @@ class TmuxShellComposerOcclusionE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             commandSnippetId = db.snippetDao().insert(

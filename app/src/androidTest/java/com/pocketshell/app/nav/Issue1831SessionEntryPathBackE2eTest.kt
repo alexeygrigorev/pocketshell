@@ -100,6 +100,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class Issue1831SessionEntryPathBackE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -121,7 +122,7 @@ class Issue1831SessionEntryPathBackE2eTest {
             clearLastSessionPrefs()
             val key = readFixtureKey()
             fixtureKey = key
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedTmuxSession(key)
             hostId = seedDockerHost(key)
             forceFlatHostDetailViewMode()
@@ -443,6 +444,7 @@ class Issue1831SessionEntryPathBackE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         } finally {

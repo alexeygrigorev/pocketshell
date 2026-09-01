@@ -117,6 +117,7 @@ import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
  */
 @RunWith(AndroidJUnit4::class)
 class BackgroundResumeSocketDeathE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // The #173 reproduction needs MANUAL ActivityScenario lifecycle control (moveToState
     // STARTED -> kill -> RESUMED) to drive the pause-only socket-death sequence;
@@ -155,7 +156,7 @@ class BackgroundResumeSocketDeathE2eTest {
     @Test
     fun socketDeathDuringPauseDoesNotCrashOnResume() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         // Seed the tmux session before the app attaches so the picker has
         // it ready and the test is hermetic against earlier runs.
@@ -435,6 +436,7 @@ class BackgroundResumeSocketDeathE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

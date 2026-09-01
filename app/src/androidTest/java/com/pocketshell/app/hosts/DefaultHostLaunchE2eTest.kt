@@ -12,9 +12,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
@@ -127,6 +129,11 @@ class DefaultHostLaunchE2eTest {
                 content = key,
             )
             keyId = storedKey.id
+            // Issue #2446: the FolderList-opens assertion below requires a
+            // real successful production connect (not the "Trust and
+            // connect" screen), so the seeded host needs a pre-verified
+            // fingerprint like every other real-fixture seed helper.
+            val trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             hostId = db.hostDao().insert(
                 HostEntity(
                     name = hostName,
@@ -138,6 +145,7 @@ class DefaultHostLaunchE2eTest {
                     pocketshellInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
                     pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         }

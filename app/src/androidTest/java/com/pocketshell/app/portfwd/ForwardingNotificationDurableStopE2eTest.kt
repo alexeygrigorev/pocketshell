@@ -86,7 +86,7 @@ class ForwardingNotificationDurableStopE2eTest {
     @Test
     fun notificationStopDisablesEveryPersistedHost_andRelaunchCannotResumeForwarding() {
         val fixtureKey = readFixtureKey()
-        runBlocking { waitForSshFixtureReady(SshKey.Pem(fixtureKey)) }
+        val trustedHostKeySha256 = runBlocking { waitForSshFixtureReady(SshKey.Pem(fixtureKey)) }
 
         val db = entryPoint().appDatabase()
         lateinit var firstSeededBeforeBootstrap: HostEntity
@@ -110,6 +110,7 @@ class ForwardingNotificationDurableStopE2eTest {
                     enabled = true,
                     maxAutoPort = 4_321,
                     skipPortsBelow = 1_234,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             firstSeededBeforeBootstrap = requireNotNull(db.hostDao().getById(firstId))
@@ -127,6 +128,7 @@ class ForwardingNotificationDurableStopE2eTest {
                 enabled = true,
                 maxAutoPort = 9_876,
                 skipPortsBelow = 2_345,
+                trustedHostKeySha256 = trustedHostKeySha256,
             )
         }
 

@@ -51,6 +51,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class AgentStateReadBackDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -69,7 +70,7 @@ class AgentStateReadBackDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -383,6 +384,7 @@ class AgentStateReadBackDockerTest {
         port = DEFAULT_PORT,
         username = DEFAULT_USER,
         keyId = 1L,
+        trustedHostKeySha256 = trustedHostKeySha256,
     )
 
     private fun shellQuote(value: String): String =

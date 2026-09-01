@@ -60,7 +60,7 @@ internal object OutboundExactlyOnceFixture {
             .bufferedReader()
             .use { it.readText() }
 
-    suspend fun seedDockerHost(key: String): String {
+    suspend fun seedDockerHost(key: String, trustedHostKeySha256: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -82,6 +82,7 @@ internal object OutboundExactlyOnceFixture {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

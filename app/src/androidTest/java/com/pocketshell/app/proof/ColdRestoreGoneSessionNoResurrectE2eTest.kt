@@ -109,6 +109,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ColdRestoreGoneSessionNoResurrectE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
     // clock drives the SAME foreground activity the Termux TerminalView interop
@@ -165,7 +166,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
     private suspend fun seedBeforeLaunch() {
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         // The prompt is process-scoped by design. Reset it before each seeded
         // launch so a failed preceding journey cannot cover the next test's
         // cold-restore/create path with an old host/session prompt.
@@ -2051,6 +2052,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

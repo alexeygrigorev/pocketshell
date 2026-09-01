@@ -122,6 +122,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxInSessionNewSessionCollisionDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -202,7 +203,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     @Test
     fun createCollidingWithASessionOnItsOwnSocketDisambiguatesInsteadOfOrphaning() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val suffix = "issue2378-${System.nanoTime().toString().takeLast(6)}"
         val folder = "/tmp/$suffix"
         val baseName = "tmp-$suffix"
@@ -320,7 +321,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     @Test
     fun inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         // Fresh summary file for this run (both entry points append to it).
         artifactFile("summary.txt").writeText("")
         val hostRowTag = seedDockerHost(key, "Issue898 InSession NewSession")
@@ -368,7 +369,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     @Test
     fun collidingBaseNameStillYieldsAGenuinelyNewSessionOnTheHost() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val suffix = "host-${System.nanoTime().toString().takeLast(6)}"
         val folder = "/tmp/issue1820-$suffix"
         val baseName = "tmp-issue1820-$suffix"
@@ -524,7 +525,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     @Test
     fun failedPostCreateLaunchIsReportedAsPartialSuccessOnARealHost() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val suffix = "issue1928-${System.nanoTime().toString().takeLast(6)}"
         val folder = "/tmp/$suffix"
         createdFolders += folder
@@ -894,6 +895,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

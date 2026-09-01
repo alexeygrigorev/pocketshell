@@ -111,6 +111,7 @@ import java.io.File
 // and `Issue1854PasteFramingSourceGuardTest`, all in the required Unit job.
 @RunWith(AndroidJUnit4::class)
 class Issue1854TypedNewlineCommitReachesPaneDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788 harness: the compose rule owns MainActivity's launch, and the
     // remote tmux session + DB host row are seeded BEFORE that launch.
@@ -319,7 +320,7 @@ class Issue1854TypedNewlineCommitReachesPaneDockerTest {
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         marker = "m${System.currentTimeMillis().toString(36).takeLast(5)}"
         clearLastSessionPrefs()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
 
         val setup = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -367,6 +368,7 @@ class Issue1854TypedNewlineCommitReachesPaneDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId

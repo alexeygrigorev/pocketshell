@@ -115,6 +115,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class Issue1686QueueDrainWireOracleDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -151,7 +152,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
     fun queuedComposerSendDrainsOverWritableWireWhileConnectionStatusFalselyNotConnected() {
         runBlocking {
             val key = readFixtureKey()
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedInteractiveSession(key)
             val hostRowTag = seedDockerHost(key, "Issue1686 Drain")
 
@@ -228,7 +229,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
     fun transportAliveEdgeUnparksAutoFailedRowThenDrainsOverWire() {
         runBlocking {
             val key = readFixtureKey()
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedInteractiveSession(key)
             val hostRowTag = seedDockerHost(key, "Issue1686 Unpark")
 
@@ -322,7 +323,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
     fun silentWireRecoveryUnparksAutoFailedRowWithoutConnectionEnumEdge() {
         runBlocking {
             val key = readFixtureKey()
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedInteractiveSession(key)
             val hostRowTag = seedDockerHost(key, "Issue2042 Silent Wire Heal")
 
@@ -437,7 +438,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
     fun deliveredAgentRouteRowLeavesTheQueueWithNoTranscriptAuthority() {
         runBlocking {
             val key = readFixtureKey()
-            waitForSshFixtureReady(SshKey.Pem(key))
+            trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
             seedInteractiveSession(key, prompt = "\u276f ")
             val hostRowTag = seedDockerHost(key, "Issue2056 Delivered Row")
 
@@ -802,6 +803,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

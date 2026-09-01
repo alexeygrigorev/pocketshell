@@ -105,6 +105,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ConversationStaysReachableAfterDetectionDropsDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -383,7 +384,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         val key = readFixtureKey()
         seededKey = key
         clearLastSessionPrefs()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         val sessionName = when (methodName) {
             "conversationStaysReachableAfterLiveDetectionDropsWithLoadedTranscript" ->
                 seedMaskedLiveClaudeSession(key)
@@ -491,6 +492,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             seededHostId = hostId

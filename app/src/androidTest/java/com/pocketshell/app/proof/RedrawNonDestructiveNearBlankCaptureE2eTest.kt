@@ -78,6 +78,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class RedrawNonDestructiveNearBlankCaptureE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -105,7 +106,7 @@ class RedrawNonDestructiveNearBlankCaptureE2eTest {
     fun redrawKeepsRichContentWhenRemoteCaptureIsNearBlank(): Unit { runBlocking {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedIdleNearBlankSession(key)
 
         val hostRowTag = seedDockerHost(key)
@@ -415,6 +416,7 @@ class RedrawNonDestructiveNearBlankCaptureE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

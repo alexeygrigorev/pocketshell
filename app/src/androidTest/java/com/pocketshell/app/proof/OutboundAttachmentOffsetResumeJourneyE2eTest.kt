@@ -112,6 +112,7 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
     private val resumedResultReady = CountDownLatch(1)
     private val timings = mutableListOf<String>()
     private val artifactRunId = "run-${System.currentTimeMillis()}"
+    private lateinit var trustedHostKeySha256: String
 
     private suspend fun seedBeforeLaunch() {
         val context = targetContext()
@@ -132,7 +133,10 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = DIRECT_AGENTS_SSH_PORT)
         proxy = ToxiproxyControl(baseUrl = "http://$DEFAULT_HOST:$TOXIPROXY_API_PORT")
         proxy.reset()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = NETWORK_FAULT_SSH_PORT)
+        // The seeded HostEntity (seedDockerHost, below) targets
+        // NETWORK_FAULT_SSH_PORT (the Toxiproxy front), so its probe is the
+        // one whose fingerprint gets threaded onto the fixture (#2446).
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = NETWORK_FAULT_SSH_PORT)
         val identity = seedFakeAgentSession(fixtureKey)
         val hostId = seedDockerHost(fixtureKey)
         hostRowTag = HOST_ROW_TAG_PREFIX + hostId
@@ -1258,6 +1262,7 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         } finally {

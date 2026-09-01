@@ -144,6 +144,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class ReconnectStormLivelockE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
     private val grantPermissions = PreGrantPermissionsRule()
@@ -174,7 +175,7 @@ class ReconnectStormLivelockE2eTest {
     private suspend fun seedRemoteAndDb() {
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
         seededHostRowTag = seedDockerHost(key)
     }
@@ -881,6 +882,7 @@ class ReconnectStormLivelockE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

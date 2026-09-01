@@ -94,6 +94,7 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class Issue1831BackFromRestoredSessionJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788: createAndroidComposeRule<MainActivity>() so the Compose test
     // clock drives the SAME foreground activity the Termux TerminalView interop
@@ -127,7 +128,7 @@ class Issue1831BackFromRestoredSessionJourneyE2eTest {
     private suspend fun seedBeforeLaunch() {
         val key = readFixtureKey()
         fixtureKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         clearLastSessionPrefs()
         seedTmuxSession(key)
         hostRowTag = seedDockerHost(key)
@@ -365,6 +366,7 @@ class Issue1831BackFromRestoredSessionJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

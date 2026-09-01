@@ -63,6 +63,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class UsageScreenE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -84,7 +85,7 @@ class UsageScreenE2eTest {
     @Test
     fun usagePanel_populatedCell_showsProviderCards() { runBlocking {
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         var fixtureStdout = ""
 
         // Sanity probe: the agents fixture actually returns provider
@@ -231,7 +232,7 @@ class UsageScreenE2eTest {
         // (blank). After the fix the fetcher still runs against agents:2222
         // and the panel renders the provider cards.
         val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
 
         seedHost(
             key = key,
@@ -295,7 +296,13 @@ class UsageScreenE2eTest {
         // Best-effort probe; an unreachable agents target still lets the
         // empty-cell test prove the panel renders for hosts that can't
         // be reached (Skipped → no provider cards, no missing-tool rows).
-        runCatching { waitForSshFixtureReady(SshKey.Pem(key)) }
+        // Issue #2446: this seeded host targets `port = 2299` below (a dead
+        // port, deliberately unbound), NOT the port this probe just verified
+        // (`DEFAULT_PORT`) — the TCP connect fails before host-key
+        // verification is ever reached, so an empty fallback fingerprint on
+        // probe failure is fine; it is never checked for this host.
+        trustedHostKeySha256 = runCatching { waitForSshFixtureReady(SshKey.Pem(key)) }
+            .getOrDefault("")
 
         seedHost(
             key = key,
@@ -397,6 +404,7 @@ class UsageScreenE2eTest {
                     pocketshellCliVersion = pocketshellCliVersion,
                     pocketshellExpectedCliVersion = pocketshellExpectedCliVersion,
                     pocketshellVersionCompatible = pocketshellVersionCompatible,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
         } finally {

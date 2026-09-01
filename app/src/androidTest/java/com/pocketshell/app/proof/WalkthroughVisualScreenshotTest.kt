@@ -62,6 +62,7 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class WalkthroughVisualScreenshotTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -93,7 +94,7 @@ class WalkthroughVisualScreenshotTest {
             val sshKey = SshKey.Pem(key)
 
             val hostRowTag = seedWalkthroughHostAndSnippets(key)
-            waitForSshFixtureReady(sshKey)
+            trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
             // Issue #761: kill any leaked sessions from a prior failed run AND
             // seed a fresh one. The seeded session is torn down in `finally`
             // below so it does not accumulate on the shared `agents:2222`
@@ -397,6 +398,7 @@ class WalkthroughVisualScreenshotTest {
                     pocketshellDaemonRunning = true,
                     pocketshellDaemonEnabled = true,
                     pocketshellVersionCompatible = true,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             db.snippetDao().insert(

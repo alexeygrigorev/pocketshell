@@ -78,6 +78,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class FileViewerTabsMainActivityJourneyDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     // JOURNEY_HARNESS_JUSTIFIED: #1715 must finish and cold-launch a second
     // MainActivity in one instrumentation test to prove a fresh ViewModel
@@ -265,7 +266,7 @@ class FileViewerTabsMainActivityJourneyDockerTest {
         clearLastSessionPrefs()
         val keyText = readFixtureKeyText()
         fixtureKey = SshKey.Pem(keyText)
-        waitForSshFixtureReady(fixtureKey, port = DAEMON_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(fixtureKey, port = DAEMON_PORT)
 
         val suffix = if (externalProcessPhase() != null) {
             externalProcessNamespace()
@@ -302,7 +303,7 @@ class FileViewerTabsMainActivityJourneyDockerTest {
     private suspend fun seedExistingExternalProcessFixture() {
         clearLastSessionPrefs()
         fixtureKey = SshKey.Pem(readFixtureKeyText())
-        waitForSshFixtureReady(fixtureKey, port = DAEMON_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(fixtureKey, port = DAEMON_PORT)
         val phaseOne = readExternalProcessArtifact(phase = 1)
         sessionName = phaseOne.getValue("producer_session_name")
         pathA = phaseOne.getValue("path_a")
@@ -337,6 +338,7 @@ class FileViewerTabsMainActivityJourneyDockerTest {
                 keyId = storedKey.id,
                 tmuxInstalled = true,
                 lastBootstrapAt = System.currentTimeMillis(),
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
     }

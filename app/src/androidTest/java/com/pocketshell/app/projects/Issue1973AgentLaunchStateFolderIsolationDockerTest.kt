@@ -42,6 +42,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class Issue1973AgentLaunchStateFolderIsolationDockerTest {
+    private lateinit var trustedHostKeySha256: String
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
     private val liveSessions = linkedSetOf<String>()
@@ -59,7 +60,7 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @After
@@ -416,6 +417,7 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
         port = DEFAULT_PORT,
         username = DEFAULT_USER,
         keyId = 1L,
+        trustedHostKeySha256 = trustedHostKeySha256,
     )
 
     private fun shellQuote(value: String): String =

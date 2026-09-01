@@ -79,6 +79,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListBootstrapSkipTreeLoadsDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private val compose = createAndroidComposeRule<MainActivity>()
     private var hostRowTag: String = ""
@@ -134,7 +135,7 @@ class FolderListBootstrapSkipTreeLoadsDockerTest {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         // Confirm the fixture is reachable + really old (rejects `tree`).
-        waitForSshFixtureReady(SshKey.Pem(keyText), port = OLD_CLI_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(keyText), port = OLD_CLI_PORT)
         withTimeout(20_000) {
             SshConnection.connect(
                 host = DEFAULT_HOST,
@@ -175,6 +176,7 @@ class FolderListBootstrapSkipTreeLoadsDockerTest {
                     // old CLI drives the "Host setup needed" sheet.
                     tmuxInstalled = null,
                     lastBootstrapAt = null,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

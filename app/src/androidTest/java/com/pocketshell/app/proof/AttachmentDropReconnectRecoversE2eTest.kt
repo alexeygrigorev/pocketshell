@@ -94,6 +94,7 @@ import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
  */
 @RunWith(AndroidJUnit4::class)
 class AttachmentDropReconnectRecoversE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     // Issue #788/#848: createAndroidComposeRule<MainActivity>() + the shared
     // SeedBeforeLaunchRule own the harness — the durable launch-owned shape the CI
@@ -133,7 +134,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         clearLastSessionPrefs()
         val key = readFixtureKey()
         seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
         seededHostRowTag = seedDockerHost(key)
     }
@@ -748,6 +749,7 @@ class AttachmentDropReconnectRecoversE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

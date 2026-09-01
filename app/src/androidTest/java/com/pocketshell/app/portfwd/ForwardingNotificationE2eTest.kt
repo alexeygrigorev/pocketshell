@@ -101,6 +101,7 @@ import kotlinx.coroutines.runBlocking
  */
 @RunWith(AndroidJUnit4::class)
 class ForwardingNotificationE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     @get:Rule
     val permissions = PreGrantPermissionsRule()
@@ -519,7 +520,7 @@ class ForwardingNotificationE2eTest {
         val fixtureKey = SshKey.Pem(
             instrumentation.context.assets.open("test_key").bufferedReader().use { it.readText() },
         )
-        waitForSshFixtureReady(fixtureKey, port = DEFAULT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(fixtureKey, port = DEFAULT_PORT)
         cleanupRemoteEchoFixture(fixtureKey)
         val forwardingSession = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -546,6 +547,7 @@ class ForwardingNotificationE2eTest {
                     maxAutoPort = remotePort,
                     skipPortsBelow = remotePort - 1,
                     scanIntervalSec = 1,
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
                 keyPath = "",
                 passphrase = null,

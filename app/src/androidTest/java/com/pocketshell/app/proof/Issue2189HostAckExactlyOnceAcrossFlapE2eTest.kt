@@ -66,6 +66,7 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class Issue2189HostAckExactlyOnceAcrossFlapE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -87,7 +88,7 @@ class Issue2189HostAckExactlyOnceAcrossFlapE2eTest {
             AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY,
         )
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedFakeAgentSession(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey)
     }
@@ -427,6 +428,7 @@ class Issue2189HostAckExactlyOnceAcrossFlapE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

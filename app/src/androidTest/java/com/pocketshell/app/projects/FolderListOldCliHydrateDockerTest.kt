@@ -67,6 +67,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListOldCliHydrateDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -101,7 +102,7 @@ class FolderListOldCliHydrateDockerTest {
             InstrumentationRegistry.getInstrumentation().targetContext,
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
-        waitForSshFixtureReady(sshKey, port = OLD_CLI_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = OLD_CLI_PORT)
     } }
 
     @After
@@ -177,6 +178,7 @@ class FolderListOldCliHydrateDockerTest {
                 port = OLD_CLI_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         val host = db.hostDao().getById(hostId)!!

@@ -47,6 +47,7 @@ class Issue1876FolderListMobileRttDockerTest {
     private lateinit var db: AppDatabase
     private val viewModelStore = ViewModelStore()
     private val createdSessions = mutableListOf<String>()
+    private lateinit var trustedHostKeySha256: String
 
     @Before
     fun setUp(): Unit { runBlocking {
@@ -68,8 +69,11 @@ class Issue1876FolderListMobileRttDockerTest {
 
         // Hard preconditions, never self-skips: both the direct seed route and
         // shaped app route must be alive or this gated journey fails.
+        // The seeded HostEntity below targets MOBILE_PORT (the throttled
+        // clone the app actually connects through), so only its probe's
+        // fingerprint is threaded onto the fixture (issue #2446).
         waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
-        waitForSshFixtureReady(sshKey, port = MOBILE_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey, port = MOBILE_PORT)
     } }
 
     @After
@@ -142,6 +146,7 @@ class Issue1876FolderListMobileRttDockerTest {
                 port = MOBILE_PORT,
                 username = DEFAULT_USER,
                 keyId = keyId,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
         )
         roots.forEachIndexed { index, path ->

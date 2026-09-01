@@ -93,6 +93,7 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  */
 @RunWith(AndroidJUnit4::class)
 class BoundedGraceSessionHoldJourneyE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -249,7 +250,7 @@ class BoundedGraceSessionHoldJourneyE2eTest {
         clearBackgroundGraceSetting()
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
         fixtureKey = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        trustedHostKeySha256 = waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSession(fixtureKey)
         hostRowTag = seedDockerHost(fixtureKey)
     }
@@ -670,6 +671,7 @@ class BoundedGraceSessionHoldJourneyE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    trustedHostKeySha256 = trustedHostKeySha256,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

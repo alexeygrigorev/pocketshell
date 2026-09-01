@@ -117,6 +117,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 @RunWith(AndroidJUnit4::class)
 class ForwardingNotificationObserverGenerationE2eTest {
+    private lateinit var trustedHostKeySha256: String
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context: Context = ApplicationProvider.getApplicationContext()
@@ -264,7 +265,7 @@ class ForwardingNotificationObserverGenerationE2eTest {
         val fixtureKey = SshKey.Pem(
             instrumentation.context.assets.open("test_key").bufferedReader().use { it.readText() },
         )
-        waitForSshFixtureReady(fixtureKey, port = DEFAULT_PORT)
+        trustedHostKeySha256 = waitForSshFixtureReady(fixtureKey, port = DEFAULT_PORT)
         startRemoteEchoFixture(fixtureKey)
 
         // Pin the service instance for the whole journey (see the class KDoc):
@@ -524,6 +525,7 @@ class ForwardingNotificationObserverGenerationE2eTest {
                 maxAutoPort = REMOTE_PORT,
                 skipPortsBelow = REMOTE_PORT - 1,
                 scanIntervalSec = 1,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
             keyPath = "",
             passphrase = null,

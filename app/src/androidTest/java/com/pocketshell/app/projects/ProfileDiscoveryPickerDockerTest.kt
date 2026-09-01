@@ -57,6 +57,7 @@ import java.io.FileOutputStream
  */
 @RunWith(AndroidJUnit4::class)
 class ProfileDiscoveryPickerDockerTest {
+    private lateinit var trustedHostKeySha256: String
 
     private lateinit var sshKey: SshKey.Pem
     private lateinit var keyFile: File
@@ -73,7 +74,7 @@ class ProfileDiscoveryPickerDockerTest {
             FileOutputStream(this).use { it.write(keyText.toByteArray()) }
             setReadable(true, true)
         }
-        waitForSshFixtureReady(sshKey)
+        trustedHostKeySha256 = waitForSshFixtureReady(sshKey)
     } }
 
     @Test
@@ -87,6 +88,7 @@ class ProfileDiscoveryPickerDockerTest {
             port = DEFAULT_PORT,
             username = DEFAULT_USER,
             keyId = 1L,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
 
         // --- 1 + 2: REAL host discovery (must NOT false-green) ---

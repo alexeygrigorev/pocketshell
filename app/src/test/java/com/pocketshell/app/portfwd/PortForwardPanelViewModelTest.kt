@@ -10,6 +10,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.service.ForwardingService
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
@@ -1659,6 +1660,7 @@ class PortForwardPanelViewModelTest {
             portRemappingDao = portRemappingDao,
             forwardingController = forwardingController,
             showAllPortsStore = showAllPortsStore,
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
 
     private fun newForwardingController(

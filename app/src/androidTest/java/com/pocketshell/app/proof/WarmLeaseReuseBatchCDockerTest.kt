@@ -8,6 +8,7 @@ import com.pocketshell.app.projects.RepoBrowserViewModel
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.usage.SshHostUsageFetcher
 import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
@@ -141,6 +142,7 @@ class WarmLeaseReuseBatchCDockerTest {
             val watchedVm = WatchedFoldersViewModel(
                 projectRootDao = db.projectRootDao(),
                 sshLeaseManager = leaseManager,
+                hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
             )
             // Issue #1829: Main-confined bind (see the repo-browser note above).
             InstrumentationRegistry.getInstrumentation().runOnMainSync {

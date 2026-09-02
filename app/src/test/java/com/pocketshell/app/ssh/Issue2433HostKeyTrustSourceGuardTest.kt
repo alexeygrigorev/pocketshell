@@ -53,8 +53,20 @@ class Issue2433HostKeyTrustSourceGuardTest {
         assertTrue(trust.contains("KnownHostsPolicy.VerifiedFingerprint(fingerprint)"))
     }
 
+    /**
+     * Issue #2433's contract was "every host-key failure source reaches the ONE
+     * shared Trust screen"; issue #2463 narrowed the *navigating* half of that
+     * to foreground, user-initiated connects only. The invariant this test still
+     * pins is that every source is WIRED to the shared router — the connectors
+     * report every typed failure, and the navigator's single trust destination
+     * is raised from the router's non-replaying prompt stream. What a given
+     * report is allowed to DO (navigate vs. annotate the card) is #2463's
+     * decision, covered behaviourally by `HostKeyTrustPromptRouterTest` and
+     * `Issue2463BackgroundHostKeyTrustNoNavJourneyE2eTest`; a pooled/background
+     * failure deliberately annotates and does NOT reach the Trust screen.
+     */
     @Test
-    fun ordinaryAddEditAndPooledFailuresReachTheSharedTrustScreen() {
+    fun everyHostKeyFailureSourceIsWiredToTheSharedTrustRouter() {
         val navigator = source("app/src/main/java/com/pocketshell/app/MainActivity.kt")
         val connector = source(
             "app/src/main/java/com/pocketshell/app/testaccess/AuthoritativeSshLeaseConnector.kt",
@@ -63,7 +75,11 @@ class Issue2433HostKeyTrustSourceGuardTest {
             "app/src/main/java/com/pocketshell/app/portfwd/PortForwardConnector.kt",
         )
         assertTrue(navigator.contains("AppDestination.FirstHostTestConnect(hostId, firstRunGuided = false)"))
-        assertTrue(navigator.contains("hostKeyTrustPromptRouter?.pendingHostId?.collect"))
+        // Issue #2463: the navigator consumes a non-replaying EVENT stream that
+        // only a foreground, user-initiated connect can raise — never a retained
+        // singleton StateFlow a fresh Activity replays into a navigation.
+        assertTrue(navigator.contains("hostKeyTrustPromptRouter?.trustPrompts?.collect"))
+        assertFalse(navigator.contains("pendingHostId"))
         assertTrue(connector.contains("trustPromptRouter?.report(target.hostIdOrNull(), failure)"))
         assertTrue(portForwardConnector.contains("trustPromptRouter.report(host.id, failure)"))
     }

@@ -26,6 +26,12 @@ internal class DefaultPortForwardConnector @Inject constructor(
             knownHosts = trust.policy,
         ) }
         result.exceptionOrNull()?.let { failure -> trustPromptRouter.report(host.id, failure) }
+        // Issue #2463: same as the lease connector — a success clears the card
+        // annotation. The forwarding RESUME scheduler and the reconnect ladder
+        // both land here without a user watching, so the report above may only
+        // annotate; the port-forward PANEL brackets its user-initiated start
+        // with `withUserInitiatedConnect` to keep reaching the trust screen.
+        if (result.isSuccess) trustPromptRouter.clearTrustAttention(host.id)
         return result
     }
 }

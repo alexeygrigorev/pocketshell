@@ -5,6 +5,7 @@ import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.app.tmux.StaleSessionPromptController
 import com.pocketshell.core.storage.AppDatabase
@@ -110,6 +111,16 @@ internal interface TestAccessEntryPoint {
      * construction-time `readSnapshot()`).
      */
     fun settingsRepository(): SettingsRepository
+
+    /**
+     * Issue #2463: the process-scoped [HostKeyTrustPromptRouter]. Its host-key
+     * annotation set, failure counters and foreground windows are shared by
+     * every Activity in the process by design, so an instrumentation class that
+     * annotated a host id must reset them before the next class seeds a fresh
+     * database (Room ids repeat after `clearAllTables()`). Same rationale as
+     * `staleSessionPromptController()` above.
+     */
+    fun hostKeyTrustPromptRouter(): HostKeyTrustPromptRouter
 
     /**
      * Issue #1021: the singleton live tmux-client registry so the session

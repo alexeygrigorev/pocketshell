@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
@@ -94,6 +95,7 @@ class AutoForwardControlScreenshotTest {
                 portRemappingDao = database.portRemappingDao(),
                 forwardingController = ForwardingController(targetContext),
                 showAllPortsStore = ShowAllPortsStore(targetContext),
+                hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
             )
         }
 

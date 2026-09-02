@@ -215,6 +215,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.PaneOutputOverflowRecoveryJourneyE2eTest"  # #1205 #780 pane delivery-backlog / seed-gate OVERFLOW must self-heal, n…
   "$FQCN_PREFIX.Issue2338SecondLaunchTerminalAttachJourneyE2eTest"  # #2338 D33/G2/G10: the 2nd+ MainActivity launch in ONE process must still attach its terminal — a route carrying a STALE exact tmux generation (re-keyed by list-panes since #2294) must not hold the surface forever. Hard-asserts the stale-route state was entered, so it cannot pass vacuously.
   "$FQCN_PREFIX.TmuxTerminalSurfaceFailureE2eTest"  # #423 local terminal/IME/render failure storm shows actionable Recreate terminal on a live transport; no SSH reconnect
+  "$FQCN_PREFIX.Issue2463BackgroundHostKeyTrustNoNavJourneyE2eTest"  # #2463 D33/G2/G10: a BACKGROUND host-key verification failure (v19 migration leaves trustedHostKeySha256 null; cold-launch reprobe) must annotate the host card, never navigate the user off the Hosts list; an explicit tap on the same host must still reach the Trust screen
   "$FQCN_PREFIX.Issue2178TypedEchoSurvivesReseedE2eTest"  # #2178 #2126 typing inside the reveal->reseed window must not lose bytes: a capture-pane snapshot older than the screen must never be painted over live echo
   "$FQCN_PREFIX.VoiceSendActivePaneStaysVisibleE2eTest"  # #687 #717 #658 epic slice 2, — reveal/reflow-heal absorbed from ): after
   "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"  # #1214 #1208 mostly-empty-model reveal-time leg of the fragments-over-bla…

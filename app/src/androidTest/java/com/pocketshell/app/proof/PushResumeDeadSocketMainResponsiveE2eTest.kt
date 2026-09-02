@@ -28,6 +28,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
@@ -89,22 +91,57 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  * responsiveness assertion in the lane that runs it (F3): the `assume` only gates
  * the per-push CI lane that structurally cannot start toxiproxy.
  *
- * ## Contract (the load-bearing, freeze-detecting assertion)
+ * ## Contract (the load-bearing, freeze-detecting assertions)
  *
- * Over the resume + grace-loop close/reconnect window (the wedged socket still
- * blackholed), the REAL main-thread heartbeat probe's max inter-arrival gap must
- * stay under [MAIN_STALL_BUDGET_MS] — i.e. Main is NOT parked 2–4s. Then, once the
- * fault + seam clear, the session must reconnect-or-show-Disconnected (never a
- * permanent frozen wedge).
+ * TWO measured windows, both at [MAIN_STALL_BUDGET_MS]:
+ *
+ *  1. The grace-loop window (the wedged socket still blackholed) — the REAL
+ *     main-thread heartbeat probe's max inter-arrival gap must stay under budget,
+ *     i.e. Main is NOT parked while the ladder re-dials over a dead-held socket.
+ *  2. Issue #2468 — the HEAL window (fault clears → reattach settles). Live
+ *     instrumentation of the real call chain showed the six
+ *     `Dispatchers.Main.immediate` close sites never fire while the blackhole
+ *     holds (every rung is stuck in an off-Main dial); they all run in ONE burst
+ *     at the successful redial — `silentlyReconnectTransport` →
+ *     `RealSshSession.close` → `TmuxClient.closeInternal` → `RealSshShell.close`,
+ *     all on `main`. That burst used to land after the probe stopped, so the
+ *     #1139 property was not actually policed. Window 2 measures it.
+ *
+ * Then the session must reconnect-or-show-Disconnected (never a permanent frozen
+ * wedge).
+ *
+ * ## Measured window (issue #2468 — what is deliberately NOT measured)
+ *
+ * The probe still SAMPLES from before `moveToState(RESUMED)`, but the asserted
+ * verdict starts only once the first post-resume frame has COMMITTED (the excluded
+ * prefix stays on record in `main-thread-probe.txt` and in
+ * `main_max_stall_including_resume_frame_ms`, so nothing is hidden — it is simply
+ * not policed). That first frame is WMS-synced, so Main does not drain
+ * its queue until traversal + RenderThread draw + buffer completion all finish;
+ * under swiftshader on a loaded runner that ONE frame cost ~850–900ms and was the
+ * entire measured "stall" in the intermittent nightly failures (runs 33591679181 /
+ * 33504917674 — HWUI `Davey!` telemetry attributes ~90–112ms traversal, ~480–570ms
+ * RenderThread draw, ~180–210ms buffer completion, with the first close-path event
+ * on an IO thread or seconds later). It is emulator GPU-emulation cost, not app
+ * work: the same test's steady-state grace loop measured a max gap of 88ms.
+ * The exclusion is bounded and asserted ([RESUME_FRAME_SETTLE_CEILING_MS]); window 1
+ * still spans the full ~30s retry ladder and window 2 covers the close burst, both
+ * at the unchanged 750ms budget and 50ms heartbeat interval.
  *
  * ## Red→green
  *
  * On the base blocking `close()` (`runBlocking(Dispatchers.IO)` /
- * `runBlocking(...)` disconnect), each grace-loop `sshLeaseManager.disconnect()`
+ * `runBlocking(...)` disconnect), `sshLeaseManager.disconnect()`
  * (RealSshSession.close, ~4s) and `staleClient.close()` (RealSshShell.close, ~2s)
- * PARKS `Dispatchers.Main.immediate`, so the probe records a multi-second gap →
- * `responsive=false` → RED. With the #1139 fix the teardown is launched on an
- * object-owned IO scope and Main stays free → GREEN.
+ * PARK `Dispatchers.Main.immediate` at the teardown/reattach, so the probe records
+ * a multi-second gap → `responsive=false` → RED. With the #1139 fix the teardown is
+ * launched on an object-owned IO scope and Main stays free → GREEN.
+ *
+ * Verified by mutation for issue #2468 (both windows at their current scope): a
+ * `Thread.sleep(CLOSE_TIMEOUT_MS)` reinstated on the caller in `RealSshShell.close()`
+ * reds window 2 at 2020ms / 2027ms in 2/2 runs, located by the artifact at +0ms of
+ * the fault-clear window; reverting returns it to green. That mutation run is the
+ * standing answer to "is this assertion still load-bearing after the rescoping".
  */
 // CI_JOURNEY_SUITE_JUSTIFIED: nightly-only toxiproxy proof (NetworkFaultProofBase
 // subclass). It needs the half-open `addBlackhole` toxic to genuinely WEDGE the
@@ -196,12 +233,19 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
             setForceLivenessProbeDead(true)
             SystemClock.sleep(BACKGROUND_HOLD_MS)
 
-            // ---- Start the REAL main-thread responsiveness probe, THEN foreground
-            // within grace (the push-notification tap → resume). The within-grace
-            // resume runs the six close sites over the wedged `-CC` socket ON
-            // Dispatchers.Main.immediate:
-            //   sshLeaseManager.disconnect() -> RealSshSession.close()  (base ~4s Main block)
-            //   staleClient.close()          -> RealSshShell.close()    (base ~2s Main block)
+            // ---- PHASE 1: start the REAL main-thread responsiveness probe, THEN
+            // foreground within grace (the push-notification tap → resume). The
+            // within-grace resume hands the session to the grace ladder, which re-dials
+            // the dead-held `-CC` transport from `Dispatchers.Main.immediate` for the
+            // whole grace window. Its teardown closes
+            // (`sshLeaseManager.disconnect()` -> `RealSshSession.close()`,
+            // `staleClient.close()` -> `RealSshShell.close()`) run on Main too — but,
+            // as phase 2 documents, only once a redial actually SUCCEEDS, which cannot
+            // happen while the blackhole holds. So phase 1 polices "the re-dialling
+            // ladder itself must not park Main" and phase 2 polices the close burst.
+            //
+            // The probe SAMPLES from here (so the resume-transition heartbeats are on
+            // record), but the VERDICT is scoped past the resume frame — see below.
             val probe = MainThreadResponsivenessProbe(
                 intervalMs = HEARTBEAT_INTERVAL_MS,
                 budgetMs = MAIN_STALL_BUDGET_MS,
@@ -214,13 +258,55 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
                 "within-grace resume onto dead socket",
             ) { it.fields["withinGrace"] == true }
 
+            // ---- Issue #2468: the VERDICT covers the GRACE LOOP, not the resume frame.
+            //
+            // The verdict used to cover everything from before `moveToState(RESUMED)`,
+            // so it opened with the activity-restart transition itself. The FIRST
+            // post-resume frame is WMS-synced: Main does not drain its queue until the
+            // whole pipeline (traversal -> RenderThread draw -> buffer completion)
+            // finishes, and under swiftshader on a loaded runner that single frame took
+            // ~850-900ms (HWUI `Davey!` telemetry from nightly runs 33591679181 /
+            // 33504917674: ~90-112ms traversal + ~480-570ms RenderThread draw + ~180-210ms
+            // buffer completion, matching the observed maxStall to within one heartbeat,
+            // with the first close-path event landing on an IO thread or seconds later).
+            // That is emulator GPU-emulation cost the journey never intended to police —
+            // on the SAME test the steady-state grace loop measured a max gap of 88ms.
+            //
+            // So: wait for that first frame to actually COMMIT, mark that instant, and
+            // assert only on the heartbeats after it. The window that follows is ~30s of
+            // pure grace-loop close/reconnect over the still-blackholed socket (the retry
+            // ladder redials for the whole grace window), so the D28/D37 safety surface —
+            // "the close/reconnect loop must not park Main" — is fully preserved at the
+            // UNCHANGED 750ms budget and 50ms interval. Sampling still starts before the
+            // resume, so the excluded frame stays ON RECORD in the artifact (and in
+            // `main_max_stall_including_resume_frame_ms`) instead of vanishing.
+            val resumeFrameMs = awaitPostResumeFrameCommitted()
+            val measureFromUptimeMs = SystemClock.uptimeMillis()
+            recordTiming("resume_frame_settle_ms", resumeFrameMs)
+            assertTrue(
+                "the first post-resume frame took ${resumeFrameMs}ms to commit, beyond the " +
+                    "${RESUME_FRAME_SETTLE_CEILING_MS}ms ceiling — the excluded window must stay " +
+                    "a single render frame, so a settle this long is itself an ANR-class resume " +
+                    "and not something this journey may exclude from the measured window (#2468).",
+                resumeFrameMs <= RESUME_FRAME_SETTLE_CEILING_MS,
+            )
+
             // Hold the probe across the whole grace-loop close/reconnect window while
             // the wedged socket is STILL blackholed — this is the window that ANRs on
             // base. The probe is non-blocking (a Handler heartbeat), so it records the
             // Main-thread parks WITHOUT itself hanging the test on base.
             SystemClock.sleep(GRACE_LOOP_WINDOW_MS)
-            val result = probe.stop(minExpectedSamples = MIN_EXPECTED_HEARTBEATS)
+            val result = probe.stop(
+                minExpectedSamples = MIN_EXPECTED_HEARTBEATS,
+                sinceUptimeMs = measureFromUptimeMs,
+            )
+            // Diagnostic only (#2468): what the pre-fix, resume-frame-inclusive scope
+            // would have concluded from the very same heartbeats. Never asserted — it is
+            // the paired evidence that the excluded prefix, not the grace loop, is what
+            // used to trip the budget.
+            val wholeWindow = probe.analyzeAll(minExpectedSamples = MIN_EXPECTED_HEARTBEATS)
             recordTiming("main_max_stall_ms", result.maxGapMs)
+            recordTiming("main_max_stall_including_resume_frame_ms", wholeWindow.maxGapMs)
             recordTiming("main_probe_samples", result.sampleCount.toLong())
             recordTiming("resume_window_ms", SystemClock.elapsedRealtime() - resumeAt)
             captureViewport("issue1139-02-during-grace-loop")
@@ -235,21 +321,113 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
             // ---- LOAD-BEARING: Main stayed responsive during the grace-loop close/
             // reconnect over the dead-held socket. RED on base (a 2–4s Main park from
             // the blocking close), GREEN with the #1139 fix.
-            writeText("main-thread-probe.txt", result.message)
+            //
+            // The artifact carries the per-gap OFFSET report (#2468) so a future
+            // overshoot names its own position instead of costing a logcat/HWUI dig.
+            writeText(
+                "main-thread-probe.txt",
+                buildString {
+                    appendLine(result.message)
+                    appendLine(
+                        "asserted window = grace-loop close/reconnect ONLY; the first " +
+                            "post-resume frame (${resumeFrameMs}ms) is EXCLUDED (#2468).",
+                    )
+                    appendLine(
+                        "whole-window (resume-frame-INCLUSIVE, diagnostic only): " +
+                            wholeWindow.message,
+                    )
+                    appendLine()
+                    append(probe.gapReport(sinceUptimeMs = measureFromUptimeMs))
+                },
+            )
             assertTrue(
                 "MAIN-THREAD FREEZE reproduced on the push-resume-onto-dead-socket path: " +
                     "${result.message}. maxStall=${result.maxGapMs}ms exceeds the " +
                     "${MAIN_STALL_BUDGET_MS}ms budget — the grace-loop close/reconnect " +
-                    "parked Dispatchers.Main.immediate (the #1139 freeze). The fix must " +
-                    "make RealSshShell.close()/RealSshSession.close() non-blocking-on-caller.",
+                    "parked Dispatchers.Main.immediate (the #1139 freeze class). " +
+                    "SCOPE (#2468): the measured window starts AFTER the first post-resume " +
+                    "frame committed (${resumeFrameMs}ms, excluded), so this gap is inside " +
+                    "the grace-loop close/reconnect ladder itself, NOT resume/render cost. " +
+                    "Do NOT re-derive the already-landed #1135/#1139 non-blocking " +
+                    "RealSshShell.close()/RealSshSession.close() conversion — look for NEW " +
+                    "Main-thread work on the close/reconnect path: the six " +
+                    "silentlyReattach/silentlyReconnect close sites in TmuxSessionViewModel " +
+                    "run on Dispatchers.Main.immediate, so any blocking call reachable from " +
+                    "them (a runBlocking, a joined cancellation, a synchronous socket write) " +
+                    "parks Main. The `main-thread-probe.txt` artifact lists every gap by " +
+                    "OFFSET from the probe start — read it first to locate the stall.",
                 result.responsive,
             )
 
-            // ---- No permanent wedge: once the fault + seam clear the SAME session must
-            // reconnect-or-show-Disconnected (never a frozen UI needing a restart).
+            // ---- PHASE 2 (issue #2468) — measure the HEAL, where the six close sites
+            // actually run ON MAIN.
+            //
+            // Instrumenting the real call chain during phase 1 (temporary `Log.i` at
+            // `RealSshSession.close` / `TmuxClient.closeInternal` / `RealSshShell.close` /
+            // `silentlyReattachAfterPassiveDisconnect` /
+            // `silentlyReconnectTransportAfterPassiveDisconnect`) showed something the
+            // journey's own KDoc did not say: while the socket stays blackholed the
+            // grace ladder never REACHES a close — every rung is stuck in an off-Main
+            // dial that cannot complete, so phase 1's Main thread is essentially idle
+            // (max gap ~55-90ms). The six `Dispatchers.Main.immediate` close sites all
+            // fire in ONE burst the moment the fault clears and the redial finally
+            // succeeds:
+            //
+            //   silentlyReconnectTransport (main) -> RealSshSession.close (main)
+            //     -> TmuxClient.closeInternal (main) -> RealSshShell.close (main)
+            //
+            // That burst used to land AFTER `probe.stop()`, i.e. completely outside the
+            // measured window — so the #1139 property ("the teardown close must not park
+            // Main") was never actually policed by this journey. Phase 2 measures exactly
+            // that burst. It is what makes the rescoped assertion load-bearing rather than
+            // budget-dodging: a blocking-on-caller `close()` reds HERE (proven by
+            // mutation), and the close it parks on is the stale, blackholed transport.
             setForceLivenessProbeDead(false)
+            val healProbe = MainThreadResponsivenessProbe(
+                intervalMs = HEARTBEAT_INTERVAL_MS,
+                budgetMs = MAIN_STALL_BUDGET_MS,
+            )
+            healProbe.start()
+            val healStartedAt = SystemClock.elapsedRealtime()
             proxy.clearToxics()
             val settled = waitForConnectedOrDisconnectBand(SETTLE_WINDOW_MS)
+            // Keep sampling for a floor duration so a fast heal cannot produce a
+            // too-short, vacuously-green window (the #635 trap): the close burst lands
+            // at the reattach, and the floor keeps the following instants measured too.
+            val healElapsed = SystemClock.elapsedRealtime() - healStartedAt
+            if (healElapsed < HEAL_WINDOW_FLOOR_MS) {
+                SystemClock.sleep(HEAL_WINDOW_FLOOR_MS - healElapsed)
+            }
+            val healResult = healProbe.stop(minExpectedSamples = MIN_EXPECTED_HEAL_HEARTBEATS)
+            recordTiming("main_max_stall_heal_ms", healResult.maxGapMs)
+            recordTiming("main_probe_heal_samples", healResult.sampleCount.toLong())
+            recordTiming("heal_window_ms", SystemClock.elapsedRealtime() - healStartedAt)
+            writeText(
+                "main-thread-probe-heal.txt",
+                buildString {
+                    appendLine(healResult.message)
+                    appendLine(
+                        "measured window = fault-clear -> reattach settle, i.e. the burst " +
+                            "where silentlyReconnectTransport / RealSshSession.close / " +
+                            "TmuxClient.closeInternal / RealSshShell.close all run on " +
+                            "Dispatchers.Main.immediate (#1139's six close sites, #2468).",
+                    )
+                    appendLine()
+                    append(healProbe.gapReport())
+                },
+            )
+            assertTrue(
+                "MAIN-THREAD FREEZE on the teardown/reattach burst: ${healResult.message}. " +
+                    "maxStall=${healResult.maxGapMs}ms exceeds the ${MAIN_STALL_BUDGET_MS}ms " +
+                    "budget while the stale dead-held client was being closed and replaced. " +
+                    "This is the #1139 signature itself: the six silentlyReattach / " +
+                    "silentlyReconnect close sites in TmuxSessionViewModel run on " +
+                    "Dispatchers.Main.immediate, so any blocking call reachable from them " +
+                    "(a runBlocking teardown, a joined cancellation, a synchronous socket " +
+                    "write) parks Main. Read `main-thread-probe-heal.txt` — it lists every " +
+                    "gap by OFFSET from the fault clear, so the stall locates itself.",
+                healResult.responsive,
+            )
             // Issue #2389: this capture used to race the surface. When the session
             // settles back to Connected the screen still has to release its recovery
             // hold and re-mount the Termux AndroidView (the VM flips Connected
@@ -297,6 +475,17 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
                     "main_stall_budget_ms=$MAIN_STALL_BUDGET_MS",
                     "main_probe_samples=${result.sampleCount}",
                     "main_responsive=${result.responsive}",
+                    "resume_frame_settle_ms=$resumeFrameMs (EXCLUDED from the asserted " +
+                        "window, #2468; ceiling=${RESUME_FRAME_SETTLE_CEILING_MS}ms)",
+                    "main_max_stall_including_resume_frame_ms=${wholeWindow.maxGapMs} " +
+                        "(diagnostic only — the pre-#2468 scope)",
+                    "main_probe_scope=grace-loop close/reconnect only (the verdict starts " +
+                        "after the first post-resume frame commits)",
+                    "main_max_stall_heal_ms=${healResult.maxGapMs}",
+                    "main_probe_heal_samples=${healResult.sampleCount}",
+                    "main_responsive_heal=${healResult.responsive}",
+                    "heal_probe_scope=fault-clear -> reattach settle: the six " +
+                        "Dispatchers.Main.immediate close sites (#1139) run in THIS window",
                     "settled_after_clear=$settled",
                     "settled_connected=$settledConnected",
                     "settled_viewport_restored_ms=$restoredMs",
@@ -306,6 +495,48 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
             )
             Unit
         } }
+
+    /**
+     * Issue #2468 — block until the FIRST post-resume frame has actually been
+     * drawn and committed, so the responsiveness probe measures the grace loop
+     * and not the activity-restart render.
+     *
+     * `waitForIdleSync()` alone is not sufficient on its own: right after
+     * `RESUMED` the Main queue can momentarily go idle BEFORE the vsync that
+     * carries the traversal message arrives, so the idle handler can fire ahead
+     * of the frame. So we additionally force a frame (`invalidate()`) and wait
+     * for its COMMIT callback — a commit callback can only run once the frame
+     * ahead of it in the pipeline has completed, which is exactly the WMS-synced
+     * post-resume frame we want behind us. Two rounds, then a final idle drain.
+     *
+     * @return how long the exclusion took, ms (recorded + ceiling-asserted by the
+     *   caller so the excluded window can never silently grow).
+     */
+    private fun awaitPostResumeFrameCommitted(): Long {
+        check(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            "ViewTreeObserver.registerFrameCommitCallback needs API 29+; " +
+                "deviceApi=${android.os.Build.VERSION.SDK_INT}"
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val startedAt = SystemClock.elapsedRealtime()
+        instrumentation.waitForIdleSync()
+        repeat(RESUME_FRAME_SETTLE_ROUNDS) {
+            val committed = CountDownLatch(1)
+            launchedActivity?.onActivity { activity ->
+                val decor = activity.window.decorView
+                decor.viewTreeObserver.registerFrameCommitCallback { committed.countDown() }
+                // A clean tree draws nothing, so force a frame to exist to commit.
+                decor.invalidate()
+            }
+            check(committed.await(RESUME_FRAME_SETTLE_CEILING_MS, TimeUnit.MILLISECONDS)) {
+                "no frame committed within ${RESUME_FRAME_SETTLE_CEILING_MS}ms of the " +
+                    "within-grace resume — the main thread never produced a post-resume " +
+                    "frame at all, which is a worse freeze than the one under test (#2468)."
+            }
+        }
+        instrumentation.waitForIdleSync()
+        return SystemClock.elapsedRealtime() - startedAt
+    }
 
     // ---- VM seams (accessed on the live VM via the launched activity) --------------
 
@@ -496,6 +727,24 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
         // well under this (the #933 P2 detector uses 700ms for a 2000ms block).
         const val MAIN_STALL_BUDGET_MS: Long = 750L
         const val MIN_EXPECTED_HEARTBEATS: Int = 10
+
+        // Issue #2468 — the excluded first-post-resume-frame window. Two forced
+        // frame-commit rounds; the SECOND can only commit once the WMS-synced
+        // post-resume frame ahead of it has completed.
+        const val RESUME_FRAME_SETTLE_ROUNDS: Int = 2
+        // Hard ceiling on how much wall clock the exclusion may consume. The worst
+        // observed post-resume frame in the nightly lane was 906ms (run 33504917674),
+        // so this is ~9x headroom over swiftshader's worst measured cost while still
+        // hard-failing if the exclusion ever starts swallowing a real Main-thread
+        // block instead of one render frame.
+        const val RESUME_FRAME_SETTLE_CEILING_MS: Long = 8_000L
+
+        // Issue #2468 phase 2 — the fault-clear -> reattach window. The floor keeps a
+        // fast heal from producing a vacuously short sample window; the minimum
+        // heartbeat count is derived from it (minus slack) so a wedged Main during the
+        // close burst fails on sample starvation even if the max-gap maths never runs.
+        const val HEAL_WINDOW_FLOOR_MS: Long = 5_000L
+        const val MIN_EXPECTED_HEAL_HEARTBEATS: Int = 60
 
         // Window over which Main responsiveness is measured while the socket is
         // dead-held: multiple grace-loop iterations (each ~2–4s block on base) fall

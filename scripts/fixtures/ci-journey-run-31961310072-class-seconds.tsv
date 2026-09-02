@@ -346,3 +346,23 @@ com.pocketshell.app.projects.Issue2377MultiSocketSessionListDockerTest	76
 # repo's per-PR runs skip the Emulator journey subset job, per G7); refresh
 # with a real CI attempt-1 elapsed time once this class has run there.
 com.pocketshell.app.MainActivityNonSessionRecreateTest	54
+# Commit ef2b3eab (#2463 fix) registered
+# com.pocketshell.app.proof.Issue2463BackgroundHostKeyTrustNoNavJourneyE2eTest
+# (4 @Test methods, Docker `agents` fixture on 2222) in
+# scripts/ci-journey-suite.sh but did not add this required retry-budget-matrix
+# row, so the (aa) missing-required-cost check failed closed and took the
+# aggregate `Unit tests` required check down with it (run 33583502773, job
+# "CI harness guards"). Same omission class as the MainActivityNonSessionRecreateTest
+# row above. Measured on the dev-box emulator via
+# `scripts/connected-test.sh --suffix i2463cost --no-pool
+# -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.
+# Issue2463BackgroundHostKeyTrustNoNavJourneyE2eTest` on 2026-09-02: first
+# invocation (cold androidTest compile) BUILD SUCCESSFUL in 2m 28s, 4/4
+# executed, 0 failed; second, warm-cache invocation (9 tasks executed, 304
+# up-to-date) BUILD SUCCESSFUL in 1m 54s, 4/4 executed, 0 failed. This row uses
+# ceil(warm wrapper wall time)=116s (the 114s Gradle time plus the wrapper's
+# lock/install overhead), matching the JOURNEY_PASS wall-time convention used
+# for the rows above. Not yet a GitHub Actions run (per-PR runs skip the
+# Emulator journey subset job, per G7); refresh with a real CI attempt-1
+# elapsed time once this class has run there.
+com.pocketshell.app.proof.Issue2463BackgroundHostKeyTrustNoNavJourneyE2eTest	116

@@ -35,6 +35,7 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.ssh.hostKeyTrustBinding
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -161,6 +162,12 @@ class HostListViewModel internal constructor(
     // launch / pull-to-refresh. Defaulted to the production notifier so
     // unit tests can inject a recording fake.
     private val updateNotifier: UpdateNotifier = DefaultUpdateNotifier(applicationContext),
+    // Issue #2463: the process-wide host-key trust router. Two jobs here: mark
+    // a host-card when a BACKGROUND probe hits a host-key failure (annotate, do
+    // not navigate), and open a short foreground-intent window when the user
+    // actually taps a host so that tap's failure still reaches the Trust screen.
+    // Null on the Robolectric constructors that never connect.
+    private val trustPromptRouter: HostKeyTrustPromptRouter? = null,
 ) : ViewModel() {
 
     @Inject
@@ -175,6 +182,7 @@ class HostListViewModel internal constructor(
         settingsRepository: SettingsRepository,
         sshLeaseManager: SshLeaseManager,
         lastSessionStore: LastSessionStore,
+        trustPromptRouter: HostKeyTrustPromptRouter,
     ) : this(
         applicationContext = applicationContext,
         hostDao = hostDao,
@@ -187,11 +195,22 @@ class HostListViewModel internal constructor(
         sshLeaseManager = sshLeaseManager,
         sessionOpener = LeaseBackedHostSessionOpener(sshLeaseManager),
         lastSessionStore = lastSessionStore,
+        trustPromptRouter = trustPromptRouter,
     )
 
     /** Live list of saved hosts, sorted by name (DAO query). */
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    /**
+     * Issue #2463: hosts whose most recent SSH attempt failed host-key
+     * verification. A BACKGROUND failure (the cold-launch reprobe, a pooled
+     * reconnect, the port-forward resume-on-launch) may only land here — the
+     * host card surfaces the failed-connect indicator and the user decides when
+     * to act. It must never move the user off the screen they are on.
+     */
+    val hostsNeedingHostKeyTrust: StateFlow<Set<Long>> =
+        trustPromptRouter?.hostsNeedingTrust ?: MutableStateFlow(emptySet<Long>()).asStateFlow()
 
     /**
      * Per-host setup-state derived from the persisted bootstrap columns
@@ -305,6 +324,24 @@ class HostListViewModel internal constructor(
      * tracks the latest backgrounded session. Uses [LastSessionStore.peek]
      * (non-logging) since this is a UI-arming peek, not a process-death restore.
      */
+    /**
+     * Issue #2463 (round-2 reviewer finding 1): mark a user-initiated host open
+     * that does NOT run through [bootstrapHost].
+     *
+     * [bootstrapHost] is the card-tap / setup-badge / "Re-check setup" path and
+     * arms its own window. **"Resume last session"** (#1239) is the other
+     * one-tap host open on this screen: it skips the bootstrap probe entirely
+     * and navigates straight to the persisted tmux destination, whose connect
+     * happens on the session screen. Without arming here, a host whose key
+     * cannot be verified — which after the v19 migration is *every* pre-existing
+     * host — would absorb that failure into a card annotation and leave the user
+     * in a terminal showing a bare connect failure, with no fingerprint and no
+     * "Trust and connect" anywhere.
+     */
+    fun armUserInitiatedConnect(hostId: Long) {
+        trustPromptRouter?.armUserInitiatedConnect(hostId)
+    }
+
     fun refreshResumableSession(): Job =
         viewModelScope.launch {
             val session = withContext(Dispatchers.IO) { lastSessionStore.peek() }
@@ -1109,6 +1146,15 @@ class HostListViewModel internal constructor(
         // immediately off a partial cache; they need a chance to re-run
         // checkServerSetup so README-installed CLIs can be upgraded.
         val probeLock = probeLockFor(host.id)
+        // Issue #2463: the card tap, the setup-badge tap and "Re-check setup"
+        // all land here. Opening the foreground-intent window is what lets a
+        // host-key failure raised by this tap — the probe below, or the
+        // folder/session connect a cache hit navigates straight into — still
+        // reach the Trust screen, while the cold-launch reprobe in
+        // `recheckHostSilently` never can. The screen's OTHER user-initiated
+        // host open, the "Resume last session" row (#1239), bypasses this
+        // function entirely and arms through [armUserInitiatedConnect].
+        trustPromptRouter?.armUserInitiatedConnect(host.id)
         markForegroundProbe(host.id)
         val skipTmuxProbe = !probeLock.isLocked && host.canUseBootstrapCache()
 
@@ -1150,9 +1196,25 @@ class HostListViewModel internal constructor(
         keyPath: String,
         passphrase: CharArray?,
     ) {
-        val session = openSession(host, keyPath, passphrase)
+        // Issue #2463: watch THIS attempt, not the sticky annotation set. See
+        // [HostKeyTrustPromptRouter.withHostKeyFailureWatch] — keying the guard
+        // below off `hostsNeedingTrust` (which only a successful connect clears)
+        // made every later non-host-key failure on an already-annotated host a
+        // silent no-op tap.
+        val attempt = openSessionWatchingHostKeyTrust(host, keyPath, passphrase)
+        val session = attempt.value
         if (session == null) {
-            // Couldn't connect → don't block navigation. The session
+            // Issue #2463: an UNVERIFIABLE HOST KEY is not a "carry on and let
+            // the session screen retry" failure — nothing downstream can connect
+            // until the user accepts or replaces the fingerprint, and the
+            // Trust/Replace screen the router just raised for this same tap owns
+            // that. Navigating on top of it buries the one screen that can fix
+            // the host behind a workspace tree that will never load.
+            if (attempt.failedHostKeyVerification) {
+                consumePendingNavigation()
+                return
+            }
+            // Any other connect failure → don't block navigation. The session
             // screen will surface the same connect failure with its
             // own retry UX, which is the right place to handle it.
             setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
@@ -1586,6 +1648,28 @@ class HostListViewModel internal constructor(
 
     private suspend fun openSession(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
         return sessionOpener.open(host, keyPath, passphrase)
+    }
+
+    /**
+     * Issue #2463: [openSession] plus the answer to "did *this* attempt fail
+     * host-key verification?", read from the router's per-attempt watch rather
+     * than from the sticky `hostsNeedingTrust` annotation. With no router wired
+     * (the Robolectric constructors that never connect) the answer is always
+     * "no", which is the pre-#2463 navigation behaviour.
+     */
+    private suspend fun openSessionWatchingHostKeyTrust(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+    ): HostKeyTrustPromptRouter.AttemptOutcome<SshSession?> {
+        val router = trustPromptRouter
+            ?: return HostKeyTrustPromptRouter.AttemptOutcome(
+                value = openSession(host, keyPath, passphrase),
+                failedHostKeyVerification = false,
+            )
+        return router.withHostKeyFailureWatch(host.id) {
+            openSession(host, keyPath, passphrase)
+        }
     }
 
     private suspend fun persistResult(host: HostEntity, installed: Boolean) {
@@ -2102,6 +2186,11 @@ internal fun resolveHostStatus(
     setupState: HostSetupState,
     sessions: List<SessionSummary>,
     attachedHostIds: Set<Long>,
+    // Issue #2463: the concrete "the most recent SSH attempt failed" signal
+    // [deriveHostStatus] always had a parameter for and nothing ever supplied.
+    // A host-key verification failure raised by a BACKGROUND probe folds into
+    // the card's failed-connect dot instead of hijacking navigation.
+    lastConnectError: Boolean = false,
 ): HostStatus {
     val perHost = sessions.filter { it.hostId == hostId }
     // We treat "no session data for this host" (i.e. the dashboard
@@ -2116,6 +2205,7 @@ internal fun resolveHostStatus(
         setupState = setupState,
         sessionCount = sessionCount,
         appAttached = appAttached,
+        lastConnectError = lastConnectError,
     )
 }
 

@@ -204,6 +204,10 @@ fun HostListScreen(
     val recheckMessage by viewModel.recheckMessage.collectAsState()
     val appUpdateWarning by viewModel.appUpdateWarning.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
+    // Issue #2463: hosts whose last SSH attempt failed host-key verification.
+    // A background cold-launch reprobe annotates the card through this set
+    // instead of navigating the user to the Trust screen unasked.
+    val hostsNeedingHostKeyTrust by viewModel.hostsNeedingHostKeyTrust.collectAsState()
     // Issue #116 (usage-panel Fix B): per-card warning record in the kebab.
     val usageBadges by viewModel.usageBadges.collectAsState()
     // Issue #214: per-provider warning records + dismissed-this-session
@@ -637,6 +641,7 @@ fun HostListScreen(
                                 setupState = setupState,
                                 sessions = sessions,
                                 attachedHostIds = attachedHostIds,
+                                lastConnectError = host.id in hostsNeedingHostKeyTrust,
                             )
                             val openingLabel = hostOpenProgress
                                 ?.takeIf { it.hostId == host.id }
@@ -758,7 +763,21 @@ fun HostListScreen(
                                 ?.let { resume ->
                                     ResumeLastSessionRow(
                                         sessionName = resume.sessionName,
-                                        onClick = { onResumeSession(resume.destination) },
+                                        onClick = {
+                                            // Issue #2463: this tap is a
+                                            // user-initiated host open that
+                                            // bypasses `bootstrapHost`, so it
+                                            // must open the foreground-intent
+                                            // window itself — otherwise a
+                                            // host-key failure on the session
+                                            // connect is absorbed into a card
+                                            // annotation and the user lands on a
+                                            // terminal with an unexplained
+                                            // connect failure and no way to
+                                            // trust the fingerprint.
+                                            viewModel.armUserInitiatedConnect(host.id)
+                                            onResumeSession(resume.destination)
+                                        },
                                         modifier = Modifier.testTag(
                                             HOST_RESUME_ROW_TAG_PREFIX + host.id,
                                         ),

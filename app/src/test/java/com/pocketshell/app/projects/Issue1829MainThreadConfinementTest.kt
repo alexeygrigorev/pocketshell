@@ -27,6 +27,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionListResult
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionsGateway
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -372,6 +373,7 @@ class Issue1829MainThreadConfinementTest {
         val watchedFoldersViewModel = WatchedFoldersViewModel(
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = leaseManager,
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
         val recurringJobsViewModel = RecurringJobsViewModel(
             remoteSource = PocketshellJobsRemoteSource(RecurringJobsParser()),

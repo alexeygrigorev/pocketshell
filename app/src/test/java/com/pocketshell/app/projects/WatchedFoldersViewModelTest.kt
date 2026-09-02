@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.ProjectRootDao
@@ -38,6 +39,7 @@ class WatchedFoldersViewModelTest {
             // validation, dedupe, reorder, parser) and never reach the SSH
             // discover probe, so a default lease manager is never dialed.
             sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
 
     @Test

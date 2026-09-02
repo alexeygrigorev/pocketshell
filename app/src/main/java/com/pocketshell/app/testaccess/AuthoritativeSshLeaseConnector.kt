@@ -40,6 +40,10 @@ internal class AuthoritativeSshLeaseConnector(
         result.exceptionOrNull()?.let { failure ->
             trustPromptRouter?.report(target.hostIdOrNull(), failure)
         }
+        // Issue #2463: a connect that succeeded proves the card's host-key
+        // attention annotation is stale, so drop it here rather than leaving a
+        // permanent marker behind after the user confirms the fingerprint.
+        if (result.isSuccess) trustPromptRouter?.clearTrustAttention(target.hostIdOrNull())
         // Fence a dial that entered the physical delegate just before the test armed the
         // outage. It must not become a manager-owned fresh lease during the offline interval.
         activeOutage.get()?.takeIf { it.leaseKey == target.leaseKey }?.let { outage ->

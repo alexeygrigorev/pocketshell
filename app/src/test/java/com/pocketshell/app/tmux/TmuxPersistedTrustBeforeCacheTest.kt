@@ -308,7 +308,7 @@ class TmuxPersistedTrustBeforeCacheTest : TmuxSessionViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(1, delegate.targets.size)
-        assertEquals(HOST_ID, router.pendingHostId.value)
+        assertEquals(setOf(HOST_ID), router.hostsNeedingTrust.value)
         assertTrue("stale runtime must remain unactivated", registry.clients.value[HOST_ID] == null)
         assertTrue("stale cached client must never be attached", !staleClient.connectCalled)
         assertTrue("stale trust runtime must be atomically removed", cache.snapshotKeys().isEmpty())

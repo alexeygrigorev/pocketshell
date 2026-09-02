@@ -9,6 +9,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.ExecResult
@@ -144,6 +145,7 @@ class PortForwardPanelLifecycleE2eTest {
                 portRemappingDao = database.portRemappingDao(),
                 forwardingController = forwardingController,
                 showAllPortsStore = ShowAllPortsStore(targetContext),
+                hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
             ).also { it.observeProcessLifecycle(ProcessLifecycleOwner.get()) }
         }
 

@@ -9,6 +9,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.settings.HostDetailViewMode
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.AppDatabase
@@ -107,6 +108,7 @@ class WatchedFoldersE2eTest {
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
             sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
 
         compose.setContent {
@@ -208,6 +210,7 @@ class WatchedFoldersE2eTest {
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
             sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
 
         compose.setContent {
@@ -246,6 +249,7 @@ class WatchedFoldersE2eTest {
         val vm = WatchedFoldersViewModel(
             projectRootDao = db.projectRootDao(),
             sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
+            hostKeyTrustPromptRouter = HostKeyTrustPromptRouter(),
         )
         var selected = HostDetailViewMode.Tree
 

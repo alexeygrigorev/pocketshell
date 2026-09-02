@@ -39,7 +39,10 @@ class AuthoritativeSshLeaseConnectorTest {
 
         connector.connect(target(SshLeaseKey("trusted.example", 2202, "user", "7:/key")))
 
-        assertEquals(7L, router.pendingHostId.value)
+        // Issue #2463: a pooled caller's typed changed-key failure annotates the
+        // host so the shared Trust/Replace UI is reachable; whether it also
+        // NAVIGATES is the user-initiated question the router answers separately.
+        assertEquals(setOf(7L), router.hostsNeedingTrust.value)
     }
 
     @Test

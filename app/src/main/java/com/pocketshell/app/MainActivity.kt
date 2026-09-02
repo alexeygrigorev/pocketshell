@@ -1005,9 +1005,13 @@ private fun AppNavigator(
         reportDestination(dest)
     }
 
+    // Issue #2463: ONLY a foreground, user-initiated connect may take the screen
+    // to the trust prompt. [HostKeyTrustPromptRouter.trustPrompts] is a
+    // replay-free event stream, so a background cold-launch reprobe never emits
+    // here (it annotates the host card instead) and a freshly created Activity
+    // cannot inherit a stale pending host id from the process singleton.
     LaunchedEffect(hostKeyTrustPromptRouter) {
-        hostKeyTrustPromptRouter?.pendingHostId?.collect { hostId ->
-            hostId ?: return@collect
+        hostKeyTrustPromptRouter?.trustPrompts?.collect { hostId ->
             val trustDestination = AppDestination.FirstHostTestConnect(
                 hostId = hostId,
                 firstRunGuided = false,
@@ -1018,7 +1022,12 @@ private fun AppNavigator(
                 backStack += current
                 setCurrentDestination(trustDestination)
             }
-            hostKeyTrustPromptRouter.consume(hostId)
+            // The user's ask has been answered — the Trust/Replace screen for
+            // this host is on display and owns the decision from here. Close the
+            // foreground window so a background failure for the same host (a
+            // pooled reconnect, a forwarding resume) cannot ride the remainder
+            // of it and navigate again. A fresh tap re-arms.
+            hostKeyTrustPromptRouter.disarmUserInitiatedConnect(hostId)
         }
     }
 

@@ -20,6 +20,7 @@ import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
@@ -34,6 +35,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.ssh.UnknownHostKeyException
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -204,6 +206,142 @@ class HostListViewModelTest {
         )
     }
 
+    // ------------------------------------------------------------- issue #2463
+    //
+    // Round-2 reviewer finding 2. The "don't bury the Trust screen" guard in
+    // [HostListViewModel.runForegroundBootstrapProbe] must key off THIS tap's
+    // own outcome, not off the sticky `hostsNeedingTrust` annotation set: that
+    // set is process-wide and only a SUCCESSFUL connect clears it, so once a
+    // background cold-launch reprobe has annotated a host, every later tap that
+    // fails for any OTHER reason (server down, network drop, auth) would also be
+    // suppressed — no folder screen with its retry UX, no trust screen (no
+    // host-key failure this time, so no prompt), no message. A tap that does
+    // nothing at all.
+
+    @Test
+    fun tapOnAnAnnotatedHostThatFailsForANonHostKeyReasonStillGetsTheNormalFailureUx() = runTest {
+        val keyFile = File(context.cacheDir, "issue2463-nonhostkey.pem").apply { writeText("k") }
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "annotated", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+
+        val router = HostKeyTrustPromptRouter()
+        // The cold-launch reprobe already annotated this host: exactly the
+        // post-migration state every existing host lands in (#2463).
+        router.report(hostId, UnknownHostKeyException("h.example", 22, "ssh-ed25519", "SHA256:x"))
+        assertTrue(
+            "precondition: the host must carry the sticky background annotation",
+            hostId in router.hostsNeedingTrust.value,
+        )
+
+        // This tap's own connect fails for a NON host-key reason — the opener
+        // reports nothing to the router, exactly like a refused/auth failure.
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ -> null },
+            trustPromptRouter = router,
+        )
+
+        viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath).join()
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(
+            "issue #2463: a tap whose OWN attempt did not fail host-key verification must " +
+                "still route to the session/folder screen, which surfaces the connect failure " +
+                "with its retry UX. Suppressing it on the sticky annotation makes the tap a " +
+                "silent no-op.",
+            pending,
+        )
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(true, pending.ready)
+    }
+
+    @Test
+    fun tapWhoseOwnAttemptFailsHostKeyVerificationDefersToTheTrustScreen() = runTest {
+        val keyFile = File(context.cacheDir, "issue2463-hostkey.pem").apply { writeText("k") }
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "unverifiable", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+
+        val router = HostKeyTrustPromptRouter()
+        val viewModel = newViewModel(
+            // The real reporting path: the connector reports the typed failure
+            // while the open call is in flight, then the open returns null.
+            sessionOpener = HostSessionOpener { openedHost, _, _ ->
+                router.report(
+                    openedHost.id,
+                    UnknownHostKeyException("h.example", 22, "ssh-ed25519", "SHA256:x"),
+                )
+                null
+            },
+            trustPromptRouter = router,
+        )
+
+        viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath).join()
+
+        assertNull(
+            "issue #2463: when the tap's OWN probe failed host-key verification the workspace " +
+                "tree must not be opened on top of the Trust screen the same tap raised",
+            viewModel.pendingNavigation.value,
+        )
+    }
+
+    @Test
+    fun secondTapAfterAHostKeyFailureIsJudgedOnItsOwnAttemptNotTheRetainedAnnotation() = runTest {
+        // The reviewer's exact sequence: tap 1 fails host-key (annotates +
+        // defers), the user backs out, tap 2 fails for a different reason. Tap 2
+        // must not inherit tap 1's verdict.
+        val keyFile = File(context.cacheDir, "issue2463-sequence.pem").apply { writeText("k") }
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "sequence", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+
+        val router = HostKeyTrustPromptRouter()
+        var attempt = 0
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { openedHost, _, _ ->
+                attempt += 1
+                if (attempt == 1) {
+                    router.report(
+                        openedHost.id,
+                        UnknownHostKeyException("h.example", 22, "ssh-ed25519", "SHA256:x"),
+                    )
+                }
+                null
+            },
+            trustPromptRouter = router,
+        )
+
+        viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath).join()
+        assertNull("tap 1 (host-key failure) defers to the Trust screen", viewModel.pendingNavigation.value)
+
+        viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath).join()
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(
+            "issue #2463: tap 2 failed for a different reason, so it must reach the normal " +
+                "failure UX even though the host is still annotated from tap 1",
+            pending,
+        )
+        assertEquals(true, pending!!.ready)
+        assertEquals(
+            "the annotation itself is sticky until a successful connect — that is the " +
+                "card-marking contract, and precisely why the guard must not read it",
+            setOf(hostId),
+            router.hostsNeedingTrust.value,
+        )
+    }
+
     private fun newViewModel(
         applicationContext: Context = context,
         hostDao: HostDao = db.hostDao(),
@@ -215,6 +353,7 @@ class HostListViewModelTest {
         settingsRepository: SettingsRepository = newSettingsRepository(),
         sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
         updateNotifier: UpdateNotifier = RecordingUpdateNotifier(),
+        trustPromptRouter: HostKeyTrustPromptRouter? = null,
     ): HostListViewModel =
         HostListViewModel(
             applicationContext = applicationContext,
@@ -227,6 +366,7 @@ class HostListViewModelTest {
             settingsRepository = settingsRepository,
             sessionOpener = sessionOpener,
             updateNotifier = updateNotifier,
+            trustPromptRouter = trustPromptRouter,
         ).also {
             viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it)
             // Issue #1110: track for the cancel+join DB-drain in [tearDown].

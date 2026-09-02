@@ -12,6 +12,7 @@ import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.portfwd.TunnelInfo
+import com.pocketshell.app.ssh.HostKeyTrustPromptRouter
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -75,6 +76,17 @@ class PortForwardPanelViewModel @Inject constructor(
     // Issue #492: persists the "Show hidden/noisy ports" checkbox across panel
     // navigation and app restarts. Global (not per-host) — see store doc.
     private val showAllPortsStore: ShowAllPortsStore,
+    // Issue #2463: the panel's two connects are the port-forward feature's only
+    // user-initiated, on-screen ones (the resume scheduler and the reconnect
+    // ladder in ForwardingController are background). Bracketing them is what
+    // keeps an unconfirmed/changed host key reaching the explicit Trust screen
+    // from here, now that a bare failure report only annotates the host card.
+    //
+    // Deliberately NOT defaulted: a default would silently hand any direct
+    // construction (a test, a future caller) a disconnected router whose prompts
+    // nothing collects, and the bug would present as "the Trust screen never
+    // opens" with everything apparently wired.
+    private val hostKeyTrustPromptRouter: HostKeyTrustPromptRouter,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PortForwardPanelState(showAllPorts = showAllPortsStore.isShowAll()))
@@ -372,7 +384,9 @@ class PortForwardPanelViewModel @Inject constructor(
         val shouldPersistOnSuccess = !host.enabled
         connectJob?.cancel()
         connectJob = viewModelScope.launch {
-            val connected = connector.connect(host, resolvedKeyPath, requestPassphrase)
+            val connected = hostKeyTrustPromptRouter.withUserInitiatedConnect(host.id) {
+                connector.connect(host, resolvedKeyPath, requestPassphrase)
+            }
             if (
                 requestGeneration != connectGeneration ||
                 requestLoadGeneration != loadGeneration ||
@@ -568,7 +582,9 @@ class PortForwardPanelViewModel @Inject constructor(
             error = null,
         )
         discoveryJob = viewModelScope.launch {
-            val connected = connector.connect(host, resolvedKeyPath, requestPassphrase)
+            val connected = hostKeyTrustPromptRouter.withUserInitiatedConnect(host.id) {
+                connector.connect(host, resolvedKeyPath, requestPassphrase)
+            }
             if (
                 requestGeneration != discoveryGeneration ||
                 requestLoadGeneration != loadGeneration ||

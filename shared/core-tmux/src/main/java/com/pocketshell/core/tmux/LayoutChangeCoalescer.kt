@@ -52,6 +52,40 @@ import kotlinx.coroutines.launch
  *    `list-panes`/`capture-pane` round-trips and `_panes`/recompose churn no
  *    longer block the UI thread. The reconcile body is responsible for
  *    marshalling any UI-state publish back to the main thread itself.
+ *  - A reconcile that could NOT reach authority is RETRIED, bounded (issue
+ *    #2469 — see "Bounded repair" below). Before that, such a structural
+ *    event was silently lost forever.
+ *
+ * ## Bounded repair when the reconcile cannot reach authority (issue #2469)
+ *
+ * `reconcilePanes()` enumerates panes with a bounded `list-panes` exec
+ * (`RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS`, 6 s). On a degraded mobile link
+ * (RTT seconds, not milliseconds) that bound is genuinely reachable, and the
+ * reconcile then returns `PaneReconcileResult.Failed` — WITHOUT throwing. The
+ * coalescer used to treat "the reconcile returned" as "the structural change
+ * was applied", so a `%layout-change` whose enumeration timed out was
+ * **dropped permanently**: the app's pane model stayed stale until some later,
+ * unrelated structural event happened to arrive and reconcile successfully.
+ * On a phone that is the user-visible "I split a pane / opened a window on the
+ * desktop and PocketShell never showed it" staleness — and, because
+ * `applyParsedPanes` is what re-runs per-pane agent detection, it also drops
+ * the re-classify that a pane-input change should have triggered.
+ *
+ * That is a delivery gap, not a timeout-calibration problem: widening the 6 s
+ * bound would only trade a lost event for a longer UI-thread-free stall while
+ * still losing it on a slower link. Instead [reconcile] now REPORTS whether it
+ * reached authority, and a non-authoritative result schedules an
+ * [offerAuthoritativeRepair] after a backoff, up to [repairBackoffMs]`.size`
+ * attempts per structural event. It is the exact analogue of the existing
+ * dropped-structural-event repair the host already wires from
+ * `TmuxClient.structuralEventOverflowGeneration`: there the event never
+ * reached us, here the enumeration it triggered never landed. Both mean "the
+ * pane model may be stale — go re-read it".
+ *
+ * The retry budget is deliberately small and self-limiting: after the last
+ * attempt the loop stops scheduling and parks on the trigger channel again, so
+ * a genuinely dead link costs a bounded handful of bounded execs, never a hot
+ * loop. The attempt counter resets on the first authoritative reconcile.
  *
  * ## Coalescing contract (precise)
  *
@@ -81,17 +115,37 @@ public class LayoutChangeCoalescer(
      * idempotent w.r.t. the authoritative pane list (it re-reads tmux), and
      * must marshal any UI-thread publish itself.
      *
+     * Returns whether the reconcile reached AUTHORITY — i.e. the pane list was
+     * re-read and applied, or the reconcile is moot (the client this coalescer
+     * belongs to was replaced). Returning `false` means the structural change
+     * could not be applied — on the production path, a bounded `list-panes`
+     * exec that timed out on a degraded link (`PaneReconcileResult.Failed`) —
+     * and schedules a bounded repair retry (issue #2469). Before #2469 this
+     * returned `Unit` and a `Failed` reconcile was indistinguishable from a
+     * successful one, so the structural change was dropped permanently.
+     *
      * Exceptions other than [CancellationException] are swallowed by the
      * drain loop (logged via [onReconcileError]) so one failed reconcile does
      * not tear down the coalescer — matching the existing `reconcilePanes`
-     * "transient list-panes failure leaves the pane list intact" contract.
+     * "transient list-panes failure leaves the pane list intact" contract. A
+     * throw counts as non-authoritative and is repaired the same way.
      */
-    private val reconcile: suspend () -> Unit,
+    private val reconcile: suspend () -> Boolean,
     /**
      * Optional hook invoked when [reconcile] throws a non-cancellation
      * error. Lets the host log without coupling this pure module to a logger.
      */
     private val onReconcileError: (Throwable) -> Unit = {},
+    /**
+     * Issue #2469 — the per-structural-event repair backoff ladder. One entry
+     * per retry attempt, in order; an empty list disables repair entirely.
+     * Sized so the FIRST repair lands promptly (a stale pane list is visible
+     * to the user within a second) while the tail backs off, and so the whole
+     * ladder still fits inside a few seconds of a degraded-link episode rather
+     * than hammering it. Injectable so a virtual-clock test can pin the exact
+     * schedule.
+     */
+    private val repairBackoffMs: List<Long> = DEFAULT_REPAIR_BACKOFF_MS,
 ) {
     /**
      * Conflated trigger channel. A burst of [offer]s collapses to a single
@@ -116,6 +170,15 @@ public class LayoutChangeCoalescer(
      */
     public val reconcileCount: StateFlow<Long> = reconcileCountState.asStateFlow()
 
+    private val repairCountState = MutableStateFlow(0L)
+
+    /**
+     * Issue #2469 — how many bounded REPAIR retries have been scheduled after a
+     * non-authoritative reconcile. Visible-for-test so a test can assert the
+     * repair ladder ran and that it is bounded (never a hot loop).
+     */
+    public val repairCount: StateFlow<Long> = repairCountState.asStateFlow()
+
     private var drainJob: Job? = null
 
     /**
@@ -136,18 +199,24 @@ public class LayoutChangeCoalescer(
     public fun start(scope: CoroutineScope) {
         drainJob?.cancel()
         drainJob = scope.launch {
+            // Issue #2469: repair attempts consumed for the structural change
+            // currently being chased. Reset by the first AUTHORITATIVE reconcile
+            // (and when the ladder is exhausted), so the budget is per-event and
+            // a persistently failing link cannot spin.
+            var repairAttempt = 0
             while (isActive) {
                 // Step 1: wait for at least one trigger. The conflated channel
                 // returns immediately if a trigger is already pending.
                 triggers.receive()
                 hasPending = false
                 // Step 2: run the reconcile exactly once for this window.
-                try {
+                val authoritative = try {
                     reconcile()
                 } catch (t: CancellationException) {
                     throw t
                 } catch (t: Throwable) {
                     onReconcileError(t)
+                    false
                 } finally {
                     reconcileCountState.value = reconcileCountState.value + 1
                 }
@@ -157,6 +226,22 @@ public class LayoutChangeCoalescer(
                 // more reconcile next window — never O(N).
                 if (windowMs > 0L) {
                     delay(windowMs)
+                }
+                // Step 4 (issue #2469): the reconcile did NOT reach authority —
+                // on the production path the bounded `list-panes` exec timed out
+                // on a degraded link. Do not drop the structural change: back off
+                // and re-offer an authoritative repair, up to the ladder's size.
+                // Exhausting the ladder resets the budget and parks on step 1
+                // again, so this is bounded per event, never a hot retry loop.
+                if (authoritative) {
+                    repairAttempt = 0
+                } else if (repairAttempt < repairBackoffMs.size) {
+                    delay(repairBackoffMs[repairAttempt])
+                    repairAttempt += 1
+                    repairCountState.value = repairCountState.value + 1
+                    offerAuthoritativeRepair()
+                } else {
+                    repairAttempt = 0
                 }
             }
         }
@@ -201,6 +286,21 @@ public class LayoutChangeCoalescer(
          * 60ms `tailEventsBatchedFromLine` conversation-ingest batch window.
          */
         public const val DEFAULT_WINDOW_MS: Long = 16L
+
+        /**
+         * Issue #2469 — the default bounded repair ladder for a reconcile that
+         * could not reach authority (a `list-panes` enumeration that overran its
+         * 6 s exec bound on a degraded link).
+         *
+         * Three attempts, front-loaded: the first repair lands ~0.5 s later so a
+         * transient blip barely shows as staleness, and the tail (1.5 s, 4 s)
+         * gives a sustained multi-second-RTT link several more chances without
+         * hammering it. Worst case for ONE lost structural event is therefore
+         * 4 bounded enumerations spread over ~30 s — bounded, off the UI thread,
+         * on the dedicated exec lane — versus the pre-#2469 behaviour of losing
+         * the event outright.
+         */
+        public val DEFAULT_REPAIR_BACKOFF_MS: List<Long> = listOf(500L, 1_500L, 4_000L)
 
         /**
          * The structural control events that require a `list-panes`

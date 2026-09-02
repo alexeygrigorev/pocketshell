@@ -39,7 +39,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -106,7 +106,10 @@ class LayoutChangeCoalescerTest {
         val latestOffered = arrayOfNulls<String>(1)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { lastSeenLayout = latestOffered[0] },
+            reconcile = {
+                lastSeenLayout = latestOffered[0]
+                true
+            },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -132,7 +135,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -149,7 +152,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -173,7 +176,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -194,7 +197,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -229,6 +232,7 @@ class LayoutChangeCoalescerTest {
                 if (!reconcileStarted.isCompleted) reconcileStarted.complete(Unit)
                 // Park the FIRST reconcile so it is "in flight" while we offer more.
                 reconcileGate.await()
+                true
             },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
@@ -262,7 +266,7 @@ class LayoutChangeCoalescerTest {
         val reconciles = AtomicInteger(0)
         val coalescer = LayoutChangeCoalescer(
             windowMs = 16L,
-            reconcile = { reconciles.incrementAndGet() },
+            reconcile = { reconciles.incrementAndGet(); true },
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
@@ -290,14 +294,21 @@ class LayoutChangeCoalescerTest {
             reconcile = {
                 val n = reconciles.incrementAndGet()
                 if (n == 1) throw IllegalStateException("transient list-panes failure")
+                true
             },
             onReconcileError = { errors.incrementAndGet() },
+            // Pin the repair ladder so the assertions below do not depend on the
+            // production default (issue #2469: a THROWN reconcile is also
+            // non-authoritative, so it is repaired the same way a `Failed` one is).
+            repairBackoffMs = listOf(500L),
         )
         coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
         runCurrent()
 
         coalescer.offer(layoutChange())
-        advanceTimeBy(100L)
+        // Past the 16ms window AND the 500ms repair backoff, so the #2469 repair
+        // for the thrown reconcile has been scheduled and drained.
+        advanceTimeBy(1_000L)
         runCurrent()
         // A later event still reconciles even though the first threw.
         coalescer.offer(layoutChange(layout = "after-error"))
@@ -305,6 +316,210 @@ class LayoutChangeCoalescerTest {
         runCurrent()
 
         assertEquals("error was reported", 1, errors.get())
-        assertEquals("coalescer survived the failure and reconciled again", 2, reconciles.get())
+        assertTrue(
+            "coalescer survived the failure and reconciled again, was ${reconciles.get()}",
+            reconciles.get() >= 2,
+        )
+        assertEquals(
+            "the thrown (non-authoritative) reconcile scheduled exactly one bounded repair",
+            1L,
+            coalescer.repairCount.value,
+        )
+    }
+
+    // -- Issue #2469: bounded repair for a reconcile that cannot reach authority ------
+
+    /**
+     * Issue #2469 — THE REGRESSION TEST for the dropped structural change.
+     *
+     * On a degraded mobile link the reconcile's bounded `list-panes` exec
+     * (`RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS`, 6 s) genuinely times out, and
+     * `reconcilePanes()` returns `PaneReconcileResult.Failed` **without
+     * throwing**. Before this fix the coalescer could not tell that apart from a
+     * successful reconcile, so the `%layout-change` was dropped permanently: the
+     * pane model stayed stale, and the per-pane agent re-detection that
+     * `applyParsedPanes` drives never ran. (That is the mechanism behind #2469's
+     * intermittent `MobileLatencyStormSelfInflictedCloseE2eTest` A1b non-vacuity
+     * failure: the classify never got the chance to run over the degraded lease.)
+     *
+     * The load-bearing assertion is that a non-authoritative reconcile is
+     * RE-DRIVEN — one failing enumeration must not lose the structural change.
+     */
+    @Test
+    fun `a non-authoritative reconcile is repaired instead of dropped`() = runTest {
+        val drainDispatcher = StandardTestDispatcher(testScheduler)
+        val attempts = AtomicInteger(0)
+        val coalescer = LayoutChangeCoalescer(
+            windowMs = 16L,
+            // Model the degraded link: the FIRST enumeration overruns its bounded
+            // exec (Failed -> false); the retry lands (Ready -> true).
+            reconcile = { attempts.incrementAndGet() > 1 },
+            repairBackoffMs = listOf(500L, 1_500L, 4_000L),
+        )
+        coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
+        runCurrent()
+
+        coalescer.offer(layoutChange())
+        advanceTimeBy(16L * 4)
+        runCurrent()
+        assertEquals(
+            "the first (bounded-exec-timeout) enumeration ran but did not reach authority",
+            1,
+            attempts.get(),
+        )
+
+        // Past the first rung of the repair ladder.
+        advanceTimeBy(600L)
+        runCurrent()
+        assertEquals(
+            "PRE-#2469 this stayed at 1: a `Failed` reconcile silently dropped the " +
+                "structural change forever. It must now be re-driven.",
+            2,
+            attempts.get(),
+        )
+        assertEquals("exactly one repair was scheduled", 1L, coalescer.repairCount.value)
+
+        // The repair reached authority, so the ladder stops — no further retries.
+        advanceTimeBy(30_000L)
+        runCurrent()
+        assertEquals("an authoritative repair ends the ladder", 2, attempts.get())
+        assertEquals("no further repairs after authority", 1L, coalescer.repairCount.value)
+    }
+
+    /**
+     * Issue #2469 — the repair ladder is BOUNDED. A permanently non-authoritative
+     * reconcile (a link that never recovers) must cost a small, fixed number of
+     * extra bounded enumerations and then park — never a hot retry loop that
+     * hammers a dying transport.
+     */
+    @Test
+    fun `the repair ladder is bounded for a permanently failing reconcile`() = runTest {
+        val drainDispatcher = StandardTestDispatcher(testScheduler)
+        val attempts = AtomicInteger(0)
+        val ladder = listOf(500L, 1_500L, 4_000L)
+        val coalescer = LayoutChangeCoalescer(
+            windowMs = 16L,
+            reconcile = { attempts.incrementAndGet(); false },
+            repairBackoffMs = ladder,
+        )
+        coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
+        runCurrent()
+
+        coalescer.offer(layoutChange())
+        // Far beyond the whole ladder.
+        advanceTimeBy(120_000L)
+        runCurrent()
+
+        assertEquals(
+            "one structural event costs the initial enumeration plus exactly " +
+                "${ladder.size} bounded repairs — not a hot loop",
+            ladder.size + 1,
+            attempts.get(),
+        )
+        assertEquals(ladder.size.toLong(), coalescer.repairCount.value)
+        assertFalse("the exhausted ladder parks on the trigger channel", coalescer.hasPending)
+    }
+
+    /**
+     * Issue #2469 — the repair budget is PER structural event: once a reconcile
+     * reaches authority the budget resets, so a later degraded episode gets its
+     * own full ladder rather than inheriting an exhausted one.
+     */
+    @Test
+    fun `an authoritative reconcile resets the repair budget`() = runTest {
+        val drainDispatcher = StandardTestDispatcher(testScheduler)
+        val attempts = AtomicInteger(0)
+        // Episode 1: attempt 1 fails, attempt 2 (the repair) succeeds.
+        // Episode 2: attempt 3 fails, attempt 4 (the repair) succeeds.
+        val failing = setOf(1, 3)
+        val coalescer = LayoutChangeCoalescer(
+            windowMs = 16L,
+            reconcile = { attempts.incrementAndGet() !in failing },
+            repairBackoffMs = listOf(500L),
+        )
+        coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
+        runCurrent()
+
+        coalescer.offer(layoutChange(layout = "episode-1"))
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals("episode 1: enumeration + one repair", 2, attempts.get())
+
+        coalescer.offer(layoutChange(layout = "episode-2"))
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(
+            "episode 2 got its OWN repair budget (an exhausted ladder must not leak " +
+                "across structural events)",
+            4,
+            attempts.get(),
+        )
+        assertEquals(2L, coalescer.repairCount.value)
+    }
+
+    /**
+     * Issue #2469 — the repair is SCHEDULED on the injected backoff ladder, not
+     * fired immediately. The first rung must land promptly (a stale pane list is
+     * user-visible within a second) while later rungs back off.
+     */
+    @Test
+    fun `repairs follow the injected backoff ladder`() = runTest {
+        val drainDispatcher = StandardTestDispatcher(testScheduler)
+        val attemptTimes = mutableListOf<Long>()
+        val coalescer = LayoutChangeCoalescer(
+            windowMs = 0L,
+            reconcile = {
+                attemptTimes += testScheduler.currentTime
+                false
+            },
+            repairBackoffMs = listOf(500L, 1_500L),
+        )
+        coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
+        runCurrent()
+
+        coalescer.offer(layoutChange())
+        advanceTimeBy(10_000L)
+        runCurrent()
+
+        assertEquals("initial enumeration + 2 ladder rungs", 3, attemptTimes.size)
+        assertEquals("the initial enumeration is immediate", 0L, attemptTimes[0])
+        assertEquals("rung 1 lands 500ms later", 500L, attemptTimes[1])
+        assertEquals("rung 2 lands 1500ms after rung 1", 2_000L, attemptTimes[2])
+    }
+
+    /**
+     * Issue #2469 — an EMPTY ladder disables repair entirely, which is exactly the
+     * pre-fix behaviour: a non-authoritative reconcile is dropped and never
+     * re-driven. Pinned so the repair path can never be accidentally disabled in
+     * production without this contrast failing loudly next to it.
+     */
+    @Test
+    fun `an empty repair ladder reproduces the pre-2469 drop`() = runTest {
+        val drainDispatcher = StandardTestDispatcher(testScheduler)
+        val attempts = AtomicInteger(0)
+        val coalescer = LayoutChangeCoalescer(
+            windowMs = 16L,
+            reconcile = { attempts.incrementAndGet(); false },
+            repairBackoffMs = emptyList(),
+        )
+        coalescer.start(CoroutineScope(backgroundScope.coroutineContext + drainDispatcher))
+        runCurrent()
+
+        coalescer.offer(layoutChange())
+        advanceTimeBy(120_000L)
+        runCurrent()
+
+        assertEquals(
+            "with no ladder the structural change is dropped after one failed " +
+                "enumeration — the exact pre-#2469 behaviour this fix removes",
+            1,
+            attempts.get(),
+        )
+        assertEquals(0L, coalescer.repairCount.value)
+        assertTrue(
+            "the production default ladder is non-empty, so the drop above cannot " +
+                "happen on the real path",
+            LayoutChangeCoalescer.DEFAULT_REPAIR_BACKOFF_MS.isNotEmpty(),
+        )
     }
 }

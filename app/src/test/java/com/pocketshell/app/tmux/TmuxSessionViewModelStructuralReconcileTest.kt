@@ -363,6 +363,17 @@ class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase
                 isError = true,
             ),
         )
+        // Issue #2469: the errored enumeration is NOT authoritative, so the
+        // coalescer now schedules a bounded repair that re-enumerates. Serve the
+        // repair the same authoritative row the first enumeration returned — the
+        // real-server shape (the transient failure passes, the re-read succeeds).
+        client.responses.addLast(
+            CommandResponse(
+                number = 3L,
+                output = listOf("%0\t@0\t\$0\ta\t0"),
+                isError = false,
+            ),
+        )
         vm.attachClientForTest(client)
 
         client.emittedEvents.emit(
@@ -371,6 +382,7 @@ class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase
         advanceUntilIdle()
         val before = vm.panes.value
         assertEquals(1, before.size)
+        val listPanesBefore = client.sentCommands.count { it.startsWith("list-panes") }
 
         client.emittedEvents.emit(
             ControlEvent.LayoutChange(sessionId = "", windowId = "@0", layout = "bf3d"),
@@ -380,6 +392,18 @@ class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase
         val after = vm.panes.value
         assertEquals(1, after.size)
         assertSame(before.single().terminalState, after.single().terminalState)
+        // Issue #2469: and it must not be SILENTLY DROPPED either. Pre-#2469 the
+        // errored reconcile was the last word — the structural change (and the
+        // per-pane re-detection `applyParsedPanes` drives from it) was lost until
+        // some unrelated later event happened to reconcile successfully. On a
+        // degraded mobile link, where the bounded `list-panes` exec genuinely
+        // times out, that is the permanent-staleness defect behind #2469.
+        assertTrue(
+            "an errored/failed reconcile must be REPAIRED with a re-enumeration, not " +
+                "dropped; list-panes calls before=$listPanesBefore " +
+                "after=${client.sentCommands.count { it.startsWith("list-panes") }}",
+            client.sentCommands.count { it.startsWith("list-panes") } >= listPanesBefore + 2,
+        )
     }
 
     /**

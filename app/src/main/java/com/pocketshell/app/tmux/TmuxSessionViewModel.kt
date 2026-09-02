@@ -7919,12 +7919,12 @@ public class TmuxSessionViewModel @Inject constructor(
         layoutCoalescerScope = coalescerScope
         val coalescer = LayoutChangeCoalescer(
             reconcile = {
-                // Only reconcile while this client is still the active one;
-                // a stale coalescer must not drive a reconcile for a torn-down
-                // client (the bind cancels the prior scope, but guard anyway).
-                if (clientRef === client) {
-                    reconcilePanes()
-                }
+                // Only reconcile while this client is still the active one; a stale
+                // coalescer must not drive (nor #2469-repair) a torn-down client's
+                // reconcile, so report that as settled. #2469: a `Failed` reconcile
+                // (the bounded `list-panes` exec overrunning a degraded link) is NOT
+                // authoritative — repair it, don't drop the structural change.
+                clientRef !== client || reconcilePanes() !is PaneReconcileResult.Failed
             },
             onReconcileError = { t ->
                 Log.w(ISSUE_576_COALESCER_TAG, "Coalesced reconcilePanes failed", t)

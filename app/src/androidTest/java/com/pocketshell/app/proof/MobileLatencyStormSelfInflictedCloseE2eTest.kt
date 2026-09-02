@@ -91,6 +91,26 @@ import org.junit.runner.RunWith
  * assertions on ANY `bounded_exec_timeout` would let A2 pass vacuously on RED —
  * they key strictly on `agent_kind_classify`.)
  *
+ * ## Issue #2469 — making the trigger's DELIVERY reliable (A1b was not wrong)
+ *
+ * The A1b non-vacuity assertion below failed intermittently (~50% of nightly
+ * runs) with `cause_trails=[]`. It was right to: the classify genuinely had not
+ * run. The storm profile is deterministic (fixed 900 ms one-way, jitter 0) and
+ * A1 — which passes on every such failure — proves the profile DOES overrun the
+ * 3.5 s bound when the command runs. The loss was in the trigger's multi-hop
+ * DELIVERY, all of it riding the same degraded link:
+ *
+ *  1. the reconcile's own `list-panes` is a 6 s-bounded exec, and a timeout used
+ *     to DROP the `%layout-change` permanently (fixed in production by
+ *     [com.pocketshell.core.tmux.LayoutChangeCoalescer]'s bounded repair), and
+ *  2. the confirmed-shell verdict is registered ASYNCHRONOUSLY, and racing it
+ *     makes `bustStaleForeignKindGuess` no-op so the classify is never called
+ *     (gated here by [awaitConfirmedShellPane]).
+ *
+ * A1b itself is UNCHANGED — still a hard, strictly-`agent_kind_classify`-keyed
+ * assertion — as are the 3.5 s bound and the mobile profile. Only the delivery
+ * of the trigger to the classify became reliable.
+ *
  * The seeded session is pinned `@ps_agent_kind=shell` (confirmed-shell —
  * [setSessionShellKind]), the exact pane class #1641 named as the storm's
  * uncredited entry trigger: it re-runs the classify over the shared lease
@@ -247,6 +267,18 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
             waitForVisibleTerminalText("initial attach") { "ISSUE1681-READY-$marker" in it }
             waitForConnected("initial attach")
 
+            // (4a) Issue #2469 — HARD SETUP GATE, not a vacuity escape. The whole
+            //      trigger below depends on the pane being registered
+            //      CONFIRMED-SHELL: `bustStaleForeignKindGuess` silently no-ops
+            //      otherwise, and `resolveForeignKindGuess` then returns its cached
+            //      verdict WITHOUT ever calling the classify. That registration is
+            //      driven asynchronously (a Compose `LaunchedEffect` →
+            //      `refreshCurrentSessionRecordedKind` → `applyRecordedShellVerdict`),
+            //      so racing it produced an A1b "vacuous window" failure that looked
+            //      like a product miss. Wait for it explicitly on the HEALTHY link,
+            //      and fail as SETUP (never skip, never soften A1b) if it never lands.
+            awaitConfirmedShellPane()
+
             diagnostics!!.clear()
             observedStatuses.clear()
 
@@ -275,10 +307,23 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
             //     let a late-firing classify's async close storm AFTER the window,
             //     a false pass). On GREEN nothing ever storms, so the extra wait is
             //     simply quiet.
+            //      Issue #2469 — the kicks are a BOUNDED RETRY, not a fixed count.
+            //      Every kick's trigger has to travel the app's `-CC` layout-change
+            //      → `reconcilePanes` → bounded `list-panes` path over the SAME
+            //      degraded link, so an individual kick can legitimately lose its
+            //      enumeration to that bound. (#2469's product fix repairs that
+            //      inside `LayoutChangeCoalescer`; this loop is the harness-side
+            //      belt-and-braces for the remaining hops.) Keep kicking until the
+            //      classify has DEMONSTRABLY overrun over the degraded lease — or
+            //      the delivery deadline expires, in which case A1b below still
+            //      hard-fails exactly as before. This never weakens A1b: it only
+            //      stops one lost enumeration from deciding the run.
             val start = SystemClock.elapsedRealtime()
-            repeat(RECLASSIFY_KICKS) { kick ->
+            var kick = 0
+            while (kick < RECLASSIFY_KICKS || needsMoreTriggerDelivery(start)) {
                 forceReclassifyOverDegradedLink(key, sessionName, kick)
                 observeWindow(PER_KICK_OBSERVE_MS)
+                kick += 1
             }
             observeWindow(STORM_SETTLE_MS)
             val elapsed = SystemClock.elapsedRealtime() - start
@@ -337,7 +382,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
             toxiproxy().clearToxics()
             waitForConnected("post-storm healthy link")
             val healthyBaselineBreadcrumbs = classifyTimeoutBreadcrumbs().size
-            forceReclassifyOverDegradedLink(key, sessionName, RECLASSIFY_KICKS)
+            forceReclassifyOverDegradedLink(key, sessionName, kick)
             observeWindow(HEALTHY_SETTLE_MS)
             assertTrue(
                 "A4 LEASE LIVENESS: the shared `-CC` lease left Connected after the link was " +
@@ -367,7 +412,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
                     "profile=mobile RTT≈${ToxiproxyControl.MOBILE_RTT_MS}ms " +
                         "(one_way=${ToxiproxyControl.MOBILE_ONE_WAY_LATENCY_MS}ms)",
                     "synthetic_self_inflicted_close_armed=$redArmed",
-                    "reclassify_kicks=$RECLASSIFY_KICKS",
+                    "reclassify_kicks=$kick (minimum=$RECLASSIFY_KICKS)",
                     "bounded_exec_timeout_breadcrumbs=${breadcrumbs.size}",
                     "sentinel_pings=${sentinel?.pingCount} attempts=${sentinel?.attemptCount} " +
                         "alive=${sentinel?.isAlive}",
@@ -409,6 +454,11 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
         attachToSession(hostRowTag, hostName, sessionName)
         waitForVisibleTerminalText("initial attach") { "ISSUE1681-WIFI-READY-$marker" in it }
         waitForConnected("initial attach")
+
+        // Issue #2469 — the SAME hard setup gate as the mobile arm, so this
+        // under-threshold control is comparable: A5's "zero overrun" is only a
+        // control if the classify was genuinely re-firable on this pane.
+        awaitConfirmedShellPane()
 
         diagnostics!!.clear()
         observedStatuses.clear()
@@ -600,6 +650,69 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
         )
     }
 
+    /**
+     * Issue #2469 — SETUP precondition for the whole trigger chain: wait until the
+     * app has actually REGISTERED the attached pane as confirmed-shell.
+     *
+     * The seeded `@ps_agent_kind=shell` option only becomes a confirmed-shell
+     * VERDICT once the app reads it back
+     * (`TmuxSessionScreen`'s `LaunchedEffect` → `refreshCurrentSessionRecordedKind`
+     * → `TmuxSessionViewModel.applyRecordedShellVerdict`) — an ASYNC hop. Until it
+     * lands, `bustStaleForeignKindGuess` no-ops and `resolveForeignKindGuess`
+     * returns its one-shot cached verdict without ever calling
+     * `AgentKindRemoteSource.classify`, so no amount of kicking can produce the
+     * shared-lease overrun A1b requires.
+     *
+     * This is a HARD failure with a SETUP message (never an `assumeTrue`, never a
+     * softening of A1b): if the app genuinely stopped registering confirmed-shell
+     * panes, that is a real product regression and must be reported as such, not
+     * absorbed into a vacuity failure that reads like a storm-trigger miss.
+     *
+     * @return the confirmed-shell pane id (the attached pane).
+     */
+    private fun awaitConfirmedShellPane(): String {
+        var lastPaneId = ""
+        var lastConfirmed: Set<String> = emptySet()
+        val settled = runCatching {
+            compose.waitUntil(timeoutMillis = CONFIRMED_SHELL_TIMEOUT_MS) {
+                var ready = false
+                launchedActivity?.onActivity { activity ->
+                    val viewModel = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                    lastPaneId = viewModel.panes.value.firstOrNull()?.paneId.orEmpty()
+                    lastConfirmed = viewModel.confirmedShellPaneIds.value
+                    ready = lastPaneId.isNotEmpty() && lastPaneId in lastConfirmed
+                }
+                ready
+            }
+            true
+        }.getOrDefault(false)
+        assertTrue(
+            "SETUP (issue #2469, NOT a vacuity): the attached pane never registered as " +
+                "confirmed-shell within ${CONFIRMED_SHELL_TIMEOUT_MS}ms, so the confirmed-shell " +
+                "classify could never re-fire over the degraded lease no matter how many kicks " +
+                "run. The seeded session is pinned `@ps_agent_kind=shell`, so the app failing to " +
+                "read that verdict back is a PRODUCT problem in the recorded-kind path, not a " +
+                "storm-trigger miss. activePane='$lastPaneId' confirmedShellPaneIds=$lastConfirmed",
+            settled,
+        )
+        return lastPaneId
+    }
+
+    /**
+     * Issue #2469 — should the bounded kick retry keep going? True while the
+     * shared-lease classify has NOT yet demonstrably overrun, the trigger-delivery
+     * deadline has not expired, and the session is still Connected.
+     *
+     * The Connected guard keeps the RED arm's shape intact: once the armed
+     * synthetic close storms the lease the status leaves Connected, and further
+     * kicks would only chase a trigger through a dead transport — A2 (asserted
+     * before A1b) is the RED signal and must be reached promptly.
+     */
+    private fun needsMoreTriggerDelivery(startedAtMs: Long): Boolean =
+        classifyTimeoutBreadcrumbs().isEmpty() &&
+            SystemClock.elapsedRealtime() - startedAtMs < TRIGGER_DELIVERY_DEADLINE_MS &&
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
+
     /** Record `@ps_agent_kind=shell` on the seeded session so the app treats it confirmed-shell. */
     private suspend fun setSessionShellKind(key: String, sessionName: String) {
         val result = execRemoteDirect(
@@ -699,8 +812,39 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
          */
         const val SYNTHETIC_SELF_CLOSE_ARG: String = "pocketshellSyntheticSelfInflictedClose"
 
-        /** How many degraded-link classify kicks to fire (RED self-sustains after the first). */
+        /**
+         * The MINIMUM number of degraded-link classify kicks to fire (RED
+         * self-sustains after the first). Issue #2469 turned this from a fixed
+         * count into a floor: the loop keeps kicking past it while
+         * [needsMoreTriggerDelivery] holds.
+         */
         const val RECLASSIFY_KICKS: Int = 4
+
+        /**
+         * Issue #2469 — how long the bounded kick retry may keep chasing the
+         * trigger before giving up and letting A1b hard-fail.
+         *
+         * Each kick's trigger rides the degraded link twice (the `-CC`
+         * `%layout-change` in, then the reconcile's bounded `list-panes`
+         * enumeration out), so a single kick can legitimately lose its window.
+         * This budget covers several more kicks (each ~1s + [PER_KICK_OBSERVE_MS])
+         * on top of the [RECLASSIFY_KICKS] floor while keeping the whole storm
+         * window well inside the phase-2 nightly runtime. It is a DEADLINE, not a
+         * relaxation: when it expires the run proceeds straight into the unchanged
+         * A2/A1b assertions.
+         */
+        val TRIGGER_DELIVERY_DEADLINE_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 150_000L else 120_000L
+
+        /**
+         * Issue #2469 — budget for the app to read `@ps_agent_kind=shell` back and
+         * register the attached pane confirmed-shell (see [awaitConfirmedShellPane]).
+         * The read is a single exec on a HEALTHY link at this point in the journey,
+         * so this is generous by a wide margin; it early-exits the moment the
+         * verdict lands.
+         */
+        val CONFIRMED_SHELL_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 45_000L
 
         /** Settle after a cwd change before the structural churn that forces the reconcile. */
         const val RECONCILE_SETTLE_MS: Long = 1_000L

@@ -118,9 +118,18 @@ everything below is now decided:**
   an optional host-side `pocketshell-jobs` systemd daemon dependency that a
   lean scope shouldn't carry. P-7 therefore disappears entirely (cards and
   repos were already cut).
-- **P-9 `snippets/`**: DEFERRED (not cut-forever) — not on the regularly-used
-  list; composer + dictation are the confirmed input paths. Revisit post-X-1
-  if he asks.
+- **P-9 `snippets/`**: CUT ("I never use them" — maintainer, 2026-09-03).
+  Composer + dictation are the confirmed input paths.
+- **P-10 `systemsurfaces/`** (home-screen widget/tile): stays DEFERRED, not
+  built now — the maintainer's answer was "I don't know" (no strong
+  opinion either way), so leave it out rather than build toward an
+  ambivalent feature; trivial to add back later if wanted.
+- **U-5 key bar** (D18's originally-planned Esc/Tab/Ctrl/Alt/arrow 8-slot
+  bar): TRIM per maintainer input, 2026-09-03 — "I need Ctrl+C, Ctrl+D,
+  Escape, Enter, this kind of thing; most of the shortcuts I don't really
+  use." When U-5 is scoped, default to a small key bar covering those plus
+  Tab (near-universal for shell completion) rather than the full D18 set;
+  don't build the wider shortcut/chord palette unless he asks for it later.
 - **`bootstrap/` host-CLI-version probe**: TRIMMED, not fully cut — keep
   only the actionable "update the host CLI" error message (K-1 already
   rejects `schema < 2` with a typed `HostCliTooOld` error; render it
@@ -132,12 +141,11 @@ everything below is now decided:**
 - **P-10 `notifications/`**: TRIMMED — keep `ShareUploadNotifications` (serves
   confirmed-core file upload), cut the app-update-available notifier
   (self-distribution convenience, not a daily job).
-- **P-10 `systemsurfaces/`** (widget/tile): DEFERRED, not built now — not on
-  the regularly-used list, cleanly addable later.
 
-**Net scope effect**: P-7 gone entirely; P-9 shrinks to share-upload +
-snippets-deferred; P-10 shrinks to `crash/` + trimmed `diagnostics/` +
-share-upload notification; P-6 shrinks to settings + host add/edit (new,
+**Net scope effect**: P-7 gone entirely; P-9 shrinks to just share-upload
+(snippets cut too, not deferred, per the 2026-09-03 follow-up); P-10 shrinks
+to `crash/` + trimmed `diagnostics/` + share-upload notification; P-6
+shrinks to settings + host add/edit (new,
 required) + plain key storage + QR import/export, minus biometric.
 Roughly 9,500 further lines of would-have-been code avoided.
 

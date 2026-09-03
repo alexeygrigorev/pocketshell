@@ -6,6 +6,10 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.composer.COMPOSER_TAG
+import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
+import com.pocketshell.next.composer.ComposerNotice
+import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -95,8 +99,50 @@ class SessionScreenTest {
         composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
     }
 
+    /**
+     * The composer stays mounted through a failure ON PURPOSE (task P-1): that
+     * is the state in which a kept draft matters most, and hiding it would
+     * delete the one thing the send contract promises.
+     */
+    @Test
+    fun `the composer is present while connecting`() {
+        setContent(SessionUiState.Connecting)
+
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `the composer is present on a live session`() {
+        setContent(SessionUiState.Live(createRemoteTerminalSession()))
+
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `the composer survives a failure, because that is when a draft matters`() {
+        setContent(SessionUiState.Failed("no route to host"))
+
+        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `an undelivered draft is visible above the terminal`() {
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(
+                draft = "kept text",
+                notice = ComposerNotice.Undelivered,
+            ),
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("kept text").assertIsDisplayed()
+    }
+
     private fun setContent(
         state: SessionUiState,
+        composerState: ComposerUiState = ComposerUiState(),
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
     ) {
@@ -104,9 +150,21 @@ class SessionScreenTest {
             PocketShellTheme {
                 SessionScreen(
                     state = state,
+                    composerState = composerState,
                     sessionName = SESSION,
                     onBack = onBack,
                     onResized = onResized,
+                    onDraftChange = {},
+                    onSend = {},
+                    onAttach = {},
+                    onMicTap = {},
+                    onCancelRecording = {},
+                    onToggleHistory = {},
+                    onTogglePreview = {},
+                    onRemoveAttachment = {},
+                    onDismissNotice = {},
+                    onDiscardDraft = {},
+                    onUseHistoryEntry = {},
                 )
             }
         }

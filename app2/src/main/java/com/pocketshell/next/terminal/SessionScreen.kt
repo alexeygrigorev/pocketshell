@@ -1,17 +1,28 @@
 package com.pocketshell.next.terminal
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.next.composer.ComposerBar
+import com.pocketshell.next.composer.ComposerUiState
+import com.pocketshell.next.composer.ComposerViewModel
+import com.pocketshell.next.composer.MessageHistorySheet
+import com.pocketshell.next.composer.SentMessage
+import com.pocketshell.next.composer.SessionSink
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -29,12 +40,19 @@ const val SESSION_ERROR_BANNER_TAG: String = "session-error-banner"
 const val SESSION_BACK_TAG: String = "session-back"
 
 /**
- * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite task
- * U-4).
+ * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
+ * U-4 and P-1).
  *
- * The attach is started from a `LaunchedEffect` keyed on the route arguments —
- * [SessionViewModel.open] is idempotent, so a recomposition or a configuration
- * change cannot open a second PTY on the same tmux session.
+ * Two ViewModels, one screen. [SessionViewModel] owns the transport and the
+ * terminal; [ComposerViewModel] owns the draft, its attachments and its
+ * history. They meet at exactly one place — the [SessionSink] built here — and
+ * that seam is deliberately two members wide, so the composer can never grow a
+ * second opinion about whether the session is attached.
+ *
+ * The sink reads `uiState.value` at call time rather than closing over the
+ * collected state: a sink built from a snapshot would answer "live" from
+ * whenever the screen last recomposed, which is precisely when a send would
+ * vanish into a dead pane and the draft would be cleared for it.
  */
 @Composable
 fun SessionRoute(
@@ -43,52 +61,107 @@ fun SessionRoute(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionViewModel = hiltViewModel(),
+    composerViewModel: ComposerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val composerState by composerViewModel.state.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
 
+    val sink = remember(viewModel) {
+        object : SessionSink {
+            override val isLive: Boolean get() = viewModel.uiState.value is SessionUiState.Live
+            override fun sendBytes(bytes: ByteArray) = viewModel.sendBytes(bytes)
+        }
+    }
+    LaunchedEffect(hostId, sessionName, sink) {
+        composerViewModel.bind(hostId, sessionName, sink)
+    }
+
+    // `OpenMultipleDocuments` rather than a media picker: the maintainer
+    // attaches logs, patches and screenshots, and the storage-access framework
+    // is the one picker that reaches all three without a storage permission.
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> -> composerViewModel.attach(uris) }
+
     SessionScreen(
         state = state,
+        composerState = composerState,
         sessionName = sessionName,
         onBack = onBack,
         onResized = viewModel::onResized,
+        onDraftChange = composerViewModel::onDraftChange,
+        onSend = composerViewModel::send,
+        onAttach = { picker.launch(arrayOf("*/*")) },
+        onMicTap = composerViewModel::onMicTap,
+        onCancelRecording = composerViewModel::cancelRecording,
+        onToggleHistory = composerViewModel::toggleHistory,
+        onTogglePreview = composerViewModel::togglePreview,
+        onRemoveAttachment = composerViewModel::removeAttachment,
+        onDismissNotice = composerViewModel::dismissNotice,
+        onDiscardDraft = composerViewModel::discard,
+        onUseHistoryEntry = composerViewModel::useHistoryEntry,
         modifier = modifier,
     )
 }
 
 /**
- * One attached session: a title bar and a full-bleed terminal.
+ * One attached session: a title bar, a full-bleed terminal, and the composer.
  *
- * ## Deliberately almost no chrome
+ * ## Chrome, and what is still absent
  *
- * A name, a way back, and the terminal. No key bar, no composer, no
- * conversation tab, no hotkey panel, no scroll affordances — every one of those
- * is a later task, and each is a place the pre-rewrite screen accumulated state
- * that had to agree with the terminal's. The one thing the chrome does say is
- * WHICH session, because the tree can show several with similar names.
+ * A name, a way back, the terminal, and one composer. Still no key bar, no
+ * hotkey panel and no scroll affordances — those are task U-5. The composer is
+ * here because it is the send path for any session and the maintainer's
+ * confirmed daily surface, and because it is the one piece of chrome that
+ * cannot disagree with the terminal: it holds no session state, it asks.
  *
- * ## Failure has no retry button
+ * ## Keyboard
  *
- * A dropped or ended session shows what happened and offers Back. Reconnect is
- * task U-7, and a Retry that silently re-ran `open()` without the backoff and
- * attempt accounting that task owns would be the thing the rewrite is trying
- * not to build again.
+ * [imePadding] on the root is the whole keyboard story. The composer is the
+ * bottom-most child, so it rides up with the IME, and the terminal above it
+ * loses exactly the height the keyboard took — which fires [onResized] and
+ * resizes the remote PTY, so the remote program reflows instead of drawing
+ * under the keyboard. That is why the composer is inline rather than a modal
+ * sheet: a sheet floats in its own window and has to be re-anchored against the
+ * IME by hand, which is 289 lines of machinery the old client carried and this
+ * screen does not need.
  *
- * Stateless: the whole screen is a function of [state], so a design render and
- * a journey see the same pixels.
+ * ## Failure still has no retry button
+ *
+ * A dropped session shows what happened and offers Back; reconnect is task U-7.
+ * The composer stays mounted through a failure ON PURPOSE — that is the state
+ * in which a draft is most valuable, and hiding it would delete the one thing
+ * the send contract promises to keep.
+ *
+ * Stateless: the whole screen is a function of its two states, so a design
+ * render and a journey see the same pixels.
  */
 @Composable
 fun SessionScreen(
     state: SessionUiState,
+    composerState: ComposerUiState,
     sessionName: String,
     onBack: () -> Unit,
     onResized: (cols: Int, rows: Int) -> Unit,
+    onDraftChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onAttach: () -> Unit,
+    onMicTap: () -> Unit,
+    onCancelRecording: () -> Unit,
+    onToggleHistory: () -> Unit,
+    onTogglePreview: () -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    onDismissNotice: () -> Unit,
+    onDiscardDraft: () -> Unit,
+    onUseHistoryEntry: (SentMessage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
+            .imePadding()
             .testTag(SESSION_SCREEN_TAG),
     ) {
         ScreenHeader(
@@ -156,6 +229,28 @@ fun SessionScreen(
                 )
             }
         }
+
+        ComposerBar(
+            state = composerState,
+            onDraftChange = onDraftChange,
+            onSend = onSend,
+            onAttach = onAttach,
+            onMicTap = onMicTap,
+            onCancelRecording = onCancelRecording,
+            onToggleHistory = onToggleHistory,
+            onTogglePreview = onTogglePreview,
+            onRemoveAttachment = onRemoveAttachment,
+            onDismissNotice = onDismissNotice,
+            onDiscard = onDiscardDraft,
+        )
+    }
+
+    if (composerState.historyOpen) {
+        MessageHistorySheet(
+            messages = composerState.history,
+            onPick = onUseHistoryEntry,
+            onDismiss = onToggleHistory,
+        )
     }
 }
 

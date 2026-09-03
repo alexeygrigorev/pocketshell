@@ -109,6 +109,14 @@ class AppNavHostTest {
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
                 treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
+                // Same rationale again for U-4's terminal: the real screen
+                // resolves `SessionViewModel` through `hiltViewModel()` AND
+                // dials a host. The stand-in echoes both route arguments, which
+                // is what this suite is pinning — that a session name with a
+                // space and a `:` survives the encode/decode round trip.
+                sessionScreen = { hostId, sessionName, _ ->
+                    Text("Session(hostId=$hostId, name=$sessionName)")
+                },
             )
         }
         composeRule.waitForIdle()

@@ -395,9 +395,10 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
             2>&1 | tee "${RUNNER_TEMP}/app2-gradle.log"
 
-      # 11 when the lane landed, 59 after task U-2 added the connect-flow and
-      # trust-prompt suites; floor 45 — comfortably under the current count but
-      # far above the point where a whole suite could silently stop running.
+      # 11 when the lane landed, 59 after U-2's connect-flow and trust-prompt
+      # suites, 117 after U-4's session ViewModel/screen suites; floor 100 —
+      # comfortably under the current count but far above the point where a
+      # whole suite could silently stop running.
       - name: Assert tests actually executed
         if: always() && steps.app2_tests.conclusion != 'skipped'
         run: |
@@ -406,7 +407,7 @@ jobs:
           scripts/check-app2-lane-execution.py \
             --label ":app2:testDebugUnitTest" \
             --results-dir app2/build/test-results/testDebugUnitTest \
-            --min 45 \
+            --min 100 \
             --newer-than "${RUNNER_TEMP}/app2-run-start"
 
       # Compile-only guard for the instrumented journey (see the header note).

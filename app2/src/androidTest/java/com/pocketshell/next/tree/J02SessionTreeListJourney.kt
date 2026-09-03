@@ -17,6 +17,7 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -253,12 +254,15 @@ class J02SessionTreeListJourney {
 
         compose.onNodeWithTag(sessionRowTag(SESSION_APLEXER)).performClick()
 
-        // The Session screen is still U-4's placeholder; what this pins is that
-        // the tap navigated with THIS row's name — an `aplexer` name carries a
-        // `:` and therefore goes through route encoding.
-        val expected = "Session(hostId=$hostId, name=$SESSION_APLEXER)"
-        awaitText(expected)
-        compose.onNodeWithText(expected).assertIsDisplayed()
+        // What this pins is that the tap navigated with THIS row's name — an
+        // `aplexer` display name carries a `:` and therefore goes through route
+        // encoding, and the session screen titles itself with the decoded name.
+        // Whether the attach then succeeds is J03's subject, not this test's:
+        // the `a` fixture hosts no attachable process, so this screen is
+        // expected to end up saying so.
+        awaitTag(SESSION_SCREEN_TAG)
+        awaitText(SESSION_APLEXER)
+        compose.onNodeWithText(SESSION_APLEXER).assertIsDisplayed()
         JourneyScreenshots.capture("02-session-opened", JOURNEY)
     }
 

@@ -547,7 +547,66 @@ case "${1:-}" in
       exec "$(fixture_sessions_bin)" list \
         "${fixture_dir}/pocketshell-sessions-list.txt"
     fi
-    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json]\n' >&2
+    if [ "${1:-}" = "attach" ]; then
+      shift
+      # Rewrite task U-4 (journey J03). The Android client attaches with
+      # `exec pocketshell sessions attach --hide-status -- '<name>'`, and this
+      # arm mirrors the REAL command's tmux path (tools/pocketshell/.../
+      # sessions.py `sessions_attach`, playbook §B.2): find the tmux socket
+      # serving NAME — name-derived `tmuxctl-<name>` first, then a sweep with
+      # `has-session` — optionally turn that session's status bar off, then
+      # `execvp` into `tmux attach-session -t '=NAME'`.
+      #
+      # Deliberately NOT delegating to the real Python CLI: the image ships the
+      # deterministic shims, and the enumeration half of this fixture already
+      # reimplements §B.1 the same way. Only the tmux arm exists here — the `a`
+      # fixture binary hosts no attachable process, so an aplexer name is a
+      # clean exit 3 rather than a hang.
+      attach_hide_status=0
+      attach_name=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --hide-status) attach_hide_status=1 ;;
+          --) shift; attach_name="${1:-}"; break ;;
+          -*) ;;
+          *) if [ -z "$attach_name" ]; then attach_name="$1"; fi ;;
+        esac
+        shift
+      done
+      if [ -z "$attach_name" ]; then
+        printf 'pocketshell: attach needs a session name\n' >&2
+        exit 64
+      fi
+      attach_socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+      attach_socket=""
+      attach_derived="${attach_socket_dir}/tmuxctl-${attach_name}"
+      if [ -S "$attach_derived" ] &&
+        /usr/bin/tmux.real -S "$attach_derived" has-session -t "=${attach_name}" 2>/dev/null; then
+        attach_socket="$attach_derived"
+      else
+        for attach_candidate in "$attach_socket_dir"/*; do
+          [ -S "$attach_candidate" ] || continue
+          if /usr/bin/tmux.real -S "$attach_candidate" \
+            has-session -t "=${attach_name}" 2>/dev/null; then
+            attach_socket="$attach_candidate"
+            break
+          fi
+        done
+      fi
+      if [ -z "$attach_socket" ]; then
+        printf "no session named '%s'\n" "$attach_name" >&2
+        exit 3
+      fi
+      if [ "$attach_hide_status" = "1" ]; then
+        # `set-option -t` takes a PANE target, so the trailing colon is load
+        # bearing — the real CLI documents the same tmux 3.4 quirk.
+        /usr/bin/tmux.real -S "$attach_socket" \
+          set-option -t "=${attach_name}:" status off >/dev/null 2>&1 || true
+      fi
+      exec /usr/bin/tmux.real -S "$attach_socket" \
+        attach-session -t "=${attach_name}"
+    fi
+    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json], attach NAME [--hide-status]\n' >&2
     exit 64
     ;;
   jobs)

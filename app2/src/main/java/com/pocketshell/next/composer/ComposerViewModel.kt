@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.voice.PendingTranscriptionDelivery
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -56,6 +57,7 @@ class ComposerViewModel @Inject constructor(
     private val drafts: ComposerDraftStore,
     private val history: SentMessageDao,
     private val stager: ComposerAttachmentStager,
+    private val queuedDictations: PendingTranscriptionDelivery,
     speech: SpeechRecognitionProvider,
 ) : ViewModel() {
 
@@ -80,6 +82,7 @@ class ComposerViewModel @Inject constructor(
     private var persistJob: Job? = null
     private var stageJob: Job? = null
     private var historyJob: Job? = null
+    private var deliveryJob: Job? = null
 
     /**
      * Points the composer at one session and its send path.
@@ -240,6 +243,34 @@ class ComposerViewModel @Inject constructor(
     /** Discard the recording and restore the draft as it was before the mic opened. */
     fun cancelRecording() = dictation.cancel()
 
+    /**
+     * The composer came back to the foreground: collect anything dictated while
+     * the device was offline.
+     *
+     * A recording made with no signal is parked as audio by the voice stack
+     * (task P-2's [PendingTranscriptionDelivery]) rather than transcribed. This
+     * is the moment it can be — the network is presumably back and, more to the
+     * point, the draft the transcript belongs in is on screen again. Each
+     * recovered transcript is appended exactly as a live dictation would have
+     * appended it, and the user sees text appear in their composer rather than
+     * a notification about a queue.
+     *
+     * D21: no scheduler, no callback, no background work. If the app is never
+     * reopened the recordings simply stay on disk.
+     */
+    fun onForegroundResume() {
+        if (deliveryJob?.isActive == true) return
+        deliveryJob = viewModelScope.launch {
+            val recovered = runCatching { queuedDictations.deliverQueued() }.getOrDefault(emptyList())
+            if (recovered.isEmpty()) return@launch
+            _state.update { current ->
+                val merged = recovered.fold(current.draft, ComposerText::appendDictated)
+                current.copy(draft = merged, notice = ComposerNotice.Info(deliveredMessage(recovered.size)))
+            }
+            persistNow()
+        }
+    }
+
     override fun onCleared() {
         dictation.release()
         super.onCleared()
@@ -355,6 +386,13 @@ class ComposerViewModel @Inject constructor(
 
         fun attachedMessage(count: Int): String =
             if (count == 1) "Attached 1 file." else "Attached $count files."
+
+        /** Says what just appeared in the draft, so text arriving on its own is not a mystery. */
+        fun deliveredMessage(count: Int): String = if (count == 1) {
+            "Added a dictation recorded while you were offline."
+        } else {
+            "Added $count dictations recorded while you were offline."
+        }
 
         fun describe(failure: Throwable): String =
             failure.message ?: failure::class.simpleName ?: "unknown error"

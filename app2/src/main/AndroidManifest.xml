@@ -32,6 +32,29 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!--
+        Task P-2: the composer's mic. Both dictation arms need it — Android's
+        `SpeechRecognizer` opens the microphone in the recognition service's
+        process on the caller's behalf, and the Whisper arm records a WAV
+        locally. Declared here AND requested at runtime by `ComposerBar`; a
+        manifest-only declaration would make every mic tap fail silently on
+        Android 6+.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+        Task P-2: package visibility for the system speech recognizer. Since
+        Android 11 an app cannot see another package unless it declares a
+        matching query, and `SpeechRecognizer.isRecognitionAvailable()` answers
+        FALSE without this — the mic would render permanently disabled on every
+        modern device with a perfectly good recognizer installed.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".App"
         android:allowBackup="false"

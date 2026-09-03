@@ -7,6 +7,7 @@ import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.ComposerDraftStore
+import com.pocketshell.next.voice.PendingTranscriptionStore
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -42,6 +43,14 @@ interface AppGraph {
 
     /** The durable draft slot, so a journey can start from a known-empty composer. */
     fun composerDraftStore(): ComposerDraftStore
+
+    /**
+     * Task P-2. The offline-dictation queue, so a journey can seed a
+     * "recorded while offline" row directly — the same way a real dictation
+     * would have parked it — without operating a real microphone (which an
+     * instrumented test cannot do).
+     */
+    fun pendingTranscriptionStore(): PendingTranscriptionStore
 }
 
 /** The app-under-test's Hilt graph. */

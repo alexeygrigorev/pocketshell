@@ -4,6 +4,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
@@ -27,8 +28,13 @@ const val SESSION_TERMINAL_TAG: String = "session-terminal"
  * which takes pixels, with no `TypedValue.applyDimension` anywhere on the path.
  * 28 is the size the pre-rewrite client shipped — big enough to read on a phone,
  * small enough to leave a usable column count at 1080 px wide.
+ *
+ * Internal rather than private because the session screen measures the SAME
+ * face at the SAME size to estimate the terminal's geometry before a view
+ * exists (task U-5, [measureTerminalCellMetrics]); a second literal would be a
+ * second answer to "how big is a cell".
  */
-private const val TERMINAL_TEXT_SIZE_RAW_PX: Int = 28
+internal const val TERMINAL_TEXT_SIZE_RAW_PX: Int = 28
 
 /**
  * The terminal's own palette entries, in ARGB.
@@ -60,7 +66,7 @@ private var cachedTerminalTypeface: android.graphics.Typeface? = null
  * loaded deliberately: the renderer applies bold per cell from the terminal's
  * own attributes, so a pre-bolded typeface would render every cell bold.
  */
-private fun terminalTypeface(context: android.content.Context): android.graphics.Typeface {
+internal fun terminalTypeface(context: android.content.Context): android.graphics.Typeface {
     cachedTerminalTypeface?.let { return it }
     val loaded = runCatching {
         android.graphics.Typeface.createFromAsset(
@@ -94,21 +100,47 @@ private fun terminalTypeface(context: android.content.Context): android.graphics
  * resizes the emulator itself on every layout pass, then calls
  * [TerminalViewClient.onEmulatorSet]. That callback is therefore the exact
  * moment the emulator's geometry changed, and reporting it from there is what
- * keeps the remote's `SIGWINCH` in step with what is on screen. Anything richer
- * — rotation handling, IME insets, the key bar — is task U-5.
+ * keeps the remote's `SIGWINCH` in step with what is on screen — including the
+ * two events task U-5 is about, since both a rotation and an opening keyboard
+ * reach this view as a plain layout-size change.
+ *
+ * ## Ctrl comes from the key bar, letters come from the keyboard
+ *
+ * A phone keyboard has every letter and no Ctrl. So U-5's key bar owns the
+ * modifier and this view owns the character: while [ctrlArmed] is set,
+ * `readControlKey()` reports it to the vendored input path and
+ * [TerminalViewClient.onCodePoint] encodes the combination through
+ * [controlBytes] and hands it to [onControlBytes]. Reporting the key handled
+ * is what keeps the vendored control branch from encoding it a second time.
  *
  * @param session the live emulator front end, from [SessionUiState.Live].
  * @param onResized called with the view's computed size in character cells.
+ * @param ctrlArmed whether the key bar's Ctrl slot is currently armed.
+ * @param onControlBytes called with the encoded Ctrl+key bytes. The screen
+ *   sends them AND clears a one-shot Ctrl — the bar cannot, because the key
+ *   that consumed the modifier was not one of its own.
  */
 @Composable
 fun TerminalHostView(
     session: TerminalSession,
     onResized: (cols: Int, rows: Int) -> Unit,
+    ctrlArmed: Boolean = false,
+    onControlBytes: (ByteArray) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Held across recompositions so a state change in the enclosing screen does
     // not detach and re-attach the terminal (which would reset the viewport).
     val repaintClient = remember(session) { RepaintingSessionClient() }
+
+    // The view's client is built once, inside `factory`, so it would otherwise
+    // capture the FIRST composition's `ctrlArmed` value and never see another.
+    // A mutable holder it reads through is the seam; `SideEffect` keeps the
+    // write out of the composition pass itself.
+    val keyInput = remember { TerminalKeyInput() }
+    SideEffect {
+        keyInput.ctrlArmed = ctrlArmed
+        keyInput.onControlBytes = onControlBytes
+    }
 
     DisposableEffect(session) {
         session.updateTerminalSessionClient(repaintClient)
@@ -137,7 +169,7 @@ fun TerminalHostView(
                 // than the chrome above it and no palette change can fix it,
                 // because it is painted on top of the finished frame.
                 defaultFocusHighlightEnabled = false
-                setTerminalViewClient(SessionTerminalViewClient(this, onResized))
+                setTerminalViewClient(SessionTerminalViewClient(this, onResized, keyInput))
                 // Order matters and is not cosmetic: upstream's `TerminalView`
                 // has NO renderer until `setTextSize` builds one, and
                 // `updateSize()` reads `mRenderer.mFontWidth` inside a
@@ -186,18 +218,36 @@ private class RepaintingSessionClient : TerminalSessionClient by NoOpTerminalSes
 }
 
 /**
+ * The mutable seam between a Compose recomposition and the long-lived
+ * [TerminalViewClient] built once in `AndroidView`'s `factory`.
+ *
+ * `@Volatile` because the writes happen on the composition's thread and the
+ * reads happen wherever the vendored view dispatches input from.
+ */
+private class TerminalKeyInput {
+    @Volatile
+    var ctrlArmed: Boolean = false
+
+    @Volatile
+    var onControlBytes: (ByteArray) -> Unit = {}
+}
+
+/**
  * The view's client. Everything it is asked is answered with the plain
  * terminal-safe default:
  *
  * - no smart-text IME (autocorrect rewriting shell tokens is exactly the wrong
  *   behaviour in a terminal, and the vendored default agrees);
- * - Back is Back, not Escape — app2 has no key bar yet (task U-5), so mapping
- *   the system Back gesture onto Escape would leave no way off the screen;
- * - no modifier latches, because there is nothing to latch them from yet.
+ * - Back is Back, not Escape — the key bar (task U-5) carries a real Esc key,
+ *   so stealing the system Back gesture for it would cost the only way off the
+ *   screen and buy nothing;
+ * - Ctrl is latched from the key bar (see [readControlKey] / [onCodePoint]);
+ *   Alt and Shift are not, because the bar has no such slots.
  */
 private class SessionTerminalViewClient(
     private val view: TerminalView,
     private val onResized: (cols: Int, rows: Int) -> Unit,
+    private val keyInput: TerminalKeyInput,
 ) : TerminalViewClient {
 
     override fun onScale(scale: Float): Float = 1.0f
@@ -224,7 +274,14 @@ private class SessionTerminalViewClient(
 
     override fun onLongPress(event: MotionEvent?): Boolean = false
 
-    override fun readControlKey(): Boolean = false
+    /**
+     * The key bar's Ctrl slot, read by the vendored input path on every key.
+     *
+     * Both `onKeyDown` (hardware keyboards) and `inputCodePoint` (the IME) call
+     * this, so one armed modifier covers both without the screen knowing which
+     * keyboard the user has.
+     */
+    override fun readControlKey(): Boolean = keyInput.ctrlArmed
 
     override fun readAltKey(): Boolean = false
 
@@ -232,8 +289,25 @@ private class SessionTerminalViewClient(
 
     override fun readFnKey(): Boolean = false
 
-    override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean =
-        false
+    /**
+     * Encodes a Ctrl-modified character and reports it handled.
+     *
+     * Returning true is what stops the vendored control branch immediately
+     * below the call site from encoding the same key a second time. When
+     * [controlBytes] has no entry for the character — Ctrl+`é`, say — this
+     * returns false and the character goes out unmodified through the vendored
+     * path, because a dropped keystroke reads as a dead keyboard.
+     */
+    override fun onCodePoint(
+        codePoint: Int,
+        ctrlDown: Boolean,
+        session: TerminalSession?,
+    ): Boolean {
+        if (!ctrlDown) return false
+        val bytes = controlBytes(codePoint) ?: return false
+        keyInput.onControlBytes(bytes)
+        return true
+    }
 
     /**
      * Fired by `TerminalView.updateSize()` right after it resized the emulator,

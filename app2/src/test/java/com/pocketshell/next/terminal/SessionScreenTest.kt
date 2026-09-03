@@ -199,6 +199,7 @@ class SessionScreenTest {
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
         onRetry: () -> Unit = {},
+        onSend: (ByteArray) -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -208,6 +209,7 @@ class SessionScreenTest {
                     onBack = onBack,
                     onResized = onResized,
                     onRetry = onRetry,
+                    onSend = onSend,
                 )
             }
         }

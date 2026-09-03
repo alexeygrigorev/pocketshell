@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.next.terminal.SessionScreen
 import com.pocketshell.next.terminal.SessionUiState
+import com.pocketshell.next.terminal.createRemoteTerminalSession
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Test
@@ -16,26 +17,54 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * Fast design renders for the session screen's non-terminal chrome (task U-7).
+ * Fast design renders for the session screen's chrome (tasks U-5 and U-7).
+ *
+ * Same harness as [HostScreenRenders]: Pixel-7-class viewport, the app's own
+ * always-dark theme, PNGs under `app2/build/renders/`.
  *
  * ```
  * ./gradlew :app2:testDebugUnitTest --tests '*SessionScreenRenders*' --rerun-tasks
- * # then open the PNGs under app2/build/renders/
  * ```
  *
- * Only the give-up failure is here, and that is a finding rather than an
- * omission: any state that HOSTS the terminal — `Live` and `Reconnecting` both
- * — renders as a blank frame on the JVM, because the vendored emulator paints
- * through `libtermux.so`, a device artifact, and its `AndroidView` takes the
- * whole capture with it. So the reconnect banner's real appearance is a device
- * screenshot from `J05ReconnectAfterDropJourney`, and its text is pinned by
- * `SessionScreenTest`. This render is the fast first look at the one state that
- * can be looked at fast, never the acceptance.
+ * Any state that HOSTS the terminal — `Live` and `Reconnecting` both — renders
+ * with a blank terminal grid on the JVM: the vendored emulator paints through
+ * `libtermux.so`, a device artifact, and its `AndroidView` takes the whole
+ * capture with it. So the reconnect banner's real appearance is a device
+ * screenshot from `J05ReconnectAfterDropJourney`, its text is pinned by
+ * `SessionScreenTest`, and what these two states' renders show is the CHROME
+ * around the terminal, not the terminal itself. This is the fast first look,
+ * never the acceptance.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class SessionScreenRenders {
+
+    /** Attaching, with the key bar already docked so the layout cannot jump. */
+    @Test
+    fun sessionAttaching() = render("u5-session-attaching") {
+        SessionScreen(
+            state = SessionUiState.Connecting,
+            sessionName = "git-pocketshell",
+            onBack = {},
+            onResized = { _, _ -> },
+            onRetry = {},
+            onSend = {},
+        )
+    }
+
+    /** Attached: the four-slot bar under a full-bleed terminal. */
+    @Test
+    fun sessionLiveWithKeyBar() = render("u5-session-key-bar") {
+        SessionScreen(
+            state = SessionUiState.Live(createRemoteTerminalSession()),
+            sessionName = "git-pocketshell",
+            onBack = {},
+            onResized = { _, _ -> },
+            onRetry = {},
+            onSend = {},
+        )
+    }
 
     /** The ladder gave up: what is left is a message and a way to try again. */
     @Test
@@ -48,6 +77,7 @@ class SessionScreenRenders {
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
+            onSend = {},
         )
     }
 

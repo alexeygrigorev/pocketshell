@@ -39,6 +39,18 @@ android {
         jvmTarget = "17"
     }
 
+    // Task T-2 (pattern from the old shared/core-ssh module, issue #41):
+    // Docker-driven integration tests live in a sibling directory attached to
+    // the `test` source set so AGP compiles them on the same classpath, while
+    // the dedicated `integrationTest` task below restricts execution to the
+    // *IntegrationTest classes and the standard unit-test tasks exclude them —
+    // `./gradlew check` stays Docker-free.
+    sourceSets {
+        getByName("test") {
+            java.srcDir("src/integrationTest/java")
+        }
+    }
+
     testOptions {
         unitTests {
             isIncludeAndroidResources = false
@@ -47,6 +59,22 @@ android {
                     events("passed", "skipped", "failed")
                     showStandardStreams = true
                 }
+
+                // Pin the Docker API version negotiated by docker-java to
+                // something modern. The bundled docker-java in Testcontainers
+                // 1.21.x defaults to API 1.32, which Docker 25+ daemons
+                // refuse — minimum is 1.44. docker-java reads the
+                // `api.version` system property (NOT the DOCKER_API_VERSION
+                // env var, despite the name). Override via -Papi.version=...
+                val apiVersion = providers.gradleProperty("api.version")
+                    .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
+                    .get()
+                test.systemProperty("api.version", apiVersion)
+
+                // Keep the standard unit-test tasks fast and Docker-free by
+                // excluding the Testcontainers-backed integration tests; they
+                // run under the dedicated `integrationTest` task instead.
+                test.exclude("**/*IntegrationTest.class")
             }
         }
     }
@@ -87,6 +115,47 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // T-2: the Docker-sshd integration suite (RealHostConnectionIntegrationTest)
+    // drives a real sshd via Testcontainers. Attached to `testImplementation`
+    // because the integration source dir is part of the `test` source set.
+    testImplementation(libs.testcontainers)
     // sshj wants a logger at test time too; reuse the nop binding.
     testRuntimeOnly(libs.slf4j.nop)
+}
+
+// Task T-2 (pattern from the old shared/core-ssh module, issue #41): a
+// dedicated task for the Docker-driven integration tests. Reuses the compiled
+// output and classpath of `testReleaseUnitTest` — same JVM, same dependencies —
+// but only runs *IntegrationTest classes and is NOT wired into `check`, so
+// contributors without Docker can still run `./gradlew check`. Run explicitly:
+// `./gradlew :shared:core-transport:integrationTest`.
+project.afterEvaluate {
+    tasks.register<Test>("integrationTest") {
+        group = "verification"
+        description = "Runs Testcontainers-backed integration tests (requires Docker)."
+
+        // Registered inside `afterEvaluate` so the AGP-created
+        // `testReleaseUnitTest` task exists when we read its testClassesDirs /
+        // classpath. Reading those FileCollections carries dependencies on the
+        // compile/process tasks (not on the unit-test task itself), so running
+        // `integrationTest` does NOT re-run the unit tests.
+        val unitTest = tasks.named<Test>("testReleaseUnitTest").get()
+        testClassesDirs = unitTest.testClassesDirs
+        classpath = unitTest.classpath
+
+        useJUnit()
+        include("**/*IntegrationTest.class")
+
+        testLogging {
+            events("passed", "skipped", "failed")
+            showStandardStreams = true
+        }
+
+        // Same Docker API pin as the unit-test config above — the integration
+        // tests are the actual consumer of this knob.
+        val apiVersion = providers.gradleProperty("api.version")
+            .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
+            .get()
+        systemProperty("api.version", apiVersion)
+    }
 }

@@ -104,6 +104,11 @@ class AppNavHostTest {
                 // `com.pocketshell.next.hosts.HostListNavigationTest`.
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
+                // Same rationale as `hostsScreen`: the real session tree
+                // resolves its ViewModel through `hiltViewModel()`. The
+                // stand-in echoes the argument the route actually delivered, so
+                // this suite still pins the Tree pattern's Long argument.
+                treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

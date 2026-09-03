@@ -3,7 +3,6 @@ package com.pocketshell.next.connect
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -12,6 +11,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
 import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.tree.SESSION_TREE_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
@@ -150,14 +150,14 @@ class J01ConnectAndTrustJourney {
         // Raising the prompt is not consent.
         assertNull("prompt must not store a key", storedFingerprint())
         // And it must not have navigated.
-        compose.onNodeWithText(treeLabel()).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(TRUST_SHEET_TRUST_TAG).performClick()
 
         // Trust -> record -> full re-dial -> authenticated -> tree.
-        awaitText(treeLabel())
+        awaitTag(SESSION_TREE_TAG)
         JourneyScreenshots.capture("03-tree-after-trust")
-        compose.onNodeWithText(treeLabel()).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
         assertEquals(
             "the trusted key must be the one the server presented",
             presentedFingerprint,
@@ -182,7 +182,7 @@ class J01ConnectAndTrustJourney {
         assertNull("reject must not store a host key", storedFingerprint())
         // Screen-level: still on the host list, never on the tree.
         compose.onNodeWithTag(hostRowTag(hostId)).assertIsDisplayed()
-        compose.onNodeWithText(treeLabel()).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
     }
 
     /**
@@ -219,10 +219,8 @@ class J01ConnectAndTrustJourney {
             STALE_FINGERPRINT,
             storedFingerprint(),
         )
-        compose.onNodeWithText(treeLabel()).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
     }
-
-    private fun treeLabel(): String = "Tree(hostId=$hostId)"
 
     private fun storedFingerprint(): String? =
         runBlocking { appGraph().hostDao().getById(hostId)?.trustedHostKeySha256 }
@@ -236,12 +234,6 @@ class J01ConnectAndTrustJourney {
     private fun awaitGone(tag: String) {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()
-        }
-    }
-
-    private fun awaitText(text: String) {
-        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
         }
     }
 

@@ -23,6 +23,34 @@ journey:
   * seeded sockets are enumerated live and appended after the canned rows;
   * aplexer rows come from the ``a`` fixture binary.
 
+SCHEMA 2 (rewrite task U-3). ``json`` now emits the schema-2 document the
+Android client's ``core-hostapi`` parser reads: a ``schema`` field, the FULL key
+set on every row (``workspace``/``tag``/``engine``/``profile``/``agent_state``/
+``agent_state_source``/``attached``/``created_epoch``/``activity_epoch``, each
+explicitly ``null`` when unknown rather than omitted), and an ``errors`` list.
+The pre-schema-2 ``{"managers": [...], "sessions": [{"name", "manager",
+"created", "attach"}]}`` shape is gone — a hard cut (D22), matching the deleted
+schema-1 client. ``list`` is untouched and still byte-for-byte the canned table.
+
+Two per-user seed files let a journey give the fixture a realistic host state
+over the SSH session it already has, with no image rebuild:
+
+  * ``POCKETSHELL_FIXTURE_SESSION_DETAIL_FILE``
+    (default ``$HOME/.pocketshell-fixture-session-detail.json``) — an object
+    keyed by session name supplying any of the schema-2 tmux fields, e.g.
+    ``{"claude-main": {"workspace": "/w", "attached": true,
+    "activity_epoch": 1788409253, "agent_state": "working"}}``. A tmux session
+    with no entry reports ``workspace: null``, which is exactly the
+    "other" bucket the client must still render.
+  * ``POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE``
+    (default ``$HOME/.pocketshell-fixture-session-errors.json``) — a list of
+    ``{"manager": ..., "message": ...}`` records, appended verbatim to
+    ``errors``. This is the ONLY way to reproduce the #2426 partial-listing
+    contract on a device: a backend that failed to enumerate while the other
+    one answered. Absent file => no errors, which is every other journey.
+
+Both default to absent, so a fixture nobody seeded behaves the same as before.
+
 Usage: ``pocketshell-fixture-sessions {list|json} <canned-table-file>``
 """
 
@@ -48,6 +76,26 @@ TMUX_REAL = os.environ.get("POCKETSHELL_FIXTURE_TMUX_BIN") or (
     "/usr/bin/tmux.real" if os.path.exists("/usr/bin/tmux.real") else None
 )
 FIELD_SEP = "::"
+
+# The schema the Android client's `core-hostapi` parser requires. A lower value
+# here makes it report HostCliError.TooOld, which is a legitimate thing for a
+# journey to want — but never the default.
+SCHEMA_VERSION = 2
+
+# Every key a schema-2 row carries. The client reads a fixed record, so a key
+# omitted because its value is None would be a parse failure, not leniency.
+ROW_KEYS = (
+    "id",
+    "workspace",
+    "tag",
+    "engine",
+    "profile",
+    "agent_state",
+    "agent_state_source",
+    "attached",
+    "created_epoch",
+    "activity_epoch",
+)
 TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 LEADING_IDX = re.compile(r"^(\s*\d+\s+)")
 
@@ -169,10 +217,12 @@ def aplexer_rows() -> list[dict]:
         name = str(item.get("name") or "").strip()
         if not name:
             continue
+        # Schema 2: fixed record, every key present, unknown values explicitly
+        # null. The snapshot supplies whatever it knows; the rest are null.
         row = {"name": name, "manager": "aplexer"}
-        for key in ("id", "workspace", "engine", "tag", "created", "created_epoch"):
-            if item.get(key) is not None:
-                row[key] = item[key]
+        for key in ROW_KEYS:
+            row[key] = item.get(key)
+        row["attached"] = bool(item.get("attached"))
         rows.append(row)
     return rows
 
@@ -205,21 +255,97 @@ def render_list(path: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _seed_file(env_name: str, default_name: str) -> str:
+    explicit = os.environ.get(env_name)
+    if explicit:
+        return explicit
+    return os.path.join(os.path.expanduser("~"), default_name)
+
+
+def session_detail() -> dict:
+    """Per-session schema-2 detail a journey seeded, or ``{}`` when none."""
+    path = _seed_file(
+        "POCKETSHELL_FIXTURE_SESSION_DETAIL_FILE",
+        ".pocketshell-fixture-session-detail.json",
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def backend_errors() -> list:
+    """Enumeration failures a journey seeded, or ``[]`` when none."""
+    path = _seed_file(
+        "POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE",
+        ".pocketshell-fixture-session-errors.json",
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    errors = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        manager = str(item.get("manager") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if manager and message:
+            errors.append({"manager": manager, "message": message})
+    return errors
+
+
+def created_epoch(created: str) -> object:
+    """``YYYY-MM-DD HH:MM:SS`` (the canned table's format) as epoch seconds."""
+    try:
+        return int(datetime.strptime(created, "%Y-%m-%d %H:%M:%S").timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
 def render_json(path: str) -> str:
     _, canned, _, _ = read_canned(path)
     rows, _ = tmux_rows(canned)
-    sessions = [
-        {
-            "name": name,
-            "manager": "tmux",
-            "created": created,
-            "attach": "tmux attach -t %s" % name,
-        }
-        for name, created in rows
-    ]
+    detail = session_detail()
+    sessions = []
+    for name, created in rows:
+        seeded = detail.get(name) if isinstance(detail.get(name), dict) else {}
+        row = {"name": name, "manager": "tmux"}
+        for key in ROW_KEYS:
+            row[key] = seeded.get(key)
+        if row["created_epoch"] is None:
+            row["created_epoch"] = created_epoch(created)
+        row["attached"] = bool(seeded.get("attached"))
+        sessions.append(row)
     sessions.extend(aplexer_rows())
+
+    managers = []
+    for row in sessions:
+        if row["manager"] not in managers:
+            managers.append(row["manager"])
+    for error in backend_errors():
+        # A manager that FAILED contributed no rows, so it must not appear in
+        # `managers` — that list is "who answered", `errors` is "who did not".
+        if error["manager"] in managers:
+            managers.remove(error["manager"])
+    if not managers:
+        managers = ["tmux"]
+
     return (
-        json.dumps({"managers": ["tmux", "aplexer"], "sessions": sessions}, indent=2)
+        json.dumps(
+            {
+                "schema": SCHEMA_VERSION,
+                "managers": managers,
+                "sessions": sessions,
+                "errors": backend_errors(),
+            },
+            indent=2,
+        )
         + "\n"
     )
 

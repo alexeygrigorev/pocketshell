@@ -28,6 +28,7 @@ import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -74,10 +75,10 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen] and [connectViewModel] are seams, not feature flags: the real
- * host list and the real connect gate resolve their ViewModels through
- * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
- * Robolectric `createComposeRule()` composition could not host them. The
+ * [hostsScreen], [connectViewModel] and [treeScreen] are seams, not feature
+ * flags: the real host list, connect gate and session tree resolve their
+ * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity, so
+ * a plain Robolectric `createComposeRule()` composition could not host them. The
  * parameters let a test supply the same screen / the same ViewModel built by
  * hand (over an in-memory database and a scripted connection factory) and still
  * exercise the real navigation edge — the production defaults are the real ones.
@@ -90,6 +91,8 @@ fun AppNavHost(
         HostListRoute(onOpenHost = onOpenHost)
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
+    treeScreen: @Composable (hostId: Long, onOpenSession: (String) -> Unit) -> Unit =
+        { _, onOpenSession -> SessionTreeRoute(onOpenSession = onOpenSession) },
 ) {
     NavHost(
         navController = navController,
@@ -110,8 +113,14 @@ fun AppNavHost(
             route = Destination.Tree.pattern,
             arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
         ) { entry ->
-            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID)
-            RoutePlaceholder("Tree(hostId=$hostId)")
+            // Task U-3: the real session tree. The hostId is read from the
+            // route here only to hand it to the seam; the ViewModel resolves it
+            // from its own SavedStateHandle, so the screen keeps working under
+            // process death without the navigation layer re-supplying it.
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            treeScreen(hostId) { sessionName ->
+                navController.navigate(Destination.Session.route(hostId, sessionName))
+            }
         }
         composable(
             route = Destination.Session.pattern,

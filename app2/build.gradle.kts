@@ -164,6 +164,12 @@ dependencies {
     // the old module's hand-rolled navigator.
     implementation(libs.androidx.navigation.compose)
 
+    // `LifecycleEventEffect(ON_START)` — the session tree's refresh trigger
+    // (task U-3). hilt-navigation-compose already brings
+    // lifecycle-viewmodel-compose, but NOT lifecycle-runtime-compose, which is
+    // where the lifecycle-event effects live.
+    implementation(libs.lifecycle.runtime.compose)
+
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     // `hiltViewModel()` inside a `composable {}` destination (task U-1). Also
@@ -171,9 +177,7 @@ dependencies {
     // ViewModel by hand.
     implementation(libs.androidx.hilt.navigation.compose)
 
-    // Shared modules app2 builds on (plan §A.2). core-hostapi is intentionally
-    // still absent — nothing in app2 speaks the host CLI yet (that arrives with
-    // the U-3 tree slice).
+    // Shared modules app2 builds on (plan §A.2).
     implementation(project(":shared:ui-kit"))
     implementation(project(":shared:core-storage"))
     implementation(project(":shared:core-terminal"))
@@ -181,6 +185,10 @@ dependencies {
     // implement core-transport's TrustStore + AuthSecretResolver seams and hand
     // back its HostConnection.
     implementation(project(":shared:core-transport"))
+    // Task U-3: the session tree speaks the host CLI. `HostCliClient` runs over
+    // a `RemoteExec` the app adapts from a `HostConnection`, which is why this
+    // module and core-transport stay independent of each other.
+    implementation(project(":shared:core-hostapi"))
 
     // The nav graph is exercised as a real composition on the host JVM
     // (Robolectric + createComposeRule), the same way :shared:ui-kit tests its

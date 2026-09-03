@@ -1,0 +1,412 @@
+name: app2
+
+# Rewrite task M-2 — CI lanes for the modules the rewrite adds.
+#
+# The rewrite (docs/_scratch/simplification-implementation-plan-2026-09-02.md)
+# hard-cut the old `app/`, `core-ssh`, `core-tmux`, `core-connection` and
+# `core-agents` modules on the `stable` branch and grew three new ones:
+# `shared/core-hostapi` (pure JVM host-CLI wire contract), `shared/core-transport`
+# (the one module that knows sshj) and `app2` (the new application module).
+# None of them had a CI lane. This workflow is that lane.
+#
+# DELIBERATELY A SEPARATE FILE FROM tests.yml
+#   * tests.yml still describes the OLD module graph (it runs
+#     `:app:integrationTest :shared:core-ssh:integrationTest
+#     :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest`,
+#     none of which exist on this branch any more) and needs its own cleanup
+#     pass. Adding the new modules to it would entangle the two.
+#   * tests.yml is under a hard file-size ratchet
+#     (scripts/check-file-size-hygiene.sh) with very little headroom — the same
+#     reason full-suite-notify.yml (#2353) and pr-journey-smoke.yml (#2354)
+#     were split out.
+#
+# NOT A REQUIRED CHECK. Registering a workflow that carries trigger-level
+# `paths:` as a required status check is the #2354 footgun: GitHub never starts
+# a run for a non-matching PR, so the required context sits at "Expected"
+# forever with no admin bypass short of dropping the requirement. If these jobs
+# are ever promoted to required, the trigger-level `paths:` below must be
+# removed first and ALL selection moved into the `changes` job (which already
+# does the per-job half and reports a skipped-but-present job either way).
+#
+# NO EMULATOR LANE YET — app2 has no real screen to drive; that arrives with
+# the U-4 task and gets wired into the journey suite then.
+
+on:
+  push:
+    branches:
+      - main
+      - stable
+    paths:
+      # The UNION of every job's filter below. Per-JOB selection is the
+      # `changes` job's business — GitHub's own `paths:` is workflow-level.
+      - "app2/**"
+      - "shared/core-transport/**"
+      - "shared/core-hostapi/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - "tests/docker/**"
+      - ".github/workflows/app2.yml"
+      - "scripts/ci-app2-changed-modules.sh"
+      - "scripts/check-app2-lane-execution.py"
+  pull_request:
+    paths:
+      - "app2/**"
+      - "shared/core-transport/**"
+      - "shared/core-hostapi/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - "tests/docker/**"
+      - ".github/workflows/app2.yml"
+      - "scripts/ci-app2-changed-modules.sh"
+      - "scripts/check-app2-lane-execution.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref) }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Per-JOB path filtering. scripts/ci-app2-changed-modules.sh carries the
+  # logic (and its own self-test) so the "never under-select" property is
+  # exercised rather than living in an untested YAML expression. Every
+  # uncertain case — unknown base, unreadable diff, workflow_dispatch, a change
+  # to shared build infrastructure — fails OPEN and selects all three lanes.
+  changes:
+    name: Select lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      hostapi: ${{ steps.select.outputs.hostapi }}
+      transport: ${{ steps.select.outputs.transport }}
+      app2: ${{ steps.select.outputs.app2 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The diff base must be present in the clone, so no shallow fetch.
+          fetch-depth: 0
+
+      - name: Self-test the lane selector
+        run: |
+          chmod +x scripts/ci-app2-changed-modules.sh
+          scripts/ci-app2-changed-modules.sh --self-test
+
+      - name: Select lanes
+        id: select
+        run: |
+          scripts/ci-app2-changed-modules.sh \
+            --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}"
+
+  # ---------------------------------------------------------------------------
+  # shared/core-hostapi — pure JVM (kotlin("jvm")), no Android SDK, no
+  # Robolectric. `test` is the single Java-plugin test task; there is no
+  # Debug/Release split to shard.
+  hostapi-test:
+    name: core-hostapi unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.hostapi == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/hostapi-run-start"
+
+      # --rerun-tasks --no-build-cache is not belt-and-braces: a plain
+      # `:shared:core-hostapi:test` came back FROM-CACHE in 1s, zero tests
+      # executed, while this lane was being written.
+      - name: Run core-hostapi unit tests
+        id: hostapi_tests
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-hostapi:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/hostapi-gradle.log"
+
+      # Floors are set a little under the count observed when the lane landed
+      # (28) so ordinary churn does not trip them but a mass loss of tests does.
+      - name: Assert tests actually executed
+        if: always() && steps.hostapi_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-hostapi:test" \
+            --results-dir shared/core-hostapi/build/test-results/test \
+            --min 20 \
+            --newer-than "${RUNNER_TEMP}/hostapi-run-start"
+
+      - name: Upload core-hostapi test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-hostapi-test-reports
+          path: |
+            shared/core-hostapi/build/reports/tests/
+            shared/core-hostapi/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-transport — Android library. `:test` is AGP's variant-spanning
+  # alias, so BOTH testDebugUnitTest and testReleaseUnitTest run and both result
+  # dirs are checked. The Testcontainers *IntegrationTest classes are excluded
+  # from these tasks by the module's build script; they run in the Docker lane
+  # below.
+  transport-test:
+    name: core-transport unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.transport == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/transport-run-start"
+
+      - name: Run core-transport unit tests
+        id: transport_tests
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-transport:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/transport-gradle.log"
+
+      # 38 observed when the lane landed (19 per variant); floor 30.
+      - name: Assert tests actually executed
+        if: always() && steps.transport_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-transport:test" \
+            --results-dir shared/core-transport/build/test-results/testDebugUnitTest \
+            --results-dir shared/core-transport/build/test-results/testReleaseUnitTest \
+            --min 30 \
+            --newer-than "${RUNNER_TEMP}/transport-run-start"
+
+      - name: Upload core-transport unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-transport-test-reports
+          path: |
+            shared/core-transport/build/reports/tests/
+            shared/core-transport/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-transport Docker lane. Service-startup shape copied from
+  # tests.yml's `integration` job: JDK 17 + Gradle cache + `docker info` before
+  # handing off to Testcontainers, then a fresh-run marker, --rerun-tasks
+  # --no-build-cache, an execution guard, and an always-on report upload.
+  #
+  # tests.yml's two extra fixture steps ("Smoke shared tmux-wrapper fixtures",
+  # "Shared SSH/tmux fixture health on a REAL fixture") are DELIBERATELY not
+  # copied: they build the `agents`/tmux-shim compose fixtures that the old
+  # core-tmux/core-agents suites needed. RealHostConnectionIntegrationTest uses
+  # none of them — Testcontainers builds its own sshd image from
+  # tests/docker/Dockerfile.ssh — so those steps would add several minutes of
+  # unrelated image builds and a failure mode this lane cannot cause.
+  #
+  # The suite skips itself via `assumeTrue` when Docker is unreachable, which
+  # would be a green run of 8 SKIPPED tests. The execution guard counts
+  # executed = tests - skipped, so that shape fails here instead of passing.
+  transport-integration:
+    name: core-transport integration tests (Docker)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.transport == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # ubuntu-latest runners have Docker preinstalled and the daemon running,
+      # which is what Testcontainers needs. Sanity-check before we hand off.
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Mark integration-run start
+        run: touch "${RUNNER_TEMP}/transport-integration-run-start"
+
+      - name: Run core-transport integration tests
+        id: transport_integration
+        timeout-minutes: 35
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-transport:integrationTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/transport-integration-gradle.log"
+
+      # 8 observed when the lane landed; floor 6.
+      - name: Assert integration tests actually executed
+        if: always() && steps.transport_integration.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-transport:integrationTest" \
+            --results-dir shared/core-transport/build/test-results/integrationTest \
+            --min 6 \
+            --newer-than "${RUNNER_TEMP}/transport-integration-run-start"
+
+      - name: Upload core-transport integration reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-transport-integration-reports
+          path: |
+            shared/core-transport/build/reports/tests/
+            shared/core-transport/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # app2 — Robolectric-backed host-JVM unit tests (the nav graph runs as a real
+  # composition). Debug only: the module's tests are Robolectric/Compose tests
+  # with no variant-specific behaviour, and neither build type minifies.
+  app2-unit:
+    name: app2 unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.app2 == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/app2-run-start"
+
+      - name: Run app2 unit tests
+        id: app2_tests
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          ./gradlew :app2:testDebugUnitTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/app2-gradle.log"
+
+      # 11 observed when the lane landed; floor 8.
+      - name: Assert tests actually executed
+        if: always() && steps.app2_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":app2:testDebugUnitTest" \
+            --results-dir app2/build/test-results/testDebugUnitTest \
+            --min 8 \
+            --newer-than "${RUNNER_TEMP}/app2-run-start"
+
+      - name: Upload app2 test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-unit-test-reports
+          path: |
+            app2/build/reports/tests/
+            app2/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore

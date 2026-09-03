@@ -4,8 +4,10 @@ import android.content.Context
 import androidx.room.Room
 import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.hostapi.HostCliClient
+import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.transport.AuthSecretResolver
 import com.pocketshell.core.transport.HostConnectionFactory
@@ -72,6 +74,15 @@ object AppModule {
 
     @Provides
     fun provideSshKeyDao(db: AppDatabase): SshKeyDao = db.sshKeyDao()
+
+    // Task P-4. `forwarding_intent` is the aggregate "stop everything" statement
+    // behind the notification's Stop action; `port_remappings` carries the user's
+    // remote→local overrides into each forwarder.
+    @Provides
+    fun provideForwardingIntentDao(db: AppDatabase): ForwardingIntentDao = db.forwardingIntentDao()
+
+    @Provides
+    fun providePortRemappingDao(db: AppDatabase): PortRemappingDao = db.portRemappingDao()
 
     @Provides
     @IoDispatcher

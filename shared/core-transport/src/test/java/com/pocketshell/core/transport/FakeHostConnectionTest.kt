@@ -323,6 +323,67 @@ class FakeHostConnectionTest {
         assertThrows(IOException::class.java) { runBlockingMissingRead(sftp) }
     }
 
+    // --------------------------------------------------------- port forwarding
+
+    @Test
+    fun `openPortForward records the request and hands back a live fake forward`() = runTest {
+        val host = FakeHostConnection()
+
+        val forward = host.openPortForward(remoteHost = "127.0.0.1", remotePort = 3000, localPort = 3000)
+
+        assertEquals(
+            listOf(FakeHostConnection.PortForwardRequest("127.0.0.1", 3000, 3000)),
+            host.portForwardRequests,
+        )
+        assertTrue(forward.isActive)
+        assertEquals(3000, forward.localPort)
+        assertEquals(0L, forward.bytesForwarded)
+
+        (forward as FakePortForward).pump(out = 40, back = 60)
+        assertEquals(40L, forward.bytesForwarded)
+        assertEquals(60L, forward.bytesReceived)
+
+        forward.close()
+        assertFalse(forward.isActive)
+        assertEquals(1, forward.closeCount)
+    }
+
+    @Test
+    fun `a scripted opener failure is still recorded as an attempt`() = runTest {
+        val host = FakeHostConnection()
+        host.portForwardOpener = { throw IOException("channel refused") }
+
+        val failure = assertThrows(IOException::class.java) { runBlockingOpenForward(host) }
+
+        assertEquals("channel refused", failure.message)
+        assertEquals(1, host.portForwardRequests.size)
+        assertTrue(host.openedPortForwards.isEmpty())
+    }
+
+    @Test
+    fun `closing the connection closes every forward it handed out`() = runTest {
+        val host = FakeHostConnection()
+        val first = host.openPortForward("127.0.0.1", 3000, 3000) as FakePortForward
+        val second = host.openPortForward("127.0.0.1", 8080, 8080) as FakePortForward
+
+        host.close()
+
+        assertFalse("a forward cannot outlive its transport", first.isActive)
+        assertFalse(second.isActive)
+        assertEquals(listOf(first, second), host.openedPortForwards)
+    }
+
+    @Test
+    fun `openPortForward on a spent connection throws like a dead transport`() = runTest {
+        val host = FakeHostConnection()
+        host.markLost("network dropped")
+
+        val failure = assertThrows(IOException::class.java) { runBlockingOpenForward(host) }
+
+        assertTrue(failure.message!!.contains("openPortForward"))
+        assertTrue(host.portForwardRequests.isEmpty())
+    }
+
     // `assertThrows` needs a non-suspending lambda; these keep the suspending
     // calls under test readable at the call site.
     private fun runBlockingExec(host: FakeHostConnection) =
@@ -330,6 +391,9 @@ class FakeHostConnectionTest {
 
     private fun runBlockingOpenPty(host: FakeHostConnection) =
         kotlinx.coroutines.runBlocking { host.openPty("bash", 80, 24) }
+
+    private fun runBlockingOpenForward(host: FakeHostConnection) =
+        kotlinx.coroutines.runBlocking { host.openPortForward("127.0.0.1", 3000, 3000) }
 
     private fun runBlockingSftp(host: FakeHostConnection) =
         kotlinx.coroutines.runBlocking { host.sftp() }

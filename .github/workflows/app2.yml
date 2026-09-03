@@ -9,12 +9,16 @@ name: app2
 # (the one module that knows sshj) and `app2` (the new application module).
 # None of them had a CI lane. This workflow is that lane.
 #
+# Task P-4 un-shelved `shared/core-portfwd` (the port-forwarding tunnel engine,
+# rewired from the deleted core-ssh onto core-transport) and added its two lanes
+# here, unit + Docker, for the same reason: a module in settings.gradle.kts that
+# no gate runs is a module whose regression tests do not exist.
+#
 # DELIBERATELY A SEPARATE FILE FROM tests.yml
 #   * tests.yml still describes the OLD module graph (it runs
 #     `:app:integrationTest :shared:core-ssh:integrationTest
-#     :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest`,
-#     none of which exist on this branch any more) and needs its own cleanup
-#     pass. Adding the new modules to it would entangle the two.
+#     :shared:core-tmux:integrationTest`, none of which exist on this branch any
+#     more) and needs its own cleanup pass. Adding the new modules to it would entangle the two.
 #   * tests.yml is under a hard file-size ratchet
 #     (scripts/check-file-size-hygiene.sh) with very little headroom — the same
 #     reason full-suite-notify.yml (#2353) and pr-journey-smoke.yml (#2354)
@@ -48,6 +52,7 @@ on:
       # `changes` job's business — GitHub's own `paths:` is workflow-level.
       - "app2/**"
       - "shared/core-transport/**"
+      - "shared/core-portfwd/**"
       - "shared/core-hostapi/**"
       - "gradle/**"
       - "settings.gradle.kts"
@@ -63,6 +68,7 @@ on:
     paths:
       - "app2/**"
       - "shared/core-transport/**"
+      - "shared/core-portfwd/**"
       - "shared/core-hostapi/**"
       - "gradle/**"
       - "settings.gradle.kts"
@@ -88,7 +94,7 @@ jobs:
   # logic (and its own self-test) so the "never under-select" property is
   # exercised rather than living in an untested YAML expression. Every
   # uncertain case — unknown base, unreadable diff, workflow_dispatch, a change
-  # to shared build infrastructure — fails OPEN and selects all three lanes.
+  # to shared build infrastructure — fails OPEN and selects all four lanes.
   changes:
     name: Select lanes
     runs-on: ubuntu-latest
@@ -96,6 +102,7 @@ jobs:
     outputs:
       hostapi: ${{ steps.select.outputs.hostapi }}
       transport: ${{ steps.select.outputs.transport }}
+      portfwd: ${{ steps.select.outputs.portfwd }}
       app2: ${{ steps.select.outputs.app2 }}
     steps:
       - name: Checkout
@@ -345,6 +352,159 @@ jobs:
           path: |
             shared/core-transport/build/reports/tests/
             shared/core-transport/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-portfwd — the port-forwarding tunnel engine (task P-4).
+  # Android library like core-transport, so `:test` is AGP's variant-spanning
+  # alias and BOTH result dirs are checked. The Testcontainers *IntegrationTest
+  # classes are excluded from these tasks by the module's build script; they run
+  # in the Docker lane below.
+  portfwd-test:
+    name: core-portfwd unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.portfwd == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/portfwd-run-start"
+
+      - name: Run core-portfwd unit tests
+        id: portfwd_tests
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-portfwd:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/portfwd-gradle.log"
+
+      # 108 observed when the lane landed (54 per variant); floor 80.
+      - name: Assert tests actually executed
+        if: always() && steps.portfwd_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-portfwd:test" \
+            --results-dir shared/core-portfwd/build/test-results/testDebugUnitTest \
+            --results-dir shared/core-portfwd/build/test-results/testReleaseUnitTest \
+            --min 80 \
+            --newer-than "${RUNNER_TEMP}/portfwd-run-start"
+
+      - name: Upload core-portfwd unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-portfwd-test-reports
+          path: |
+            shared/core-portfwd/build/reports/tests/
+            shared/core-portfwd/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-portfwd Docker lane (task P-4). Same shape as the transport
+  # Docker lane: Testcontainers builds its own sshd image from
+  # tests/docker/Dockerfile.ssh, so none of tests.yml's compose fixtures are
+  # needed. This is the lane that proves a REAL forward carries bytes — the
+  # suite dials the container, opens `-L`, reads the sshd banner back through
+  # the tunnel, and re-establishes a manual forward after a real drop.
+  #
+  # The suite skips itself via `assumeTrue` when Docker is unreachable, which
+  # would be a green run of 6 SKIPPED tests. The execution guard counts
+  # executed = tests - skipped, so that shape fails here instead of certifying
+  # nothing.
+  portfwd-integration:
+    name: core-portfwd integration tests (Docker)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.portfwd == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Mark integration-run start
+        run: touch "${RUNNER_TEMP}/portfwd-integration-run-start"
+
+      - name: Run core-portfwd integration tests
+        id: portfwd_integration
+        timeout-minutes: 35
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-portfwd:integrationTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/portfwd-integration-gradle.log"
+
+      # 6 observed when the lane landed; floor 5.
+      - name: Assert integration tests actually executed
+        if: always() && steps.portfwd_integration.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-portfwd:integrationTest" \
+            --results-dir shared/core-portfwd/build/test-results/integrationTest \
+            --min 5 \
+            --newer-than "${RUNNER_TEMP}/portfwd-integration-run-start"
+
+      - name: Upload core-portfwd integration reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-portfwd-integration-reports
+          path: |
+            shared/core-portfwd/build/reports/tests/
+            shared/core-portfwd/build/test-results/
           overwrite: true
           if-no-files-found: ignore
 

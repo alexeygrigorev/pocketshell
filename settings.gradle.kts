@@ -29,10 +29,9 @@ rootProject.name = "pocketshell"
 // "stable" branch hard cut. New modules (core-transport, core-hostapi, app2)
 // are uncommented here as their scaffolding tasks land.
 //
-// core-portfwd depends on core-ssh (api(project(":shared:core-ssh"))) and is
-// shelved until task P-4 rewires it onto core-transport.
-
-// include(":shared:core-portfwd")
+// Task P-4 rewired core-portfwd's transport acquisition from the deleted
+// core-ssh onto core-transport's HostConnection, so it is back in the build.
+include(":shared:core-portfwd")
 include(":shared:core-transport")
 // Task K-1: the host-CLI JSON parser/client. Pure JVM (kotlin("jvm")), the
 // first non-Android module in the tree — it must stay free of the Android SDK

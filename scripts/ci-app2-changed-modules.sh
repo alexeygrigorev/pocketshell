@@ -38,6 +38,7 @@
 # OUTPUT (stdout, and $GITHUB_OUTPUT when set)
 #   hostapi=true|false
 #   transport=true|false
+#   portfwd=true|false
 #   app2=true|false
 # plus a human-readable plan on stderr.
 
@@ -45,8 +46,13 @@ set -uo pipefail
 
 ZERO="0000000000000000000000000000000000000000"
 
-# Module directory, in the emit() order: hostapi, transport, app2.
-declare -a MODULE_DIRS=("shared/core-hostapi" "shared/core-transport" "app2")
+# Module directory, in the emit() order: hostapi, transport, portfwd, app2.
+declare -a MODULE_DIRS=(
+  "shared/core-hostapi"
+  "shared/core-transport"
+  "shared/core-portfwd"
+  "app2"
+)
 
 # A change to any of these selects every lane.
 declare -a SHARED_PREFIXES=(
@@ -63,16 +69,16 @@ declare -a SHARED_PREFIXES=(
 )
 
 emit() {
-  # emit <hostapi> <transport> <app2>
+  # emit <hostapi> <transport> <portfwd> <app2>
   local out
-  out="$(printf 'hostapi=%s\ntransport=%s\napp2=%s\n' "$1" "$2" "$3")"
+  out="$(printf 'hostapi=%s\ntransport=%s\nportfwd=%s\napp2=%s\n' "$1" "$2" "$3" "$4")"
   printf '%s\n' "$out"
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     printf '%s\n' "$out" >>"$GITHUB_OUTPUT"
   fi
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf 'app2 lane selection: hostapi=%s transport=%s app2=%s\n' "$1" "$2" "$3" \
-      >>"$GITHUB_STEP_SUMMARY"
+    printf 'app2 lane selection: hostapi=%s transport=%s portfwd=%s app2=%s\n' \
+      "$1" "$2" "$3" "$4" >>"$GITHUB_STEP_SUMMARY"
   fi
 }
 
@@ -82,19 +88,19 @@ plan() {
 
   if [[ -z "$base" || "$base" == "$ZERO" ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
     echo "app2 lane selection: base '${base}' is unusable -> selecting ALL lanes (fail-open)" >&2
-    emit true true true
+    emit true true true true
     return 0
   fi
 
   if ! changed="$(git diff --name-only "$base" HEAD 2>/dev/null)"; then
     echo "app2 lane selection: git diff against '${base}' failed -> selecting ALL lanes (fail-open)" >&2
-    emit true true true
+    emit true true true true
     return 0
   fi
 
   if [[ -z "$changed" ]]; then
     echo "app2 lane selection: empty diff against '${base}' -> selecting ALL lanes (fail-open)" >&2
-    emit true true true
+    emit true true true true
     return 0
   fi
 
@@ -106,36 +112,43 @@ plan() {
     for prefix in "${SHARED_PREFIXES[@]}"; do
       if [[ "$path" == "$prefix" || "$path" == "$prefix"* ]]; then
         echo "app2 lane selection: shared path '${path}' changed -> selecting ALL lanes" >&2
-        emit true true true
+        emit true true true true
         return 0
       fi
     done
   done <<<"$changed"
 
-  local -a hit=(false false false)
+  local -a hit=(false false false false)
   local i
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
-    for i in 0 1 2; do
+    for i in 0 1 2 3; do
       if [[ "$path" == "${MODULE_DIRS[i]}/"* ]]; then
         hit[i]=true
       fi
     done
   done <<<"$changed"
 
-  # DEPENDENCY EDGE (task M-3): app2 now consumes :shared:core-transport — the
-  # connect package implements its TrustStore / AuthSecretResolver seams and
-  # holds its HostConnection — so a transport-only change can break app2's
-  # compilation or its registry tests while touching no app2 path. Selecting
-  # app2 whenever transport is selected keeps the "never under-select" property
-  # true for that edge. app2 does NOT depend on core-hostapi yet; add the same
-  # edge when it does.
+  # DEPENDENCY EDGES. A change to a dependency can break a dependant while
+  # touching none of its paths, so each edge is walked here to keep the "never
+  # under-select" property true:
+  #   core-transport -> core-portfwd (task P-4: the tunnel engine runs over
+  #     HostConnection and re-exports its types as `api`)
+  #   core-transport -> app2         (task M-3: the connect package implements
+  #     its TrustStore / AuthSecretResolver seams)
+  #   core-portfwd   -> app2         (task P-4: the ports package drives the
+  #     forwarder and supervisor directly)
+  # app2 does NOT depend on core-hostapi yet; add the same edge when it does.
   if [[ "${hit[1]}" == "true" ]]; then
     hit[2]=true
+    hit[3]=true
+  fi
+  if [[ "${hit[2]}" == "true" ]]; then
+    hit[3]=true
   fi
 
-  echo "app2 lane selection: base=${base} hostapi=${hit[0]} transport=${hit[1]} app2=${hit[2]}" >&2
-  emit "${hit[0]}" "${hit[1]}" "${hit[2]}"
+  echo "app2 lane selection: base=${base} hostapi=${hit[0]} transport=${hit[1]} portfwd=${hit[2]} app2=${hit[3]}" >&2
+  emit "${hit[0]}" "${hit[1]}" "${hit[2]}" "${hit[3]}"
 }
 
 self_test() {
@@ -146,8 +159,8 @@ self_test() {
   git -C "$tmp" init -q
   git -C "$tmp" config user.email t@example.com
   git -C "$tmp" config user.name t
-  mkdir -p "$tmp/shared/core-hostapi" "$tmp/shared/core-transport" "$tmp/app2" \
-    "$tmp/gradle" "$tmp/shared/ui-kit"
+  mkdir -p "$tmp/shared/core-hostapi" "$tmp/shared/core-transport" \
+    "$tmp/shared/core-portfwd" "$tmp/app2" "$tmp/gradle" "$tmp/shared/ui-kit"
   echo seed >"$tmp/seed.txt"
   git -C "$tmp" add -A
   git -C "$tmp" commit -qm seed
@@ -155,17 +168,17 @@ self_test() {
   base="$(git -C "$tmp" rev-parse HEAD)"
 
   check() {
-    # check <label> <expected-hostapi> <expected-transport> <expected-app2>
-    local label="$1" eh="$2" et="$3" ea="$4"
+    # check <label> <hostapi> <transport> <portfwd> <app2>
+    local label="$1" eh="$2" et="$3" ep="$4" ea="$5"
     checks=$((checks + 1))
     out="$(cd "$tmp" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY bash "$SELF" --base "$base" 2>/dev/null)"
     local want
-    want="$(printf 'hostapi=%s\ntransport=%s\napp2=%s' "$eh" "$et" "$ea")"
+    want="$(printf 'hostapi=%s\ntransport=%s\nportfwd=%s\napp2=%s' "$eh" "$et" "$ep" "$ea")"
     if [[ "$out" != "$want" ]]; then
       echo "FAIL [$label]: expected '$want', got '$out'" >&2
       status=1
     else
-      echo "ok   [$label] -> hostapi=$eh transport=$et app2=$ea"
+      echo "ok   [$label] -> hostapi=$eh transport=$et portfwd=$ep app2=$ea"
     fi
   }
 
@@ -178,37 +191,42 @@ self_test() {
   }
 
   commit_file "shared/core-hostapi/src/main/A.kt"
-  check "hostapi only" true false false
+  check "hostapi only" true false false false
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/core-transport/src/main/B.kt"
-  # app2 rides along: it depends on core-transport (task M-3).
-  check "transport only pulls app2 in" false true true
+  # portfwd and app2 ride along: both depend on core-transport (M-3 / P-4).
+  check "transport pulls portfwd and app2 in" false true true true
+
+  git -C "$tmp" reset -q --hard "$base"
+  commit_file "shared/core-portfwd/src/main/P.kt"
+  # app2 rides along: the ports package drives the forwarder directly (P-4).
+  check "portfwd pulls app2 in" false false true true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "app2/src/main/C.kt"
-  check "app2 only" false false true
+  check "app2 only" false false false true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/ui-kit/src/main/D.kt"
-  check "unrelated module" false false false
+  check "unrelated module" false false false false
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "gradle/libs.versions.toml"
-  check "version catalog (shared)" true true true
+  check "version catalog (shared)" true true true true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "tests/docker/Dockerfile.ssh"
-  check "docker fixture (shared)" true true true
+  check "docker fixture (shared)" true true true true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file ".github/workflows/app2.yml"
-  check "the workflow itself (shared)" true true true
+  check "the workflow itself (shared)" true true true true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/core-hostapi/x.kt"
   commit_file "app2/y.kt"
-  check "two modules" true false true
+  check "two modules" true false false true
 
   # A path containing a space is ONE path, not several words — the reason the
   # matcher reads the diff line by line instead of word-splitting it. This case
@@ -217,12 +235,12 @@ self_test() {
   # file that merely has "app2" in its directory name.
   git -C "$tmp" reset -q --hard "$base"
   commit_file "docs/notes on app2/summary.md"
-  check "space in path is not two paths" false false false
+  check "space in path is not two paths" false false false false
 
   # Fail-open: an unusable base selects everything.
   checks=$((checks + 3))
   out="$(cd "$tmp" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY bash "$SELF" --base "$ZERO" 2>/dev/null)"
-  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\napp2=true')" ]]; then
+  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\nportfwd=true\napp2=true')" ]]; then
     echo "FAIL [zero base fails open]: got '$out'" >&2
     status=1
   else
@@ -230,7 +248,7 @@ self_test() {
   fi
 
   out="$(cd "$tmp" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY bash "$SELF" --base "" 2>/dev/null)"
-  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\napp2=true')" ]]; then
+  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\nportfwd=true\napp2=true')" ]]; then
     echo "FAIL [empty base fails open]: got '$out'" >&2
     status=1
   else
@@ -238,15 +256,15 @@ self_test() {
   fi
 
   out="$(cd "$tmp" && env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY bash "$SELF" --base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 2>/dev/null)"
-  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\napp2=true')" ]]; then
+  if [[ "$out" != "$(printf 'hostapi=true\ntransport=true\nportfwd=true\napp2=true')" ]]; then
     echo "FAIL [unknown base fails open]: got '$out'" >&2
     status=1
   else
     echo "ok   [unknown base fails open]"
   fi
 
-  if [[ $checks -ne 12 ]]; then
-    echo "FAIL: expected 12 checks, ran $checks" >&2
+  if [[ $checks -ne 13 ]]; then
+    echo "FAIL: expected 13 checks, ran $checks" >&2
     status=1
   fi
 

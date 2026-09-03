@@ -32,6 +32,9 @@ import java.io.IOException
  * - [openPty] hands out the next script queued by [enqueuePty] (or
  *   [defaultPtyScript] when the queue is empty); a scripted channel replays its
  *   frames and then completes both `output` and `exit`.
+ * - [openPortForward] answers through [portForwardOpener], which defaults to a
+ *   socket-less [FakePortForward]; every request is recorded whether the opener
+ *   succeeded or threw.
  * - Once the state is [TransportState.Lost] or [TransportState.Closed], the
  *   connection is spent: [exec], [openPty] and [sftp] throw [IOException], the
  *   same way a real dead transport does.
@@ -53,6 +56,9 @@ class FakeHostConnection(
 
     /** One recorded [openPty] invocation. */
     data class PtyRequest(val command: String, val cols: Int, val rows: Int, val term: String)
+
+    /** One recorded [openPortForward] invocation. */
+    data class PortForwardRequest(val remoteHost: String, val remotePort: Int, val localPort: Int)
 
     /** What a [FakePtyChannel] replays once opened. */
     data class PtyScript(
@@ -79,6 +85,8 @@ class FakeHostConnection(
     private val queuedPtyScripts = ArrayDeque<PtyScript>()
     private val recordedPtyRequests = mutableListOf<PtyRequest>()
     private val openedPtyChannels = mutableListOf<FakePtyChannel>()
+    private val recordedPortForwardRequests = mutableListOf<PortForwardRequest>()
+    private val openedPortForwardHandles = mutableListOf<FakePortForward>()
     private val recordedGraceHandles = mutableListOf<FakeGraceHandle>()
     private var pendingGraceHandle: FakeGraceHandle? = null
     private var sftpChannel: FakeSftpChannel? = null
@@ -97,6 +105,20 @@ class FakeHostConnection(
         exitCode = null,
         completeAfterFrames = false,
     )
+
+    /**
+     * How [openPortForward] answers. The default hands out a [FakePortForward]
+     * that binds nothing (no real socket, so a test can "forward" any port,
+     * including privileged ones, on any machine).
+     *
+     * Replace it to script a failure (`throw`), a slow/blocking open, or a
+     * forward whose close blocks — the three shapes the forwarding engine's
+     * teardown paths care about. It is a plain lambda rather than a bag of
+     * one-off knobs so a test expresses exactly the misbehaviour it needs.
+     */
+    var portForwardOpener: (PortForwardRequest) -> PortForward = { request ->
+        FakePortForward(request)
+    }
 
     // ---------------------------------------------------------------- scripting
 
@@ -162,6 +184,14 @@ class FakeHostConnection(
 
     val openedPtys: List<FakePtyChannel> get() = synchronized(lock) { openedPtyChannels.toList() }
 
+    /** Every [openPortForward] call, in order — including ones the opener failed. */
+    val portForwardRequests: List<PortForwardRequest>
+        get() = synchronized(lock) { recordedPortForwardRequests.toList() }
+
+    /** The [FakePortForward]s handed out by the default opener, in order. */
+    val openedPortForwards: List<FakePortForward>
+        get() = synchronized(lock) { openedPortForwardHandles.toList() }
+
     val graceHandles: List<FakeGraceHandle>
         get() = synchronized(lock) { recordedGraceHandles.toList() }
 
@@ -206,6 +236,27 @@ class FakeHostConnection(
         sftpChannel ?: FakeSftpChannel(nowMs).also { sftpChannel = it }
     }
 
+    override suspend fun openPortForward(
+        remoteHost: String,
+        remotePort: Int,
+        localPort: Int,
+    ): PortForward {
+        val request = synchronized(lock) {
+            requireUsable("openPortForward")
+            PortForwardRequest(remoteHost, remotePort, localPort).also {
+                recordedPortForwardRequests += it
+            }
+        }
+        // The opener runs OUTSIDE the lock on purpose: a test scripting a
+        // blocking/slow open (to exercise the engine's concurrent-open handling)
+        // must not freeze every other call on this fake while it is parked.
+        val forward = portForwardOpener(request)
+        if (forward is FakePortForward) {
+            synchronized(lock) { openedPortForwardHandles += forward }
+        }
+        return forward
+    }
+
     /** The in-memory SFTP channel, creating it if the code under test has not asked yet. */
     fun sftpFixture(): FakeSftpChannel = synchronized(lock) {
         sftpChannel ?: FakeSftpChannel(nowMs).also { sftpChannel = it }
@@ -236,7 +287,11 @@ class FakeHostConnection(
             pendingGraceHandle = null
             openedPtyChannels.toList()
         }
+        val forwards = synchronized(lock) { openedPortForwardHandles.toList() }
         channels.forEach { it.close() }
+        // A real transport takes its forwards down with it; a fake that left them
+        // "active" would let a test assert a forward survived a dead connection.
+        forwards.forEach { it.close() }
         _state.value = TransportState.Closed
     }
 
@@ -343,6 +398,49 @@ class FakePtyChannel internal constructor(
 
     override suspend fun close() {
         if (!ended) finish(null)
+    }
+}
+
+/**
+ * Port forward handed out by [FakeHostConnection]'s default opener.
+ *
+ * Binds no socket, so a test can "forward" any local port on any machine
+ * (including one already in use, or a privileged one) without touching the
+ * network. Byte counters are writable so a test can simulate traffic and assert
+ * the throughput derivation above it.
+ */
+class FakePortForward(val request: FakeHostConnection.PortForwardRequest) : PortForward {
+
+    override val localPort: Int = request.localPort
+    override val remoteHost: String = request.remoteHost
+    override val remotePort: Int = request.remotePort
+
+    @Volatile
+    private var open = true
+
+    @Volatile
+    override var bytesForwarded: Long = 0
+
+    @Volatile
+    override var bytesReceived: Long = 0
+
+    /** Number of times [close] was called — one is correct, zero is a leak. */
+    @Volatile
+    var closeCount: Int = 0
+        private set
+
+    override val isActive: Boolean get() = open
+
+    /** Simulates traffic in both directions. */
+    fun pump(out: Long = 0, back: Long = 0): FakePortForward {
+        bytesForwarded += out
+        bytesReceived += back
+        return this
+    }
+
+    override suspend fun close() {
+        closeCount += 1
+        open = false
     }
 }
 

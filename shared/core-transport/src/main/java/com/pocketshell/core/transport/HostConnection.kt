@@ -35,6 +35,27 @@ interface HostConnection {
     suspend fun sftp(): SftpChannel
 
     /**
+     * Opens a local-to-remote port forward: traffic to `127.0.0.1:[localPort]`
+     * on the DEVICE is tunnelled over this connection to
+     * `[remoteHost]:[remotePort]`, resolved from the SSH server's side.
+     * Equivalent to `ssh -L <localPort>:<remoteHost>:<remotePort>`.
+     *
+     * Throws if [localPort] cannot be bound locally, or if the connection is
+     * already spent. Every accepted local client gets its own `direct-tcpip`
+     * channel; the returned handle owns them all until it is closed.
+     *
+     * D21 carve-out: forwarding dials its OWN connection rather than sharing the
+     * interactive one, because a forward must outlive the terminal connection's
+     * grace close. That policy lives in the app layer; this method just opens the
+     * forward on whichever connection it is called on.
+     */
+    suspend fun openPortForward(
+        remoteHost: String,
+        remotePort: Int,
+        localPort: Int,
+    ): PortForward
+
+    /**
      * Arms a delayed [close] that fires [graceMs] from now unless the returned
      * handle is cancelled first (D21: the app holds no background work beyond
      * this one bounded timer). A second call replaces the pending close.

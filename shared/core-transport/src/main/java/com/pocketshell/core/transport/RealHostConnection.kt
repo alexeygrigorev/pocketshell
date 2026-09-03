@@ -177,6 +177,33 @@ internal class RealHostConnection(
     }
 
     /**
+     * P-4: a local-to-remote forward over this connection. The listener bind and
+     * the accept loop live in [PortForwardImpl]; this class only supplies the
+     * client-backed channel opener and the dispatcher its close runs on.
+     *
+     * Binding the local [ServerSocket] happens on [ioDispatcher] because it is a
+     * blocking syscall that fails (address in use, permission) rather than a
+     * pure allocation — the caller must see that failure as a thrown
+     * [java.io.IOException] from this suspend call, not from a background thread.
+     */
+    override suspend fun openPortForward(
+        remoteHost: String,
+        remotePort: Int,
+        localPort: Int,
+    ): PortForward {
+        requireUsable("openPortForward")
+        return withContext(ioDispatcher) {
+            PortForwardImpl(
+                channels = PortForwardImpl.sshjOpener(client),
+                remoteHost = remoteHost,
+                remotePort = remotePort,
+                localPort = localPort,
+                ioDispatcher = ioDispatcher,
+            )
+        }
+    }
+
+    /**
      * T-5: owns the single pending delayed close (D21). All of its logic lives
      * in [GraceCloseScheduler]; it runs on this connection's [ioDispatcher], so
      * a test that injects a virtual-time dispatcher controls the grace timer.

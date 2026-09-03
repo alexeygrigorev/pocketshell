@@ -1,9 +1,8 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.ExecResult
-import com.pocketshell.core.ssh.SshPortForward
-import com.pocketshell.core.ssh.SshSession
-import kotlinx.coroutines.Job
+import com.pocketshell.core.transport.ExecResult
+import com.pocketshell.core.transport.FakeHostConnection
+import com.pocketshell.core.transport.HostConnection
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -13,8 +12,8 @@ import org.junit.Test
  * Pure unit tests for the regex/parsing layer of [PortScanner], plus the
  * fallback-chain wiring (primary → fallback → last resort).
  *
- * No network. No Docker. We feed [PortScanner.scan] a hand-written
- * [SshSession] that returns canned [ExecResult]s per command.
+ * No network. No Docker. We feed [PortScanner.scan] a [FakeHostConnection]
+ * scripted to answer each strategy's command with a canned [ExecResult].
  */
 class PortScannerTest {
 
@@ -91,72 +90,56 @@ class PortScannerTest {
 
     @Test
     fun `scan returns empty list when every strategy fails`() = runTest {
-        val session = StubSession { _ -> ExecResult("", "", exitCode = 127) }
-        assertEquals(emptyList<RemotePort>(), PortScanner.scan(session))
+        val host = stubHost { _ -> exec(exitCode = 127) }
+        assertEquals(emptyList<RemotePort>(), PortScanner.scan(host))
     }
 
     @Test
     fun `scan uses primary ss output when available`() = runTest {
-        val session = StubSession { cmd ->
+        val host = stubHost { cmd ->
             when {
                 cmd.startsWith("ss -tlnp") ->
-                    ExecResult("0.0.0.0:8080 users:((\"app\",pid=1,fd=4))\n", "", 0)
+                    exec("0.0.0.0:8080 users:((\"app\",pid=1,fd=4))\n")
                 else -> error("primary strategy should have won: cmd=$cmd")
             }
         }
-        assertEquals(listOf(RemotePort(8080, "app")), PortScanner.scan(session))
+        assertEquals(listOf(RemotePort(8080, "app")), PortScanner.scan(host))
     }
 
     @Test
     fun `scan falls through to netstat when ss returns nothing`() = runTest {
-        val session = StubSession { cmd ->
+        val host = stubHost { cmd ->
             when {
-                cmd.startsWith("ss -tlnp") -> ExecResult("", "", 0)
-                cmd.startsWith("netstat -tlnp") -> ExecResult("0.0.0.0:22 1/sshd\n", "", 0)
+                cmd.startsWith("ss -tlnp") -> exec("")
+                cmd.startsWith("netstat -tlnp") -> exec("0.0.0.0:22 1/sshd\n")
                 else -> error("last resort should not have run: cmd=$cmd")
             }
         }
-        assertEquals(listOf(RemotePort(22, "sshd")), PortScanner.scan(session))
+        assertEquals(listOf(RemotePort(22, "sshd")), PortScanner.scan(host))
     }
 
     @Test
     fun `scan falls through to last-resort port-only output`() = runTest {
-        val session = StubSession { cmd ->
+        val host = stubHost { cmd ->
             when {
-                cmd.startsWith("ss -tlnp") -> ExecResult("", "", 0)
-                cmd.startsWith("netstat -tlnp") -> ExecResult("", "", 0)
-                cmd.startsWith("ss -tln") -> ExecResult("127.0.0.1:9000\n", "", 0)
+                cmd.startsWith("ss -tlnp") -> exec("")
+                cmd.startsWith("netstat -tlnp") -> exec("")
+                cmd.startsWith("ss -tln") -> exec("127.0.0.1:9000\n")
                 else -> error("unexpected command: $cmd")
             }
         }
-        assertTrue(PortScanner.scan(session).contains(RemotePort(9000, "")))
+        assertTrue(PortScanner.scan(host).contains(RemotePort(9000, "")))
     }
 
-    /** Minimal [SshSession] that resolves [exec] from a function and stubs everything else. */
-    private class StubSession(
-        private val onExec: (String) -> ExecResult,
-    ) : SshSession {
-        override val isConnected: Boolean = true
-        override suspend fun exec(command: String): ExecResult = onExec(command)
-        override fun tail(path: String, onLine: (String) -> Unit): Job =
-            error("tail not used by PortScanner tests")
-        override fun openLocalPortForward(
-            remoteHost: String,
-            remotePort: Int,
-            localPort: Int,
-        ): SshPortForward = error("openLocalPortForward not used by PortScanner tests")
-        override fun startShell(): com.pocketshell.core.ssh.SshShell =
-            error("startShell not used by PortScanner tests")
-        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
-            error("uploadFile not used in this test")
+    /**
+     * A [FakeHostConnection] whose every exec is answered by [onExec], so a test
+     * scripts the fallback chain by command prefix and nothing else about the
+     * transport has to be stubbed.
+     */
+    private fun stubHost(onExec: (String) -> ExecResult): HostConnection =
+        FakeHostConnection().onExecMatching("any command", match = { true }) { onExec(it) }
 
-        override suspend fun uploadStream(
-            input: java.io.InputStream,
-            length: Long,
-            name: String,
-            remotePath: String,
-        ): String = error("uploadStream not used in this test")
-
-        override fun close() = Unit
-    }
+    /** A finished command: the scanner only ever reads stdout and the exit code. */
+    private fun exec(stdout: String = "", exitCode: Int = 0): ExecResult =
+        ExecResult(exitCode = exitCode, stdout = stdout, stderr = "", timedOut = false)
 }

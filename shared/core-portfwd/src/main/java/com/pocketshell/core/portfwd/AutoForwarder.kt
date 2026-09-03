@@ -1,7 +1,7 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.SshPortForward
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.transport.HostConnection
+import com.pocketshell.core.transport.PortForward
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -50,8 +49,8 @@ public object DefaultLocalPortAvailability : LocalPortAvailability {
  * Ported from `ssh-auto-forward-android/.../ssh/AutoForwarder.kt`. The JSch
  * Session + repository injection have been dropped:
  *
- * - SSH I/O goes through the supplied [SshSession] (which is whatever the
- *   `core-ssh` module returns from `SshConnection.connect`)
+ * - SSH I/O goes through the supplied [HostConnection] (task P-4: whatever
+ *   `core-transport`'s `HostConnectionFactory.connect` handed back)
  * - Persistence (Room-backed remappings, byte usage stats) is no longer
  *   this class's concern — port-byte stats land on each [TunnelInfo] and the
  *   caller decides what to do with them
@@ -59,7 +58,7 @@ public object DefaultLocalPortAvailability : LocalPortAvailability {
  * Lifecycle:
  *
  * ```kotlin
- * val forwarder = AutoForwarder(session, AutoForwardConfig())
+ * val forwarder = AutoForwarder(connection, AutoForwardConfig())
  * val job = forwarder.start(scope)            // begins scan loop
  * forwarder.flowOfTunnels().collect { ... }   // observe tunnels
  * forwarder.stop()                            // tear down all tunnels + cancel
@@ -75,7 +74,7 @@ public object DefaultLocalPortAvailability : LocalPortAvailability {
  * stop are no-ops.
  */
 public class AutoForwarder(
-    private val session: SshSession,
+    private val connection: HostConnection,
     private val config: AutoForwardConfig = AutoForwardConfig(),
     /**
      * Persisted remote -> local port remappings (issue #203 expanded
@@ -103,7 +102,7 @@ public class AutoForwarder(
      * the remote port is not currently listening — they represent the
      * user's *desired state*.
      *
-     * The forwarder swaps once per SSH session (the supervisor builds a
+     * The forwarder swaps once per connection (the supervisor builds a
      * fresh [AutoForwarder] after every reconnect). The user's manual
      * opt-ins are desired state that must survive that swap, so the
      * supervisor re-seeds this set on each reconnect. Captured at
@@ -145,7 +144,7 @@ public class AutoForwarder(
     // Mutable state guarded by [mutex]. All reads + writes from the scan
     // loop, public togglePort, public stop go through withLock.
     private val mutex = Mutex()
-    private val tunnels = mutableMapOf<Int, SshPortForward>()
+    private val tunnels = mutableMapOf<Int, PortForward>()
     // Seeded from [initialManualPorts] so the user's desired-state ports
     // (issue #439) are re-forwarded on a fresh forwarder after reconnect.
     private val manualPorts = initialManualPorts.toMutableSet()
@@ -242,18 +241,17 @@ public class AutoForwarder(
      * either (the others still close). Fire-and-forget on a detached scope:
      * [stop] is terminal + single-shot, so this batch launches exactly once.
      */
-    private fun closeForwardsOffCallerThread(tunnelsToClose: List<SshPortForward>) {
+    private fun closeForwardsOffCallerThread(tunnelsToClose: List<PortForward>) {
         if (tunnelsToClose.isEmpty()) return
         CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
             tunnelsToClose.forEach { tunnel ->
                 // One child coroutine per forward so a wedged close can't
-                // delay closing its siblings.
+                // delay closing its siblings. [PortForward.close] already runs
+                // its blocking teardown interruptibly on the transport's IO
+                // dispatcher, so the timeout here actually interrupts a wedged
+                // socket rather than merely abandoning the wait.
                 launch {
-                    runCatching {
-                        withTimeoutOrNull(closeTimeoutMs) {
-                            runInterruptible { tunnel.close() }
-                        }
-                    }
+                    runCatching { withTimeoutOrNull(closeTimeoutMs) { tunnel.close() } }
                 }
             }
         }
@@ -333,10 +331,10 @@ public class AutoForwarder(
     }
 
     private suspend fun scanAndForward() {
-        val remotePorts = PortScanner.scan(session)
+        val remotePorts = PortScanner.scan(connection)
         val remotePortSet = remotePorts.map { it.port }.toSet()
 
-        val tunnelsToClose = mutableListOf<SshPortForward>()
+        val tunnelsToClose = mutableListOf<PortForward>()
         val portsToOpen = mutex.withLock {
             if (stopped) return
             // Evict TTL'd deny-list entries up front so the rest of the
@@ -435,7 +433,7 @@ public class AutoForwarder(
             // Forward 127.0.0.1:<remotePort> on the remote's side — the
             // standard "service bound to localhost on the dev box" case.
             // Matches the legacy ssh-auto-forward-android behaviour.
-            session.openLocalPortForward(
+            connection.openPortForward(
                 remoteHost = "127.0.0.1",
                 remotePort = remotePort,
                 localPort = localPort,
@@ -466,7 +464,7 @@ public class AutoForwarder(
         }
     }
 
-    private fun detachTunnelLocked(remotePort: Int): SshPortForward? {
+    private fun detachTunnelLocked(remotePort: Int): PortForward? {
         val tunnel = tunnels.remove(remotePort) ?: return null
         localPortMap.remove(remotePort)
         priorTotalBytes.remove(remotePort)

@@ -1,0 +1,113 @@
+package com.pocketshell.next.nav
+
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
+/**
+ * The app2 navigation graph, as a sealed class of destinations.
+ *
+ * Style follows the old client's `AppDestination` (one sealed hierarchy that
+ * enumerates every screen, documented per destination) — but not its content or
+ * its mechanism. The old hierarchy carried fully-resolved SSH credentials on
+ * ~20 destinations and was driven by a hand-rolled
+ * `remember { mutableStateOf(...) }` navigator, which meant deep links and
+ * saved-state restoration were app code. app2 hosts a real
+ * `androidx.navigation` `NavHost`, so each destination here is a *route
+ * template* plus a typed builder for it:
+ *
+ * - [pattern] is the string handed to `composable(route = ...)`.
+ * - `route(...)` builds a concrete, encoded instance to `navigate(...)` to.
+ * - Arguments are ids and names only. Nothing here carries a connection, a key
+ *   path, or a passphrase; a screen resolves those from `hostId` through the
+ *   connections registry (task M-3). That is the deliberate break from the old
+ *   graph, where a credential-carrying destination was the norm.
+ *
+ * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage.
+ * A new screen is a new object here, never an ad-hoc string at a call site.
+ */
+sealed class Destination(val pattern: String) {
+
+    /** Landing destination — the saved-host list. */
+    data object Hosts : Destination("hosts") {
+        fun route(): String = pattern
+    }
+
+    /** App settings. */
+    data object Settings : Destination("settings") {
+        fun route(): String = pattern
+    }
+
+    /** Provider quota / usage panel. */
+    data object Usage : Destination("usage") {
+        fun route(): String = pattern
+    }
+
+    /** Workspace + session tree for one host. */
+    data object Tree : Destination("tree/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "tree/$hostId"
+    }
+
+    /**
+     * A live session on [ARG_HOST_ID], identified by its server-side
+     * [ARG_SESSION_NAME] (tmux session name, or aplexer `workspace:tag`).
+     * The name is the identity the host CLI speaks — the client never
+     * carries sockets or UUIDs (plan §B.0).
+     */
+    data object Session : Destination("session/{$ARG_HOST_ID}/{$ARG_SESSION_NAME}") {
+        fun route(hostId: Long, sessionName: String): String =
+            "session/$hostId/${encodeSegment(sessionName)}"
+    }
+
+    /**
+     * Remote file browser/viewer for [ARG_HOST_ID].
+     *
+     * [ARG_PATH] is optional: absent means "open at the host's default
+     * location", present means "open this absolute remote path". It is a query
+     * argument rather than a path segment precisely because a filesystem path
+     * contains `/`; percent-encoding it into a segment would work but reads
+     * badly in logs and back-stack dumps.
+     */
+    data object Files : Destination("files/{$ARG_HOST_ID}?$ARG_PATH={$ARG_PATH}") {
+        fun route(hostId: Long, path: String? = null): String =
+            if (path == null) "files/$hostId" else "files/$hostId?$ARG_PATH=${encodeSegment(path)}"
+    }
+
+    companion object {
+        const val ARG_HOST_ID: String = "hostId"
+        const val ARG_SESSION_NAME: String = "sessionName"
+        const val ARG_PATH: String = "path"
+
+        /**
+         * Every destination, in graph order.
+         *
+         * Computed on each read, NOT stored in a `val` initializer. A companion
+         * property is compiled to a static field on [Destination], so an eager
+         * `val all = listOf(Hosts, ...)` runs inside `Destination.<clinit>` —
+         * and `Destination.<clinit>` is itself triggered *from* a nested
+         * object's initializer (the objects extend [Destination]). Whichever
+         * destination is touched first therefore sees its own `INSTANCE` still
+         * null while the list is being built, and `all` silently contains a
+         * null forever after. The unit test caught exactly that; a getter has
+         * no such window.
+         */
+        val all: List<Destination>
+            get() = listOf(Hosts, Tree, Session, Files, Settings, Usage)
+
+        /** The graph's start destination. Getter, for the same reason as [all]. */
+        val start: Destination
+            get() = Hosts
+
+        /**
+         * Percent-encodes one route component.
+         *
+         * `URLEncoder` is form encoding, which spells a space `+`; navigation
+         * decodes route components with URI rules, where `+` stays a literal
+         * plus. Rewriting `+` to `%20` makes the two sides agree — a session
+         * named `my project` must arrive at the screen with its space intact.
+         * Kept off `android.net.Uri` on purpose so route construction is
+         * testable on the plain JVM.
+         */
+        internal fun encodeSegment(value: String): String =
+            URLEncoder.encode(value, StandardCharsets.UTF_8.name()).replace("+", "%20")
+    }
+}

@@ -43,3 +43,7 @@ include(":shared:ui-kit")
 // Test-only support module (issue #1048): the ONE audited shared de-flake
 // settle-pump, consumed via `testImplementation` only — never ships in the APK.
 include(":shared:test-support")
+
+// The rewrite's application module (task M-1), applicationId
+// `com.pocketshell.next` so it installs side by side with the old client.
+include(":app2")

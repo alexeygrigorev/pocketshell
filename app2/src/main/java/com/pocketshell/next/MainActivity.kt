@@ -4,8 +4,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -20,6 +23,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -44,7 +48,16 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppNavHost()
+                    // The window draws edge to edge (targetSdk 35 makes that
+                    // non-optional), so content must be inset out from under
+                    // the status/navigation bars or the first row of any
+                    // screen renders under the clock — which is exactly what
+                    // the placeholder scaffold hid by centring its one label.
+                    // IME insets stay a screen concern (task U-5 owns the
+                    // terminal's keyboard behaviour); this is bars only.
+                    AppNavHost(
+                        modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
+                    )
                 }
             }
         }
@@ -57,11 +70,21 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
 /**
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
+ *
+ * [hostsScreen] is a seam, not a feature flag: the real host list resolves its
+ * ViewModel through `hiltViewModel()`, which needs a Hilt-managed Activity, so
+ * a plain Robolectric `createComposeRule()` composition could not host it. The
+ * parameter lets a test supply the same screen with an explicitly-constructed
+ * ViewModel (over an in-memory database) and still exercise the real
+ * navigation edge — the production default is the real screen.
  */
 @Composable
 fun AppNavHost(
     navController: NavHostController = rememberNavController(),
     modifier: Modifier = Modifier,
+    hostsScreen: @Composable (onOpenHost: (Long) -> Unit) -> Unit = { onOpenHost ->
+        HostListRoute(onOpenHost = onOpenHost)
+    },
 ) {
     NavHost(
         navController = navController,
@@ -69,7 +92,7 @@ fun AppNavHost(
         modifier = modifier,
     ) {
         composable(Destination.Hosts.pattern) {
-            RoutePlaceholder("Hosts")
+            hostsScreen { hostId -> navController.navigate(Destination.Tree.route(hostId)) }
         }
         composable(
             route = Destination.Tree.pattern,

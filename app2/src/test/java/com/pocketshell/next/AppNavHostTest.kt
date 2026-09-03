@@ -1,5 +1,6 @@
 package com.pocketshell.next
 
+import androidx.compose.material3.Text
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.navigation.NavHostController
@@ -28,7 +29,7 @@ class AppNavHostTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `start destination renders the host list`() {
+    fun `start destination renders the hosts route`() {
         setContentWithNav()
 
         composeRule.onNodeWithText("Hosts").assertExists()
@@ -75,7 +76,17 @@ class AppNavHostTest {
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
-            AppNavHost(navController = controller)
+            AppNavHost(
+                navController = controller,
+                // The real host list resolves its ViewModel through
+                // `hiltViewModel()`, which needs a Hilt-managed Activity this
+                // plain compose rule does not provide. This suite is about the
+                // graph — route patterns and argument encoding — so the hosts
+                // route gets a stand-in label; the real screen inside the real
+                // graph is covered by
+                // `com.pocketshell.next.hosts.HostListNavigationTest`.
+                hostsScreen = { Text("Hosts") },
+            )
         }
         composeRule.waitForIdle()
         return controller

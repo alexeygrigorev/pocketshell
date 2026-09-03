@@ -127,6 +127,10 @@ dependencies {
 
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
+    // `hiltViewModel()` inside a `composable {}` destination (task U-1). Also
+    // supplies lifecycle-viewmodel-compose, so screens never construct a
+    // ViewModel by hand.
+    implementation(libs.androidx.hilt.navigation.compose)
 
     // Shared modules app2 builds on (plan §A.2). core-hostapi is intentionally
     // still absent — nothing in app2 speaks the host CLI yet (that arrives with
@@ -145,6 +149,9 @@ dependencies {
     // does not survive encoding, fails in seconds without an emulator.
     testImplementation(libs.junit)
     testImplementation(platform(libs.compose.bom))
+    // The host-list ViewModel is exercised against a real in-memory Room
+    // database (task U-1) — `runTest` + a deterministic dispatcher, no mocks.
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)

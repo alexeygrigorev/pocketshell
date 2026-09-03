@@ -149,8 +149,15 @@ class ConnectGateNavigationTest {
                 // Activity to resolve `hiltViewModel()` against. Everything
                 // else — the gate, the sheet, the registry, the trust store,
                 // the screens, the graph — is production code.
-                hostsScreen = { onOpenHost ->
-                    HostListRoute(onOpenHost = onOpenHost, viewModel = hostListViewModel)
+                hostsScreen = { actions ->
+                    HostListRoute(
+                        onOpenHost = actions.onOpenHost,
+                        onAddHost = actions.onAddHost,
+                        onEditHost = actions.onEditHost,
+                        onShareHost = actions.onShareHost,
+                        onScanQr = actions.onScanQr,
+                        viewModel = hostListViewModel,
+                    )
                 },
                 connectViewModel = { stack.viewModel },
                 // Same reason: the U-3 session tree resolves its ViewModel

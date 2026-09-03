@@ -18,6 +18,16 @@
         notification visible on Android 13+; without the FOREGROUND_SERVICE pair
         the service cannot start at all.
     -->
+    <!--
+        Task P-6: the QR host importer points the camera at a code rendered on
+        a computer (or another phone) to add a host without typing it. Declared
+        optional as a feature so a device with no camera can still install —
+        the scanner falls back to picking a QR image from storage.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />

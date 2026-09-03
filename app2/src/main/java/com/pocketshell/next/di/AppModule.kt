@@ -18,11 +18,14 @@ import com.pocketshell.next.connect.RoomAuthSecretResolver
 import com.pocketshell.next.connect.RoomTrustStore
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
+import com.pocketshell.next.hosts.HostImporter
+import com.pocketshell.next.hosts.SshKeyStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineDispatcher
@@ -87,6 +90,36 @@ object AppModule {
     @Provides
     @IoDispatcher
     fun provideIoDispatcher(): CoroutineDispatcher = Dispatchers.IO
+
+    // -------------------------------------------------------------------------
+    // Host management (task P-6): the key store the add/edit form picks from,
+    // and the QR importer that writes a scanned host.
+
+    /**
+     * Private keys live in `filesDir/ssh-keys`, the same path the shipping
+     * client used — so the X-3 `applicationId` rename finds existing keys where
+     * `ssh_keys.privateKeyPath` already says they are, instead of pointing at a
+     * directory that was never populated.
+     *
+     * The directory (not a `Context`) is what [SshKeyStore] takes, which is what
+     * keeps that class Android-free and testable against a temp folder.
+     */
+    @Provides
+    @Singleton
+    fun provideSshKeyStore(
+        @ApplicationContext context: Context,
+        sshKeyDao: SshKeyDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): SshKeyStore = SshKeyStore(File(context.filesDir, "ssh-keys"), sshKeyDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideHostImporter(
+        hostDao: HostDao,
+        sshKeyDao: SshKeyDao,
+        keyStore: SshKeyStore,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): HostImporter = HostImporter(hostDao, sshKeyDao, keyStore, dispatcher)
 
     // -------------------------------------------------------------------------
     // The connection stack (task U-2). Four bindings, each one an interface

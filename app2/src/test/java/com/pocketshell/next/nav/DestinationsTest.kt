@@ -37,8 +37,9 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 7 = the plan's fixed six plus Ports (task P-4).
-        assertEquals(7, patterns.size)
+        // 11 = the plan's fixed six, plus Ports (task P-4), plus the four
+        // host-management routes task P-6 added.
+        assertEquals(11, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -55,6 +56,22 @@ class DestinationsTest {
             Destination.Files.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
+        assertMatchesPattern(Destination.HostQr.pattern, Destination.HostQr.route(hostId = 7))
+        assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route(hostId = 7))
+        assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route())
+    }
+
+    /**
+     * Add and Edit are the same screen, so the route is the only thing that can
+     * tell them apart. The sentinel is spelled out here because
+     * `AddEditHostViewModel` normalises anything `<= 0` back to "Add" — the two
+     * halves have to agree on which value means "no host".
+     */
+    @Test
+    fun `host form route spells add as the no-host sentinel and edit as the id`() {
+        assertEquals("host-form?hostId=-1", Destination.HostForm.route())
+        assertEquals("host-form?hostId=42", Destination.HostForm.route(hostId = 42))
+        assertEquals(-1L, Destination.NO_HOST_ID)
     }
 
     @Test

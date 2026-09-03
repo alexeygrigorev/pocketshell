@@ -26,7 +26,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
+import com.pocketshell.next.hosts.AddEditHostRoute
 import com.pocketshell.next.hosts.HostListRoute
+import com.pocketshell.next.hosts.HostQrShareRoute
+import com.pocketshell.next.hosts.QrScannerRoute
+import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
 import com.pocketshell.next.tree.SessionTreeRoute
@@ -73,28 +77,60 @@ class MainActivity : ComponentActivity() {
 const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
 
 /**
+ * Every non-dial action the host list can start. Grouped into one type because
+ * the list is the app's landing screen and now carries five of them — passing
+ * them as five positional lambdas through the [AppNavHost] seam made both the
+ * production call and every test stand-in unreadable.
+ */
+data class HostListActions(
+    val onOpenHost: (Long) -> Unit,
+    val onAddHost: () -> Unit,
+    val onEditHost: (Long) -> Unit,
+    val onShareHost: (Long) -> Unit,
+    val onScanQr: () -> Unit,
+)
+
+/**
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen], [connectViewModel], [treeScreen] and [portsScreen] are seams, not feature
- * flags: the real host list, connect gate and session tree resolve their
- * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity, so
- * a plain Robolectric `createComposeRule()` composition could not host them. The
- * parameters let a test supply the same screen / the same ViewModel built by
- * hand (over an in-memory database and a scripted connection factory) and still
- * exercise the real navigation edge — the production defaults are the real ones.
+ * The `*Screen` / `connectViewModel` parameters are seams, not feature flags:
+ * the real screens resolve their ViewModels through `hiltViewModel()`, which
+ * needs a Hilt-managed Activity, so a plain Robolectric `createComposeRule()`
+ * composition could not host them. The parameters let a test supply the same
+ * screen / the same ViewModel built by hand (over an in-memory database and a
+ * scripted connection factory) and still exercise the real navigation edge —
+ * the production defaults are the real ones.
  */
 @Composable
 fun AppNavHost(
     navController: NavHostController = rememberNavController(),
     modifier: Modifier = Modifier,
-    hostsScreen: @Composable (onOpenHost: (Long) -> Unit) -> Unit = { onOpenHost ->
-        HostListRoute(onOpenHost = onOpenHost)
+    hostsScreen: @Composable (HostListActions) -> Unit = { actions ->
+        HostListRoute(
+            onOpenHost = actions.onOpenHost,
+            onAddHost = actions.onAddHost,
+            onEditHost = actions.onEditHost,
+            onShareHost = actions.onShareHost,
+            onScanQr = actions.onScanQr,
+        )
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
     treeScreen: @Composable (hostId: Long, onOpenSession: (String) -> Unit) -> Unit =
         { _, onOpenSession -> SessionTreeRoute(onOpenSession = onOpenSession) },
     portsScreen: @Composable () -> Unit = { PortForwardRoute() },
+    hostFormScreen: @Composable (hostId: Long?, onDone: () -> Unit, onAddKey: () -> Unit) -> Unit =
+        { hostId, onDone, onAddKey ->
+            AddEditHostRoute(hostId = hostId, onDone = onDone, onAddKey = onAddKey)
+        },
+    sshKeysScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        SshKeysRoute(onBack = onBack)
+    },
+    hostQrScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        HostQrShareRoute(onBack = onBack)
+    },
+    qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
+        { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
 ) {
     NavHost(
         navController = navController,
@@ -108,8 +144,57 @@ fun AppNavHost(
             ConnectGate(
                 onConnected = { hostId -> navController.navigate(Destination.Tree.route(hostId)) },
                 viewModel = connectViewModel(),
-                content = hostsScreen,
+            ) { onOpenHost ->
+                hostsScreen(
+                    HostListActions(
+                        onOpenHost = onOpenHost,
+                        // Task P-6: the management routes are plain
+                        // navigations, deliberately NOT gated by the connect
+                        // gate — editing or sharing a host must work while the
+                        // host is unreachable, which is exactly when a user
+                        // goes looking for the form.
+                        onAddHost = { navController.navigate(Destination.HostForm.route()) },
+                        onEditHost = { hostId ->
+                            navController.navigate(Destination.HostForm.route(hostId))
+                        },
+                        onShareHost = { hostId ->
+                            navController.navigate(Destination.HostQr.route(hostId))
+                        },
+                        onScanQr = { navController.navigate(Destination.QrScan.route()) },
+                    ),
+                )
+            }
+        }
+        composable(
+            route = Destination.HostForm.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) {
+                    type = NavType.LongType
+                    defaultValue = Destination.NO_HOST_ID
+                },
+            ),
+        ) { entry ->
+            // Task P-6. The sentinel is normalised to `null` HERE, once, so the
+            // form's "am I editing?" question has a single answer derived from
+            // the route rather than a `-1` leaking into the ViewModel.
+            val raw = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: Destination.NO_HOST_ID
+            hostFormScreen(
+                raw.takeIf { it > 0L },
+                { navController.popBackStack() },
+                { navController.navigate(Destination.SshKeys.route()) },
             )
+        }
+        composable(Destination.SshKeys.pattern) {
+            sshKeysScreen { navController.popBackStack() }
+        }
+        composable(
+            route = Destination.HostQr.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) {
+            hostQrScreen { navController.popBackStack() }
+        }
+        composable(Destination.QrScan.pattern) {
+            qrScanScreen({ navController.popBackStack() }, { navController.popBackStack() })
         }
         composable(
             route = Destination.Tree.pattern,

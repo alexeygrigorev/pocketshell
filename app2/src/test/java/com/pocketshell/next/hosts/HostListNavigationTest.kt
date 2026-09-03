@@ -121,9 +121,19 @@ class HostListNavigationTest {
             controller = rememberNavController()
             AppNavHost(
                 navController = controller,
-                hostsScreen = { onOpenHost ->
-                    HostListRoute(onOpenHost = onOpenHost, viewModel = vm)
+                hostsScreen = { actions ->
+                    HostListRoute(
+                        onOpenHost = actions.onOpenHost,
+                        onAddHost = actions.onAddHost,
+                        onEditHost = actions.onEditHost,
+                        onShareHost = actions.onShareHost,
+                        onScanQr = actions.onScanQr,
+                        viewModel = vm,
+                    )
                 },
+                hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
+                qrScanScreen = { _, _ -> Text("QrScan") },
+                hostQrScreen = { Text("HostQr") },
                 connectViewModel = { stack.viewModel },
                 // The U-3 session tree resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot

@@ -71,7 +71,26 @@ class AppNavHostTest {
         assertNavigatesTo(nav, Destination.Ports.route(hostId = 7), "Ports")
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
+        assertNavigatesTo(nav, Destination.SshKeys.route(), "SshKeys")
+        assertNavigatesTo(nav, Destination.HostQr.route(hostId = 7), "HostQr")
+        assertNavigatesTo(nav, Destination.QrScan.route(), "QrScan")
         assertNavigatesTo(nav, Destination.Hosts.route(), "Hosts")
+    }
+
+    /**
+     * The add/edit form's argument is the whole point of the route: Add carries
+     * the `-1` sentinel and must arrive as `null`, Edit carries a real id and
+     * must arrive intact. A route that silently delivered the sentinel to the
+     * form would make every Add look like an edit of host -1; a route that
+     * dropped the id would make every Edit an Add. Both are the audit-F1 bug
+     * class, one navigation layer below the ViewModel.
+     */
+    @Test
+    fun `host form route distinguishes add from edit by its argument`() {
+        val nav = setContentWithNav()
+
+        assertNavigatesTo(nav, Destination.HostForm.route(), "HostForm(hostId=null)")
+        assertNavigatesTo(nav, Destination.HostForm.route(hostId = 42), "HostForm(hostId=42)")
     }
 
     /**
@@ -104,6 +123,15 @@ class AppNavHostTest {
                 // graph is covered by
                 // `com.pocketshell.next.hosts.HostListNavigationTest`.
                 hostsScreen = { Text("Hosts") },
+                // Task P-6 added four host-management routes. Their screens
+                // resolve ViewModels through `hiltViewModel()` for the same
+                // reason as the ones above, so they get stand-ins that echo the
+                // argument the route delivered — this suite pins the patterns
+                // and their argument decoding, not the screens.
+                hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
+                sshKeysScreen = { Text("SshKeys") },
+                hostQrScreen = { Text("HostQr") },
+                qrScanScreen = { _, _ -> Text("QrScan") },
                 connectViewModel = { stack.viewModel },
                 // Same rationale as `hostsScreen`: the real session tree
                 // resolves its ViewModel through `hiltViewModel()`. The

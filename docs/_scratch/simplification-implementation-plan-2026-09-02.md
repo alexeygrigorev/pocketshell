@@ -96,15 +96,76 @@ slice inside it goes:**
   (U-4, U-5, U-7, U-8) — the actual point of the app and the reliability half
   of the maintainer's stated goal.
 
-**Still under discussion (2026-09-03) — not yet cut, not yet confirmed kept.**
-The maintainer asked for a further audit beyond this list; do not build any of
-these until one of them gets an explicit answer: P-6's keys/QR
-(biometric passphrase unlock, QR host import/export — SSH key add/edit
-itself stays, just the fancier flows are in question), P-7's `env`/`jobs`
-(currently still marked "keep" above, but reopened), P-9's `snippets/`, the
-`bootstrap/` host-CLI-version probe (arguably reliability infra rather than a
-"feature," flagged as a lean-keep), and P-10's `messaging/`/`notifications/`/
-`systemsurfaces/` (widget/tile).
+**Resolved 2026-09-03 via a `fable`-run JTBD audit of the old app's terminal
+kebab menu (the maintainer's concrete "too much on here" example) plus the
+prior round's open items. This replaces the "still under discussion" list —
+everything below is now decided:**
+
+- **P-6 keys/QR**: QR host import/export CONFIRMED KEEP ("very useful for
+  adding things" / "QR code is needed" — maintainer, 2026-09-03). Biometric
+  passphrase unlock CUT ("biometric unlock not needed"). Plain SSH key
+  add/edit stays regardless (baseline, not in question).
+- **P-6, unstated but required**: app2 has no host add/edit screen yet (U-1
+  only reads the existing list) — this is a release blocker independent of
+  the maintainer's feature list, sized as its own small task alongside the
+  QR/keys work.
+- **P-7 `env/`**: CUT — its primary consumer was configuring agent sessions
+  (already cut); the rare manual need is covered by the file editor or
+  `$EDITOR` in the terminal.
+- **P-7 `jobs/`**: CUT — this is the SAME feature as the old terminal menu's
+  "Recurring jobs" item (same `RecurringJobsScreen`/ViewModel/Parser code,
+  977 LOC), which the maintainer verbatim called "we never use." Also drags
+  an optional host-side `pocketshell-jobs` systemd daemon dependency that a
+  lean scope shouldn't carry. P-7 therefore disappears entirely (cards and
+  repos were already cut).
+- **P-9 `snippets/`**: DEFERRED (not cut-forever) — not on the regularly-used
+  list; composer + dictation are the confirmed input paths. Revisit post-X-1
+  if he asks.
+- **`bootstrap/` host-CLI-version probe**: TRIMMED, not fully cut — keep
+  only the actionable "update the host CLI" error message (K-1 already
+  rejects `schema < 2` with a typed `HostCliTooOld` error; render it
+  readably). Cut the 1,817-line guided-install sheet — that onboards
+  strangers' hosts, not this maintainer's one already-configured box.
+- **P-10 `messaging/`**: CUT — it's specifically agent-completion push
+  notifications (`AgentCardPushNotifications.kt` etc.), which the amendment
+  already rules out; also drags Firebase + a server-side push sender.
+- **P-10 `notifications/`**: TRIMMED — keep `ShareUploadNotifications` (serves
+  confirmed-core file upload), cut the app-update-available notifier
+  (self-distribution convenience, not a daily job).
+- **P-10 `systemsurfaces/`** (widget/tile): DEFERRED, not built now — not on
+  the regularly-used list, cleanly addable later.
+
+**Net scope effect**: P-7 gone entirely; P-9 shrinks to share-upload +
+snippets-deferred; P-10 shrinks to `crash/` + trimmed `diagnostics/` +
+share-upload notification; P-6 shrinks to settings + host add/edit (new,
+required) + plain key storage + QR import/export, minus biometric.
+Roughly 9,500 further lines of would-have-been code avoided.
+
+**Lean terminal-session menu design** (for U-4/U-5 chrome; full old-menu →
+new-menu mapping and reasoning in the JTBD audit transcript if needed later —
+this is the actionable summary): the old menu's 16 items collapse to 3 kebab
+items + 2 promoted chrome affordances.
+- **Kebab menu**: Reconnect (manual escape hatch for a wedged connection the
+  keep-alive hasn't flagged yet — also subsumes the old "Redraw" action,
+  since a fresh attach forces a full tmux repaint), Files (opens the
+  explorer at the session's `workspace` path, not host root), Port
+  forwarding.
+- **Promoted to persistent chrome, not menu items**: the session title in
+  the terminal top bar becomes tappable → a quick-switch bottom sheet
+  (ui-kit `SheetHeader` + a session list + a "+ New session" row) — 2 taps
+  instead of 3, directly answers "make session switching easier"; the usage
+  glance pill (P-5) sits in the same top bar, always visible.
+- **Moved out of the terminal screen entirely**: Stop-session becomes a
+  long-press action with a confirm dialog on the session-tree row (U-3
+  polish), not a terminal-menu item — it's a session-management job, and the
+  tree is the session-management screen.
+- **Cut outright, no relocation**: Rename session, "What is this session?"
+  (manual agent-kind classification, zero consumers once agent UI is cut),
+  Detach (the back gesture + the U-7/U-8 grace mechanism already do this
+  job), "New session" as a menu item (U-6's tree FAB already owns create),
+  "Open files"/"Open file…" (the explorer covers both), Session ports
+  (host-wide port forwarding answers the underlying job), Settings as a
+  menu item (reachable from the hosts screen, not a mid-session action).
 
 **Consequences for §A.4's journey set:** J09 (`ConversationViewJourney`) is
 dropped along with U-10. J12 (`UsagePanelJourney`) is back in scope (P-5

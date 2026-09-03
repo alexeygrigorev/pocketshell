@@ -97,10 +97,11 @@ def test_union_includes_aplexer_rows_tagged_as_second_manager() -> None:
             "created_at_ms": 1787774700696,
         }
     ]
-    sessions = session_enum.enumerate_live_sessions(
+    sessions, errors = session_enum.enumerate_live_sessions(
         tmuxctl_stdout=_tmuxctl_table(),
         aplexer_payload=snapshot,
     )
+    assert errors == []
     names = [row.name for row in sessions]
     assert "git-pocketshell-release" in names
     assert "toyaikit:codex" in names
@@ -112,16 +113,17 @@ def test_union_includes_aplexer_rows_tagged_as_second_manager() -> None:
 
 
 def test_tmux_only_host_lists_only_tmux() -> None:
-    sessions = session_enum.enumerate_live_sessions(
+    sessions, errors = session_enum.enumerate_live_sessions(
         tmuxctl_stdout=_tmuxctl_table(),
         include_aplexer=False,
     )
+    assert errors == []
     assert {row.manager for row in sessions} == {"tmux"}
     assert len(sessions) == 12
 
 
 def test_json_payload_tags_managers() -> None:
-    sessions = session_enum.enumerate_live_sessions(
+    sessions, errors = session_enum.enumerate_live_sessions(
         tmuxctl_stdout=_tmuxctl_table(),
         aplexer_payload=[
             {
@@ -132,7 +134,7 @@ def test_json_payload_tags_managers() -> None:
             }
         ],
     )
-    payload = session_enum.json_payload(sessions)
+    payload = session_enum.json_payload(sessions, errors)
     assert payload["managers"] == ["tmux", "aplexer"]
     names = {item["name"] for item in payload["sessions"]}
     assert "git-pocketshell" in names

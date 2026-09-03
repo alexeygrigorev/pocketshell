@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Usage</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:45</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="breadcrumb">
+      <div class="back">‹</div>
+      <span class="crumb current">Usage</span>
+      <div class="more">⟳</div>
+    </div>
+
+    <div class="content">
+      <div class="usage-meta">
+        <span>Last sync: 2m ago</span>
+        <span>3 providers · 2 hosts</span>
+      </div>
+
+      <div class="usage-card">
+        <div class="usage-card-head">
+          <div class="usage-provider">
+            <span class="pdot ok"></span>
+            Claude Code
+          </div>
+          <span class="pill ok">OK</span>
+        </div>
+
+        <div class="usage-window">
+          <div class="usage-window-head">
+            <span class="usage-window-name">5h window</span>
+            <span class="usage-window-pct">45.2%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" style="width: 45%"></div></div>
+          <div class="usage-window-foot">resets in 2h 34m</div>
+        </div>
+
+        <div class="usage-window">
+          <div class="usage-window-head">
+            <span class="usage-window-name">7d window</span>
+            <span class="usage-window-pct">18.0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" style="width: 18%"></div></div>
+          <div class="usage-window-foot">resets May 28</div>
+        </div>
+      </div>
+
+      <div class="usage-card">
+        <div class="usage-card-head">
+          <div class="usage-provider">
+            <span class="pdot blocked"></span>
+            Codex
+          </div>
+          <span class="pill blocked">Blocked</span>
+        </div>
+
+        <div class="usage-window">
+          <div class="usage-window-head">
+            <span class="usage-window-name">Weekly limit</span>
+            <span class="usage-window-pct">100%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill danger" style="width: 100%"></div></div>
+          <div class="usage-window-foot">resets May 26 · weekly limit reached</div>
+        </div>
+      </div>
+
+      <div class="usage-card">
+        <div class="usage-card-head">
+          <div class="usage-provider">
+            <span class="pdot ok"></span>
+            OpenCode
+          </div>
+          <span class="pill ok">OK</span>
+        </div>
+
+        <div class="usage-window">
+          <div class="usage-window-head">
+            <span class="usage-window-name">Monthly</span>
+            <span class="usage-window-pct">12.0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" style="width: 12%"></div></div>
+          <div class="usage-window-foot">resets Jun 1</div>
+        </div>
+      </div>
+
+      <div class="usage-empty">
+        gpu-box: <code style="font-family: var(--font-mono); color: var(--text-secondary);">heru</code> not installed
+        <div class="hint">Tap to set up server-side usage tracking</div>
+      </div>
+
+      <div style="height: 30px"></div>
+    </div>
+  </div>
+</body>
+</html>

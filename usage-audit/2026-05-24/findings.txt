@@ -1,0 +1,152 @@
+Usage / quota panel — re-verification + UX audit (2026-05-24)
+=================================================================
+
+Headline
+--------
+The Usage panel is BROKEN at the integration layer. The work shipped in
+issue #24 built the parser (`core-usage`), the SSH remote source
+(`UsageRemoteSource`), and the entire Compose surface (`UsageScreen`,
+`UsageDashboardStrip`, `UsageSessionBlockedBadge`), but NONE of these
+are wired into the running app. The user cannot reach the panel from
+anywhere. Server-side detection of `heru` at host bootstrap also never
+feeds the panel.
+
+Static-evidence audit
+---------------------
+grep -rn 'UsageScreen|UsageDashboardStrip|UsageSessionBlockedBadge' \
+  --include='*.kt' app/src
+
+  app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt:41:fun UsageScreen(
+  app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt:77:fun UsageDashboardStrip(
+  app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt:120:fun UsageSessionBlockedBadge(
+
+  (definitions only — zero callers anywhere in app/src/main, app/src/test,
+   app/src/androidTest, or any shared module)
+
+Navigation:
+  app/src/main/java/com/pocketshell/app/nav/AppDestination.kt
+    — sealed interface AppDestination
+    — destinations: HostList, AddHost, EditHost, SshKeys, CrashReports,
+      PortForwardChooser, Session, PortForwardPanel, RecurringJobs,
+      TmuxSession
+    — NO `Usage` destination
+
+  app/src/main/java/com/pocketshell/app/MainActivity.kt
+    — `AppNavigator` `when (current)` branches: same set as AppDestination
+    — NO `UsageScreen()` call
+
+Top-bar nav (HostListScreen):
+  Crashes | Import | Keys     ← visible in 02-hosts-empty.png
+  (Usage NOT present)
+
+In-session kebab menu (terminal):
+  Recurring jobs              ← only item in 22-terminal-kebab-menu.png
+  (Usage NOT present)
+
+Bootstrap detection of heru:
+  app/src/main/java/com/pocketshell/app/bootstrap/HostBootstrapper.kt
+    — BootstrapTool.Heru is enumerated, detected via `command -v heru`,
+      and installable via `pipx install heru`. So missing heru shows up
+      in the bootstrap sheet as an installable row.
+  - But the bootstrap sheet does NOT call UsageRemoteSource.detectHeru,
+    UsageRemoteSource.fetchUsage, or open UsageScreen on success.
+  - The detected status is dropped after the bootstrap sheet closes.
+
+Unit test status
+----------------
+:shared:core-usage:test           BUILD SUCCESSFUL (parser + models)
+:app:testDebugUnitTest tests='*UsageRemoteSource*'
+                                  BUILD SUCCESSFUL (detectHeru, fetchUsage)
+
+Conclusion: the parser and SSH command layer were built well and are
+covered by unit tests. The integration layer (ViewModel, navigation,
+dashboard widget wiring, session-row badge wiring, polling cadence) was
+never built. The acceptance criteria of #24 ("Usage screen per
+docs/mockups/usage.html", "Dashboard widget", "Session-row blocked
+badge", "Per-host detection of heru; pluggable command override",
+"Empty state when tool missing") are NOT met end-to-end. Only the
+"parser for heru usage --json" criterion is met.
+
+Verification matrix
+-------------------
+Cell 1  Heru not installed on server
+        — Cannot drive: no UI route to the panel.
+        — `UsageRemoteSource.detectHeru` would return
+          `UsageToolStatus.Missing`; nothing consumes the result.
+        — Bootstrap sheet does show "heru" as a missing tool row, but
+          tapping Install just runs `pipx install heru` and dismisses;
+          the panel is still unreachable afterwards.
+
+Cell 2  Heru installed but returns no data ('[]\n')
+        — Cannot drive: no UI route. `bootstrap-bin/heru` stub already
+          prints `[]\n` and parser correctly returns an empty list.
+
+Cell 3  Heru installed and returns real data
+        — Cannot drive: no UI route. `agent-bin/heru` already returns
+          three providers (claude ok, codex limited, opencode unknown).
+          Parser unit test consumes the same JSON shape successfully.
+
+Cell 4  SSH disconnected after panel opened
+        — Cannot drive: panel never opened. The connection-loss path
+          is unimplemented because there is no live screen state to
+          go stale.
+
+UX findings
+-----------
+1. Discoverability: zero. The panel has no entry point in the top nav
+   (Crashes / Import / Keys are the only options), no FAB action, no
+   item in the in-session kebab menu (only "Recurring jobs"), no
+   compact dashboard strip on the host list. The user cannot find what
+   does not exist in the UI. This is the same gap UI audit #108 calls
+   out about a missing Settings surface: the app lacks a "secondary"
+   navigation tier.
+
+2. Where it should live: per docs/usage-panel.md, the panel is meant to
+   be a full-screen surface plus a compact dashboard strip on the host
+   list plus a session-row badge. The natural placement is:
+   - A `Usage` item alongside `Crashes / Import / Keys` in the top nav
+     (or in the Settings surface from #108).
+   - A `UsageDashboardStrip` above the host card list on HostList.
+   - A `UsageSessionBlockedBadge` on each connected host card AND
+     inside the session screen's status row.
+   The user needs this BEFORE connecting (to know if a quota is gone
+   before starting work) and DURING a session (to see the agent's
+   blocked badge), not after.
+
+3. Information drift: not assessable end-to-end because the screen is
+   unreachable. Code-level review of UsageScreen.kt shows the rendered
+   fields match docs/usage-panel.md: status pill, per-window progress
+   bar + percent + reset time, last-error footnote, empty-state copy.
+
+4. Missing: the "pluggable usage command per host" decision (D19) is
+   present in `UsageRemoteSource` as a `commandOverride` parameter but
+   has no UI control — no per-host setting screen exists.
+
+Screenshot evidence (this branch)
+---------------------------------
+01-hosts-empty-no-usage-link.png   Top nav: Crashes / Import / Keys.
+                                   No "Usage" tab.
+02-hosts-with-entry-no-usage-strip.png
+                                   Host list with 1 saved host. No
+                                   compact UsageDashboardStrip above
+                                   the host card. No usage badge on
+                                   the host row.
+03-terminal-kebab-no-usage.png     In-session kebab menu shows only
+                                   "Recurring jobs". No "Usage" /
+                                   "Quota".
+04-crashes-tab-no-usage.png        Crashes top-nav surface — no
+                                   sibling Usage tab.
+05-import-tab-no-usage.png         Import top-nav surface — same.
+usage-mockup-spec.html             Locked spec from
+                                   docs/mockups/usage.html. This is
+                                   the layout the integration should
+                                   produce; the Compose code in
+                                   UsageScreen.kt already matches.
+
+Original-screen provenance
+--------------------------
+01-hosts-empty-no-usage-link.png        from ui-audit/2026-05-24/02-hosts-empty.png
+02-hosts-with-entry-no-usage-strip.png  from ui-audit/2026-05-24/19-hosts-list-with-entry.png
+03-terminal-kebab-no-usage.png          from ui-audit/2026-05-24/22-terminal-kebab-menu.png
+04-crashes-tab-no-usage.png             from ui-audit/2026-05-24/29-crashes-tab.png
+05-import-tab-no-usage.png              from ui-audit/2026-05-24/30-import-tab.png

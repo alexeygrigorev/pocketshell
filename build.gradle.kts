@@ -6,6 +6,11 @@ plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.android) apply false
+    // Rewrite task K-1: shared/core-hostapi is a pure-JVM module (no Android
+    // SDK), so it applies kotlin("jvm") + the serialization compiler plugin
+    // rather than the Android library pair above.
+    alias(libs.plugins.kotlin.jvm) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.hilt) apply false
     alias(libs.plugins.ksp) apply false

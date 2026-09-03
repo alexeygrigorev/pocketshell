@@ -1,0 +1,51 @@
+{
+  "schema": 2,
+  "managers": [
+    "aplexer"
+  ],
+  "sessions": [
+    {
+      "name": "aplexer-follow:idle",
+      "manager": "aplexer",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "workspace": "/tmp/aplexer-follow",
+      "tag": "idle",
+      "engine": "claude",
+      "profile": "zlaude",
+      "agent_state": "idle",
+      "agent_state_source": "reported",
+      "attached": false,
+      "created_epoch": 1788765485,
+      "activity_epoch": 1788838957
+    },
+    {
+      "name": "aplexer-follow:waiting",
+      "manager": "aplexer",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "workspace": "/tmp/aplexer-follow",
+      "tag": "waiting",
+      "engine": "codex",
+      "profile": null,
+      "agent_state": "waiting",
+      "agent_state_source": "reported",
+      "attached": true,
+      "created_epoch": 1788765486,
+      "activity_epoch": 1788838958
+    },
+    {
+      "name": "aplexer-follow:working",
+      "manager": "aplexer",
+      "id": "00000000-0000-4000-8000-000000000003",
+      "workspace": "/tmp/aplexer-follow",
+      "tag": "working",
+      "engine": "grok",
+      "profile": null,
+      "agent_state": "working",
+      "agent_state_source": "heuristic",
+      "attached": false,
+      "created_epoch": 1788765487,
+      "activity_epoch": 1788838959
+    }
+  ],
+  "errors": []
+}

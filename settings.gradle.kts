@@ -34,6 +34,10 @@ rootProject.name = "pocketshell"
 
 // include(":shared:core-portfwd")
 include(":shared:core-transport")
+// Task K-1: the host-CLI JSON parser/client. Pure JVM (kotlin("jvm")), the
+// first non-Android module in the tree — it must stay free of the Android SDK
+// so it is testable on the host JVM with no Robolectric/emulator.
+include(":shared:core-hostapi")
 include(":shared:core-terminal")
 include(":shared:core-usage")
 include(":shared:core-storage")

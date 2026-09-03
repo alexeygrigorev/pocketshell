@@ -7,18 +7,36 @@ name: Full-suite red-run notify
 # fast-attribution mechanism the v0.4.45 release postmortem (#2338/#2294, 11
 # days red `main`) was missing.
 #
+# Issue #2459 extends this with a BOUNDED ONE-SHOT RETRY-AND-COMPARE: on the
+# first red scheduled run (run_attempt == 1), also capture its failure
+# signature, store it on the tracking issue, and trigger exactly one full
+# `gh run rerun`. When that retry's own completion re-fires this same
+# `workflow_run` event (same run id, run_attempt >= 2), compare the retry's
+# outcome against the stored signature and classify it as G5 infra/flake (a
+# clean or differing retry) or a confirmed regression (an identical
+# signature), posting the verdict — citing BOTH run URLs — as a follow-up
+# comment instead of leaving that comparison to a human every time. See
+# scripts/ci-retry-gate.sh for the anti-infinite-loop mechanism (a total,
+# stateless function of run_attempt: only run_attempt == 1 may ever start a
+# retry, so the retry's own result can never trigger a second one).
+#
 # Deliberately a SEPARATE workflow, triggered by `workflow_run` once Tests
 # concludes, rather than a job inside tests.yml: `.github/workflows/tests.yml`
 # is under a hard file-size ratchet (scripts/check-file-size-hygiene.sh) with
 # essentially no headroom left, and this notify logic needs no job-level
 # `needs:` access into Tests' jobs anyway — it re-derives everything it needs
-# (which top-level job failed, the last known-green scheduled run's SHA) from
-# the GitHub API against the now-completed run, via
-# scripts/ci-run-jobs.sh and scripts/ci-skip-check.sh respectively.
+# (which top-level job failed, the last known-green scheduled run's SHA, the
+# retry-comparison signature) from the GitHub API against the now-completed
+# run, via scripts/ci-run-jobs.sh, scripts/ci-skip-check.sh, and
+# scripts/ci-retry-signature.py respectively.
 #
-# Only fires for a SCHEDULED Tests run that concluded failure — never for a
-# push/PR/workflow_dispatch run (those have no "last known green scheduled
-# run" concept to bisect against) and never for a green run.
+# Only fires for a SCHEDULED Tests run — never for a push/PR/workflow_dispatch
+# run (those have no "last known green scheduled run" concept to bisect
+# against). The job-level `if` no longer also requires `conclusion ==
+# 'failure'`: a `run_attempt >= 2` GREEN completion is exactly the "the
+# bounded retry came back clean" case that must still run the compare step,
+# so the conclusion check moved into scripts/ci-retry-gate.sh's PHASE
+# decision instead (see its header comment for the full state table).
 
 on:
   workflow_run:
@@ -27,38 +45,94 @@ on:
 
 jobs:
   notify:
-    name: File/update red scheduled-run tracking issue
-    if: github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure'
+    name: File/update red scheduled-run tracking issue + bounded retry (#2459)
+    if: github.event.workflow_run.event == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
-      actions: read
+      actions: write
       issues: write
     steps:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
 
+      # issue #2459: the one decision every other step branches on. PHASE is
+      # one of first_red | retry_red | retry_clean | noop — see
+      # scripts/ci-retry-gate.sh's header for the full state table and why
+      # this alone bounds the retry to exactly one shot.
+      - id: gate
+        run: |
+          scripts/ci-retry-gate.sh \
+            --run-attempt "${{ github.event.workflow_run.run_attempt }}" \
+            --conclusion "${{ github.event.workflow_run.conclusion }}"
+
       - id: jobs
+        if: steps.gate.outputs.phase == 'first_red'
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci-run-jobs.sh --repo "${{ github.repository }}" --run-id "${{ github.event.workflow_run.id }}"
 
       - id: green
+        if: steps.gate.outputs.phase == 'first_red'
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci-skip-check.sh --repo "${{ github.repository }}" --sha "${{ github.event.workflow_run.head_sha }}"
 
-      - name: File or update the tracking issue
+      - name: File or update the tracking issue (first red)
+        if: steps.gate.outputs.phase == 'first_red'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           scripts/ci-red-issue.sh \
             --repo "${{ github.repository }}" \
-            --run-url "${{ github.event.workflow_run.html_url }}" \
+            --run-url "${{ github.event.workflow_run.html_url }}/attempts/1" \
             --sha "${{ github.event.workflow_run.head_sha }}" \
             --last-green-sha "${{ steps.green.outputs.last_green_sha }}" \
             --unit-gate "${{ steps.jobs.outputs.unit_gate }}" \
             --python "${{ steps.jobs.outputs.python }}" \
             --integration "${{ steps.jobs.outputs.integration }}" \
             --emulator-journey-verdict "${{ steps.jobs.outputs.emulator_journey_verdict }}"
+
+      # issue #2459: this run's own failure signature (failed job names, plus
+      # failing test class names for the emulator-journey shards), computed
+      # whenever this event needs to be COMPARED against another attempt —
+      # i.e. on the original red run (to store for later) and on the retry's
+      # own red completion (to compare against what was stored).
+      - id: signature
+        if: steps.gate.outputs.phase == 'first_red' || steps.gate.outputs.phase == 'retry_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts
+          python3 scripts/ci-retry-signature.py \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --journey-artifact-prefix "emulator-journey-android-test-reports-shard-" \
+            --out artifacts/ci-retry-signature.txt
+
+      - name: Store the signature and trigger the one bounded retry (#2459)
+        if: steps.gate.outputs.phase == 'first_red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-retry-notify.sh store \
+            --repo "${{ github.repository }}" \
+            --marker "pocketshell-full-suite-red-marker" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --signature-file artifacts/ci-retry-signature.txt
+          gh run rerun "${{ github.event.workflow_run.id }}" --repo "${{ github.repository }}"
+
+      - name: Compare the bounded retry's outcome and classify (#2459)
+        if: steps.gate.outputs.phase == 'retry_red' || steps.gate.outputs.phase == 'retry_clean'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-retry-notify.sh report \
+            --repo "${{ github.repository }}" \
+            --marker "pocketshell-full-suite-red-marker" \
+            --run-id "${{ github.event.workflow_run.id }}" \
+            --original-run-url "${{ github.event.workflow_run.html_url }}/attempts/1" \
+            --retry-run-url "${{ github.event.workflow_run.html_url }}/attempts/${{ github.event.workflow_run.run_attempt }}" \
+            --retry-conclusion "${{ github.event.workflow_run.conclusion }}" \
+            --retry-signature-file "artifacts/ci-retry-signature.txt"

@@ -64,6 +64,7 @@ class HostScreenRenders {
             onEditHost = {},
             onShareHost = {},
             onScanQr = {},
+            onOpenSettings = {},
             onDeleteHost = {},
         )
     }
@@ -84,6 +85,7 @@ class HostScreenRenders {
             onEditHost = {},
             onShareHost = {},
             onScanQr = {},
+            onOpenSettings = {},
             onDeleteHost = {},
         )
     }

@@ -22,4 +22,7 @@ interface ProjectRootDao {
 
     @Delete
     suspend fun delete(root: ProjectRootEntity)
+
+    @Query("DELETE FROM project_roots WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }

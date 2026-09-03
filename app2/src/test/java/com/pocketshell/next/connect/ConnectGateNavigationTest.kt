@@ -156,6 +156,7 @@ class ConnectGateNavigationTest {
                         onEditHost = actions.onEditHost,
                         onShareHost = actions.onShareHost,
                         onScanQr = actions.onScanQr,
+                        onOpenSettings = actions.onOpenSettings,
                         viewModel = hostListViewModel,
                     )
                 },

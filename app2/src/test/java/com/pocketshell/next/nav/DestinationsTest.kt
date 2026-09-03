@@ -37,9 +37,10 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 12 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
-        // plus the four host-management routes task P-6 added.
-        assertEquals(12, patterns.size)
+        // 13 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
+        // plus the five routes task P-6 added: the four host-management ones
+        // and WorkspaceRoots.
+        assertEquals(13, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -63,6 +64,15 @@ class DestinationsTest {
         assertMatchesPattern(Destination.HostQr.pattern, Destination.HostQr.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route())
+        assertMatchesPattern(
+            Destination.WorkspaceRoots.pattern,
+            Destination.WorkspaceRoots.route(hostId = 7),
+        )
+    }
+
+    @Test
+    fun `workspace roots route carries the host id as a path segment`() {
+        assertEquals("workspace-roots/42", Destination.WorkspaceRoots.route(hostId = 42))
     }
 
     /**

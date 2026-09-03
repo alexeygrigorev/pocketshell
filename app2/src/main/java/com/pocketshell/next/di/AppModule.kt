@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.hostapi.HostCliClient
 import com.pocketshell.core.storage.dao.PortRemappingDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.transport.AuthSecretResolver
@@ -100,6 +101,10 @@ object AppModule {
     // queue and nothing ever re-sends from it.
     @Provides
     fun provideSentMessageDao(db: AppDatabase): SentMessageDao = db.sentMessageDao()
+
+    // Task P-6: per-host workspace-root shortcuts, managed from Settings.
+    @Provides
+    fun provideProjectRootDao(db: AppDatabase): ProjectRootDao = db.projectRootDao()
 
     @Provides
     @IoDispatcher

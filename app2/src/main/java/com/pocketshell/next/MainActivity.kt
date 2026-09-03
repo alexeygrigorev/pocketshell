@@ -13,6 +13,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -35,6 +38,10 @@ import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
+import com.pocketshell.next.settings.LocalAppSettings
+import com.pocketshell.next.settings.SettingsRoute
+import com.pocketshell.next.settings.SettingsViewModel
+import com.pocketshell.next.settings.WorkspaceRootsRoute
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
@@ -81,9 +88,23 @@ class MainActivity : ComponentActivity() {
                     // the placeholder scaffold hid by centring its one label.
                     // IME insets stay a screen concern (task U-5 owns the
                     // terminal's keyboard behaviour); this is bars only.
-                    AppNavHost(
-                        modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
-                    )
+                    //
+                    // Task P-6: the settings snapshot is collected ONCE here and
+                    // provided through `LocalAppSettings` (see that file's class
+                    // doc for why a CompositionLocal rather than another
+                    // ViewModel threaded through every screen). `hiltViewModel()`
+                    // resolves against this Activity, which is the one thing a
+                    // Robolectric `AppNavHost`-only composition (the nav tests)
+                    // cannot provide — those compose `AppNavHost` directly and so
+                    // never reach this line, which is why they still see
+                    // `LocalAppSettings`'s default value rather than a crash.
+                    val settingsViewModel: SettingsViewModel = hiltViewModel()
+                    val appSettings by settingsViewModel.state.collectAsState()
+                    CompositionLocalProvider(LocalAppSettings provides appSettings) {
+                        AppNavHost(
+                            modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
+                        )
+                    }
                 }
             }
         }
@@ -105,6 +126,7 @@ data class HostListActions(
     val onEditHost: (Long) -> Unit,
     val onShareHost: (Long) -> Unit,
     val onScanQr: () -> Unit,
+    val onOpenSettings: () -> Unit,
 )
 
 /**
@@ -133,6 +155,7 @@ fun AppNavHost(
             onEditHost = actions.onEditHost,
             onShareHost = actions.onShareHost,
             onScanQr = actions.onScanQr,
+            onOpenSettings = actions.onOpenSettings,
         )
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
@@ -170,6 +193,12 @@ fun AppNavHost(
     },
     qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
+    settingsScreen: @Composable (onBack: () -> Unit, onOpenWorkspaceRoots: (Long) -> Unit) -> Unit =
+        { onBack, onOpenWorkspaceRoots ->
+            SettingsRoute(onBack = onBack, onOpenWorkspaceRoots = onOpenWorkspaceRoots)
+        },
+    workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =
+        { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
 ) {
     NavHost(
         navController = navController,
@@ -200,6 +229,10 @@ fun AppNavHost(
                             navController.navigate(Destination.HostQr.route(hostId))
                         },
                         onScanQr = { navController.navigate(Destination.QrScan.route()) },
+                        // Task P-6 fast-follow: the only UI entry point into
+                        // Settings, deliberately on the landing screen rather
+                        // than a mid-session terminal action.
+                        onOpenSettings = { navController.navigate(Destination.Settings.route()) },
                     ),
                 )
             }
@@ -318,7 +351,21 @@ fun AppNavHost(
             portsScreen()
         }
         composable(Destination.Settings.pattern) {
-            RoutePlaceholder("Settings")
+            // Task P-6: the real settings screen. Workspace roots is a
+            // per-host sub-screen rather than an inline expando, because its
+            // own add/delete actions and list need the vertical room a
+            // Settings row cannot spare.
+            settingsScreen(
+                { navController.popBackStack() },
+                { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
+            )
+        }
+        composable(
+            route = Destination.WorkspaceRoots.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            workspaceRootsScreen(hostId) { navController.popBackStack() }
         }
         composable(Destination.Usage.pattern) {
             RoutePlaceholder("Usage")

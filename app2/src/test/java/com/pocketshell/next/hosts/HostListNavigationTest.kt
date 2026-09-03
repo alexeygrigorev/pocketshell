@@ -114,6 +114,29 @@ class HostListNavigationTest {
         composeRule.onNodeWithText("No hosts yet").assertExists()
     }
 
+    /**
+     * The fast-follow gap this suite exists to close: before this test, there
+     * was no navigable UI path anywhere in the app that reached
+     * `Destination.Settings` — the route existed and `SettingsScreen` worked,
+     * but nothing could tap into it.
+     */
+    @Test
+    fun `tapping Settings in the host list header navigates to Settings`() {
+        val nav = setContent()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("No hosts yet").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Settings").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
+        composeRule.onNodeWithText("Settings").assertExists()
+    }
+
     private fun setContent(): NavHostController {
         val vm = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
@@ -128,12 +151,19 @@ class HostListNavigationTest {
                         onEditHost = actions.onEditHost,
                         onShareHost = actions.onShareHost,
                         onScanQr = actions.onScanQr,
+                        onOpenSettings = actions.onOpenSettings,
                         viewModel = vm,
                     )
                 },
                 hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
                 qrScanScreen = { _, _ -> Text("QrScan") },
                 hostQrScreen = { Text("HostQr") },
+                // `SettingsRoute`'s default resolves its ViewModel through
+                // `hiltViewModel()`, which this plain compose rule cannot
+                // provide. This suite is about the host list header's tap →
+                // `Destination.Settings` edge, so the destination is a
+                // stand-in that just names itself.
+                settingsScreen = { _, _ -> Text("Settings") },
                 connectViewModel = { stack.viewModel },
                 // The U-3 session tree resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot

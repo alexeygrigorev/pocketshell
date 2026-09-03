@@ -33,6 +33,7 @@ rootProject.name = "pocketshell"
 // shelved until task P-4 rewires it onto core-transport.
 
 // include(":shared:core-portfwd")
+include(":shared:core-transport")
 include(":shared:core-terminal")
 include(":shared:core-usage")
 include(":shared:core-storage")

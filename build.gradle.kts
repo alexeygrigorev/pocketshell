@@ -78,9 +78,13 @@ val expectedBouncyCastlePins = mapOf(
 
 // app/, core-ssh, core-tmux were deleted and core-portfwd shelved in the
 // "stable" rewrite branch (docs/_scratch/simplification-implementation-plan-2026-09-02.md).
-// sshj moves to shared/core-transport (task T-1/T-2); repopulate this list
-// once that module exists and depends on sshj.
-val sshjClasspathGraphs = listOf<Pair<String, String>>()
+// sshj now lives in shared/core-transport (task T-1), so the #2172 resolution
+// assertion has a real graph to inspect again; app2 / core-portfwd rejoin this
+// list as they are rewired onto core-transport.
+val sshjClasspathGraphs = listOf(
+    ":shared:core-transport" to "releaseRuntimeClasspath",
+    ":shared:core-transport" to "releaseUnitTestRuntimeClasspath",
+)
 
 tasks.register("assertNoDynamicDependencyVersions") {
     group = "verification"

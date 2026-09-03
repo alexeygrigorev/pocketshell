@@ -1501,10 +1501,47 @@ needed it.
 
 ---
 
-**X-1 — parity trial gate (maintainer, not an implementer task)**
-- Depends on: U-1..U-10, P-1..P-10 all landed.
-- The maintainer lives on app2 for 2 weeks. Every gap → a normal small issue
-  against app2. Exit: two weeks without reaching for the old app.
+**X-1 — lean-core release gate (maintainer, not an implementer task; REVISED
+2026-09-03, supersedes the original "full parity" framing below)**
+
+The maintainer's direction (2026-09-03): don't wait for feature parity with
+the old app before shipping. Ship the LEAN core — the confirmed-core feature
+set from the Scope amendment above, once it's functionally complete and
+pleasant to use — as a real, tagged **minor version release** (not a patch),
+installable and daily-usable, then keep iterating fast from there. The old
+"2-week parity trial across every P-task" gate is dropped; a smaller, faster
+gate replaces it.
+
+- **Depends on**: H (done), T (done), K (done), M (done), U-1..U-8 (U-4
+  in progress as of this writing, U-5..U-8 not yet started), P-1, P-2,
+  P-3a/P-3b, P-4 (in progress), P-5 — i.e. every item marked "explicitly
+  still in scope" or "trim, don't cut" in the Scope amendment above, NOT the
+  full U-1..U-10/P-1..P-10 set the original gate named.
+- **One gap not on the maintainer's explicit feature list but required
+  regardless**: app2 currently has NO host add/edit screen — U-1 only reads
+  the existing host list (read-only). A release needs a way to add a host on
+  a fresh install. Treat this as an unstated but load-bearing part of P-6,
+  sized independently of the rest of that task's original (larger) scope.
+- The "still under discussion" list (keys/QR, env/jobs, snippets, bootstrap
+  probe, messaging/notifications, widget/tile) resolves via the JTBD audit
+  in flight as of this writing; whatever it recommends cutting is NOT a
+  release blocker, whatever it recommends keeping gets its own small task.
+- **Exit**: the maintainer uses app2 for real daily work and it doesn't get
+  in his way — no fixed time window, just "does it hold up."
+- **Release mechanics note**: `scripts/push-release-tag.sh` tags only from a
+  `main` checkout with `HEAD == origin/main` (see `docs/release.md`); all of
+  this rewrite's work lives on `stable`. Before an actual tag can be cut,
+  `stable` needs to reach `main` (fast-forward merge once `stable` is judged
+  release-ready, or `main` is replaced by `stable` outright — a call for the
+  maintainer at that point, not decided here). Until then, "release" means
+  "app2 is good enough to tag," not that a tag exists yet.
+
+<details><summary>Original framing (superseded, kept for history)</summary>
+
+Depends on: U-1..U-10, P-1..P-10 all landed. The maintainer lives on app2 for
+2 weeks. Every gap → a normal small issue against app2. Exit: two weeks
+without reaching for the old app.
+</details>
 
 **X-2 — [blocked: APX-ADOPT] single-source detection completion**
 - Depends on: H-5, H-6, X-1.
@@ -1517,12 +1554,16 @@ needed it.
 
 **X-3 — the hard cut (D22)**
 - Depends on: X-1.
-- DELETE: `app/` (all 156,678 lines), `shared/core-ssh`, `shared/core-tmux`,
-  `shared/core-connection`, `shared/core-agents`, the frozen half of
-  `shared/core-terminal` (§A.2 list), their test trees, and every
-  `scripts/check-connection-vm-ratchet*`/`check-file-size-hygiene` VM entry;
-  prune `tests.yml` jobs that only served them (do this as its own commit
-  series: modules first, app last, CI last — each step green).
+- ALREADY DONE (2026-09-03, on `stable`, ahead of the original sequencing):
+  `app/`, `shared/core-ssh`, `shared/core-tmux`, `shared/core-connection`,
+  `shared/core-agents`, and the frozen half of `shared/core-terminal` were
+  deleted at the START of this rewrite rather than at X-3, on the
+  maintainer's explicit direction — `main` still has them, `stable` does
+  not. `tests.yml`'s stale references to them were cleaned up separately.
+  What's LEFT for X-3 once X-1 actually gates it: the applicationId
+  rename + Room data migration below, plus reconciling `stable` with `main`
+  (see X-1's release-mechanics note above) — X-3 is now much smaller than
+  originally scoped.
 - MODIFY: `app2` → rename applicationId to `com.pocketshell.app`
   (one release where the OLD package is still installed side-by-side; Room
   data carried over via the D22 carve-out: an export/import screen or a

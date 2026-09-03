@@ -24,21 +24,20 @@ rootProject.name = "pocketshell"
 // and an explicit comment list is more discoverable than a conditional
 // `file().exists()` filter (no silent skips, no magic).
 //
-// Issue #2 will uncomment :app.
-// Issue #3 will uncomment the :shared:core-* modules and :shared:ui-kit.
+// Rewrite in progress (docs/_scratch/simplification-implementation-plan-2026-09-02.md).
+// app/, core-ssh, core-tmux, core-connection, core-agents were deleted in the
+// "stable" branch hard cut. New modules (core-transport, core-hostapi, app2)
+// are uncommented here as their scaffolding tasks land.
+//
+// core-portfwd depends on core-ssh (api(project(":shared:core-ssh"))) and is
+// shelved until task P-4 rewires it onto core-transport.
 
-include(":app")
-
-include(":shared:core-ssh")
-include(":shared:core-portfwd")
-include(":shared:core-tmux")
+// include(":shared:core-portfwd")
 include(":shared:core-terminal")
-include(":shared:core-agents")
 include(":shared:core-usage")
 include(":shared:core-storage")
 include(":shared:core-voice")
 include(":shared:core-assistant")
-include(":shared:core-connection")
 include(":shared:ui-kit")
 
 // Test-only support module (issue #1048): the ONE audited shared de-flake

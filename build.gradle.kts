@@ -76,13 +76,11 @@ val expectedBouncyCastlePins = mapOf(
     "org.bouncycastle:bcprov-jdk18on" to "1.80.2",
 )
 
-val sshjClasspathGraphs = listOf(
-    ":shared:core-ssh" to "releaseRuntimeClasspath",
-    ":shared:core-ssh" to "releaseUnitTestRuntimeClasspath",
-    ":app" to "releaseRuntimeClasspath",
-    ":shared:core-portfwd" to "releaseRuntimeClasspath",
-    ":shared:core-tmux" to "releaseRuntimeClasspath",
-)
+// app/, core-ssh, core-tmux were deleted and core-portfwd shelved in the
+// "stable" rewrite branch (docs/_scratch/simplification-implementation-plan-2026-09-02.md).
+// sshj moves to shared/core-transport (task T-1/T-2); repopulate this list
+// once that module exists and depends on sshj.
+val sshjClasspathGraphs = listOf<Pair<String, String>>()
 
 tasks.register("assertNoDynamicDependencyVersions") {
     group = "verification"
@@ -119,9 +117,14 @@ tasks.register("assertNoDynamicDependencyVersions") {
         if (!rootScript.contains("pinBouncyCastleTransitives")) {
             errors += "root build.gradle.kts no longer applies pinBouncyCastleTransitives"
         }
-        val coreSshScript = rootProject.file("shared/core-ssh/build.gradle.kts").readText()
-        if (!coreSshScript.contains("libs.bouncycastle.bcutil")) {
-            errors += "shared/core-ssh/build.gradle.kts no longer constrains bcutil"
+        // shared/core-ssh was deleted in the "stable" rewrite branch; sshj's pin
+        // site moves to shared/core-transport (task T-1/T-2). Check it there
+        // once it exists, skip until then rather than fail on a missing file.
+        val coreTransportBuildFile = rootProject.file("shared/core-transport/build.gradle.kts")
+        if (coreTransportBuildFile.exists() &&
+            !coreTransportBuildFile.readText().contains("libs.bouncycastle.bcutil")
+        ) {
+            errors += "shared/core-transport/build.gradle.kts no longer constrains bcutil"
         }
 
         sshjClasspathGraphs.forEach { (path, configName) ->

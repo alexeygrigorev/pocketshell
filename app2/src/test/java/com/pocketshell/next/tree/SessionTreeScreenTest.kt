@@ -205,10 +205,70 @@ class SessionTreeScreenTest {
         assertEquals(listOf("my project:review"), opened)
     }
 
+    // --- create affordance (task U-6) --------------------------------------
+
+    @Test
+    fun `the create FAB is on the screen in every state and reports its taps`() {
+        var creates = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
+            onCreateSession = { creates += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(SESSION_TREE_CREATE_LABEL).assertIsDisplayed()
+
+        composeRule.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).performClick()
+        assertEquals(1, creates)
+    }
+
+    /**
+     * An empty host is exactly when a user needs to make a session, so the
+     * create affordance must survive the empty state rather than being drawn
+     * over the list only.
+     */
+    @Test
+    fun `the create FAB survives the empty and failed states`() {
+        setContent(state(loaded = true, sessions = emptyList()))
+        composeRule.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).assertIsDisplayed()
+    }
+
+    /**
+     * `created:false` — the session was already there. That is a SUCCESS, so
+     * the screen says so in an INFO banner, never in the error banner.
+     */
+    @Test
+    fun `an already-existed session renders a notice, not the error banner`() {
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW)))
+                .copy(
+                    create = CreateSessionState(
+                        notice = "Session \"claude-main\" already existed — opened it.",
+                    ),
+                ),
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_CREATE_NOTICE_TAG).assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Session \"claude-main\" already existed — opened it.")
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun `no create state renders no notice at all`() {
+        setContent(state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))))
+
+        composeRule.onNodeWithTag(SESSION_TREE_CREATE_NOTICE_TAG).assertDoesNotExist()
+    }
+
     private fun setContent(
         state: SessionTreeUiState,
         onRefresh: () -> Unit = {},
         onOpenSession: (String) -> Unit = {},
+        onCreateSession: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -216,6 +276,7 @@ class SessionTreeScreenTest {
                     state = state,
                     onRefresh = onRefresh,
                     onOpenSession = onOpenSession,
+                    onCreateSession = onCreateSession,
                     nowSec = NOW,
                 )
             }

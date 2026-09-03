@@ -74,10 +74,31 @@ if [ "${1:-}" = "create-detached" ]; then
     printf 'create-detached: session name required\n' >&2
     exit 64
   fi
+  # Rewrite task U-6: create on the session's OWN socket
+  # (`<tmux socket dir>/tmuxctl-<name>`), which is what the real tmuxctl does —
+  # one tmux server per session. This matters beyond fidelity: the enumerator
+  # (`pocketshell-fixture-sessions`, and the real
+  # `pocketshell.session_enum`) walks `tmuxctl-*` sockets, and the host CLI's
+  # idempotency probe (`sessions.py::_tmux_session_socket`) checks that path
+  # first. Creating on the DEFAULT socket, as this shim used to, meant a session
+  # the client had just created appeared in no listing at all — the fixture
+  # would have reported "created" while the tree stayed empty.
+  socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+  mkdir -p "${socket_dir}"
+  chmod 700 "${socket_dir}"
+  socket="${socket_dir}/tmuxctl-${session}"
+  # Idempotent, and idempotent WITHOUT attaching: `new-session -A` turns into
+  # an attach when the session exists, which fails with "open terminal failed:
+  # not a terminal" over a non-interactive `exec` channel — i.e. exactly the
+  # second-create case the host CLI's `created:false` contract is about. The
+  # real tmuxctl no-ops instead, so this probes first.
+  if tmux -S "${socket}" has-session -t "=${session}" >/dev/null 2>&1; then
+    exit 0
+  fi
   if [ -n "${cwd}" ]; then
-    tmux new-session -A -d -s "${session}" -c "${cwd}"
+    tmux -S "${socket}" new-session -d -s "${session}" -c "${cwd}"
   else
-    tmux new-session -A -d -s "${session}"
+    tmux -S "${socket}" new-session -d -s "${session}"
   fi
   exit 0
 fi

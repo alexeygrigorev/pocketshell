@@ -1,15 +1,22 @@
 package com.pocketshell.next.tree
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -31,6 +38,8 @@ import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.SessionAgentState
+import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /**
@@ -45,6 +54,11 @@ const val SESSION_TREE_ERROR_BANNER_TAG: String = "session-tree-error-banner"
 const val SESSION_TREE_ERROR_RETRY_TAG: String = "session-tree-error-retry"
 const val SESSION_TREE_LOADING_TAG: String = "session-tree-loading"
 const val SESSION_TREE_EMPTY_TAG: String = "session-tree-empty"
+const val SESSION_TREE_CREATE_FAB_TAG: String = "session-tree-create-fab"
+const val SESSION_TREE_CREATE_NOTICE_TAG: String = "session-tree-create-notice"
+
+/** The FAB's accessibility label, and what a journey taps by description. */
+const val SESSION_TREE_CREATE_LABEL: String = "New session"
 
 fun sessionRowTag(name: String): String = "session-row-$name"
 
@@ -70,10 +84,24 @@ fun SessionTreeRoute(
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
 
+    // A created session is opened through the SAME edge a row tap uses, so the
+    // session route has exactly one caller. Keyed on the name so a second
+    // create after the first navigation still fires; `consumeOpenRequest` runs
+    // BEFORE the navigation so coming Back to the tree cannot re-trigger it
+    // (the same shape as ConnectGate's navigate-once effect).
+    LaunchedEffect(state.create.openRequest) {
+        val name = state.create.openRequest ?: return@LaunchedEffect
+        viewModel.consumeOpenRequest()
+        onOpenSession(name)
+    }
+
     SessionTreeScreen(
         state = state,
         onRefresh = viewModel::refresh,
         onOpenSession = onOpenSession,
+        onCreateSession = viewModel::openCreateSheet,
+        onSubmitCreate = viewModel::createSession,
+        onDismissCreate = viewModel::dismissCreateSheet,
         modifier = modifier,
     )
 }
@@ -87,8 +115,8 @@ fun SessionTreeRoute(
  * sessions. There is no collapse state, no drag reordering, no persisted node
  * registry, and no per-row action menu — the old client's tree had all four and
  * they are the machinery the rewrite is removing, not features being deferred.
- * A tap opens the session; that is the screen's whole interaction budget for
- * now (create is U-6, swipe actions are out of scope entirely).
+ * A tap opens the session and the FAB creates one (U-6); that is the screen's
+ * whole interaction budget (swipe actions are out of scope entirely).
  *
  * ## The partial-list banner is the point of the screen, not decoration
  *
@@ -113,10 +141,61 @@ fun SessionTreeScreen(
     onRefresh: () -> Unit,
     onOpenSession: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onCreateSession: () -> Unit = {},
+    onSubmitCreate: (name: String, cwd: String?) -> Unit = { _, _ -> },
+    onDismissCreate: () -> Unit = {},
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        SessionTreeBody(
+            state = state,
+            onRefresh = onRefresh,
+            onOpenSession = onOpenSession,
+            nowSec = nowSec,
+        )
+
+        // Bottom-end FAB over the list, the one create affordance on this
+        // screen (U-6). Drawn in a Box above the content rather than inside a
+        // Scaffold so the list's own pull-to-refresh box keeps owning the
+        // whole viewport.
+        FloatingActionButton(
+            onClick = onCreateSession,
+            containerColor = PocketShellColors.Accent,
+            contentColor = PocketShellColors.OnAccent,
+            shape = PocketShellShapes.large,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(PocketShellSpacing.lg)
+                .testTag(SESSION_TREE_CREATE_FAB_TAG),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Add,
+                contentDescription = SESSION_TREE_CREATE_LABEL,
+            )
+        }
+    }
+
+    if (state.create.visible) {
+        CreateSessionSheet(
+            state = state.create,
+            defaultFolder = state.suggestedFolder,
+            onSubmit = onSubmitCreate,
+            onCancel = onDismissCreate,
+        )
+    }
+}
+
+/** The tree's own chrome + list, split out so the FAB can sit over it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionTreeBody(
+    state: SessionTreeUiState,
+    onRefresh: () -> Unit,
+    onOpenSession: (String) -> Unit,
+    nowSec: Long,
+) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .testTag(SESSION_TREE_TAG),
     ) {
@@ -134,6 +213,21 @@ fun SessionTreeScreen(
                     .padding(horizontal = PocketShellSpacing.md)
                     .padding(bottom = PocketShellSpacing.sm)
                     .testTag(SESSION_TREE_PARTIAL_BANNER_TAG),
+            )
+        }
+
+        // "That session already existed, so it was opened" — an INFO note, not
+        // an error: the host CLI's create is idempotent and `created:false` is
+        // a success (see CreateSessionState).
+        state.create.notice?.let { notice ->
+            Banner(
+                text = notice,
+                role = BannerRole.Info,
+                maxLines = 3,
+                modifier = Modifier
+                    .padding(horizontal = PocketShellSpacing.md)
+                    .padding(bottom = PocketShellSpacing.sm)
+                    .testTag(SESSION_TREE_CREATE_NOTICE_TAG),
             )
         }
 

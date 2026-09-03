@@ -52,13 +52,56 @@ data class SessionTreeUiState(
     val errors: List<BackendError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
     val failure: String? = null,
+    /** Everything the create-session sheet needs (task U-6). */
+    val create: CreateSessionState = CreateSessionState(),
 ) {
     val sessionCount: Int get() = groups.sumOf { it.rows.size }
 
     /** True when the screen should say "no sessions" rather than stay blank. */
     val isEmptyAndHealthy: Boolean
         get() = loaded && groups.isEmpty() && errors.isEmpty() && failure == null
+
+    /**
+     * What the create sheet's folder field is prefilled with: the workspace of
+     * the most recently active session, when the host reported one.
+     *
+     * The listing is the only folder knowledge this screen has, and its groups
+     * are already ordered most-recent-first, so the first ABSOLUTE workspace
+     * path is "where you were last". The [OTHER_WORKSPACE_LABEL] bucket is not
+     * a path and is skipped; with nothing usable the field starts empty, which
+     * means "no `--cwd`" and lets the host's own default apply.
+     */
+    val suggestedFolder: String
+        get() = groups.firstOrNull { it.workspace?.startsWith("/") == true }?.label ?: ""
 }
+
+/**
+ * The create-session sheet's state (task U-6, journey J04).
+ *
+ * [openRequest] is a one-shot navigation signal rather than a callback the
+ * ViewModel holds: a created session is opened by the SCREEN, through the same
+ * `onOpenSession` edge a row tap uses, so there is exactly one way to reach the
+ * session route. It is cleared by [SessionTreeViewModel.consumeOpenRequest]
+ * before the navigation runs, so coming Back to the tree cannot re-trigger it.
+ *
+ * [notice] carries the "that session already existed" message. The host CLI's
+ * create is idempotent and reports `created: false` for a name that was already
+ * there — a SUCCESS, per [com.pocketshell.core.hostapi.CreatedSession]. Treating
+ * it as a failure would be the bug: the user asked for that session and now has
+ * it, which is exactly what they wanted.
+ */
+data class CreateSessionState(
+    /** The sheet is on screen. */
+    val visible: Boolean = false,
+    /** A create is in flight; the sheet stays open and its inputs are frozen. */
+    val submitting: Boolean = false,
+    /** The create failed. The sheet STAYS open so the user can edit and retry. */
+    val failure: String? = null,
+    /** "Opened the existing session X" — never an error. */
+    val notice: String? = null,
+    /** The session name the screen should open next, once. */
+    val openRequest: String? = null,
+)
 
 /**
  * The session tree for one host (rewrite task U-3, journey J02).
@@ -112,6 +155,7 @@ class SessionTreeViewModel @Inject constructor(
     val state: StateFlow<SessionTreeUiState> = _state.asStateFlow()
 
     private var inFlight: Job? = null
+    private var createInFlight: Job? = null
 
     /**
      * Re-reads the host's session list. Safe to call from `ON_START` and from
@@ -128,17 +172,130 @@ class SessionTreeViewModel @Inject constructor(
         inFlight = viewModelScope.launch { load() }
     }
 
+    // --- create (task U-6) -------------------------------------------------
+
+    /** Raises the create sheet, with no stale failure or notice on it. */
+    fun openCreateSheet() {
+        updateCreate { it.copy(visible = true, failure = null, notice = null) }
+    }
+
+    /**
+     * Closes the sheet without creating anything. Ignored while a create is in
+     * flight: the session is already being made on the host, and closing the
+     * sheet would leave the user with no sight of the result.
+     */
+    fun dismissCreateSheet() {
+        updateCreate { current ->
+            if (current.submitting) current else current.copy(visible = false, failure = null)
+        }
+    }
+
+    /**
+     * `pocketshell sessions create --json` for [name] in [cwd], then refresh
+     * the listing and ask the screen to open it.
+     *
+     * A session that already existed comes back `created == false`, which is a
+     * SUCCESS: the sheet closes, the tree refreshes and the screen opens that
+     * session, with a notice saying it was already there. A FAILURE leaves the
+     * sheet open with its text intact so the user can fix the folder and retry.
+     */
+    fun createSession(name: String, cwd: String?) {
+        if (createInFlight?.isActive == true) return
+        val trimmedName = name.trim()
+        if (trimmedName.isEmpty()) {
+            // The host CLI takes NAME as a required positional argument, so a
+            // blank name is answered here rather than sent for the host to
+            // reject with a usage error.
+            updateCreate { it.copy(failure = BLANK_NAME_MESSAGE) }
+            return
+        }
+        updateCreate { it.copy(submitting = true, failure = null, notice = null) }
+        createInFlight = viewModelScope.launch {
+            runCreate(trimmedName, cwd?.trim()?.takeIf { it.isNotEmpty() })
+        }
+    }
+
+    /**
+     * Clears the one-shot open signal. Called by the screen BEFORE it
+     * navigates, so returning to the tree cannot re-open the session.
+     */
+    fun consumeOpenRequest() {
+        updateCreate { it.copy(openRequest = null) }
+    }
+
+    private suspend fun runCreate(name: String, cwd: String?) {
+        val connection = when (val outcome = resolveConnection()) {
+            is ConnectionOutcome.Ready -> outcome.connection
+            is ConnectionOutcome.Unavailable -> return failCreate(outcome.message)
+        }
+        clients.create(connection)
+            // engine/profile are deliberately always null: the rewrite's scope
+            // amendment cut agent launching from the client, so this is a plain
+            // shell session (docs/rewrite-implementation-plan.md).
+            .createSession(name = name, cwd = cwd, engine = null, profile = null)
+            .fold(
+                onSuccess = { created ->
+                    updateCreate {
+                        CreateSessionState(
+                            visible = false,
+                            submitting = false,
+                            failure = null,
+                            notice = if (created.created) {
+                                null
+                            } else {
+                                "Session \"${created.name}\" already existed — opened it."
+                            },
+                            // The HOST's name for what it made, not the typed
+                            // one: an aplexer-backed create answers with its own
+                            // `workspace:tag` display name.
+                            openRequest = created.name,
+                        )
+                    }
+                    refresh()
+                },
+                onFailure = { error ->
+                    failCreate(userMessage(error, "Could not create the session on the host: "))
+                },
+            )
+    }
+
+    /** A create that failed: the sheet stays open, carrying the reason. */
+    private fun failCreate(message: String) {
+        updateCreate { it.copy(visible = true, submitting = false, failure = message) }
+    }
+
+    private fun updateCreate(block: (CreateSessionState) -> CreateSessionState) {
+        _state.update { current -> current.copy(create = block(current.create)) }
+    }
+
     private suspend fun load() {
-        val connection = when (val result = registry.getOrConnect(hostId)) {
-            is ConnectResult.Connected -> result.connection
-            is ConnectResult.NeedsTrust -> return fail(
+        when (val outcome = resolveConnection()) {
+            is ConnectionOutcome.Ready -> applyListing(outcome.connection)
+            is ConnectionOutcome.Unavailable -> fail(outcome.message)
+        }
+    }
+
+    /**
+     * The host's live connection, or the user-facing reason there isn't one.
+     *
+     * Shared by the listing and the create so both reach the host exactly one
+     * way — through [ConnectionsRegistry.getOrConnect], which reuses U-2's
+     * connection when it is still live and re-dials when it is not.
+     */
+    private suspend fun resolveConnection(): ConnectionOutcome =
+        when (val result = registry.getOrConnect(hostId)) {
+            is ConnectResult.Connected -> ConnectionOutcome.Ready(result.connection)
+            is ConnectResult.NeedsTrust -> ConnectionOutcome.Unavailable(
                 "This host's key still needs to be confirmed. Open it from the host " +
                     "list to review the key.",
             )
 
-            is ConnectResult.Failed -> return fail(result.message)
+            is ConnectResult.Failed -> ConnectionOutcome.Unavailable(result.message)
         }
-        applyListing(connection)
+
+    private sealed interface ConnectionOutcome {
+        data class Ready(val connection: HostConnection) : ConnectionOutcome
+        data class Unavailable(val message: String) : ConnectionOutcome
     }
 
     private suspend fun applyListing(connection: HostConnection) {
@@ -158,7 +315,9 @@ class SessionTreeViewModel @Inject constructor(
                     )
                 }
             },
-            onFailure = { error -> fail(userMessage(error)) },
+            onFailure = { error ->
+                fail(userMessage(error, "Could not list sessions on the host: "))
+            },
         )
     }
 
@@ -177,11 +336,17 @@ class SessionTreeViewModel @Inject constructor(
      * returns ([HostCliError.userMessage] covers "the CLI is too old",
      * "exit 127: not found", "did not finish within 20000ms"). Anything else
      * reaching here is a transport-level throwable, which has no such text, so
-     * it gets a generic prefix rather than a bare exception class name.
+     * it gets [fallbackPrefix] rather than a bare exception class name.
      */
-    private fun userMessage(error: Throwable): String = when (error) {
+    private fun userMessage(error: Throwable, fallbackPrefix: String): String = when (error) {
         is HostCliError -> error.userMessage
-        else -> "Could not list sessions on the host: " +
-            (error.message ?: error::class.simpleName ?: "unknown error")
+        else -> fallbackPrefix + (error.message ?: error::class.simpleName ?: "unknown error")
     }
 }
+
+/**
+ * What the sheet says when a create is attempted with no name. `internal` so
+ * the test asserts the SAME string the screen paints rather than a hand-copied
+ * duplicate that can drift.
+ */
+internal const val BLANK_NAME_MESSAGE: String = "Enter a name for the session."

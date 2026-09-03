@@ -357,6 +357,254 @@ class SessionTreeViewModelTest {
         assertFalse(viewModel.state.value.refreshing)
     }
 
+    // --- create (task U-6) -------------------------------------------------
+
+    @Test
+    fun `a successful create refreshes the listing and asks the screen to open it`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+            val viewModel = viewModel(hostId)
+
+            viewModel.refresh()
+            advanceUntilIdle()
+            viewModel.openCreateSheet()
+            assertTrue(viewModel.state.value.create.visible)
+
+            viewModel.createSession(name = "demo", cwd = "/home/testuser/git/pocketshell")
+            advanceUntilIdle()
+
+            val create = viewModel.state.value.create
+            assertNull("a successful create is not a failure", create.failure)
+            assertNull("a session that did NOT exist needs no notice", create.notice)
+            assertFalse("the sheet closes on success", create.visible)
+            assertFalse(create.submitting)
+            assertEquals("demo", create.openRequest)
+
+            // The command is the host CLI's own, with --cwd quoted and the name
+            // after `--`, and engine/profile ABSENT (the picker is cut).
+            val createCommand = connection().executedCommands.single { "create" in it }
+            assertEquals(
+                "pocketshell sessions create --json --cwd '/home/testuser/git/pocketshell' -- 'demo'",
+                createCommand,
+            )
+            // ...and the listing was re-read afterwards, so the new session can
+            // appear on the tree.
+            assertEquals(
+                2,
+                connection().executedCommands.count { it == "pocketshell sessions list --json" },
+            )
+            assertTrue(viewModel.state.value.loaded)
+        }
+
+    /**
+     * The idempotency contract (`CreatedSession.created == false`): the session
+     * already existed, which is a SUCCESS. It must still open, with a notice
+     * rather than an error — treating "already there" as a failure is exactly
+     * the bug the host CLI's idempotent create exists to prevent.
+     */
+    @Test
+    fun `creating a name that already exists opens it instead of failing`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("claude-main", created = false))
+        val viewModel = viewModel(hostId)
+
+        viewModel.openCreateSheet()
+        viewModel.createSession(name = "claude-main", cwd = null)
+        advanceUntilIdle()
+
+        val create = viewModel.state.value.create
+        assertNull("an existing session must NOT read as a failure", create.failure)
+        assertEquals("claude-main", create.openRequest)
+        assertFalse(create.visible)
+        val notice = requireNotNull(create.notice) { "the user should be told it already existed" }
+        assertTrue(notice, notice.contains("already existed"))
+        assertTrue(notice, notice.contains("claude-main"))
+        // And the tree itself is not in an error state over it.
+        assertNull(viewModel.state.value.failure)
+    }
+
+    @Test
+    fun `a failed create keeps the sheet open carrying the hosts own words`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        stack.factory.script = { connection ->
+            connection.onExecPrefix(
+                "pocketshell sessions list",
+                ExecResult(0, HEALTHY_LISTING, "", false),
+            )
+            connection.onExecPrefix(
+                "pocketshell sessions create",
+                // The host's create prints its OWN explanation as a JSON error
+                // envelope on stdout and exits non-zero.
+                ExecResult(
+                    exitCode = 1,
+                    stdout = """{"schema":2,"error":"pocketshell: `tmuxctl create-detached demo` exited 2."}""",
+                    stderr = "",
+                    timedOut = false,
+                ),
+            )
+        }
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.openCreateSheet()
+        viewModel.createSession(name = "demo", cwd = "/nope")
+        advanceUntilIdle()
+
+        val create = viewModel.state.value.create
+        val failure = requireNotNull(create.failure) { "a failed create must be reported" }
+        assertTrue(failure, failure.contains("tmuxctl create-detached demo"))
+        assertTrue("the sheet must stay open so the user can retry", create.visible)
+        assertFalse(create.submitting)
+        assertNull("a failed create must never navigate", create.openRequest)
+        // The tree's own listing is untouched: the create failed, the list did not.
+        assertNull(viewModel.state.value.failure)
+        assertEquals(4, viewModel.state.value.sessionCount)
+    }
+
+    @Test
+    fun `a blank name is refused before anything is sent to the host`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.openCreateSheet()
+        viewModel.createSession(name = "   ", cwd = "/home/testuser")
+        advanceUntilIdle()
+
+        assertEquals(BLANK_NAME_MESSAGE, viewModel.state.value.create.failure)
+        assertTrue(viewModel.state.value.create.visible)
+        assertNull(viewModel.state.value.create.openRequest)
+        assertTrue(
+            "the host CLI requires NAME, so nothing may be sent",
+            connection().executedCommands.none { "create" in it },
+        )
+    }
+
+    /** A blank folder means no `--cwd` at all, so the host's default applies. */
+    @Test
+    fun `a blank folder omits the cwd option entirely`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+        val viewModel = viewModel(hostId)
+
+        viewModel.createSession(name = "demo", cwd = "   ")
+        advanceUntilIdle()
+
+        assertEquals(
+            "pocketshell sessions create --json -- 'demo'",
+            connection().executedCommands.single { "create" in it },
+        )
+    }
+
+    @Test
+    fun `the open request is one-shot`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+        val viewModel = viewModel(hostId)
+
+        viewModel.createSession(name = "demo", cwd = null)
+        advanceUntilIdle()
+        assertEquals("demo", viewModel.state.value.create.openRequest)
+
+        viewModel.consumeOpenRequest()
+
+        assertNull(
+            "a consumed signal must not re-fire when the user comes back",
+            viewModel.state.value.create.openRequest,
+        )
+    }
+
+    @Test
+    fun `a create in flight cannot be started twice or dismissed`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+        val viewModel = viewModel(hostId)
+
+        viewModel.openCreateSheet()
+        viewModel.createSession(name = "demo", cwd = null)
+        // Not advanced: the create is queued but has not answered yet.
+        assertTrue(viewModel.state.value.create.submitting)
+
+        viewModel.createSession(name = "demo-2", cwd = null)
+        viewModel.dismissCreateSheet()
+        assertTrue("a submitting sheet must stay on screen", viewModel.state.value.create.visible)
+        advanceUntilIdle()
+
+        assertEquals(
+            "the second tap must not create a second session",
+            1,
+            connection().executedCommands.count { "create" in it },
+        )
+        assertEquals("demo", viewModel.state.value.create.openRequest)
+    }
+
+    @Test
+    fun `dismissing the sheet creates nothing and clears a previous failure`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+            val viewModel = viewModel(hostId)
+
+            viewModel.openCreateSheet()
+            viewModel.createSession(name = "", cwd = null)
+            assertEquals(BLANK_NAME_MESSAGE, viewModel.state.value.create.failure)
+
+            viewModel.dismissCreateSheet()
+            advanceUntilIdle()
+
+            val create = viewModel.state.value.create
+            assertFalse(create.visible)
+            assertNull(create.failure)
+            assertNull(create.openRequest)
+            // Nothing was ever sent — a blank name is answered locally, so the
+            // host was not even dialled.
+            assertEquals(0, stack.factory.dialCount)
+        }
+
+    /**
+     * The sheet's folder prefill: the most recently active workspace the host
+     * reported, never the "other" bucket's label (which is not a path).
+     */
+    @Test
+    fun `the suggested folder is the most recent real workspace`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerSessions(HEALTHY_LISTING)
+        val viewModel = viewModel(hostId)
+
+        assertEquals("", viewModel.state.value.suggestedFolder)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+
+        assertEquals("/home/testuser/git/pocketshell", viewModel.state.value.suggestedFolder)
+    }
+
+    @Test
+    fun `a workspace-less host suggests no folder rather than the other bucket`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            answerSessions(
+                """
+                {"schema":2,"managers":["tmux"],"sessions":[
+                  {"name":"homeless","manager":"tmux","id":null,"workspace":null,"tag":null,
+                   "engine":null,"profile":null,"agent_state":null,"agent_state_source":null,
+                   "attached":false,"created_epoch":null,"activity_epoch":10}
+                ],"errors":[]}
+                """.trimIndent(),
+            )
+            val viewModel = viewModel(hostId)
+
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            assertEquals(1, viewModel.state.value.sessionCount)
+            assertEquals("", viewModel.state.value.suggestedFolder)
+        }
+
     /**
      * The `ExecResult` → `ExecOutcome` bridge. Both are four-field records of
      * the same shapes, so a positional/misnamed mapping compiles cleanly and
@@ -393,6 +641,25 @@ class SessionTreeViewModelTest {
             )
         }
     }
+
+    /** Scripts both verbs on one connection: the listing and the create. */
+    private fun answerListAndCreate(listJson: String, createJson: String) {
+        stack.factory.script = { connection ->
+            connection.onExecPrefix(
+                "pocketshell sessions list",
+                ExecResult(exitCode = 0, stdout = listJson, stderr = "", timedOut = false),
+            )
+            connection.onExecPrefix(
+                "pocketshell sessions create",
+                ExecResult(exitCode = 0, stdout = createJson, stderr = "", timedOut = false),
+            )
+        }
+    }
+
+    /** The host CLI's schema-2 create envelope, verbatim in shape. */
+    private fun createdJson(name: String, created: Boolean): String = """
+        {"schema": 2, "name": "$name", "manager": "tmux", "id": null, "created": $created}
+    """.trimIndent()
 
     private fun connection(): FakeHostConnection = stack.factory.connections.single()
 

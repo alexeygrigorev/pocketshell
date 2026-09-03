@@ -22,8 +22,10 @@ import java.nio.charset.StandardCharsets
  *   connections registry (task M-3). That is the deliberate break from the old
  *   graph, where a credential-carrying destination was the norm.
  *
- * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage.
- * A new screen is a new object here, never an ad-hoc string at a call site.
+ * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
+ * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
+ * route rather than a tab inside [Session]). A new screen is a new object here,
+ * never an ad-hoc string at a call site.
  */
 sealed class Destination(val pattern: String) {
 
@@ -72,6 +74,20 @@ sealed class Destination(val pattern: String) {
             if (path == null) "files/$hostId" else "files/$hostId?$ARG_PATH=${encodeSegment(path)}"
     }
 
+    /**
+     * Port forwarding for one host (task P-4).
+     *
+     * A standalone route rather than a tab inside [Session] on purpose: the
+     * session screen's chrome is still moving, and forwarding is deliberately
+     * host-scoped, not session-scoped — a forward outlives any session on that
+     * host. When the session chrome settles it should gain an entry point that
+     * navigates HERE; this destination is where that link will point, so nothing
+     * has to move then.
+     */
+    data object Ports : Destination("ports/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "ports/$hostId"
+    }
+
     companion object {
         const val ARG_HOST_ID: String = "hostId"
         const val ARG_SESSION_NAME: String = "sessionName"
@@ -91,7 +107,7 @@ sealed class Destination(val pattern: String) {
          * no such window.
          */
         val all: List<Destination>
-            get() = listOf(Hosts, Tree, Session, Files, Settings, Usage)
+            get() = listOf(Hosts, Tree, Session, Files, Ports, Settings, Usage)
 
         /** The graph's start destination. Getter, for the same reason as [all]. */
         val start: Destination

@@ -28,6 +28,7 @@ import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.ports.PortForwardRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -75,7 +76,7 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen], [connectViewModel] and [treeScreen] are seams, not feature
+ * [hostsScreen], [connectViewModel], [treeScreen] and [portsScreen] are seams, not feature
  * flags: the real host list, connect gate and session tree resolve their
  * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity, so
  * a plain Robolectric `createComposeRule()` composition could not host them. The
@@ -93,6 +94,7 @@ fun AppNavHost(
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
     treeScreen: @Composable (hostId: Long, onOpenSession: (String) -> Unit) -> Unit =
         { _, onOpenSession -> SessionTreeRoute(onOpenSession = onOpenSession) },
+    portsScreen: @Composable () -> Unit = { PortForwardRoute() },
 ) {
     NavHost(
         navController = navController,
@@ -147,6 +149,15 @@ fun AppNavHost(
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID)
             val path = entry.arguments?.getString(Destination.ARG_PATH)
             RoutePlaceholder("Files(hostId=$hostId, path=$path)")
+        }
+        composable(
+            route = Destination.Ports.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) {
+            // Task P-4: the real port-forward panel. Like the tree, the ViewModel
+            // reads the hostId from its own SavedStateHandle, so the screen keeps
+            // working under process death without navigation re-supplying it.
+            portsScreen()
         }
         composable(Destination.Settings.pattern) {
             RoutePlaceholder("Settings")

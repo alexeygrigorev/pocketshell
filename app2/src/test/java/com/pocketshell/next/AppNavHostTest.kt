@@ -68,6 +68,7 @@ class AppNavHostTest {
             "Files(hostId=7, path=/home/alexey/notes.md)",
         )
         assertNavigatesTo(nav, Destination.Files.route(hostId = 7), "Files(hostId=7, path=null)")
+        assertNavigatesTo(nav, Destination.Ports.route(hostId = 7), "Ports")
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
         assertNavigatesTo(nav, Destination.Hosts.route(), "Hosts")
@@ -109,6 +110,12 @@ class AppNavHostTest {
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
                 treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
+                // Same rationale again: the P-4 port-forward route resolves its
+                // ViewModel through `hiltViewModel()`. Its own behaviour is
+                // covered by `com.pocketshell.next.ports.PortForwardScreenTest`
+                // and `PortForwardViewModelTest`; what this suite pins is that
+                // `NavHost` accepts the pattern and its Long argument.
+                portsScreen = { Text("Ports") },
             )
         }
         composeRule.waitForIdle()

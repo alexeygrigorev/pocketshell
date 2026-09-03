@@ -37,7 +37,8 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        assertEquals(6, patterns.size)
+        // 7 = the plan's fixed six plus Ports (task P-4).
+        assertEquals(7, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -53,6 +54,7 @@ class DestinationsTest {
             Destination.Files.pattern,
             Destination.Files.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
+        assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
     }
 
     @Test

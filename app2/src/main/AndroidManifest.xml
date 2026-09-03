@@ -11,6 +11,17 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+        Task P-4: port forwarding runs in a foreground service so tunnels the
+        user opened keep answering while the app is backgrounded (D21's
+        background-work carve-out). POST_NOTIFICATIONS is what makes its ongoing
+        notification visible on Android 13+; without the FOREGROUND_SERVICE pair
+        the service cannot start at all.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <application
         android:name=".App"
         android:allowBackup="false"
@@ -30,6 +41,26 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Task P-4: the port-forwarding foreground service.
+
+            `foregroundServiceType="specialUse"` because keeping a user-initiated
+            SSH transport alive so forwards survive backgrounding matches none of
+            the predefined types — it is not scheduled `dataSync`, and there is no
+            `connectedDevice`. The PROPERTY_SPECIAL_USE_FGS_SUBTYPE below is the
+            informational metadata Play review reads.
+
+            `exported="false"`: only PocketShell's own code may wake it.
+        -->
+        <service
+            android:name=".ports.ForwardService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled forwarding on." />
+        </service>
     </application>
 
 </manifest>

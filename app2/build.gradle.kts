@@ -189,6 +189,10 @@ dependencies {
     // a `RemoteExec` the app adapts from a `HostConnection`, which is why this
     // module and core-transport stay independent of each other.
     implementation(project(":shared:core-hostapi"))
+    // Task P-4: the port-forwarding engine (scan loop, tunnel map, reconnect
+    // supervisor). It hands back `core-transport` types, so it is an `api`
+    // dependency there and arrives on this classpath with core-transport.
+    implementation(project(":shared:core-portfwd"))
 
     // The nav graph is exercised as a real composition on the host JVM
     // (Robolectric + createComposeRule), the same way :shared:ui-kit tests its

@@ -1,8 +1,9 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.ExecResult
-import com.pocketshell.core.ssh.SshPortForward
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.transport.ExecResult
+import com.pocketshell.core.transport.FakeHostConnection
+import com.pocketshell.core.transport.HostConnection
+import com.pocketshell.core.transport.PortForward
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,9 +31,11 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 
 /**
- * Unit tests for [AutoForwarder] using a fully-faked [SshSession]. The fake
- * lets us script which ports `ss`/`netstat` reports per scan and observe the
- * forwards the AutoForwarder asks for.
+ * Unit tests for [AutoForwarder] over a faked [HostConnection]. The fake wraps
+ * core-transport's scripted [FakeHostConnection] and adds only what these tests
+ * need on top of it: scripted `ss`/`netstat` output per scan, observable
+ * forwards, and the two misbehaviours the teardown paths care about (an open
+ * that hangs, a close that hangs).
  *
  * We launch the scan loop on the [runTest] [kotlinx.coroutines.test.TestScope]
  * (which uses the virtual-time scheduler), so [runCurrent] and
@@ -50,12 +53,12 @@ class AutoForwarderTest {
         val loopback = InetAddress.getByName("127.0.0.1")
         ServerSocket(0, 1, loopback).use { holder ->
             val occupiedPort = holder.localPort
-            val session = FakeSession()
-            session.setListening("0.0.0.0:$occupiedPort users:((\"app\",pid=1,fd=4))")
+            val connection = FakeConnection()
+            connection.setListening("0.0.0.0:$occupiedPort users:((\"app\",pid=1,fd=4))")
             val availabilityQueries = mutableListOf<Int>()
 
             val forwarder = AutoForwarder(
-                session,
+                connection,
                 smallConfig().copy(maxAutoPort = 65_535),
                 localPortAvailability = LocalPortAvailability { port ->
                     availabilityQueries += port
@@ -89,11 +92,11 @@ class AutoForwarderTest {
 
     @Test
     fun `first scan opens a forward for an in-window remote port`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             localPortAvailability = allLocalPortsAvailable,
         )
@@ -107,7 +110,7 @@ class AutoForwarderTest {
         assertEquals(3000, t.localPort) // in-window → mirrored locally
         assertEquals(TunnelInfo.Status.FORWARDING, t.status)
         assertEquals("app", t.process)
-        assertEquals(1, session.openForwards.size)
+        assertEquals(1, connection.openForwards.size)
 
         forwarder.stop()
         job.cancel()
@@ -119,12 +122,12 @@ class AutoForwarderTest {
         // #602 ask 4: forwarding remote N defaults local N, but when N and the
         // next two candidates are busy the forwarder must keep walking upward and
         // surface the ACTUAL chosen local port (no failure, no broken mapping).
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val occupied = setOf(3000, 3001, 3002)
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             localPortAvailability = LocalPortAvailability { port -> port !in occupied },
         )
@@ -135,7 +138,7 @@ class AutoForwarderTest {
         assertEquals(3000, tunnel.remotePort)
         assertEquals("local port should walk past the three busy candidates", 3003, tunnel.localPort)
         assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
-        assertEquals(3003, session.openForwards.values.single().localPort)
+        assertEquals(3003, connection.openForwards.values.single().localPort)
 
         forwarder.stop()
         job.cancel()
@@ -144,12 +147,12 @@ class AutoForwarderTest {
 
     @Test
     fun `in-window mirror port increments when requested local port is occupied`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val occupied = setOf(3000)
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             localPortAvailability = LocalPortAvailability { port -> port !in occupied },
         )
@@ -161,7 +164,7 @@ class AutoForwarderTest {
         assertEquals(3000, tunnel.remotePort)
         assertEquals(3001, tunnel.localPort)
         assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
-        assertEquals(3001, session.openForwards.values.single().localPort)
+        assertEquals(3001, connection.openForwards.values.single().localPort)
 
         forwarder.stop()
         job.cancel()
@@ -170,10 +173,10 @@ class AutoForwarderTest {
 
     @Test
     fun `port below skipPortsBelow is not forwarded but is reported AVAILABLE`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
 
@@ -183,7 +186,7 @@ class AutoForwarderTest {
         assertEquals(22, t.remotePort)
         assertEquals(TunnelInfo.Status.AVAILABLE, t.status)
         assertEquals("sshd", t.process)
-        assertTrue("no forwards should have been requested", session.openForwards.isEmpty())
+        assertTrue("no forwards should have been requested", connection.openForwards.isEmpty())
 
         forwarder.stop()
         job.cancel()
@@ -192,17 +195,17 @@ class AutoForwarderTest {
 
     @Test
     fun `port disappearing between scans tears down its forward`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
         assertEquals(1, forwarder.flowOfTunnels().first().size)
 
         // Service stops; next scan should observe it gone and tear the
         // local forward down.
-        session.setListening("")
+        connection.setListening("")
         advanceTimeBy(2_000L)
         runCurrent()
 
@@ -211,7 +214,7 @@ class AutoForwarderTest {
             "forward should be torn down once remote port disappears, got $snapshot",
             snapshot.none { it.status == TunnelInfo.Status.FORWARDING },
         )
-        val firstForward = session.openForwards.values.first()
+        val firstForward = connection.openForwards.values.first()
         assertFalse("underlying forward should have been closed", firstForward.isActive)
 
         forwarder.stop()
@@ -221,10 +224,10 @@ class AutoForwarderTest {
 
     @Test
     fun `togglePort manually forces a forward for an out-of-window port`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
         // sshd on 22 isn't auto-forwarded because it's below skipPortsBelow.
@@ -252,18 +255,18 @@ class AutoForwarderTest {
 
     @Test
     fun `stop tears down every open forward`() = runTest {
-        val session = FakeSession()
-        session.setListening(
+        val connection = FakeConnection()
+        connection.setListening(
             """
             0.0.0.0:3000 users:(("a",pid=1,fd=4))
             0.0.0.0:4000 users:(("b",pid=1,fd=4))
             """.trimIndent(),
         )
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
-        assertEquals(2, session.openForwards.size)
+        assertEquals(2, connection.openForwards.size)
 
         forwarder.stop()
 
@@ -274,7 +277,7 @@ class AutoForwarderTest {
         // it ran inline.
         assertTrue(
             "all forwards should have been closed by stop()",
-            waitUntilReal(2_000L) { session.openForwards.values.all { !it.isActive } },
+            waitUntilReal(2_000L) { connection.openForwards.values.all { !it.isActive } },
         )
         assertEquals(0, forwarder.flowOfTunnels().first().size)
         job.cancel()
@@ -292,23 +295,23 @@ class AutoForwarderTest {
         // promptly anyway, while still confirming the close is dispatched
         // (teardown not dropped). RED on base (stop() blocks until the latch
         // releases), GREEN with the off-thread teardown.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
         val closeEntered = CountDownLatch(1)
         val closeRelease = CountDownLatch(1)
-        session.blockForwardClose(closeEntered, closeRelease)
+        connection.blockForwardClose(closeEntered, closeRelease)
 
         val executor = Executors.newSingleThreadExecutor()
         val dispatcher = executor.asCoroutineDispatcher()
         val loopScope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + dispatcher)
         // Default teardownDispatcher = Dispatchers.IO, so the hung close runs
         // off the caller thread — exactly the production wiring.
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         try {
             forwarder.start(loopScope)
             assertTrue(
                 "a forward should have been opened by the first scan",
-                waitUntilReal(2_000L) { session.openForwards.values.any { it.isActive } },
+                waitUntilReal(2_000L) { connection.openForwards.values.any { it.isActive } },
             )
 
             val stopThread = Thread { forwarder.stop() }
@@ -332,20 +335,20 @@ class AutoForwarderTest {
 
     @Test
     fun `stop closes a forward that finishes opening after stop`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
         val openEntered = CountDownLatch(1)
         val releaseOpen = CountDownLatch(1)
-        session.blockNextOpen(openEntered, releaseOpen)
+        connection.blockNextOpen(openEntered, releaseOpen)
 
         val executor = Executors.newSingleThreadExecutor()
         val dispatcher = executor.asCoroutineDispatcher()
         val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + dispatcher)
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         try {
             val job = forwarder.start(scope)
             assertTrue(
-                "openLocalPortForward should be in flight",
+                "openPortForward should be in flight",
                 openEntered.await(2, TimeUnit.SECONDS),
             )
 
@@ -354,8 +357,8 @@ class AutoForwarderTest {
             assertTrue(
                 "late-opened forward must be closed by stop()",
                 waitUntilReal(2_000L) {
-                    session.completedOpenAttempts.get() >= 1 &&
-                        session.openForwards.values.all { !it.isActive }
+                    connection.completedOpenAttempts.get() >= 1 &&
+                        connection.openForwards.values.all { !it.isActive }
                 },
             )
             job.cancel()
@@ -375,8 +378,8 @@ class AutoForwarderTest {
 
     @Test
     fun `start is idempotent and returns the same job`() = runTest {
-        val session = FakeSession()
-        val forwarder = AutoForwarder(session, smallConfig())
+        val connection = FakeConnection()
+        val forwarder = AutoForwarder(connection, smallConfig())
         val first = forwarder.start(this)
         val second = forwarder.start(this)
         assertEquals(first, second)
@@ -386,8 +389,8 @@ class AutoForwarderTest {
 
     @Test(timeout = 5_000)
     fun `concurrent starts publish one shared loop job`() {
-        val session = FakeSession()
-        val forwarder = AutoForwarder(session, smallConfig())
+        val connection = FakeConnection()
+        val forwarder = AutoForwarder(connection, smallConfig())
         val executor = Executors.newFixedThreadPool(2)
         val releaseDispatch = CountDownLatch(1)
         val firstDispatchEntered = CountDownLatch(1)
@@ -442,7 +445,7 @@ class AutoForwarderTest {
 
     @Test(timeout = 5_000)
     fun `stop racing loop publication cancels the startup job`() {
-        val session = FakeSession()
+        val connection = FakeConnection()
         lateinit var forwarder: AutoForwarder
         val executor = Executors.newSingleThreadExecutor()
         val releaseBody = CountDownLatch(1)
@@ -460,7 +463,7 @@ class AutoForwarderTest {
             }
         }
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
-        forwarder = AutoForwarder(session, smallConfig())
+        forwarder = AutoForwarder(connection, smallConfig())
 
         try {
             val job = forwarder.start(scope)
@@ -483,7 +486,7 @@ class AutoForwarderTest {
         val executor = Executors.newFixedThreadPool(4)
         try {
             repeat(100) {
-                val forwarder = AutoForwarder(FakeSession(), smallConfig())
+                val forwarder = AutoForwarder(FakeConnection(), smallConfig())
                 val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
                 val ready = java.util.concurrent.CyclicBarrier(3)
                 val first = executor.submit<Job> {
@@ -512,37 +515,37 @@ class AutoForwarderTest {
 
     @Test
     fun `stop is idempotent`() = runTest {
-        val session = FakeSession()
-        val forwarder = AutoForwarder(session, smallConfig())
+        val connection = FakeConnection()
+        val forwarder = AutoForwarder(connection, smallConfig())
         forwarder.stop()
         forwarder.stop() // should not throw
     }
 
     @Test
     fun `start after stop is a no-op`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         forwarder.stop()
 
         val job = forwarder.start(this)
         runCurrent()
-        assertTrue("stopped forwarder must not scan again", session.openForwards.isEmpty())
+        assertTrue("stopped forwarder must not scan again", connection.openForwards.isEmpty())
         job.cancel()
         runCurrent()
     }
 
     @Test
     fun `byte counts and speed flow through to TunnelInfo`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
         // Simulate traffic on the forward between scans.
-        val forward = session.openForwards.values.single() as FakeForward
+        val forward = connection.openForwards.values.single() as FakeForward
         forward.bytesForwardedAtomic.set(1_000)
         forward.bytesReceivedAtomic.set(500)
 
@@ -569,11 +572,11 @@ class AutoForwarderTest {
 
     @Test
     fun `failed port is retried after TTL elapses`() = runTest {
-        // Reject the first openLocalPortForward call, accept subsequent
+        // Reject the first openPortForward call, accept subsequent
         // ones. That lands the port on failedPorts after the first scan.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
-        session.failNextOpens(1)
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        connection.failNextOpens(1)
 
         // Drive our own clock so we can step it past the TTL without
         // also stepping the coroutine virtual clock (which would fire
@@ -581,7 +584,7 @@ class AutoForwarderTest {
         val now = AtomicLong(0L)
         val ttl = 5_000L
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig().copy(failedPortTtlMs = ttl),
             clock = { now.get() },
         )
@@ -592,7 +595,7 @@ class AutoForwarderTest {
         val afterFail = forwarder.flowOfTunnels().first()
         assertEquals(1, afterFail.size)
         assertEquals(TunnelInfo.Status.FAILED, afterFail.single().status)
-        assertTrue("forward should NOT have been opened on the first scan", session.openForwards.isEmpty())
+        assertTrue("forward should NOT have been opened on the first scan", connection.openForwards.isEmpty())
 
         // Advance the scan-loop clock to the next tick but stay inside
         // the TTL: the port must still be denied.
@@ -600,7 +603,7 @@ class AutoForwarderTest {
         runCurrent()
         assertTrue(
             "deny-list entry is still within TTL — must not retry",
-            session.openForwards.isEmpty(),
+            connection.openForwards.isEmpty(),
         )
         assertEquals(
             TunnelInfo.Status.FAILED,
@@ -620,7 +623,7 @@ class AutoForwarderTest {
             TunnelInfo.Status.FORWARDING,
             afterTtl.single().status,
         )
-        assertEquals(1, session.openForwards.size)
+        assertEquals(1, connection.openForwards.size)
 
         forwarder.stop()
         job.cancel()
@@ -630,12 +633,12 @@ class AutoForwarderTest {
     @Test
     fun `failed port still denied within TTL`() = runTest {
         // Hardcoded clock returns 0 forever so TTL never elapses.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
-        session.failAllOpens()
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        connection.failAllOpens()
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig().copy(failedPortTtlMs = 60_000L),
             clock = { 0L },
         )
@@ -647,20 +650,20 @@ class AutoForwarderTest {
 
         assertTrue(
             "all opens must have failed; forward count is the number of *successful* opens",
-            session.openForwards.isEmpty(),
+            connection.openForwards.isEmpty(),
         )
-        // openLocalPortForward was called at least once (first scan); the
+        // openPortForward was called at least once (first scan); the
         // TTL guard then suppresses further attempts.
         assertTrue(
-            "openLocalPortForward must have been called at least once (initial attempt)",
-            session.totalOpenAttempts.get() >= 1,
+            "openPortForward must have been called at least once (initial attempt)",
+            connection.totalOpenAttempts.get() >= 1,
         )
         // ...but NOT once per scan tick — the TTL keeps it on the deny-list.
         // Six ticks elapsed (1 initial + 5 from 5.5 s @ 1 s); the deny-list
         // must hold so we see strictly fewer attempts than scans.
         assertTrue(
-            "TTL must suppress retries — got ${session.totalOpenAttempts.get()} attempts",
-            session.totalOpenAttempts.get() < 6,
+            "TTL must suppress retries — got ${connection.totalOpenAttempts.get()} attempts",
+            connection.totalOpenAttempts.get() < 6,
         )
 
         forwarder.stop()
@@ -673,13 +676,13 @@ class AutoForwarderTest {
         // Local port range of size 2; we'll manually toggle three
         // out-of-window ports so the third forces the allocator to walk
         // the whole range and trip the fail-fast guard.
-        val session = FakeSession()
+        val connection = FakeConnection()
         // No listening ports — we use togglePort to force forwards for
         // out-of-window remote ports (22, 23, 25 are all < skipPortsBelow).
-        session.setListening("")
+        connection.setListening("")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             AutoForwardConfig(
                 scanIntervalSec = 1,
                 maxAutoPort = 5_000,
@@ -695,7 +698,7 @@ class AutoForwarderTest {
         forwarder.togglePort(22)
         forwarder.togglePort(23)
         // First two should have succeeded — each got its own slot.
-        assertEquals(2, session.openForwards.size)
+        assertEquals(2, connection.openForwards.size)
 
         // Third toggle — allocator must throw. AutoForwarder catches it
         // inside forwardPortLocked and memos remote port 25 on
@@ -707,7 +710,7 @@ class AutoForwarderTest {
         assertEquals(
             "third manual toggle must not open a forward — range is exhausted",
             2,
-            session.openForwards.size,
+            connection.openForwards.size,
         )
         val snapshot = forwarder.flowOfTunnels().first()
         val twentyFive = snapshot.singleOrNull { it.remotePort == 25 }
@@ -725,11 +728,11 @@ class AutoForwarderTest {
     fun `initialRemappings override mirror allocation for an in-window port`() = runTest {
         // Issue #203 expanded scope: a persisted remapping must override
         // the natural "mirror remote port onto same local port" rule.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             initialRemappings = mapOf(3000 to 9000),
             localPortAvailability = LocalPortAvailability { true },
@@ -744,9 +747,9 @@ class AutoForwarderTest {
         assertEquals(9000, t.localPort)
         assertEquals(TunnelInfo.Status.FORWARDING, t.status)
         assertEquals(
-            "openLocalPortForward should have been called with the remapped local port",
+            "openPortForward should have been called with the remapped local port",
             9000,
-            session.openForwards.values.single().localPort,
+            connection.openForwards.values.single().localPort,
         )
 
         forwarder.stop()
@@ -759,12 +762,12 @@ class AutoForwarderTest {
         // #602: remapped ports still use the conflict-aware allocator. If the
         // requested local port is busy, the tunnel should open on the next
         // available local port and surface that actual mapping.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val occupied = setOf(9000, 9001)
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             initialRemappings = mapOf(3000 to 9000),
             localPortAvailability = LocalPortAvailability { port -> port !in occupied },
@@ -777,9 +780,9 @@ class AutoForwarderTest {
         assertEquals(9002, t.localPort)
         assertEquals(TunnelInfo.Status.FORWARDING, t.status)
         assertEquals(
-            "openLocalPortForward should have been called with the incremented local port",
+            "openPortForward should have been called with the incremented local port",
             9002,
-            session.openForwards.values.single().localPort,
+            connection.openForwards.values.single().localPort,
         )
 
         forwarder.stop()
@@ -792,11 +795,11 @@ class AutoForwarderTest {
         // sshd on port 22 is normally below skipPortsBelow, so the
         // allocator would hand it a port from localPortRange when
         // manually toggled. A persisted remap entry must take priority.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             initialRemappings = mapOf(22 to 2222),
             localPortAvailability = LocalPortAvailability { true },
@@ -818,9 +821,9 @@ class AutoForwarderTest {
         // pick (which would otherwise land in 3_500..3_600).
         assertEquals(2222, sshd.localPort)
         assertEquals(
-            "openLocalPortForward should have been called with the remapped local port",
+            "openPortForward should have been called with the remapped local port",
             2222,
-            session.openForwards.values.single().localPort,
+            connection.openForwards.values.single().localPort,
         )
 
         forwarder.stop()
@@ -832,11 +835,11 @@ class AutoForwarderTest {
     fun `empty initialRemappings preserves default mirroring behaviour`() = runTest {
         // Regression check: existing callers that don't supply a
         // remappings map must continue to get the mirror behaviour.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             localPortAvailability = allLocalPortsAvailable,
         )
@@ -856,11 +859,11 @@ class AutoForwarderTest {
         // Issue #439: the supervisor seeds a fresh forwarder with the
         // user's desired manual ports after a reconnect. :22 is below the
         // auto window and the only way it comes up is via the seeded set.
-        val session = FakeSession()
-        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
 
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             initialManualPorts = setOf(22),
         )
@@ -869,7 +872,7 @@ class AutoForwarderTest {
 
         val t = forwarder.flowOfTunnels().first().single { it.remotePort == 22 }
         assertEquals(TunnelInfo.Status.FORWARDING, t.status)
-        assertEquals(1, session.openForwards.size)
+        assertEquals(1, connection.openForwards.size)
 
         forwarder.stop()
         job.cancel()
@@ -880,9 +883,9 @@ class AutoForwarderTest {
     fun `initialManualPorts re-forwards a port that is not currently listening`() = runTest {
         // The desired port may briefly not be listening right after a
         // reconnect (server restarting). The seeded set still re-opens it.
-        val session = FakeSession() // nothing listening
+        val connection = FakeConnection() // nothing listening
         val forwarder = AutoForwarder(
-            session,
+            connection,
             smallConfig(),
             initialManualPorts = setOf(8080),
         )
@@ -891,7 +894,7 @@ class AutoForwarderTest {
 
         val t = forwarder.flowOfTunnels().first().single { it.remotePort == 8080 }
         assertEquals(TunnelInfo.Status.FORWARDING, t.status)
-        assertEquals(1, session.openForwards.size)
+        assertEquals(1, connection.openForwards.size)
 
         forwarder.stop()
         job.cancel()
@@ -900,15 +903,15 @@ class AutoForwarderTest {
 
     @Test
     fun `ensurePort enable then disable is idempotent and absolute`() = runTest {
-        val session = FakeSession()
-        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
-        val forwarder = AutoForwarder(session, smallConfig())
+        val connection = FakeConnection()
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
 
         forwarder.ensurePort(22, enabled = true)
         forwarder.ensurePort(22, enabled = true) // idempotent — no dup
-        assertEquals(1, session.openForwards.count { it.value.remotePort == 22 })
+        assertEquals(1, connection.openForwards.count { it.value.remotePort == 22 })
         assertEquals(
             TunnelInfo.Status.FORWARDING,
             forwarder.flowOfTunnels().first().single { it.remotePort == 22 }.status,
@@ -942,17 +945,40 @@ class AutoForwarderTest {
         return predicate()
     }
 
-    /** Fake SSH session that lets a test script `ss`/`netstat` output. */
-    private class FakeSession : SshSession {
-        @Volatile private var output: String = ""
-        val openForwards: MutableMap<Int, FakeForward> = mutableMapOf()
+    /**
+     * The transport the forwarder runs over: core-transport's scripted
+     * [FakeHostConnection] (which answers exec and owns the transport state)
+     * plus the port-forward behaviours these tests script — a hanging open, a
+     * hanging close, and forwards whose byte counters a test can move.
+     */
+    private class FakeConnection(
+        private val delegate: FakeHostConnection = FakeHostConnection(),
+    ) : HostConnection by delegate {
+
+        @Volatile
+        private var output: String = ""
+
+        val openForwards: MutableMap<Int, FakeForward> = java.util.concurrent.ConcurrentHashMap()
         val totalOpenAttempts = AtomicInteger(0)
         val completedOpenAttempts = AtomicInteger(0)
         private val failuresRemaining = AtomicInteger(0)
         private val failForever = AtomicBoolean(false)
-        private val nextChannelId = AtomicInteger(0)
-        @Volatile private var blockedOpen: Pair<CountDownLatch, CountDownLatch>? = null
-        @Volatile private var blockedClose: Pair<CountDownLatch, CountDownLatch>? = null
+
+        @Volatile
+        private var blockedOpen: Pair<CountDownLatch, CountDownLatch>? = null
+
+        @Volatile
+        private var blockedClose: Pair<CountDownLatch, CountDownLatch>? = null
+
+        init {
+            // Primary `ss -tlnp` returns the scripted output; netstat /
+            // last-resort are not modelled here — PortScannerTest owns the
+            // fallback chain.
+            delegate.onExecMatching("ss -tlnp ...", match = { it.startsWith("ss -tlnp") }) {
+                ExecResult(exitCode = 0, stdout = output, stderr = "", timedOut = false)
+            }
+            delegate.defaultExec = ExecResult(exitCode = 0, stdout = "", stderr = "", timedOut = false)
+        }
 
         fun setListening(ssOutput: String) {
             output = ssOutput
@@ -963,45 +989,30 @@ class AutoForwarderTest {
         }
 
         /**
-         * Make every forward produced by [openLocalPortForward] block inside
-         * its `close()` — it counts down [entered] and waits on [release].
-         * Lets a test hold an SSH-channel teardown open while asserting the
-         * caller of `stop()` is not blocked (#1085 F-E).
+         * Make every forward produced by [openPortForward] block inside its
+         * `close()` — it counts down [entered] and waits on [release]. Lets a
+         * test hold an SSH-channel teardown open while asserting the caller of
+         * `stop()` is not blocked (#1085 F-E).
          */
         fun blockForwardClose(entered: CountDownLatch, release: CountDownLatch) {
             blockedClose = entered to release
         }
 
-        /** Make the next [n] openLocalPortForward calls throw. */
+        /** Make the next [n] openPortForward calls throw. */
         fun failNextOpens(n: Int) {
             failuresRemaining.set(n)
         }
 
-        /** Make every openLocalPortForward call throw. */
+        /** Make every openPortForward call throw. */
         fun failAllOpens() {
             failForever.set(true)
         }
 
-        override val isConnected: Boolean = true
-        override suspend fun exec(command: String): ExecResult {
-            // Primary `ss -tlnp` returns our scripted output; we don't model
-            // netstat / last-resort here — the dedicated PortScannerTest
-            // covers the fallback chain.
-            return if (command.startsWith("ss -tlnp")) {
-                ExecResult(output, "", exitCode = 0)
-            } else {
-                ExecResult("", "", exitCode = 0)
-            }
-        }
-        override fun tail(path: String, onLine: (String) -> Unit): Job =
-            error("tail not used by AutoForwarder tests")
-        override fun startShell(): com.pocketshell.core.ssh.SshShell =
-            error("startShell not used by AutoForwarder tests")
-        override fun openLocalPortForward(
+        override suspend fun openPortForward(
             remoteHost: String,
             remotePort: Int,
             localPort: Int,
-        ): SshPortForward {
+        ): PortForward {
             totalOpenAttempts.incrementAndGet()
             blockedOpen?.let { (entered, release) ->
                 blockedOpen = null
@@ -1014,46 +1025,34 @@ class AutoForwarderTest {
             if (failuresRemaining.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
                 throw RuntimeException("fake open failure (countdown)")
             }
-            val f = FakeForward(
-                remoteHost,
-                remotePort,
-                localPort,
-                nextChannelId.incrementAndGet(),
-                closeBlock = blockedClose,
-            )
-            openForwards[remotePort] = f
+            val forward = FakeForward(remoteHost, remotePort, localPort, closeBlock = blockedClose)
+            openForwards[remotePort] = forward
             completedOpenAttempts.incrementAndGet()
-            return f
+            return forward
         }
-        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
-            error("uploadFile not used by AutoForwarder tests")
-        override suspend fun uploadStream(
-            input: java.io.InputStream,
-            length: Long,
-            name: String,
-            remotePath: String,
-        ): String = error("uploadStream not used by AutoForwarder tests")
-        override fun close() = Unit
     }
 
     private class FakeForward(
         override val remoteHost: String,
         override val remotePort: Int,
         override val localPort: Int,
-        @Suppress("unused") val channelId: Int,
         private val closeBlock: Pair<CountDownLatch, CountDownLatch>? = null,
-    ) : SshPortForward {
+    ) : PortForward {
         val bytesForwardedAtomic = AtomicLong(0)
         val bytesReceivedAtomic = AtomicLong(0)
-        @Volatile private var open = true
+
+        @Volatile
+        private var open = true
+
         override val isActive: Boolean get() = open
         override val bytesForwarded: Long get() = bytesForwardedAtomic.get()
         override val bytesReceived: Long get() = bytesReceivedAtomic.get()
-        override fun close() {
-            // Model a wedged SSH channel teardown: signal we entered close,
-            // then block until released (or interrupted by the bounded
-            // teardown timeout). Mirrors RealSshPortForward.close() funnelling
-            // its channel-close packet through a transport that can stall.
+
+        override suspend fun close() {
+            // Model a wedged SSH channel teardown: signal we entered close, then
+            // block until released (or interrupted by the bounded teardown
+            // timeout). Mirrors PortForwardImpl.close(), whose blocking join
+            // runs interruptibly on the transport's IO dispatcher.
             closeBlock?.let { (entered, release) ->
                 entered.countDown()
                 try {

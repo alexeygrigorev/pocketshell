@@ -86,11 +86,14 @@ androidComponents {
 }
 
 dependencies {
-    // Public API is built on top of SshSession / SshPortForward from core-ssh.
-    api(project(":shared:core-ssh"))
+    // Task P-4: the tunnel engine's public surface takes a HostConnection and
+    // hands back PortForward/TunnelInfo, so core-transport stays `api` exactly
+    // as the deleted core-ssh dependency was — a caller cannot construct an
+    // AutoForwarder without core-transport's types on its own compile classpath.
+    api(project(":shared:core-transport"))
 
     // Coroutines drive the periodic scan loop and the public Flow<TunnelInfo>
-    // surface. Already exposed transitively via core-ssh's `api` dep, but
+    // surface. Already exposed transitively via core-transport's `api` dep, but
     // declared explicitly so this module's intent is self-documenting.
     implementation(libs.kotlinx.coroutines.core)
 
@@ -99,8 +102,11 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.testcontainers)
-    // sshj needs a logger at test time when we drive a real session through
-    // the container; reuse the nop binding from core-ssh.
+    // The engine's unit tests drive it against core-transport's scripted
+    // FakeHostConnection — no sshj, no sockets, no Docker.
+    testImplementation(testFixtures(project(":shared:core-transport")))
+    // sshj needs a logger at test time when the integration suite drives a real
+    // connection through the container.
     testRuntimeOnly(libs.slf4j.nop)
 }
 

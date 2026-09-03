@@ -99,6 +99,7 @@ class SessionScreenTest {
         state: SessionUiState,
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
+        onSend: (ByteArray) -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -107,6 +108,7 @@ class SessionScreenTest {
                     sessionName = SESSION,
                     onBack = onBack,
                     onResized = onResized,
+                    onSend = onSend,
                 )
             }
         }

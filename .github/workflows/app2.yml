@@ -556,9 +556,10 @@ jobs:
             2>&1 | tee "${RUNNER_TEMP}/app2-gradle.log"
 
       # 11 when the lane landed, 59 after U-2's connect-flow and trust-prompt
-      # suites, 117 after U-4's session ViewModel/screen suites; floor 100 —
-      # comfortably under the current count but far above the point where a
-      # whole suite could silently stop running.
+      # suites, 117 after U-4's session ViewModel/screen suites, 424 after
+      # U-5's key-byte/geometry/key-bar suites (with U-6, P-3, P-4 and P-6
+      # landed alongside); floor 380 — comfortably under the current count but
+      # far above the point where a whole suite could silently stop running.
       - name: Assert tests actually executed
         if: always() && steps.app2_tests.conclusion != 'skipped'
         run: |
@@ -567,7 +568,7 @@ jobs:
           scripts/check-app2-lane-execution.py \
             --label ":app2:testDebugUnitTest" \
             --results-dir app2/build/test-results/testDebugUnitTest \
-            --min 100 \
+            --min 380 \
             --newer-than "${RUNNER_TEMP}/app2-run-start"
 
       # Compile-only guard for the instrumented journey (see the header note).

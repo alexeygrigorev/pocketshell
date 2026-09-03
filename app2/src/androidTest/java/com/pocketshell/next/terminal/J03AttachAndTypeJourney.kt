@@ -1,14 +1,19 @@
 package com.pocketshell.next.terminal
 
+import android.content.pm.ActivityInfo
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.storage.entity.HostEntity
@@ -25,6 +30,8 @@ import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
+import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -86,6 +93,26 @@ class J03AttachAndTypeJourney {
         .around(compose)
 
     private var hostId: Long = 0
+
+    /**
+     * Puts the device back the way it was found.
+     *
+     * The rotation test is the only one here that touches orientation, and a
+     * run that fails midway through it would otherwise leave the shared
+     * emulator in landscape — where the NEXT test class, and every parallel
+     * agent's run on the same AVD, starts from a screen shape it did not ask
+     * for. Best effort: if the Activity is already gone there is nothing to
+     * restore.
+     */
+    @After
+    fun restoreOrientation() {
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                compose.activity.requestedOrientation =
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+    }
 
     private suspend fun seed(description: Description) {
         val graph = appGraph()
@@ -232,6 +259,154 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
     }
 
+    /**
+     * Task U-5: the remote's idea of the terminal size follows the phone's.
+     *
+     * `stty size` is asked INSIDE the live session, so the number under test is
+     * the one the shell will wrap at — not a field on a ViewModel and not the
+     * emulator's own grid, either of which can be right while the remote is
+     * still wrapping at 80x24. Every reading is cross-checked against the
+     * host's own `#{pane_width}x#{pane_height}` over an independent SSH
+     * connection, because a locally-echoed `stty` reply would look identical to
+     * a resize that never crossed the wire.
+     *
+     * Two viewport changes, the two the maintainer actually does: raising the
+     * keyboard (which must take rows and leave columns alone) and rotating
+     * (which swaps them). Both must also come BACK — a resize path that only
+     * ever shrinks leaves the session unusable after the keyboard closes.
+     */
+    @Test
+    fun theRemoteTerminalSizeTracksTheKeyboardAndRotation() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+
+        val closed = remoteSize("keyboard down")
+        JourneyScreenshots.capture("04-keyboard-down", JOURNEY)
+
+        showKeyboard()
+        val opened = remoteSize("keyboard up")
+        JourneyScreenshots.capture("05-keyboard-up", JOURNEY)
+        assertTrue(
+            "the keyboard must cost the remote rows: closed=$closed opened=$opened",
+            opened.rows < closed.rows,
+        )
+        assertEquals(
+            "the keyboard takes height, not width: closed=$closed opened=$opened",
+            closed.cols,
+            opened.cols,
+        )
+
+        hideKeyboard()
+        val reclosed = remoteSize("keyboard down again")
+        assertEquals(
+            "closing the keyboard must give the rows back: was $closed, now $reclosed",
+            closed,
+            reclosed,
+        )
+
+        rotate(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+        val landscape = remoteSize("landscape")
+        JourneyScreenshots.capture("06-landscape", JOURNEY)
+        assertTrue(
+            "landscape must widen the remote terminal: portrait=$closed landscape=$landscape",
+            landscape.cols > closed.cols,
+        )
+        assertTrue(
+            "landscape must shorten the remote terminal: portrait=$closed landscape=$landscape",
+            landscape.rows < closed.rows,
+        )
+
+        rotate(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+        val backToPortrait = remoteSize("portrait again")
+        assertEquals(
+            "rotating back must restore the size: was $closed, now $backToPortrait",
+            closed,
+            backToPortrait,
+        )
+    }
+
+    /**
+     * Task U-5: Ctrl on the key bar plus `c` on the keyboard is a real SIGINT.
+     *
+     * The oracle is the HOST's process table, not the screen. A terminal shows
+     * `^C` for any number of reasons — a locally echoed control glyph, a shell
+     * printing it on its own — and the only claim worth making is that the
+     * running process died. So the journey starts a uniquely-named `sleep`,
+     * waits until the host reports it running (otherwise the interrupt could be
+     * "proven" against a command that never started), interrupts it, and waits
+     * for it to be gone.
+     *
+     * Then it types a command and watches the output come back, because an
+     * interrupt that also wedged the session would satisfy the first half.
+     */
+    @Test
+    fun ctrlFromTheKeyBarInterruptsARunningCommand() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+
+        typeLine("sleep $SLEEP_SECONDS")
+        awaitHostSleep(running = true)
+        JourneyScreenshots.capture("07-sleeping", JOURNEY)
+
+        // The whole point of the key bar: the modifier comes from the bar, the
+        // letter from the keyboard, because a phone keyboard has every letter
+        // and no Ctrl.
+        compose.onNodeWithText(KEY_LABEL_CTRL).assertIsDisplayed()
+        compose.onNodeWithText(KEY_LABEL_CTRL).performClick()
+        compose.waitForIdle()
+        typeCharacter('c')
+
+        awaitHostSleep(running = false)
+        JourneyScreenshots.capture("08-interrupted", JOURNEY)
+
+        // ...and the session is still usable afterwards. Twice, for the reason
+        // the headline test explains: once as the shell echoes the typed line,
+        // once as the command's own output.
+        typeLine("echo $CTRL_MARKER")
+        awaitTranscript("the post-interrupt marker twice") {
+            it.split(CTRL_MARKER).size >= 3
+        }
+        assertTrue(
+            "the host must show the post-interrupt command ran",
+            squashed(capturePane()).contains(CTRL_MARKER),
+        )
+    }
+
+    /**
+     * Task U-5: Esc and Enter on the key bar reach the remote as real bytes.
+     *
+     * Enter is the load-bearing one — a bar that sent `\n` instead of `\r`
+     * submits nothing to a line editor — and it is asserted the only way that
+     * distinguishes them: by typing a command WITHOUT a newline and letting the
+     * bar's Enter run it.
+     */
+    @Test
+    fun theKeyBarsEnterSubmitsATypedCommand() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+
+        // Typed WITHOUT the Enter key event `typeLine` appends.
+        typeCharacters("echo $ENTER_MARKER")
+        val beforeEnter = awaitTranscript("the un-submitted command echoed back") {
+            it.contains(ENTER_MARKER)
+        }
+        assertEquals(
+            "the command must NOT have run yet, or the key bar's Enter proves nothing:\n" +
+                beforeEnter,
+            2,
+            squashed(beforeEnter).split(ENTER_MARKER).size,
+        )
+
+        compose.onNodeWithText(KEY_LABEL_ENTER).performClick()
+
+        awaitTranscript("the marker echoed and run") { it.split(ENTER_MARKER).size >= 3 }
+        JourneyScreenshots.capture("09-key-bar-enter", JOURNEY)
+        assertTrue(
+            "the host must show the command the key bar's Enter submitted",
+            squashed(capturePane()).contains(ENTER_MARKER),
+        )
+    }
+
     // --- helpers ----------------------------------------------------------
 
     /** Host tap → the session tree for that host. */
@@ -266,13 +441,23 @@ class J03AttachAndTypeJourney {
      *    emulator parses and renders; reading it from the instrumentation thread
      *    is a data race whose failures look like flakes.
      */
-    private fun awaitTranscript(what: String, predicate: (String) -> Boolean): String {
+    private fun awaitTranscript(what: String, predicate: (String) -> Boolean): String =
+        awaitRenderedTranscript(what) { predicate(squashed(it)) }
+
+    /**
+     * The same poll over the RAW transcript, newlines intact.
+     *
+     * `stty size` prints `rows cols` on a line of its own, so the U-5 resize
+     * assertions have to see line boundaries — squashing them would turn
+     * `64 90` followed by the next prompt into one run of digits and letters.
+     */
+    private fun awaitRenderedTranscript(what: String, predicate: (String) -> Boolean): String {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
             compose.waitForIdle()
             last = renderedTranscript()
-            if (predicate(squashed(last))) return last
+            if (predicate(last)) return last
             SystemClock.sleep(POLL_MS)
         }
         val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
@@ -362,6 +547,38 @@ class J03AttachAndTypeJourney {
      * directly would skip every one of those.
      */
     private fun typeLine(line: String) {
+        typeCharacters(line)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_ENTER)
+        instrumentation.waitForIdleSync()
+    }
+
+    /**
+     * Types [text] with NO trailing Enter.
+     *
+     * Split out for U-5: proving the key bar's Enter really submits a command
+     * requires a command sitting there unsubmitted first, and a helper that
+     * always appended Enter could never produce one.
+     */
+    private fun typeCharacters(text: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        focusTerminal()
+        instrumentation.sendStringSync(text)
+        instrumentation.waitForIdleSync()
+    }
+
+    /** One character, the same real key-event path. */
+    private fun typeCharacter(character: Char) = typeCharacters(character.toString())
+
+    /**
+     * Puts the keyboard focus back on the terminal.
+     *
+     * Called before every injection because a tap on a Compose key bar slot
+     * takes focus with it — and an injected key event goes to whatever the
+     * window says is focused, so without this the letter after a Ctrl tap would
+     * be delivered to the bar and silently vanish.
+     */
+    private fun focusTerminal() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         compose.waitForIdle()
         instrumentation.runOnMainSync {
@@ -370,9 +587,206 @@ class J03AttachAndTypeJourney {
             view.requestFocus()
         }
         instrumentation.waitForIdleSync()
-        instrumentation.sendStringSync(line)
-        instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_ENTER)
+    }
+
+    // --- U-5: size, keyboard, rotation ------------------------------------
+
+    /** A terminal size as both ends of the wire report it. */
+    private data class RemoteSize(val cols: Int, val rows: Int) {
+        override fun toString(): String = "${cols}x$rows"
+    }
+
+    /**
+     * The size the live session believes it has, agreed by both ends.
+     *
+     * The host's own `#{pane_width}`/`#{pane_height}` is read first, over an
+     * INDEPENDENT SSH connection, and polled until it stops moving — a resize
+     * crosses the wire asynchronously and asserting mid-flight would be a
+     * flake generator. Then `stty size` is typed INTO the session and required
+     * to report that exact size: the pane geometry proves the resize reached
+     * tmux, and `stty` proves it reached the process that actually wraps text.
+     */
+    private fun remoteSize(what: String): RemoteSize {
+        val host = settledHostPaneSize(what)
+        typeLine("stty size")
+        awaitRenderedTranscript("$what: stty size to report ${host.rows} ${host.cols}") {
+            sizeLines(it).lastOrNull() == "${host.rows} ${host.cols}"
+        }
+        // Printed so a run's own log carries the evidence: a green assertion
+        // that both ends agree says nothing about whether the number CHANGED.
+        println("J03_REMOTE_SIZE $what stty=${host.rows} ${host.cols} pane=$host")
+        return host
+    }
+
+    /**
+     * The host's pane size once two consecutive reads agree.
+     *
+     * A `SIGWINCH` and tmux's own redraw are not instantaneous, and the phone's
+     * inset animation produces several intermediate sizes on the way, so a
+     * single read right after a viewport change can catch any of them.
+     */
+    private fun settledHostPaneSize(what: String): RemoteSize {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var previous: RemoteSize? = null
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            val current = hostPaneSize()
+            if (current != null && current == previous) return current
+            previous = current
+            SystemClock.sleep(SIZE_SETTLE_MS)
+        }
+        throw AssertionError("$what: the host's pane size never settled (last=$previous)")
+    }
+
+    /** `tmux display-message`, over the fixture's own connection, never the app's. */
+    private fun hostPaneSize(): RemoteSize? {
+        val raw = AgentsFixture.exec(
+            "tmux -S $SOCKET display-message -p -t '=$SESSION:' " +
+                "'#{pane_width} #{pane_height}' 2>/dev/null || true",
+        ).trim()
+        val match = Regex("""^(\d+) (\d+)$""").find(raw) ?: return null
+        return RemoteSize(
+            cols = match.groupValues[1].toInt(),
+            rows = match.groupValues[2].toInt(),
+        )
+    }
+
+    /**
+     * The `rows cols` lines `stty size` prints, in transcript order.
+     *
+     * Matched on the RAW transcript: the shell prints the pair on a line of its
+     * own, and the whitespace-squashing the other assertions use would run it
+     * into the next prompt.
+     */
+    private fun sizeLines(text: String): List<String> =
+        text.lines().map { it.trim() }.filter { STTY_SIZE_LINE.matches(it) }
+
+    /** Raises the soft keyboard on the terminal and waits for the inset to appear. */
+    private fun showKeyboard() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        focusTerminal()
+        instrumentation.runOnMainSync {
+            val view = checkNotNull(terminalView()) { "no TerminalView to raise a keyboard on" }
+            val manager = view.context.getSystemService(InputMethodManager::class.java)
+            manager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        }
+        awaitImeInset(visible = true)
+    }
+
+    private fun hideKeyboard() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            val view = checkNotNull(terminalView()) { "no TerminalView to lower a keyboard on" }
+            val manager = view.context.getSystemService(InputMethodManager::class.java)
+            manager?.hideSoftInputFromWindow(view.windowToken, 0)
+        }
+        awaitImeInset(visible = false)
+    }
+
+    /**
+     * Waits for the framework's own IME inset to reach the expected state.
+     *
+     * The inset — not a screenshot, not `isActive()` — because it is the exact
+     * quantity `Modifier.imePadding()` consumes, so it is the thing that must
+     * change for the terminal to shrink. If it never does, the test says so
+     * instead of quietly asserting a resize that had no cause.
+     */
+    private fun awaitImeInset(visible: Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var bottom = -1
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            bottom = compose.runOnUiThread {
+                ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
+                    ?.getInsets(WindowInsetsCompat.Type.ime())
+                    ?.bottom
+                    ?: 0
+            }
+            if ((bottom > 0) == visible) {
+                // Let the inset animation finish before anything measures.
+                SystemClock.sleep(IME_SETTLE_MS)
+                return
+            }
+            SystemClock.sleep(POLL_MS)
+        }
+        val shot = JourneyScreenshots.capture("failure-ime-${visible}", JOURNEY)
+        throw AssertionError(
+            "the keyboard never became ${if (visible) "visible" else "hidden"} " +
+                "(ime inset bottom=$bottom). Screenshot: ${shot.absolutePath}",
+        )
+    }
+
+    /**
+     * Rotates the device and waits until the terminal is laid out the new way.
+     *
+     * The Activity is recreated, so the vendored view is rebuilt and re-attached
+     * to the SAME `TerminalSession` the ViewModel still owns — which is the U-4
+     * design this exercises for the first time.
+     */
+    private fun rotate(orientation: Int) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            compose.activity.requestedOrientation = orientation
+        }
         instrumentation.waitForIdleSync()
+
+        val wantWide = orientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var seen = "none"
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            var laidOut = false
+            instrumentation.runOnMainSync {
+                val view = terminalView()
+                if (view != null && view.width > 0 && view.height > 0) {
+                    seen = "${view.width}x${view.height}"
+                    laidOut = (view.width > view.height) == wantWide
+                }
+            }
+            if (laidOut) {
+                SystemClock.sleep(IME_SETTLE_MS)
+                return
+            }
+            SystemClock.sleep(POLL_MS)
+        }
+        throw AssertionError(
+            "the terminal never laid out ${if (wantWide) "landscape" else "portrait"} " +
+                "(last seen $seen)",
+        )
+    }
+
+    /**
+     * Waits until the host's process table does (or does not) carry the
+     * journey's `sleep`.
+     *
+     * The anchored match matters: the fixture image runs three idle
+     * `sleep 3600` agents of its own, and the SSH command carrying this very
+     * `grep` has the pattern in its own arguments.
+     *
+     * `-e` matters just as much, and cost a red run to learn: `ps` without it
+     * selects only the caller's own processes on the caller's own terminal, and
+     * an `exec` channel has no terminal — so the pane's shell and everything
+     * under it were invisible and the oracle reported "not running" while the
+     * command was running perfectly well.
+     */
+    private fun awaitHostSleep(running: Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var count = -1
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            count = AgentsFixture.exec(
+                "ps -eo args= | grep -c '^sleep $SLEEP_SECONDS\$' || true",
+            ).trim().toIntOrNull() ?: -1
+            if ((count > 0) == running) return
+            SystemClock.sleep(POLL_MS)
+        }
+        val shot = JourneyScreenshots.capture("failure-sleep-$running", JOURNEY)
+        throw AssertionError(
+            "the host never reported `sleep $SLEEP_SECONDS` as " +
+                "${if (running) "running" else "gone"} (count=$count).\n" +
+                "The rendered viewport was:\n" + renderedTranscript() + "\n" +
+                "Screenshot: ${shot.absolutePath}",
+        )
     }
 
     /**
@@ -404,9 +818,31 @@ class J03AttachAndTypeJourney {
     private companion object {
         const val TIMEOUT_MS = 60_000L
         const val POLL_MS = 250L
+
+        /**
+         * How long an inset/rotation animation is given to finish before
+         * anything measures. A frame grabbed mid-animation reports a viewport
+         * neither the old nor the new size.
+         */
+        const val IME_SETTLE_MS = 1_500L
+
+        /** Gap between the two agreeing reads that count as a settled size. */
+        const val SIZE_SETTLE_MS = 500L
+
         const val JOURNEY = "j03-attach-type"
 
         const val SESSION = "j03-shell"
+
+        /** `stty size`'s output: `rows cols`, on a line of its own. */
+        val STTY_SIZE_LINE = Regex("""\d{1,4} \d{1,4}""")
+
+        /**
+         * The interrupted command's duration, chosen to be unique in the
+         * fixture's process table — the image's own idle agents run
+         * `sleep 3600`, so `sleep 100` would be indistinguishable from them
+         * under a loose match and `sleep 3600` from them under any match.
+         */
+        const val SLEEP_SECONDS = 987
 
         /**
          * The per-session socket convention `sessions attach` resolves against
@@ -419,10 +855,15 @@ class J03AttachAndTypeJourney {
         const val PROMPT = "J03READY\$"
         const val BANNER = "J03-FIXTURE-PANE"
         const val MARKER = "pocketshell-u4-ok"
+        const val CTRL_MARKER = "pocketshell-u5-interrupted"
+        const val ENTER_MARKER = "pocketshell-u5-submitted"
 
         val HOST_IDS: Map<String, Long> = mapOf(
             "attachingToARealSessionRendersItAndAcceptsTyping" to 9_301L,
             "attachingToAVanishedSessionSaysSoInsteadOfHangingOnAttaching" to 9_302L,
+            "theRemoteTerminalSizeTracksTheKeyboardAndRotation" to 9_303L,
+            "ctrlFromTheKeyBarInterruptsARunningCommand" to 9_304L,
+            "theKeyBarsEnterSubmitsATypedCommand" to 9_305L,
         )
     }
 }

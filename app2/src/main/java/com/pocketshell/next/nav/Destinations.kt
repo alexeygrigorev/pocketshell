@@ -139,6 +139,19 @@ sealed class Destination(val pattern: String) {
         fun route(): String = pattern
     }
 
+    /**
+     * Per-host workspace-root shortcuts (task P-6), opened from the Settings →
+     * Workspace section for one saved host.
+     *
+     * [ARG_HOST_ID] is a path segment, not a query argument, because — unlike
+     * [Files]/[FileViewer] — nothing here ever carries a value containing `/`:
+     * it identifies which host's `project_roots` rows this screen manages, the
+     * same shape as [Tree].
+     */
+    data object WorkspaceRoots : Destination("workspace-roots/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "workspace-roots/$hostId"
+    }
+
     companion object {
         const val ARG_HOST_ID: String = "hostId"
 
@@ -166,7 +179,7 @@ sealed class Destination(val pattern: String) {
         val all: List<Destination>
             get() = listOf(
                 Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
-                HostForm, SshKeys, HostQr, QrScan,
+                HostForm, SshKeys, HostQr, QrScan, WorkspaceRoots,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

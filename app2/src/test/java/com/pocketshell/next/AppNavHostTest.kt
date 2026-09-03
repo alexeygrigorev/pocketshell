@@ -75,6 +75,7 @@ class AppNavHostTest {
         )
         assertNavigatesTo(nav, Destination.Ports.route(hostId = 7), "Ports")
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
+        assertNavigatesTo(nav, Destination.WorkspaceRoots.route(hostId = 7), "WorkspaceRoots(hostId=7)")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
         assertNavigatesTo(nav, Destination.SshKeys.route(), "SshKeys")
         assertNavigatesTo(nav, Destination.HostQr.route(hostId = 7), "HostQr")
@@ -137,6 +138,13 @@ class AppNavHostTest {
                 sshKeysScreen = { Text("SshKeys") },
                 hostQrScreen = { Text("HostQr") },
                 qrScanScreen = { _, _ -> Text("QrScan") },
+                // Task P-6: Settings and WorkspaceRoots resolve ViewModels
+                // through `hiltViewModel()` too, for the same reason as every
+                // other stand-in above. Their own behaviour is covered by
+                // `com.pocketshell.next.settings.*`; this suite pins that
+                // `NavHost` accepts both patterns and decodes the host id.
+                settingsScreen = { _, _ -> Text("Settings") },
+                workspaceRootsScreen = { hostId, _ -> Text("WorkspaceRoots(hostId=$hostId)") },
                 connectViewModel = { stack.viewModel },
                 // Same rationale as `hostsScreen`: the real session tree
                 // resolves its ViewModel through `hiltViewModel()`. The

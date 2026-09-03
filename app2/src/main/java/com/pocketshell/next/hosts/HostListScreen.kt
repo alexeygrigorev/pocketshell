@@ -34,6 +34,7 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 const val HOST_LIST_TAG: String = "host-list"
 const val HOST_LIST_ADD_TAG: String = "host-list-add"
 const val HOST_LIST_SCAN_TAG: String = "host-list-scan"
+const val HOST_LIST_SETTINGS_TAG: String = "host-list-settings"
 
 fun hostRowTag(hostId: Long): String = "host-row-$hostId"
 
@@ -54,6 +55,7 @@ fun HostListRoute(
     onEditHost: (Long) -> Unit,
     onShareHost: (Long) -> Unit,
     onScanQr: () -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
 ) {
@@ -65,6 +67,7 @@ fun HostListRoute(
         onEditHost = onEditHost,
         onShareHost = onShareHost,
         onScanQr = onScanQr,
+        onOpenSettings = onOpenSettings,
         onDeleteHost = viewModel::delete,
         modifier = modifier,
     )
@@ -80,7 +83,9 @@ fun HostListRoute(
  * literally no way to get a host into the table:
  *
  * - **Add** and **Scan** in the header, and repeated in the empty state, which
- *   is the only screen a fresh install ever sees.
+ *   is the only screen a fresh install ever sees. A **Settings** affordance sits
+ *   alongside them — the only place in the app that reaches [SettingsScreen]
+ *   (deliberately not a mid-session terminal menu action, plan §P-6).
  * - A per-row [Kebab] with Edit / Share QR / Delete. It sits in the trailing
  *   slot the navigation chevron used to occupy: the row's own tap still dials
  *   the host, and a menu tap does not (an inner clickable consumes it), so one
@@ -95,6 +100,7 @@ fun HostListScreen(
     onEditHost: (Long) -> Unit,
     onShareHost: (Long) -> Unit,
     onScanQr: () -> Unit,
+    onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -118,6 +124,19 @@ fun HostListScreen(
                         variant = ButtonVariant.Primary,
                         compact = true,
                         modifier = Modifier.testTag(HOST_LIST_ADD_TAG),
+                    )
+                    // The only entry point into Settings anywhere in the app
+                    // (plan §P-6's "reachable from the hosts screen, not a
+                    // mid-session action"). A third compact Text button matches
+                    // the header's existing Scan/Add grammar rather than
+                    // introducing a bespoke icon-only affordance ui-kit does
+                    // not otherwise use in a `ScreenHeader` trailing slot.
+                    PocketShellButton(
+                        text = "Settings",
+                        onClick = onOpenSettings,
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                        modifier = Modifier.testTag(HOST_LIST_SETTINGS_TAG),
                     )
                 }
             },

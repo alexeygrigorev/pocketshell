@@ -539,6 +539,19 @@ def _grok_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
     return []
 
 
+def _handoff_messages_from_row(engine: str, row: dict[str, Any]) -> List[HandoffMessage]:
+    """Dispatch one parsed JSONL row to its per-engine message extractor."""
+    if engine == "claude":
+        return _claude_messages_from_row(row)
+    if engine == "codex":
+        return _codex_messages_from_row(row)
+    if engine == "opencode":
+        return _opencode_messages_from_row(row)
+    if engine == "grok":
+        return _grok_messages_from_row(row)
+    return []
+
+
 def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[HandoffMessage]:
     """Extract user/assistant prose from raw agent JSONL rows."""
     messages: List[HandoffMessage] = []
@@ -546,15 +559,284 @@ def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[Hand
         row = _parse_json_line(line)
         if row is None:
             continue
-        if engine == "claude":
-            messages.extend(_claude_messages_from_row(row))
-        elif engine == "codex":
-            messages.extend(_codex_messages_from_row(row))
-        elif engine == "opencode":
-            messages.extend(_opencode_messages_from_row(row))
-        elif engine == "grok":
-            messages.extend(_grok_messages_from_row(row))
+        messages.extend(_handoff_messages_from_row(engine, row))
     return messages
+
+
+# ---------------------------------------------------------------------------
+# UnifiedEvent adapter — the tmux-row half of `pocketshell sessions transcript`
+# ---------------------------------------------------------------------------
+#
+# `sessions transcript` emits aplexer's `UnifiedEvent` JSONL (`a transcript
+# --json`). An aplexer-managed row is served by aplexer itself; a plain tmux
+# row has no aplexer record, so the SAME wire shape is reconstructed here from
+# the locate+parse path this module already owns.
+#
+# The captured real `a transcript --json` output under
+# ``tests/fixtures/aplexer/transcript-{claude,codex}.jsonl`` is the contract;
+# this adapter conforms to it. Its field vocabulary (aplexer/src/watch.rs
+# ``UnifiedEvent``, serialised with null/empty fields omitted):
+#
+#   always: kind, engine, sequence, timestamp, raw, metadata
+#   optional: role, content, tool_name, tool_input, tool_output, error,
+#             usage_delta, continuation_id
+#
+# DELIBERATE, DOCUMENTED GAP: this adapter emits ``kind: "message"`` only. It
+# maps this module's existing internal event model (:class:`HandoffMessage` —
+# user/assistant prose) onto the envelope; agent_log has no tool-call /
+# tool-result parse model to map, so ``tool_call``/``tool_result`` events are
+# absent rather than invented. That is a strict SUBSET of the real aplexer
+# stream, which is exactly what the schema-compat test pins. This whole
+# fallback is a sanctioned interim: it is deleted once every session is
+# aplexer-managed.
+
+#: Poll interval for ``--follow`` on the tmux fallback. Matches aplexer's own
+#: ``FOLLOW_POLL`` (aplexer/src/agent_events.rs) so the two paths tail at the
+#: same cadence.
+FOLLOW_POLL_S = 0.2
+
+#: Keys every real ``a transcript --json`` event carries.
+UNIFIED_EVENT_REQUIRED_KEYS = (
+    "kind",
+    "engine",
+    "sequence",
+    "timestamp",
+    "raw",
+    "metadata",
+)
+
+
+class AgentLogNotFoundError(LookupError):
+    """No conversation log on disk for ``(engine, session)``."""
+
+    def __init__(self, engine: str, session: str) -> None:
+        self.engine = engine
+        self.session = session
+        super().__init__(
+            f"no {engine} session log found for `{session}`. Looked under "
+            f"{_search_root_for(engine)}"
+        )
+
+
+def _iso8601_utc(epoch_ms: int) -> str:
+    """``YYYY-MM-DDTHH:MM:SS+00:00`` — byte-identical to aplexer's helper.
+
+    Mirrors ``iso8601_utc`` in aplexer/src/watch.rs (second precision, explicit
+    ``+00:00`` offset) so a grok event emitted here is indistinguishable in
+    shape from one emitted by ``a transcript``.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00"
+    )
+
+
+def _grok_row_timestamp(row: dict[str, Any]) -> str:
+    """Port of ``grok_row_timestamp`` (aplexer/src/agent_events.rs).
+
+    Grok writes a numeric ``timestamp`` (seconds OR milliseconds — the 1e10
+    threshold disambiguates, same as aplexer) and, failing that, an
+    ``params._meta.agentTimestampMs``.
+    """
+    value = row.get("timestamp")
+    if isinstance(value, bool):
+        value = None
+    if isinstance(value, (int, float)):
+        number = int(value)
+        return _iso8601_utc(number * 1000 if number < 10_000_000_000 else number)
+    params = row.get("params")
+    if isinstance(params, dict):
+        meta = params.get("_meta")
+        if isinstance(meta, dict):
+            agent_ms = meta.get("agentTimestampMs")
+            if isinstance(agent_ms, (int, float)) and not isinstance(agent_ms, bool):
+                return _iso8601_utc(int(agent_ms))
+    return ""
+
+
+def _row_timestamp(engine: str, row: dict[str, Any]) -> str:
+    """The event timestamp for one native row, aplexer's rules exactly.
+
+    Claude and Codex both write an ISO-8601 ``timestamp`` string on every
+    native row and aplexer forwards it verbatim (``row_timestamp``); a row
+    without one gets ``""`` rather than a fabricated now(). Grok's numeric
+    stamp is converted. OpenCode has no aplexer reader at all, so it reuses
+    the string-or-empty rule.
+    """
+    if engine == "grok":
+        return _grok_row_timestamp(row)
+    value = row.get("timestamp")
+    return value if isinstance(value, str) else ""
+
+
+def _unified_message_event(
+    *,
+    engine: str,
+    sequence: int,
+    timestamp: str,
+    message: HandoffMessage,
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """One ``kind: "message"`` UnifiedEvent.
+
+    Key insertion order matches the Rust struct's serialisation order so the
+    emitted JSONL reads the same as aplexer's for a human diffing the two.
+    """
+    return {
+        "kind": "message",
+        "engine": engine,
+        "sequence": sequence,
+        "timestamp": timestamp,
+        "role": message.role,
+        "content": message.text,
+        "raw": row,
+        "metadata": dict(metadata),
+    }
+
+
+def unified_events_from_lines(
+    engine: str,
+    lines: Iterable[str],
+    *,
+    metadata: Optional[dict[str, Any]] = None,
+    start_sequence: int = 0,
+) -> List[dict[str, Any]]:
+    """Map raw native JSONL lines onto UnifiedEvent dicts.
+
+    ``start_sequence`` continues the counter across a ``--follow`` poll, so
+    sequence numbers stay monotonic over the life of the stream (aplexer
+    numbers events over the whole file and preserves those absolute numbers
+    under ``--last``; so does this).
+    """
+    meta = dict(metadata or {})
+    events: List[dict[str, Any]] = []
+    sequence = start_sequence
+    for line in lines:
+        row = _parse_json_line(line)
+        if row is None:
+            continue
+        timestamp = _row_timestamp(engine, row)
+        for message in _handoff_messages_from_row(engine, row):
+            events.append(
+                _unified_message_event(
+                    engine=engine,
+                    sequence=sequence,
+                    timestamp=timestamp,
+                    message=message,
+                    row=row,
+                    metadata=meta,
+                )
+            )
+            sequence += 1
+    return events
+
+
+def _split_complete_lines(data: bytes) -> tuple[List[str], int]:
+    """``(complete lines, bytes consumed)`` — the trailing partial line is held.
+
+    A live agent appends to its JSONL while we read it, so the final chunk can
+    be half a JSON object. Stopping at the last newline means the next poll
+    sees that row whole instead of discarding it as malformed.
+    """
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return [], 0
+    consumed = cut + 1
+    text = data[:consumed].decode("utf-8", errors="replace")
+    return text.splitlines(), consumed
+
+
+def unified_events_from_agent_log(
+    *,
+    engine: str,
+    session: str,
+    cwd: Optional[str] = None,
+    last: Optional[int] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> tuple[Path, List[dict[str, Any]]]:
+    """Locate ``(engine, session)``'s log; return ``(path, UnifiedEvents)``.
+
+    The resolved path rides along so a caller can report provenance (which
+    file the fallback actually served) without re-running the resolver.
+
+    ``last`` windows the TAIL of the events, after sequence numbers have been
+    assigned over the whole file — so ``--last 3`` yields sequences ``n-3..n-1``
+    exactly as ``a transcript --last 3`` does, not a renumbered ``0..2``.
+
+    Raises :class:`AgentLogNotFoundError` when nothing resolves.
+    """
+    path = _resolve_log_path(engine, session, cwd)
+    if path is None:
+        raise AgentLogNotFoundError(engine, session)
+    events = unified_events_from_lines(
+        engine, _read_lines(path), metadata=metadata
+    )
+    return path, _tail(events, last)
+
+
+def iter_unified_events(
+    *,
+    engine: str,
+    session: str,
+    cwd: Optional[str] = None,
+    last: Optional[int] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    follow: bool = False,
+    poll_interval: float = FOLLOW_POLL_S,
+    max_polls: Optional[int] = None,
+    sleep: Optional[Any] = None,
+) -> Iterable[dict[str, Any]]:
+    """Yield UnifiedEvents for one agent log, optionally tailing it.
+
+    Without ``follow`` this is :func:`unified_events_from_agent_log` as a
+    generator. With ``follow`` the initial page is emitted first (``last``
+    applies to it only), then the file is polled for appended rows, which are
+    numbered continuing from the initial page.
+
+    ``max_polls``/``sleep`` exist so the follow loop is drivable from a unit
+    test without a real wall-clock wait; production passes neither.
+    """
+    path = _resolve_log_path(engine, session, cwd)
+    if path is None:
+        raise AgentLogNotFoundError(engine, session)
+
+    data = path.read_bytes()
+    if follow:
+        lines, consumed = _split_complete_lines(data)
+    else:
+        lines, consumed = data.decode("utf-8", errors="replace").splitlines(), len(data)
+    events = unified_events_from_lines(engine, lines, metadata=metadata)
+    next_sequence = len(events)
+    yield from _tail(events, last)
+    if not follow:
+        return
+
+    import time as _time
+
+    nap = sleep if sleep is not None else _time.sleep
+    polls = 0
+    while max_polls is None or polls < max_polls:
+        polls += 1
+        nap(poll_interval)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            # The agent rotated/removed the log mid-follow. Stop cleanly
+            # rather than spinning on a path that will never come back.
+            return
+        if len(data) <= consumed:
+            continue
+        new_lines, grown = _split_complete_lines(data[consumed:])
+        if not new_lines:
+            continue
+        consumed += grown
+        fresh = unified_events_from_lines(
+            engine, new_lines, metadata=metadata, start_sequence=next_sequence
+        )
+        next_sequence += len(fresh)
+        yield from fresh
 
 
 def _bound_handoff_messages(

@@ -249,6 +249,88 @@ class RealSshPortForwardCountersTest {
     }
 
     @Test
+    fun `close joins an r2l copier that exits while its pair is closing`() {
+        val localPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            .use { it.localPort }
+        val copyBodyReleased = CountDownLatch(1)
+        val uncaughtHandlerEntered = CountDownLatch(1)
+        val uncaughtHandlerRelease = CountDownLatch(1)
+        val copiedPair = Socket() to TestDirectConnection()
+        val forward = RealSshPortForward(
+            channels = object : PortForwardChannelTransport {
+                override fun openChannel(remoteHost: String, remotePort: Int): DirectConnection =
+                    error("test does not accept local connections")
+
+                override fun closeChannel(channel: DirectConnection) {
+                    // This is the exact teardown ordering from the reported
+                    // race: pair close lets the copier finish before close()
+                    // takes its old, late copyThreads snapshot.
+                    copyBodyReleased.countDown()
+                    check(uncaughtHandlerEntered.await(2, TimeUnit.SECONDS)) {
+                        "r2l copier did not reach its post-body teardown window"
+                    }
+                }
+            },
+            remoteHost = "remote.example",
+            remotePort = 5432,
+            localPort = localPort,
+            activePairs = setOf(copiedPair).toMutableSet(),
+        )
+        val startCopyThread = RealSshPortForward::class.java.getDeclaredMethod(
+            "startCopyThread",
+            String::class.java,
+            Function0::class.java,
+        ).apply { isAccessible = true }
+        val copyThreadsField = RealSshPortForward::class.java.getDeclaredField("copyThreads")
+            .apply { isAccessible = true }
+        var copyThread: Thread? = null
+
+        try {
+            startCopyThread.invoke(
+                forward,
+                "ssh-portfwd-r2l-$localPort",
+                {
+                    Thread.currentThread().uncaughtExceptionHandler =
+                        Thread.UncaughtExceptionHandler { _, _ ->
+                            uncaughtHandlerEntered.countDown()
+                            try {
+                                uncaughtHandlerRelease.await()
+                            } catch (_: InterruptedException) {
+                                // close() interrupts a handle it captured;
+                                // the test handler then permits termination.
+                            }
+                        }
+                    copyBodyReleased.await()
+                    error("synthetic copier failure after pair close")
+                } as Function0<Unit>,
+            )
+            assertTrue(
+                "the r2l copier must be running before close starts",
+                drainMainLooperUntil(sleepMs = 10L) {
+                    @Suppress("UNCHECKED_CAST")
+                    val registered = copyThreadsField.get(forward) as Set<Thread>
+                    copyThread = registered.singleOrNull { it.name == "ssh-portfwd-r2l-$localPort" }
+                    copyThread?.isAlive == true
+                },
+            )
+
+            forward.close()
+
+            assertTrue(
+                "close must return only after the live r2l copy thread terminates",
+                copyThread != null && !copyThread!!.isAlive,
+            )
+        } finally {
+            copyBodyReleased.countDown()
+            uncaughtHandlerRelease.countDown()
+            copyThread?.interrupt()
+            copyThread?.join(2_000L)
+            copiedPair.first.close()
+            forward.close()
+        }
+    }
+
+    @Test
     fun `close reports a copy callback that stays alive after interrupt`() {
         val localPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
             .use { it.localPort }

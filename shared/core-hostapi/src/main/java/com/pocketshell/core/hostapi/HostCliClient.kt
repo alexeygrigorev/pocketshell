@@ -39,7 +39,7 @@ data class CreatedSession(
  * nothing at all (dropping it would silently shift every later argument).
  *
  * Public because it is the load-bearing half of [HostCliClient.attachCommand]
- * / [HostCliClient.transcriptCommand] and is tested directly.
+ * and is tested directly.
  */
 fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
@@ -51,11 +51,10 @@ fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
  * - `listX` / `createSession` **run** a command and parse its JSON. One call
  *   is one exec — no retry, no polling, no caching. The caller owns cadence
  *   and owns what to do with a failure.
- * - `attachCommand` / `transcriptCommand` **build** a command string and run
- *   nothing. Both take over their channel (attach becomes the session,
- *   `--follow` streams until the channel closes), so they belong on a PTY
+ * - `attachCommand` **builds** a command string and runs nothing. It takes
+ *   over its channel (attach becomes the session), so it belongs on a PTY
  *   channel the caller opens, not on the request/response [RemoteExec] seam.
- *   They are prefixed with `exec ` so the wrapping shell is REPLACED by the
+ *   It is prefixed with `exec ` so the wrapping shell is REPLACED by the
  *   process: signals and window-size changes then land on the session itself
  *   rather than on a middleman that would eat them.
  *
@@ -144,25 +143,6 @@ class HostCliClient(
     fun attachCommand(name: String, hideStatus: Boolean = true): String = buildString {
         append("exec ").append(binary).append(" sessions attach")
         if (hideStatus) append(" --hide-status")
-        append(" -- ").append(shellSingleQuote(name))
-    }
-
-    /**
-     * The command that streams [name]'s conversation as UnifiedEvent JSONL.
-     *
-     * [follow] keeps the stream open after the initial page. [last] limits the
-     * initial page to that many events; [ALL_EVENTS] (or any negative value)
-     * omits `--last` entirely and asks for the whole transcript. `--last 0` is
-     * a legal request for "no backlog, follow only" and is passed through.
-     */
-    fun transcriptCommand(
-        name: String,
-        follow: Boolean,
-        last: Int = ALL_EVENTS,
-    ): String = buildString {
-        append("exec ").append(binary).append(" sessions transcript")
-        if (follow) append(" --follow")
-        if (last >= 0) append(" --last ").append(last)
         append(" -- ").append(shellSingleQuote(name))
     }
 
@@ -318,14 +298,6 @@ class HostCliClient(
     }
 
     companion object {
-        /**
-         * `transcriptCommand(last = ALL_EVENTS)` asks for the whole
-         * transcript by omitting `--last`. It is negative because the host's
-         * `--last` accepts 0 as a real value ("no backlog"), so 0 could not
-         * double as the sentinel.
-         */
-        const val ALL_EVENTS: Int = -1
-
         /**
          * Budget for the read verbs. Generous because `sessions list` sweeps
          * a socket directory that accumulates hundreds of dead sockets, and

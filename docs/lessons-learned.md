@@ -103,3 +103,23 @@ check and only the new check.
 - No-backwards-compatibility (hard cuts only) and no-background-work are
   locked project-wide decisions — see `docs/decisions.md` D21/D22 rather
   than re-deriving them here.
+- The `implementer` agent type is pinned to `model: opus` in
+  `.claude/agents/implementer.md`. When Anthropic has an Opus-specific
+  outage (check status.claude.com — it names affected model tiers), every
+  dispatched implementer dies repeatedly while the orchestrator (often on
+  Sonnet) keeps responding fine, which looks like a mystery until you check
+  which model the *subagent* is pinned to, not just your own. Fix: relaunch
+  the stuck task as a fresh `implementer` with an explicit `model: "sonnet"`
+  override, pointed at the SAME worktree the interrupted agent already
+  wrote partial progress into — nothing is lost, the fresh agent just reads
+  `git status`/the changed files first and continues. Don't burn cycles
+  retrying the same Opus-pinned dispatch against a confirmed platform
+  incident; check status.claude.com once, then route around it.
+- A `while`/`until pgrep -f "<pattern>" ...` wait loop can match its OWN
+  process if the pattern string appears in the loop's own command line
+  (e.g. because you're waiting on a command whose invocation text you
+  echoed into the wait script). The loop then never exits — `pgrep -f`
+  greps the whole command line, including the wait script's own source.
+  Prefer waiting on a PID (`while kill -0 $PID`) or a distinctive log-file
+  marker over `pgrep -f` on a string that might reappear in your own
+  wrapper.

@@ -522,6 +522,26 @@ case "${1:-}" in
     ;;
   sessions)
     shift
+    if [ "${1:-}" = "create" ]; then
+      # Rewrite task U-6 (journey J04): `sessions create` is the ONE verb whose
+      # contract the phone cannot fake — idempotency (`created:false` for a name
+      # that already exists), the JSON error envelope on stdout, and the
+      # backend routing all live in the real implementation. So this arm
+      # delegates to the repository's real host CLI (same idiom as the `send`
+      # arm, issue #2240, and the `engines` arm, issue #2276) instead of
+      # re-implementing them in shell, where the fixture could agree with a
+      # broken client.
+      #
+      # It creates a REAL detached tmux session through the fixture `tmuxctl`
+      # (on that session's own `tmuxctl-<name>` socket), so the session the
+      # journey just created is then enumerated by `sessions list --json` for
+      # real rather than being announced and never seen.
+      if [ ! -d /opt/pocketshell-real/src ]; then
+        printf 'pocketshell sessions create fixture needs /opt/pocketshell-real/src\n' >&2
+        exit 64
+      fi
+      exec /usr/local/bin/pocketshell-real-send sessions "$@"
+    fi
     if [ "${1:-}" = "list" ]; then
       shift
       # Issue #2377: `--json` is the enumerator the phone's folder list rides

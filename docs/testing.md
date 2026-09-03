@@ -1412,6 +1412,16 @@ scripts/connected-test.sh --module app2 --suffix iapp2
    unexplained UI timeout, and calls out `EPERM`/`EACCES` separately since that
    means a missing `android.permission.INTERNET` rather than a down fixture.
 
+`J04CreateSessionJourney` (rewrite task U-6) additionally exercises
+`pocketshell sessions create --json` on the fixture. That arm of
+`tests/docker/agent-bin/pocketshell` delegates to the repository's REAL host
+implementation and creates a genuine detached tmux session on that session's own
+`tmuxctl-<name>` socket, so the session the journey just created is enumerated
+by `sessions list --json` for real — which also means **the fixture image must
+be rebuilt** (`up -d --build agents`) after changing those shims, and that a
+journey run leaves its `j04-*` sessions behind (each test kills its own before
+creating, so a re-run is still deterministic).
+
 The port is read from the `agentsPort` instrumentation argument and defaults to
 2222 (`AgentsFixture` in `app2/src/androidTest`), so `--pool` works unchanged.
 There is no CI emulator lane for app2 yet — that arrives with rewrite task U-4;

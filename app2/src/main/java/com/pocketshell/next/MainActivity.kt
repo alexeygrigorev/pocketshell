@@ -29,6 +29,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
+import com.pocketshell.next.crash.CrashReportsScreen
 import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
@@ -137,7 +138,7 @@ data class HostListActions(
  * The `*Screen` / `connectViewModel` parameters are seams, not feature flags:
  * the real screens (host list, connect gate, session tree, terminal,
  * port-forward panel, file explorer, file viewer, host add/edit form, SSH
- * keys, host QR share/scan) resolve their ViewModels through
+ * keys, host QR share/scan, crash reports) resolve their ViewModels through
  * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
  * Robolectric `createComposeRule()` composition could not host them. The
  * parameters let a test supply the same screen / the same ViewModel built by
@@ -203,14 +204,24 @@ fun AppNavHost(
     },
     qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
-    settingsScreen: @Composable (onBack: () -> Unit, onOpenWorkspaceRoots: (Long) -> Unit) -> Unit =
-        { onBack, onOpenWorkspaceRoots ->
-            SettingsRoute(onBack = onBack, onOpenWorkspaceRoots = onOpenWorkspaceRoots)
-        },
+    settingsScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenWorkspaceRoots: (Long) -> Unit,
+        onOpenCrashReports: () -> Unit,
+    ) -> Unit = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
+        SettingsRoute(
+            onBack = onBack,
+            onOpenWorkspaceRoots = onOpenWorkspaceRoots,
+            onOpenCrashReports = onOpenCrashReports,
+        )
+    },
     workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =
         { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
     usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         UsageRoute(onBack = onBack)
+    },
+    crashReportsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        CrashReportsScreen(onBack = onBack)
     },
 ) {
     NavHost(
@@ -377,6 +388,11 @@ fun AppNavHost(
             settingsScreen(
                 { navController.popBackStack() },
                 { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
+                // Issue #2476: the only entry point into the crash-report
+                // browser. Capture (`CrashReporter.install()` from
+                // `App.onCreate`) never depended on this route; what was
+                // missing was any way for a human to read what it recorded.
+                { navController.navigate(Destination.CrashReports.route()) },
             )
         }
         composable(
@@ -389,6 +405,12 @@ fun AppNavHost(
         composable(Destination.Usage.pattern) {
             // Task P-5: the real usage/quota panel.
             usageScreen { navController.popBackStack() }
+        }
+        composable(Destination.CrashReports.pattern) {
+            // Task P-10 / issue #2476: the local crash-report browser. Reached
+            // from Settings → Diagnostics; argument-free, because the reports
+            // are the installation's, not a host's.
+            crashReportsScreen { navController.popBackStack() }
         }
     }
 }

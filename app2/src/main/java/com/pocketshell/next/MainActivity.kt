@@ -29,6 +29,7 @@ import com.pocketshell.next.connect.ConnectViewModel
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
+import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -76,13 +77,15 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen], [connectViewModel], [treeScreen] and [portsScreen] are seams, not feature
- * flags: the real host list, connect gate and session tree resolve their
- * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity, so
- * a plain Robolectric `createComposeRule()` composition could not host them. The
- * parameters let a test supply the same screen / the same ViewModel built by
- * hand (over an in-memory database and a scripted connection factory) and still
- * exercise the real navigation edge — the production defaults are the real ones.
+ * [hostsScreen], [connectViewModel], [treeScreen], [sessionScreen] and
+ * [portsScreen] are seams, not feature flags: the real host list, connect
+ * gate, session tree, terminal and port-forward panel resolve their
+ * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity,
+ * so a plain Robolectric `createComposeRule()` composition could not host
+ * them. The parameters let a test supply the same screen / the same
+ * ViewModel built by hand (over an in-memory database and a scripted
+ * connection factory) and still exercise the real navigation edge — the
+ * production defaults are the real ones.
  */
 @Composable
 fun AppNavHost(
@@ -94,6 +97,10 @@ fun AppNavHost(
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
     treeScreen: @Composable (hostId: Long, onOpenSession: (String) -> Unit) -> Unit =
         { _, onOpenSession -> SessionTreeRoute(onOpenSession = onOpenSession) },
+    sessionScreen: @Composable (hostId: Long, sessionName: String, onBack: () -> Unit) -> Unit =
+        { hostId, sessionName, onBack ->
+            SessionRoute(hostId = hostId, sessionName = sessionName, onBack = onBack)
+        },
     portsScreen: @Composable () -> Unit = { PortForwardRoute() },
 ) {
     NavHost(
@@ -131,9 +138,14 @@ fun AppNavHost(
                 navArgument(Destination.ARG_SESSION_NAME) { type = NavType.StringType },
             ),
         ) { entry ->
-            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID)
-            val name = entry.arguments?.getString(Destination.ARG_SESSION_NAME)
-            RoutePlaceholder("Session(hostId=$hostId, name=$name)")
+            // Task U-4: the real terminal. The session name arrives already
+            // percent-decoded by the navigation library, so a session called
+            // `my project:review` reaches `sessions attach` byte-identical —
+            // which matters, because the name IS the identity the host CLI
+            // resolves against (plan §B.0).
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val name = entry.arguments?.getString(Destination.ARG_SESSION_NAME).orEmpty()
+            sessionScreen(hostId, name) { navController.popBackStack() }
         }
         composable(
             route = Destination.Files.pattern,

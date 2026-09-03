@@ -7,13 +7,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.AppNavHost
+import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -35,10 +33,15 @@ import org.junit.runner.RunWith
  * tap goes nowhere, and (b) the tap navigates with the wrong id — both are
  * invisible to a state-flow assertion and both are caught here.
  *
- * The ViewModel is constructed explicitly rather than resolved via
+ * The ViewModels are constructed explicitly rather than resolved via
  * `hiltViewModel()`; a Robolectric `createComposeRule()` composition has no
  * Hilt-managed Activity to resolve against. Everything else — the screen, the
  * graph, the route builder, the argument decoding — is production code.
+ *
+ * Since task U-2 the tap edge runs through the real connect gate, so this suite
+ * carries the shared [TestConnectStack] with a factory that dials straight to
+ * connected (no host-key question). The trust branches of that gate belong to
+ * `com.pocketshell.next.connect.ConnectGateNavigationTest`.
  */
 @RunWith(AndroidJUnit4::class)
 class HostListNavigationTest {
@@ -46,27 +49,22 @@ class HostListNavigationTest {
     @get:Rule
     val composeRule = createComposeRule()
 
-    private lateinit var db: AppDatabase
+    private lateinit var stack: TestConnectStack
 
     @Before
     fun setUp() {
-        db = Room.inMemoryDatabaseBuilder(
-            ApplicationProvider.getApplicationContext(),
-            AppDatabase::class.java,
-        )
-            .allowMainThreadQueries()
-            .build()
+        stack = TestConnectStack()
     }
 
     @After
     fun tearDown() {
-        db.close()
+        stack.close()
     }
 
     @Test
     fun `stored hosts render and a tap navigates to that host's tree`() {
         val keyId = runBlocking {
-            db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
+            stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
         }
         val hetznerId = runBlocking { insertHost(keyId, "hetzner", "135.181.114.209", "alexey") }
         val builderId = runBlocking { insertHost(keyId, "builder", "10.0.0.7", "root") }
@@ -85,7 +83,12 @@ class HostListNavigationTest {
         composeRule.onNodeWithText("root@10.0.0.7").assertExists()
 
         composeRule.onNodeWithTag(hostRowTag(hetznerId)).performClick()
-        composeRule.waitForIdle()
+        // The tap dials now; wait for the connect to land on the tree route
+        // rather than assuming navigation happened within one frame.
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Tree(hostId=$hetznerId)")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
 
         // The route pattern AND the decoded argument: a graph that navigated to
         // the wrong host would still match the pattern.
@@ -111,7 +114,7 @@ class HostListNavigationTest {
     }
 
     private fun setContent(): NavHostController {
-        val vm = HostListViewModel(db.hostDao(), Dispatchers.Unconfined)
+        val vm = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
@@ -120,6 +123,7 @@ class HostListNavigationTest {
                 hostsScreen = { onOpenHost ->
                     HostListRoute(onOpenHost = onOpenHost, viewModel = vm)
                 },
+                connectViewModel = { stack.viewModel },
             )
         }
         composeRule.waitForIdle()
@@ -131,7 +135,7 @@ class HostListNavigationTest {
         name: String,
         hostname: String,
         username: String,
-    ): Long = db.hostDao().insert(
+    ): Long = stack.db.hostDao().insert(
         HostEntity(name = name, hostname = hostname, username = username, keyId = keyId),
     )
 }

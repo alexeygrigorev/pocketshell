@@ -1390,6 +1390,34 @@ UI, sends walkthrough shell commands through the prompt composer, verifies visib
 terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
 artifacts, and cleans up the remote temp directory and tmux session.
 
+### app2 (rewrite) connected journeys
+
+The rewrite's `app2` module has its own instrumented journey suite, starting
+with `J01ConnectAndTrustJourney` (rewrite task U-2). It uses the SAME fixture
+and the same key as everything above; two things differ from the old module:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+scripts/connected-test.sh --module app2 --suffix iapp2
+```
+
+1. **`--module app2` is required.** `scripts/connected-test.sh` owns the task
+   name — it appends `:connectedDebugAndroidTest` itself — so passing
+   `:app2:connectedDebugAndroidTest` as a trailing gradle argument would ALSO
+   run the default `:app` task, which no longer exists on this branch.
+2. **The wrapper does not start the fixture.** It claims the emulator (and,
+   with `--pool`, an agents port); bringing the `agents`/`sshd` container up is
+   the caller's job, as in every section above. The suite fails fast with an
+   explicit "bring it up with docker compose …" message rather than an
+   unexplained UI timeout, and calls out `EPERM`/`EACCES` separately since that
+   means a missing `android.permission.INTERNET` rather than a down fixture.
+
+The port is read from the `agentsPort` instrumentation argument and defaults to
+2222 (`AgentsFixture` in `app2/src/androidTest`), so `--pool` works unchanged.
+There is no CI emulator lane for app2 yet — that arrives with rewrite task U-4;
+until then `.github/workflows/app2.yml`'s unit job compiles the androidTest
+source set so the journey cannot rot unnoticed.
+
 ### Short app-switch reconnect proof
 
 Issue #548/#450/#577/#392/#177 has a focused emulator harness for the reported

@@ -5,6 +5,14 @@ import androidx.room.Room
 import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.SshKeyDao
+import com.pocketshell.core.transport.AuthSecretResolver
+import com.pocketshell.core.transport.HostConnectionFactory
+import com.pocketshell.core.transport.RealHostConnectionFactory
+import com.pocketshell.core.transport.TrustStore
+import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.connect.RoomAuthSecretResolver
+import com.pocketshell.next.connect.RoomTrustStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -60,6 +68,50 @@ object AppModule {
     fun provideHostDao(db: AppDatabase): HostDao = db.hostDao()
 
     @Provides
+    fun provideSshKeyDao(db: AppDatabase): SshKeyDao = db.sshKeyDao()
+
+    @Provides
     @IoDispatcher
     fun provideIoDispatcher(): CoroutineDispatcher = Dispatchers.IO
+
+    // -------------------------------------------------------------------------
+    // The connection stack (task U-2). Four bindings, each one an interface
+    // core-transport declares wired to the single implementation app2 has:
+    // trust lives on the host row, key material lives in `ssh_keys` + the file
+    // it points at, and the dial is sshj's.
+    //
+    // Every one of them is a @Singleton, and that is load-bearing for the
+    // registry: a second ConnectionsRegistry instance would be a second
+    // one-connection-per-host table, which is two connections per host — the
+    // exact failure the registry exists to make impossible.
+
+    @Provides
+    @Singleton
+    fun provideTrustStore(
+        hostDao: HostDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): TrustStore = RoomTrustStore(hostDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideAuthSecretResolver(
+        sshKeyDao: SshKeyDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): AuthSecretResolver = RoomAuthSecretResolver(sshKeyDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideHostConnectionFactory(
+        secrets: AuthSecretResolver,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): HostConnectionFactory = RealHostConnectionFactory(secrets, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideConnectionsRegistry(
+        factory: HostConnectionFactory,
+        trustStore: TrustStore,
+        hostDao: HostDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): ConnectionsRegistry = ConnectionsRegistry(factory, trustStore, hostDao, dispatcher)
 }

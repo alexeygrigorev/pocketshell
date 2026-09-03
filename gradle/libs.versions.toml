@@ -176,6 +176,13 @@ lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtim
 
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
 hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+# Rewrite task U-2: app2's instrumented journey reads the app's OWN singletons
+# (host DAO, connections registry) through a Hilt `@EntryPoint` declared in the
+# androidTest source set. That entry point is only aggregated into a component
+# the test APK can see when the app under test runs `HiltTestApplication`, which
+# is what this artifact supplies. Same version as `hilt-android`, by ref — the
+# runtime and its test harness must never drift apart.
+hilt-android-testing = { group = "com.google.dagger", name = "hilt-android-testing", version.ref = "hilt" }
 androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "androidx-hilt-navigation-compose" }
 
 # navigation-compose (task M-1). The `NavHost` app2's MainActivity hosts.

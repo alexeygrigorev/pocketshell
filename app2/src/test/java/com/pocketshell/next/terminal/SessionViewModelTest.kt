@@ -380,6 +380,79 @@ class SessionViewModelTest {
         clear()
     }
 
+    /**
+     * Regression for issue #2477.
+     *
+     * A connection closed on PURPOSE — [com.pocketshell.next.connect.ConnectionsRegistry.closeAll] is the
+     * shape every journey's own test hygiene uses, called here while this
+     * screen's watcher is still alive, exactly the way
+     * `J06BackgroundGraceReturnJourney`'s own end-of-test cleanup does on a
+     * device — tears the PTY down with no exit status, identically to a
+     * genuine network drop. Before the fix this was indistinguishable from
+     * [dropLink] and the ladder redialled AT ONCE (rung 0 is 0 ms): a fresh,
+     * live connection nobody asked for and nothing was watching landed in the
+     * registry, orphaned until the next background/grace check found it
+     * "live" — which is exactly what stranded
+     * `backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification` on a full,
+     * unfiltered `app2` androidTest run: a notification for a session that was
+     * never opened in THAT test, left behind by a REDIAL from the previous
+     * test's deliberate close.
+     *
+     * The fix must show [SessionUiState.Failed] (never [SessionUiState.Reconnecting]
+     * or [SessionUiState.Live]), must not dial again, and must leave the
+     * registry with nothing live for this host — the orphan-connection class
+     * this whole regression is about.
+     */
+    @Test
+    fun `a connection closed on purpose ends the session instead of redialling`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            livePty()
+            val viewModel = viewModel()
+
+            viewModel.open(hostId, SESSION)
+            settle()
+            assertTrue(
+                "expected Live before the close, got ${viewModel.uiState.value}",
+                viewModel.uiState.value is SessionUiState.Live,
+            )
+            assertEquals(1, stack.factory.dialCount)
+
+            // The exact call J06BackgroundGraceReturnJourney's own test body
+            // makes on a real device, while this screen (this ViewModel) is
+            // still alive and RESUMED — not a network failure.
+            stack.registry.closeAll()
+            // Rung 0 is 0 ms: if the bug were still here, this would be long
+            // enough for the redial to land.
+            settleFor(2_000)
+
+            val state = viewModel.uiState.value
+            assertTrue(
+                "a DELIBERATE close must end the session, not start a reconnect " +
+                    "ladder — got $state",
+                state is SessionUiState.Failed,
+            )
+            assertEquals(
+                "no fresh connection may be dialled for a connection closed on purpose",
+                1,
+                stack.factory.dialCount,
+            )
+            assertNull(
+                "the registry must be left with no orphaned connection for this host",
+                stack.registry.current(hostId),
+            )
+
+            // Issue #2477's OWN postmortem: without the fix, this scenario ends
+            // with a REDIALLED, LIVE bridge whose input pump is a `delay` loop
+            // with no terminal condition (see `settle`'s class doc) — so a test
+            // that forgot this `clear()` would hang inside `runTest`'s own
+            // implicit `advanceUntilIdle()` rather than failing fast. Present
+            // for the same reason every other `livePty()` test above calls it,
+            // and load-bearing here specifically because THIS test is the one
+            // that used to leave a connection nothing was watching.
+            clear()
+        }
+
     /** The ladder is finite, and what it leaves behind names the way out. */
     @Test
     fun `exhausting the ladder fails with a message offering Retry`() = runTest(dispatcher) {

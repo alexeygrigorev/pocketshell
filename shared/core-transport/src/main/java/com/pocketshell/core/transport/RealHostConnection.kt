@@ -260,6 +260,23 @@ internal class RealHostConnection(
         // BEFORE disconnecting so the disconnect listener classifies the drop
         // as deliberate.
         if (!closing.compareAndSet(false, true)) return
+        // Issue #2477: settle [state] to Closed BEFORE disconnecting, not
+        // after. `client.disconnect()` cascades into closing every open
+        // channel (sshj tears each one down as part of the same transport
+        // teardown), and each channel's OWN close is what resolves a
+        // [PtyChannel.exit] deferred — on whatever internal sshj/dispatcher
+        // thread that channel's watcher happens to run on, with NO guaranteed
+        // ordering against this function getting back around to updating
+        // `state`. A caller such as `SessionViewModel` that reacts to a
+        // channel ending by checking `state` to tell a deliberate close apart
+        // from a lost link can therefore observe the channel already ended
+        // while `state` still reads `Connected` — misclassifying a DELIBERATE
+        // close as a dropped link and reconnecting into a fresh, orphaned
+        // connection nobody asked for (exactly the cross-journey pollution
+        // #2477 reports). Setting the terminal state FIRST, before any
+        // teardown that could resolve a channel's exit even begins, makes that
+        // observation impossible by construction rather than by timing.
+        settle(TransportState.Closed)
         withContext(ioDispatcher) {
             runCatching { client.disconnect() }
         }
@@ -268,7 +285,6 @@ internal class RealHostConnection(
         // permit is owned by something with its own end (exec's finally, the
         // PTY/forward decorators), and a spent connection is never reused.
         sftpLock.withLock { sftpPermit?.release() }
-        settle(TransportState.Closed)
     }
 
     /**

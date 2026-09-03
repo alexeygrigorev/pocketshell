@@ -11,6 +11,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.core.transport.GraceHandle
 import com.pocketshell.next.connect.ConnectionsRegistry
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -126,10 +127,19 @@ class GraceCoordinator(
      * Posted to the main thread because `ProcessLifecycleOwner`'s registry is
      * main-thread-only and a `@Singleton` is created on whichever thread first
      * injects it (the same reason [ProcessForegroundSignal] posts).
+     *
+     * Also unregisters whichever OTHER [GraceCoordinator] instance was
+     * previously the process's active one — see [activeInstance] for why that
+     * is load-bearing rather than defensive ceremony (issue #2477).
      */
     fun register(application: Application) {
         if (!registered.compareAndSet(false, true)) return
         val wire = Runnable {
+            val previous = activeInstance.getAndSet(this)
+            if (previous != null && previous !== this) {
+                ProcessLifecycleOwner.get().lifecycle.removeObserver(previous)
+                application.unregisterActivityLifecycleCallbacks(previous)
+            }
             ProcessLifecycleOwner.get().lifecycle.addObserver(this)
             application.registerActivityLifecycleCallbacks(this)
         }
@@ -229,6 +239,42 @@ class GraceCoordinator(
     override fun onActivityDestroyed(activity: Activity) = Unit
 
     companion object {
+
+        /**
+         * The process's currently-active [GraceCoordinator] — the ONLY instance
+         * that may be wired to [Application.ActivityLifecycleCallbacks] and
+         * [ProcessLifecycleOwner] at any moment. Static/companion-scoped
+         * DELIBERATELY, so it tracks across every instance regardless of which
+         * Hilt component built it (issue #2477).
+         *
+         * A single Android process is meant to construct exactly one Hilt
+         * `@Singleton` [GraceCoordinator] for its whole life, and [register]'s
+         * own per-instance idempotence (`registered`) was written for that
+         * world. That invariant does NOT hold in every environment this class
+         * runs in: Hilt's Android test harness deliberately builds a FRESH
+         * `SingletonComponent` — and therefore a fresh [GraceCoordinator] and a
+         * fresh [ConnectionsRegistry] — for every `@HiltAndroidTest` method,
+         * while every one of those components sits on top of the SAME real,
+         * process-wide [Application] instance (`am instrument` never restarts
+         * the process between test methods). Without this guard, EVERY
+         * superseded test method's [GraceCoordinator] stayed permanently
+         * registered as an activity-lifecycle observer — each holding its own
+         * snapshot of whichever [ConnectionsRegistry] it was built with — and
+         * kept independently reacting to every LATER test's Activity
+         * transitions, capable of re-arming the ONE shared, OS-level grace
+         * notification for a connection a later test's own `closeAll()` can
+         * never reach (it only resolves the CURRENT Hilt graph). That is
+         * exactly what stranded
+         * `J06BackgroundGraceReturnJourney.backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification`
+         * on a full, unfiltered suite run: J05's own leftover coordinator,
+         * still alive and still registered, rearmed the shared notification
+         * for J05's own never-closed connection while J06's test had opened
+         * none of its own. [register] now unregisters whichever instance this
+         * one is replacing, so at most one [GraceCoordinator] can ever answer
+         * a lifecycle callback — true by construction, not by assuming a
+         * component-recreation environment never happens.
+         */
+        private val activeInstance = AtomicReference<GraceCoordinator?>(null)
 
         /**
          * The ONE grace default (D21, #1159): 90 seconds. Long enough to answer

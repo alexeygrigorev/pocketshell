@@ -17,6 +17,8 @@ context; the README and current feature docs track released behavior.
 | [server-setup.md](server-setup.md) | Server-side `pocketshell` helper install, PATH, and troubleshooting |
 | [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
+| [rewrite-diagnosis-and-design.md](rewrite-diagnosis-and-design.md) | app2 rewrite: diagnosis of the old app's complexity and the target architecture |
+| [rewrite-implementation-plan.md](rewrite-implementation-plan.md) | app2 rewrite: the live task-by-task playbook, current scope decisions, and lean-core release target — check its "Scope amendment" section first |
 | [aplexer-integration.md](aplexer-integration.md) | Becoming an aplexer client: phases A–C; Phase A done, both managers listed |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [release.md](release.md) | How we cut candidate, stabilize, fast-forward the exact SHA to main, push main, and tag from main (release-owner agent) |

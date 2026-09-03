@@ -1,10 +1,14 @@
 # PocketShell rewrite — implementation playbook (for small-model implementers)
 
-Companion to [simplification-plan-2026-09-02.md](simplification-plan-2026-09-02.md)
+Companion to [rewrite-diagnosis-and-design.md](rewrite-diagnosis-and-design.md)
 (the diagnosis and target design — read its §1–§3 only if you need the "why"; this
 document deliberately repeats every decision you need, so you should not have to).
 Written 2026-09-02 against `pocketshell` HEAD b7fa7713, `aplexer` v0.1.1,
-`tools/pocketshell` as of the same commit.
+`tools/pocketshell` as of the same commit. Moved out of `docs/_scratch/` on
+2026-09-03 — this is now the live, actively-maintained plan for the rewrite,
+not a point-in-time scratch note; see its "Scope amendment" section for the
+current, authoritative target (superseding parts of the original plan below
+it where they conflict).
 
 **How to use this document.** Each task in Part D is sized for one implementer
 session under this repo's normal process (process.md): one issue, one worktree,

@@ -37,14 +37,18 @@ enumerator (`tmuxctl list` / `t`) instead of a default-socket
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import click
 
+from . import aplexer as _aplexer
+from . import config as _config
 from . import resume as _resume
 from . import session_enum as _session_enum
 
@@ -481,6 +485,394 @@ def sessions_resume(
 # PocketShell starts can never trigger the OOM-kill cascade that wiped the
 # agent team. `create-detached` is already idempotent (a no-op when the
 # session exists) — that contract is tmuxctl's, not re-implemented here.
+#
+# Since the aplexer adoption (simplification plan §B.3) the same command is
+# also the ONE session-create entry point for both backends: which backend a
+# new session lands on is host policy read from `~/.config/pocketshell/
+# config.toml` (see `pocketshell.config`), not something the phone chooses.
+
+#: Wire version of the `--json` envelope, deliberately the same number as
+#: `sessions list --json` (`session_enum.SCHEMA_VERSION`) — one client-visible
+#: schema generation across the `sessions` verbs.
+CREATE_SCHEMA_VERSION = _session_enum.SCHEMA_VERSION
+
+#: Timeout for the small `tmux` probes/`send-keys` this command runs. These
+#: are local, single-session calls; anything slower is a wedged server, and
+#: waiting on it would hang the phone's create.
+_TMUX_TIMEOUT_S = 5.0
+
+#: Timeout for `a start`. aplexer's own default `--startup-timeout-ms` is
+#: 10s, so this is that plus room for process spawn.
+_APLEXER_START_TIMEOUT_S = 20.0
+
+
+class _CreateError(Exception):
+    """A create that failed, carrying the exit code to propagate."""
+
+    def __init__(self, message: str, *, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.message = message
+        self.exit_code = exit_code
+
+
+def _route_backend(
+    engine: Optional[str],
+    backend_flag: Optional[str],
+    config: Mapping[str, Any],
+) -> str:
+    """Decide which backend a new session is created on. Pure.
+
+    Order (simplification plan §B.3):
+
+    1. an explicit ``--backend`` wins outright;
+    2. else, when an ``--engine`` was asked for, ``[backends].agent``;
+    3. else ``[backends].shell``.
+
+    A key the config does not set resolves to ``tmux``
+    (:data:`pocketshell.config.DEFAULT_BACKEND`).
+    """
+    if backend_flag and backend_flag.strip():
+        return backend_flag.strip()
+    key = (
+        _config.BACKEND_KEY_AGENT
+        if engine and engine.strip()
+        else _config.BACKEND_KEY_SHELL
+    )
+    return _config.backend_for(config, key)
+
+
+def _run_tmux(argv: Sequence[str]) -> tuple[int, str, str]:
+    """Run one ``tmux`` command -> ``(returncode, stdout, stderr)``.
+
+    A module-level seam so the unit suite can drive the socket probe and the
+    ``send-keys`` step without a tmux server. A missing binary is reported as
+    127 rather than raised, since every caller here treats "no tmux" as a
+    create failure with a message, not a traceback.
+    """
+    try:
+        completed = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_TMUX_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"`{' '.join(argv)}` timed out"
+    except OSError as exc:
+        return 127, "", str(exc)
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _tmux_session_socket(
+    name: str, *, env: Optional[Mapping[str, str]] = None
+) -> Optional[str]:
+    """Socket path of the live tmux session ``name``, or ``None``.
+
+    tmuxctl runs one tmux server per session on ``tmuxctl-<name>`` under
+    tmux's socket dir (``session_enum.TMUXCTL_SOCKET_PREFIX``), so that is
+    probed first; a session created outside tmuxctl still lives on the shared
+    ``default`` socket, so that is the fallback. ``-t '=<name>'`` is tmux's
+    exact-match form — a prefix match would happily resolve ``work`` onto
+    ``work-2``. ``has-session`` never starts a server, so probing a socket
+    that does not exist is free.
+    """
+    socket_dir = _session_enum.tmux_socket_dir(env)
+    candidates = (
+        socket_dir / f"{_session_enum.TMUXCTL_SOCKET_PREFIX}{name}",
+        socket_dir / _session_enum.TMUX_DEFAULT_SOCKET,
+    )
+    for candidate in candidates:
+        code, _stdout, _stderr = _run_tmux(
+            ["tmux", "-S", str(candidate), "has-session", "-t", f"={name}"]
+        )
+        if code == 0:
+            return str(candidate)
+    return None
+
+
+def agent_launch_command(
+    engine: str, *, directory: str, profile: Optional[str] = None
+) -> str:
+    """The launch line typed into a freshly created tmux session.
+
+    Shape: ``pocketshell agent <engine> --dir <cwd> [--profile <p>]``. The
+    phone used to type this itself (docs/aplexer-integration.md); doing it
+    server-side means the client never has to build a shell string.
+
+    ``--dir`` is included because `pocketshell agent <engine>` requires it
+    (``agents.py``'s ``_make_agent_command``) — the plan's shorthand
+    ``pocketshell agent <engine> [--profile P]`` would exit 2. Every
+    interpolated value is shell-quoted: ``engine``/``profile`` are free-form
+    strings from the caller and this text is executed by the session's shell.
+    """
+    parts = [
+        "pocketshell",
+        "agent",
+        shlex.quote(engine),
+        "--dir",
+        shlex.quote(directory),
+    ]
+    if profile:
+        parts.extend(["--profile", shlex.quote(profile)])
+    return " ".join(parts)
+
+
+def _create_on_tmux(
+    *,
+    name: str,
+    cwd: Optional[str],
+    mem: Optional[str],
+    engine: Optional[str],
+    profile: Optional[str],
+    probe_existing: bool,
+    quiet_stdout: bool,
+) -> dict[str, Any]:
+    """tmux arm: `tmuxctl create-detached`, plus the agent launch line.
+
+    ``probe_existing`` asks whether the session already existed. That costs a
+    ``has-session`` call, so it is only done when the answer is actually used:
+    for the ``created`` field of the ``--json`` envelope, and to decide
+    whether to send the launch line (re-sending it into a session that is
+    already running an agent is exactly what idempotency must not do).
+
+    ``quiet_stdout`` keeps tmuxctl's own chatter off OUR stdout. `tmuxctl
+    create-detached` echoes the session name, which would otherwise land in
+    front of the JSON envelope and make the machine-readable stream
+    unparseable (observed on the dev box, not hypothetical). Its output is
+    relayed to stderr instead, so nothing is lost.
+    """
+    tmuxctl_path = _resolve_tmuxctl_binary()
+    if tmuxctl_path is None:
+        raise _CreateError(_tmuxctl_missing_message(), exit_code=127)
+
+    existing_socket = _tmux_session_socket(name) if probe_existing else None
+    created = existing_socket is None
+
+    argv = _resume.tmuxctl_create_argv(
+        name, tmuxctl_path=tmuxctl_path, cwd=cwd, mem=mem
+    )
+    if quiet_stdout:
+        completed = subprocess.run(argv, check=False, capture_output=True, text=True)
+        for chunk in (completed.stdout, completed.stderr):
+            if chunk:
+                sys.stderr.write(str(chunk))
+    else:
+        completed = subprocess.run(argv, check=False)
+    if completed.returncode != 0:
+        detail = str(getattr(completed, "stderr", "") or "").strip()
+        raise _CreateError(
+            f"pocketshell: `tmuxctl create-detached {name}` exited "
+            f"{completed.returncode}." + (f" {detail}" if detail else ""),
+            exit_code=completed.returncode,
+        )
+
+    if engine and created:
+        socket_path = _tmux_session_socket(name)
+        if socket_path is None:
+            raise _CreateError(
+                f"pocketshell: tmux session {name!r} was not found after "
+                "create; cannot start the agent in it."
+            )
+        launch = agent_launch_command(
+            engine, directory=cwd or os.getcwd(), profile=profile
+        )
+        code, _stdout, stderr = _run_tmux(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "send-keys",
+                # `send-keys` takes a target-PANE, not a target-session: the
+                # bare `={name}` that `has-session` accepts resolves to
+                # nothing here ("can't find pane", observed on the dev box).
+                # `={name}:` is the exact-match session plus its current
+                # window/pane — still exact, so `work` can never land in
+                # `work-2`.
+                "-t",
+                f"={name}:",
+                launch,
+                "Enter",
+            ]
+        )
+        if code != 0:
+            raise _CreateError(
+                f"pocketshell: could not start {engine} in tmux session "
+                f"{name!r}: {stderr.strip() or f'send-keys exited {code}'}"
+            )
+
+    return {
+        "name": name,
+        "manager": _session_enum.MANAGER_TMUX,
+        "id": None,
+        "created": created,
+    }
+
+
+def _aplexer_snapshot() -> Any:
+    """`a --json snapshot` (falling back to `a --json list`).
+
+    Same two-step probe `session_enum` uses for the listing, kept as its own
+    seam here so the create path can be unit-tested without an `a` binary.
+    """
+    payload = _aplexer.run_json(["snapshot"], feature="sessions")
+    if payload is None:
+        payload = _aplexer.run_json(["list"], feature="sessions")
+    return payload
+
+
+def _run_aplexer(argv: Sequence[str]) -> tuple[int, str, str]:
+    """Run one ``a`` command -> ``(returncode, stdout, stderr)``.
+
+    ``aplexer.run_json`` is deliberately not used for ``start``: it collapses
+    every failure to ``None``, and this path must report *why* a start failed.
+    """
+    try:
+        completed = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_APLEXER_START_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"`{' '.join(argv)}` timed out"
+    except OSError as exc:
+        return 127, "", str(exc)
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def aplexer_start_argv(
+    *,
+    aplexer_path: str,
+    workspace: str,
+    tag: str,
+    engine: Optional[str],
+    profile: Optional[str],
+) -> list[str]:
+    """Build ``a --json start --workspace <ws> --tag <tag> [--engine …]``.
+
+    ``--json`` is a global flag on ``a``, so it is placed before the
+    subcommand exactly like :func:`pocketshell.aplexer.run_json` does — one
+    spelling across the codebase. ``--engine`` is omitted for a plain shell
+    session so aplexer applies its own configured default.
+    """
+    argv = [aplexer_path, "--json", "start", "--workspace", workspace, "--tag", tag]
+    if engine:
+        argv.extend(["--engine", engine])
+    if profile:
+        argv.extend(["--profile", profile])
+    return argv
+
+
+def _aplexer_existing_record(
+    payload: Any, *, workspace: str, tag: str
+) -> Optional[Mapping[str, Any]]:
+    """Find a live aplexer session already holding ``workspace`` + ``tag``.
+
+    aplexer keys a session by exactly that pair (`a start` refuses a second
+    one), so it is the identity to match on. A finished session does not
+    count: `a start` reclaims that pair, i.e. it really does create.
+    """
+    if not isinstance(payload, list):
+        return None
+    target = os.path.realpath(workspace)
+    for raw in payload:
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("tag") or "") != tag:
+            continue
+        raw_workspace = raw.get("workspace") or raw.get("cwd") or ""
+        if os.path.realpath(str(raw_workspace)) != target:
+            continue
+        if str(raw.get("phase") or "").strip().lower() in {"exited", "failed"}:
+            continue
+        return raw
+    return None
+
+
+def _create_on_aplexer(
+    *,
+    name: str,
+    cwd: Optional[str],
+    engine: Optional[str],
+    profile: Optional[str],
+) -> dict[str, Any]:
+    """aplexer arm: `a start` for the workspace+tag this NAME denotes.
+
+    NAME is the tag (the tmux arm's session name is used verbatim as the
+    aplexer tag, so one create call names the same session on either
+    backend); ``--cwd`` — defaulting to the process cwd exactly like the tmux
+    arm's ``tmuxctl create-detached`` — is the workspace. The reported
+    ``name`` is the row's listing name (``<workspace-basename>:<tag>``, from
+    ``session_enum.aplexer_display_name``) so it round-trips with what
+    `sessions list --json` shows.
+    """
+    aplexer_path = _aplexer.which_a()
+    if aplexer_path is None:
+        raise _CreateError(
+            "pocketshell: `a` (aplexer) is not installed on this host, but "
+            "the backend routing selected it. Install aplexer or set "
+            "[backends] in ~/.config/pocketshell/config.toml back to tmux.",
+            exit_code=127,
+        )
+    workspace = cwd or os.getcwd()
+
+    existing = _aplexer_existing_record(
+        _aplexer_snapshot(), workspace=workspace, tag=name
+    )
+    if existing is not None:
+        return {
+            "name": _session_enum.aplexer_display_name(existing) or name,
+            "manager": _session_enum.MANAGER_APLEXER,
+            "id": str(existing.get("id") or "") or None,
+            "created": False,
+        }
+
+    argv = aplexer_start_argv(
+        aplexer_path=aplexer_path,
+        workspace=workspace,
+        tag=name,
+        engine=engine,
+        profile=profile,
+    )
+    code, stdout, stderr = _run_aplexer(argv)
+    if code != 0:
+        raise _CreateError(
+            f"pocketshell: `a start --tag {name}` exited {code}: "
+            f"{stderr.strip() or stdout.strip() or 'no output'}",
+            exit_code=code,
+        )
+    try:
+        record = json.loads(stdout)
+    except ValueError as exc:
+        raise _CreateError(
+            f"pocketshell: `a --json start` returned unreadable JSON: {exc}"
+        ) from exc
+    if not isinstance(record, Mapping):
+        raise _CreateError(
+            "pocketshell: `a --json start` returned "
+            f"{type(record).__name__}, expected a session record"
+        )
+    return {
+        "name": _session_enum.aplexer_display_name(record) or name,
+        "manager": _session_enum.MANAGER_APLEXER,
+        "id": str(record.get("id") or "") or None,
+        "created": True,
+    }
+
+
+def _emit_create_failure(
+    ctx: click.Context, message: str, *, exit_code: int, as_json: bool
+) -> None:
+    """Report a failed create: JSON error envelope on stdout, else stderr."""
+    if as_json:
+        click.echo(
+            json.dumps({"schema": CREATE_SCHEMA_VERSION, "error": message}, indent=2)
+        )
+    else:
+        click.echo(message, err=True)
+    ctx.exit(exit_code if exit_code else 1)
 
 
 @sessions_group.command(
@@ -493,7 +885,10 @@ def sessions_resume(
     "-c",
     "cwd",
     default=None,
-    help="Working directory for the new session (forwarded to `tmuxctl create-detached -c`).",
+    help=(
+        "Working directory for the new session (tmux: `tmuxctl create-detached -c`; "
+        "aplexer: `a start --workspace`)."
+    ),
 )
 @click.option(
     "--mem",
@@ -504,33 +899,103 @@ def sessions_resume(
         "cgroups.toml (PocketShell's is 30G). Only pass this to override that policy."
     ),
 )
+@click.option(
+    "--engine",
+    "engine",
+    default=None,
+    help=(
+        "Start a coding agent in the new session (claude / codex / opencode / "
+        "grok / …). Also selects the `[backends].agent` routing policy."
+    ),
+)
+@click.option(
+    "--profile",
+    "profile",
+    default=None,
+    help="Named host profile for --engine (see `pocketshell profiles list`).",
+)
+@click.option(
+    "--backend",
+    "backend",
+    type=click.Choice(list(_config.BACKENDS), case_sensitive=False),
+    default=None,
+    help=(
+        "Force the session backend, overriding the host's "
+        "~/.config/pocketshell/config.toml [backends] policy."
+    ),
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the schema-2 create envelope "
+        '{"schema","name","manager","id","created"} on stdout.'
+    ),
+)
 @click.pass_context
 def sessions_create(
     ctx: click.Context,
     name: str,
     cwd: Optional[str],
     mem: Optional[str],
+    engine: Optional[str],
+    profile: Optional[str],
+    backend: Optional[str],
+    as_json: bool,
 ) -> None:
-    """Create a memory-capped, DETACHED tmux session (delegates to `tmuxctl create-detached`).
+    """Create a DETACHED session on the host's configured backend.
 
-    NAME is the tmux session name. The session is created inside tmuxctl's
-    cgroup-v2 systemd `--user` scope (capped under `robust.slice`) but NOT
-    attached — consumers attach over their own transport (PocketShell uses
-    tmux `-CC` control mode). The create is idempotent: a no-op if the session
-    already exists (tmuxctl's contract).
+    NAME is the session name (the tmux session name; the aplexer tag). The
+    session is created but NOT attached — consumers attach over their own
+    transport (`pocketshell sessions attach`, or tmux `-CC` control mode).
 
-    `--mem` is intentionally UNSET by default so tmuxctl resolves the
-    per-project cap from the repo's `cgroups.toml` (PocketShell's is 30G);
-    only pass `--mem` to override that committed policy.
+    Backend routing: `--backend` wins; otherwise `--engine` selects
+    `[backends].agent` and a plain session `[backends].shell` from
+    `~/.config/pocketshell/config.toml` (both default to tmux).
+
+    On tmux the session is created inside tmuxctl's cgroup-v2 systemd `--user`
+    scope (capped under `robust.slice`); with `--engine` the agent launch line
+    is then sent into it server-side. `--mem` is intentionally UNSET by
+    default so tmuxctl resolves the per-project cap from the repo's
+    `cgroups.toml` (PocketShell's is 30G).
+
+    The create is idempotent: an existing session is a success that reports
+    `"created": false` and starts no second agent in it.
     """
-    tmuxctl_path = _resolve_tmuxctl_binary()
-    if tmuxctl_path is None:
-        click.echo(_tmuxctl_missing_message(), err=True)
-        ctx.exit(127)
+    try:
+        config = _config.load_config()
+        resolved = _route_backend(engine, backend, config)
+        if resolved == _config.BACKEND_APLEXER:
+            result = _create_on_aplexer(
+                name=name, cwd=cwd, engine=engine, profile=profile
+            )
+        elif resolved == _config.BACKEND_TMUX:
+            result = _create_on_tmux(
+                name=name,
+                cwd=cwd,
+                mem=mem,
+                engine=engine,
+                profile=profile,
+                # Only pay for the probe when its answer is used.
+                probe_existing=as_json or bool(engine),
+                quiet_stdout=as_json,
+            )
+        else:
+            raise _CreateError(
+                f"pocketshell: unknown session backend {resolved!r} "
+                f"(known: {', '.join(_config.BACKENDS)}).",
+                exit_code=2,
+            )
+    except _config.ConfigError as exc:
+        _emit_create_failure(ctx, str(exc), exit_code=2, as_json=as_json)
         return
-    argv = _resume.tmuxctl_create_argv(
-        name, tmuxctl_path=tmuxctl_path, cwd=cwd, mem=mem
-    )
-    completed = subprocess.run(argv, check=False)
-    if completed.returncode != 0:
-        ctx.exit(completed.returncode)
+    except _CreateError as exc:
+        _emit_create_failure(
+            ctx, exc.message, exit_code=exc.exit_code, as_json=as_json
+        )
+        return
+
+    if as_json:
+        click.echo(json.dumps({"schema": CREATE_SCHEMA_VERSION, **result}, indent=2))

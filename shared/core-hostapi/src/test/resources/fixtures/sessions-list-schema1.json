@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "managers": [
+    "tmux"
+  ],
+  "sessions": [
+    {
+      "name": "git-pocketshell",
+      "manager": "tmux",
+      "created": "Mon Sep  1 09:16:09 2026",
+      "created_epoch": 1788159369,
+      "workspace": "/home/alexey/git/pocketshell",
+      "attached": false
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema": 2,
+  "managers": [
+    "tmux",
+    "zellij",
+    "aplexer"
+  ],
+  "sessions": [
+    {
+      "name": "git-pocketshell",
+      "manager": "tmux",
+      "id": null,
+      "workspace": "/home/alexey/git/pocketshell",
+      "tag": null,
+      "engine": null,
+      "profile": null,
+      "agent_state": null,
+      "agent_state_source": null,
+      "attached": false,
+      "created_epoch": 1788159369,
+      "activity_epoch": 1788381055
+    },
+    {
+      "name": "future-manager-session",
+      "manager": "zellij",
+      "id": "zj-0001",
+      "workspace": "/home/alexey/git/somewhere",
+      "tag": null,
+      "engine": null,
+      "profile": null,
+      "agent_state": null,
+      "agent_state_source": null,
+      "attached": true,
+      "created_epoch": 1788400000,
+      "activity_epoch": 1788400500
+    },
+    {
+      "name": "aplexer-follow:live",
+      "manager": "aplexer",
+      "id": "02892e25-5670-4c82-ac7a-914f7935fa0d",
+      "workspace": "/tmp/aplexer-follow",
+      "tag": "live",
+      "engine": "grok",
+      "profile": null,
+      "agent_state": "waiting",
+      "agent_state_source": "heuristic",
+      "attached": false,
+      "created_epoch": 1787765371,
+      "activity_epoch": 1787765526
+    }
+  ],
+  "errors": []
+}

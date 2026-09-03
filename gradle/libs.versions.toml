@@ -60,6 +60,15 @@ bouncycastle-bcpkix = "1.80"
 bouncycastle-bcprov = "1.80.2"
 slf4j = "2.0.17"
 kotlinx-coroutines = "1.10.2"
+
+# core-hostapi (rewrite task K-1). kotlinx-serialization-json parses the host
+# CLI's `pocketshell ... --json` documents (schema 2). 1.8.1 is the current
+# stable on the 1.8.x line, which is built against Kotlin 2.1.x — the same
+# compiler this repo pins (`kotlin = "2.1.21"`), so the serialization compiler
+# plugin (shipped with Kotlin itself, version.ref = kotlin below) and the
+# runtime stay in the supported pairing. 1.9.x is built for Kotlin 2.2 and is
+# deliberately not taken here; that's a toolchain bump, not a library pick.
+kotlinx-serialization = "1.8.1"
 testcontainers = "1.21.3"
 junit = "4.13.2"
 
@@ -181,6 +190,9 @@ bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", ver
 slf4j-nop = { group = "org.slf4j", name = "slf4j-nop", version.ref = "slf4j" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+
+# core-hostapi (task K-1). The JSON format + runtime for the host CLI parser.
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
 testcontainers = { group = "org.testcontainers", name = "testcontainers", version.ref = "testcontainers" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
@@ -225,6 +237,12 @@ snakeyaml = { group = "org.yaml", name = "snakeyaml", version.ref = "snakeyaml" 
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+# core-hostapi (task K-1) is the first pure-JVM module in the repo (no Android
+# SDK, no androidx): `kotlin("jvm")` instead of `com.android.library` +
+# `kotlin-android`. The serialization compiler plugin ships with the Kotlin
+# distribution, so it tracks the `kotlin` version pin exactly.
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

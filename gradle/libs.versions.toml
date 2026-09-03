@@ -28,6 +28,17 @@ zxing = "3.5.3"
 # existing zxing pin.
 zxing-android-embedded = "4.3.0"
 
+# navigation-compose (rewrite task M-1, app2). The old `app` module hand-rolled
+# a `remember { mutableStateOf(AppDestination) }` navigator because #18's brief
+# forbade new catalog entries; app2 uses the real `NavHost` so back stack,
+# argument typing, and saved-state restoration are library concerns instead of
+# app code (the rewrite's whole point is less bespoke plumbing). 2.9.0 is the
+# stable release contemporary with Compose BOM 2025.05.00 and lifecycle 2.9.0
+# (navigation 2.9.x depends on lifecycle 2.9.x, so this pin and the `lifecycle`
+# pin above must move together), and is compatible with the already-catalogued
+# hilt-navigation-compose 1.2.0 that later app2 tasks will use.
+androidx-navigation-compose = "2.9.0"
+
 # hilt-navigation-compose (issue #18 follow-up #38). Provides
 # `hiltViewModel()` for composables. Tracks Compose / lifecycle versions in
 # lock-step — 1.2.0 is the stable release that supports Compose 1.6+ and
@@ -157,6 +168,9 @@ lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtim
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
 hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
 androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "androidx-hilt-navigation-compose" }
+
+# navigation-compose (task M-1). The `NavHost` app2's MainActivity hosts.
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "androidx-navigation-compose" }
 
 # core-ssh (issue #4).
 sshj = { group = "com.hierynomus", name = "sshj", version.ref = "sshj" }

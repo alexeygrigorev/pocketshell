@@ -8,8 +8,8 @@ import org.junit.Test
 
 /**
  * [shellSingleQuote] is the only thing standing between a session name and the
- * remote shell: the attach/transcript verbs are command STRINGS, not argv
- * lists, so a name with an apostrophe in it is either quoted right or it is a
+ * remote shell: the attach/create verbs are command STRINGS, not argv lists,
+ * so a name with an apostrophe in it is either quoted right or it is a
  * command-injection hole.
  *
  * Two layers of proof here. The byte assertions pin the exact output so a

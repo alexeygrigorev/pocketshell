@@ -13,11 +13,9 @@ import org.junit.Test
  *
  *     sh -c "exec pocketshell sessions attach --hide-status -- 'it'\''s a test'"
  *     -> no session named "it's a test"   (exit 3)
- *     sh -c "exec pocketshell sessions transcript --follow --last 5 -- 'ünïcødé пример'"
- *     -> pocketshell: no live session matches `ünïcødé пример`.  (exit 3)
  *
- * i.e. the CLI received the name back intact, including the apostrophe and the
- * non-ASCII bytes, and accepted the `--` option terminator.
+ * i.e. the CLI received the name back intact, including the apostrophe, and
+ * accepted the `--` option terminator.
  */
 class HostCliCommandStringTest {
 
@@ -73,50 +71,6 @@ class HostCliCommandStringTest {
         assertEquals(
             "exec ~/.local/bin/pocketshell sessions attach --hide-status -- 'work'",
             client(binary = "~/.local/bin/pocketshell").attachCommand("work"),
-        )
-    }
-
-    // --- transcript -------------------------------------------------------
-
-    @Test
-    fun `transcript with no follow and no limit is the bare verb`() {
-        assertEquals(
-            "exec pocketshell sessions transcript -- 'work'",
-            client().transcriptCommand("work", follow = false),
-        )
-    }
-
-    @Test
-    fun `transcript emits follow before last`() {
-        assertEquals(
-            "exec pocketshell sessions transcript --follow --last 200 -- 'work'",
-            client().transcriptCommand("work", follow = true, last = 200),
-        )
-    }
-
-    @Test
-    fun `transcript passes a zero limit through as a real request`() {
-        // `--last 0` means "no backlog, follow only" on the host; it must not
-        // be confused with "unlimited".
-        assertEquals(
-            "exec pocketshell sessions transcript --follow --last 0 -- 'work'",
-            client().transcriptCommand("work", follow = true, last = 0),
-        )
-    }
-
-    @Test
-    fun `transcript omits last for ALL_EVENTS`() {
-        assertEquals(
-            "exec pocketshell sessions transcript --follow -- 'work'",
-            client().transcriptCommand("work", follow = true, last = HostCliClient.ALL_EVENTS),
-        )
-    }
-
-    @Test
-    fun `transcript quotes an apostrophe in the session name`() {
-        assertEquals(
-            "exec pocketshell sessions transcript --follow --last 5 -- 'ünïcødé it'\\''s'",
-            client().transcriptCommand("ünïcødé it's", follow = true, last = 5),
         )
     }
 

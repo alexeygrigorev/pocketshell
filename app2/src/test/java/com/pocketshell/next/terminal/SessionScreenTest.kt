@@ -63,18 +63,117 @@ class SessionScreenTest {
         assertEquals(1, backs)
     }
 
-    /**
-     * A failure is a dead end by design in U-4 (reconnect is task U-7), so the
-     * ONE affordance it must carry is the way out.
-     */
     @Test
     fun `back is reachable from a failure`() {
         var backs = 0
         setContent(SessionUiState.Failed("no route to host"), onBack = { backs += 1 })
 
-        composeRule.onNodeWithText("Back").performClick()
+        composeRule.onNodeWithTag(SESSION_BACK_TAG).performClick()
 
         assertEquals(1, backs)
+    }
+
+    /**
+     * The give-up state's other affordance (task U-7): the ladder stops, the
+     * user does not have to. A failure with no way to try again would send
+     * every transient outage back through the session tree.
+     */
+    @Test
+    fun `a failure offers a retry that calls back`() {
+        var retries = 0
+        setContent(SessionUiState.Failed("Could not reconnect."), onRetry = { retries += 1 })
+
+        composeRule.onNodeWithTag(SESSION_RETRY_TAG).performClick()
+
+        assertEquals(1, retries)
+    }
+
+    /**
+     * The reconnect banner renders the two numbers that make the wait legible —
+     * which attempt this is (1-based for a human) and how long until the next
+     * one.
+     */
+    @Test
+    fun `reconnecting shows the attempt and the countdown`() {
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 2,
+                retryInMs = 5_000,
+                terminal = createRemoteTerminalSession(),
+            ),
+        )
+
+        composeRule.onNodeWithTag(SESSION_RECONNECT_BANNER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Reconnecting… attempt 3 · retrying in 5s").assertIsDisplayed()
+        // Not the same thing as a failure, and not the same thing as attaching.
+        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_CONNECTING_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * The countdown rounds UP, so the banner never says "0s" while it is still
+     * waiting.
+     */
+    @Test
+    fun `the countdown rounds up`() {
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 1,
+                retryInMs = 1,
+                terminal = createRemoteTerminalSession(),
+            ),
+        )
+
+        composeRule.onNodeWithText("Reconnecting… attempt 2 · retrying in 1s").assertIsDisplayed()
+    }
+
+    /** The ladder's first rung has no wait at all, and says so rather than "in 0s". */
+    @Test
+    fun `the zero wait says it is retrying now`() {
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 0,
+                retryInMs = 0,
+                terminal = createRemoteTerminalSession(),
+            ),
+        )
+
+        composeRule.onNodeWithText("Reconnecting… attempt 1 · retrying now").assertIsDisplayed()
+    }
+
+    /**
+     * The whole point of keeping the emulator across a drop: the pane the user
+     * was reading stays on screen under the banner. A reconnect state without a
+     * terminal surface is a cleared screen.
+     */
+    @Test
+    fun `reconnecting keeps the terminal surface on screen`() {
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 0,
+                retryInMs = 0,
+                terminal = createRemoteTerminalSession(),
+            ),
+        )
+
+        composeRule.onNodeWithTag(SESSION_TERMINAL_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `retry is reachable from the reconnect banner`() {
+        var retries = 0
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 4,
+                retryInMs = 10_000,
+                terminal = createRemoteTerminalSession(),
+            ),
+            onRetry = { retries += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_RETRY_TAG).performClick()
+
+        assertEquals(1, retries)
     }
 
     /**
@@ -99,6 +198,7 @@ class SessionScreenTest {
         state: SessionUiState,
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
+        onRetry: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -107,6 +207,7 @@ class SessionScreenTest {
                     sessionName = SESSION,
                     onBack = onBack,
                     onResized = onResized,
+                    onRetry = onRetry,
                 )
             }
         }

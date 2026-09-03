@@ -130,10 +130,33 @@ class TerminalPtyBridge(
      * read return -1 so it retires immediately instead of on its next poll
      * tick. Idempotent.
      */
-    fun stop() {
+    fun stop() = shutdown(closeQueues = true)
+
+    /**
+     * Stops the pumps but leaves the vendored session's byte queues OPEN, so a
+     * fresh bridge can adopt the same [TerminalSession] (task U-7's reconnect).
+     *
+     * `ByteQueue.close()` is one-way: a queue closed by [stop] never reopens,
+     * and a reattach onto that session would silently accept no bytes and send
+     * no keystrokes. Reconnect therefore detaches rather than stops, which is
+     * also what keeps the last frame on screen — the emulator is untouched, it
+     * simply stops being fed.
+     *
+     * The trade-off is that a pump parked INSIDE a full-queue write is not
+     * unparked here (only a queue close does that). That cannot happen on the
+     * path this is used for: the channel whose output ended has no more frames
+     * to write. [stop] — which [SessionViewModel.onCleared] still calls — keeps
+     * the unparking behaviour for the teardown case that needs it. Idempotent,
+     * and a detached bridge is not restartable.
+     */
+    fun detach() = shutdown(closeQueues = false)
+
+    private fun shutdown(closeQueues: Boolean) {
         if (!stopped.compareAndSet(false, true)) return
-        runCatching { TerminalSessionInternals.closeTerminalToProcessQueue(emulator) }
-        runCatching { TerminalSessionInternals.closeProcessToTerminalQueue(emulator) }
+        if (closeQueues) {
+            runCatching { TerminalSessionInternals.closeTerminalToProcessQueue(emulator) }
+            runCatching { TerminalSessionInternals.closeProcessToTerminalQueue(emulator) }
+        }
         outputJob?.cancel()
         inputJob?.cancel()
         outputJob = null

@@ -20,17 +20,20 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.termux.terminal.TerminalSession
 
 /** Stable test tags for the session screen's own chrome. */
 const val SESSION_SCREEN_TAG: String = "session-screen"
 const val SESSION_TITLE_TAG: String = "session-title"
 const val SESSION_CONNECTING_TAG: String = "session-connecting"
 const val SESSION_ERROR_BANNER_TAG: String = "session-error-banner"
+const val SESSION_RECONNECT_BANNER_TAG: String = "session-reconnect-banner"
+const val SESSION_RETRY_TAG: String = "session-retry"
 const val SESSION_BACK_TAG: String = "session-back"
 
 /**
- * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite task
- * U-4).
+ * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
+ * U-4 and U-7).
  *
  * The attach is started from a `LaunchedEffect` keyed on the route arguments —
  * [SessionViewModel.open] is idempotent, so a recomposition or a configuration
@@ -53,6 +56,7 @@ fun SessionRoute(
         sessionName = sessionName,
         onBack = onBack,
         onResized = viewModel::onResized,
+        onRetry = viewModel::retryNow,
         modifier = modifier,
     )
 }
@@ -68,12 +72,19 @@ fun SessionRoute(
  * that had to agree with the terminal's. The one thing the chrome does say is
  * WHICH session, because the tree can show several with similar names.
  *
- * ## Failure has no retry button
+ * ## Reconnecting keeps the terminal
  *
- * A dropped or ended session shows what happened and offers Back. Reconnect is
- * task U-7, and a Retry that silently re-ran `open()` without the backoff and
- * attempt accounting that task owns would be the thing the rewrite is trying
- * not to build again.
+ * [SessionUiState.Reconnecting] renders the SAME terminal surface as
+ * [SessionUiState.Live], with a banner above it. Blanking the pane while the
+ * link is down would throw away the last thing the user was reading for no
+ * reason: the emulator is simply not being fed, and tmux repaints it on
+ * reattach. The banner carries the attempt number and a live countdown so the
+ * wait is legible rather than a spinner.
+ *
+ * ## A failure offers Retry
+ *
+ * The ladder gives up eventually (task U-7), and the user gets the manual retry
+ * the give-up message names, next to the way back.
  *
  * Stateless: the whole screen is a function of [state], so a design render and
  * a journey see the same pixels.
@@ -84,6 +95,7 @@ fun SessionScreen(
     sessionName: String,
     onBack: () -> Unit,
     onResized: (cols: Int, rows: Int) -> Unit,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -115,19 +127,36 @@ fun SessionScreen(
                     .testTag(SESSION_CONNECTING_TAG),
             )
 
-            is SessionUiState.Live -> Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxSize()
-                    // The terminal renders its own background per cell, but the
-                    // view can be laid out taller than the grid it has drawn so
-                    // far; without this the gap flashes the theme surface.
-                    .background(PocketShellColors.Background),
-            ) {
-                TerminalHostView(
+            is SessionUiState.Live -> Terminal(
+                session = state.terminal,
+                onResized = onResized,
+                modifier = Modifier.weight(1f),
+            )
+
+            is SessionUiState.Reconnecting -> Column(modifier = Modifier.weight(1f)) {
+                Banner(
+                    text = reconnectingMessage(state),
+                    role = BannerRole.Warning,
+                    maxLines = 2,
+                    trailingContent = {
+                        PocketShellButton(
+                            text = "Retry",
+                            onClick = onRetry,
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                            modifier = Modifier.testTag(SESSION_RETRY_TAG),
+                        )
+                    },
+                    modifier = Modifier
+                        .padding(horizontal = PocketShellSpacing.md)
+                        .padding(bottom = PocketShellSpacing.sm)
+                        .testTag(SESSION_RECONNECT_BANNER_TAG),
+                )
+                // The last frame stays exactly where it was, under the banner.
+                Terminal(
                     session = state.terminal,
                     onResized = onResized,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.weight(1f),
                 )
             }
 
@@ -138,10 +167,11 @@ fun SessionScreen(
                     maxLines = 4,
                     trailingContent = {
                         PocketShellButton(
-                            text = "Back",
-                            onClick = onBack,
+                            text = "Retry",
+                            onClick = onRetry,
                             variant = ButtonVariant.Text,
                             compact = true,
+                            modifier = Modifier.testTag(SESSION_RETRY_TAG),
                         )
                     },
                     modifier = Modifier
@@ -151,7 +181,8 @@ fun SessionScreen(
                 )
                 EmptyState(
                     title = "Not attached",
-                    description = "Go back to the session list to pick another session.",
+                    description = "Tap Retry, or go back to the session list to pick another " +
+                        "session.",
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -159,8 +190,47 @@ fun SessionScreen(
     }
 }
 
+@Composable
+private fun Terminal(
+    session: TerminalSession,
+    onResized: (cols: Int, rows: Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            // The terminal renders its own background per cell, but the view can
+            // be laid out taller than the grid it has drawn so far; without this
+            // the gap flashes the theme surface.
+            .background(PocketShellColors.Background),
+    ) {
+        TerminalHostView(
+            session = session,
+            onResized = onResized,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/**
+ * The reconnect banner's text.
+ *
+ * Both numbers are load bearing: the attempt says the app is still working
+ * rather than stuck, and the countdown says how long the wait is instead of
+ * making the user guess whether anything will happen. The attempt is rendered
+ * 1-based — [ReconnectController] counts from 0, users do not.
+ */
+private fun reconnectingMessage(state: SessionUiState.Reconnecting): String {
+    val attempt = state.attempt + 1
+    if (state.retryInMs <= 0) return "Reconnecting… attempt $attempt · retrying now"
+    // Rounded UP, so a countdown never displays "0s" while it is still waiting.
+    val seconds = (state.retryInMs + 999) / 1000
+    return "Reconnecting… attempt $attempt · retrying in ${seconds}s"
+}
+
 private fun statusLine(state: SessionUiState): String = when (state) {
     SessionUiState.Connecting -> "attaching"
     is SessionUiState.Live -> "attached"
+    is SessionUiState.Reconnecting -> "reconnecting"
     is SessionUiState.Failed -> "not attached"
 }

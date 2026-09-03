@@ -123,6 +123,17 @@ plan() {
     done
   done <<<"$changed"
 
+  # DEPENDENCY EDGE (task M-3): app2 now consumes :shared:core-transport — the
+  # connect package implements its TrustStore / AuthSecretResolver seams and
+  # holds its HostConnection — so a transport-only change can break app2's
+  # compilation or its registry tests while touching no app2 path. Selecting
+  # app2 whenever transport is selected keeps the "never under-select" property
+  # true for that edge. app2 does NOT depend on core-hostapi yet; add the same
+  # edge when it does.
+  if [[ "${hit[1]}" == "true" ]]; then
+    hit[2]=true
+  fi
+
   echo "app2 lane selection: base=${base} hostapi=${hit[0]} transport=${hit[1]} app2=${hit[2]}" >&2
   emit "${hit[0]}" "${hit[1]}" "${hit[2]}"
 }
@@ -171,7 +182,8 @@ self_test() {
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/core-transport/src/main/B.kt"
-  check "transport only" false true false
+  # app2 rides along: it depends on core-transport (task M-3).
+  check "transport only pulls app2 in" false true true
 
   git -C "$tmp" reset -q --hard "$base"
   commit_file "app2/src/main/C.kt"

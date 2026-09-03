@@ -14,6 +14,24 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// :shared:core-transport brings sshj, which brings BouncyCastle
+// (bcpkix/bcprov/bcutil-jdk18on) and jspecify — all of which ship the same
+// Java resource files, and AGP's merger refuses duplicates. Same list the
+// shipping app module and :shared:core-portfwd carry; none of these metadata
+// files are read at runtime. The androidTest APK is packaged separately, so it
+// needs the same exclusions (applied in the variant block below).
+val duplicateJavaResourceExcludes = listOf(
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+    "META-INF/INDEX.LIST",
+    "META-INF/DEPENDENCIES",
+    "META-INF/LICENSE",
+    "META-INF/LICENSE.txt",
+    "META-INF/license.txt",
+    "META-INF/NOTICE",
+    "META-INF/NOTICE.txt",
+    "META-INF/notice.txt",
+)
+
 android {
     namespace = "com.pocketshell.next"
     compileSdk = 36
@@ -71,6 +89,12 @@ android {
         compose = true
     }
 
+    packaging {
+        resources {
+            excludes += duplicateJavaResourceExcludes
+        }
+    }
+
     testOptions {
         unitTests {
             // Robolectric needs the merged manifest + resources to run the real
@@ -104,12 +128,16 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
 
-    // Shared modules app2 builds on (plan §A.2). core-transport / core-hostapi
-    // are intentionally NOT here yet — the scaffold does not talk to a host,
-    // and those modules land in parallel tasks T-1/K-1.
+    // Shared modules app2 builds on (plan §A.2). core-hostapi is intentionally
+    // still absent — nothing in app2 speaks the host CLI yet (that arrives with
+    // the U-3 tree slice).
     implementation(project(":shared:ui-kit"))
     implementation(project(":shared:core-storage"))
     implementation(project(":shared:core-terminal"))
+    // Task M-3: the connections registry / Room trust store / secret resolver
+    // implement core-transport's TrustStore + AuthSecretResolver seams and hand
+    // back its HostConnection.
+    implementation(project(":shared:core-transport"))
 
     // The nav graph is exercised as a real composition on the host JVM
     // (Robolectric + createComposeRule), the same way :shared:ui-kit tests its
@@ -123,4 +151,22 @@ dependencies {
     testImplementation(libs.compose.ui.test.junit4)
     // Supplies the empty host Activity `createComposeRule()` launches.
     debugImplementation(libs.compose.ui.test.manifest)
+
+    // Task M-3: the connections registry is driven on the host JVM against the
+    // scripted FakeHostConnection (no sshj, no network) plus an in-memory Room
+    // database, the same pattern :shared:core-storage uses for its DAO tests.
+    testImplementation(testFixtures(project(":shared:core-transport")))
+    testImplementation(libs.kotlinx.coroutines.test)
+}
+
+// The androidTest APK is packaged separately from the app APK, so it needs the
+// same BouncyCastle/jspecify duplicate-resource exclusions. Declared now (with
+// the dependency that introduces them) rather than when the first journey test
+// lands, so U-2 does not have to rediscover the failure.
+androidComponents {
+    onVariants { variant ->
+        variant.androidTest?.packaging?.resources?.excludes?.addAll(
+            duplicateJavaResourceExcludes,
+        )
+    }
 }

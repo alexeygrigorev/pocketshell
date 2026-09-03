@@ -93,7 +93,10 @@ internal class PortForwardImpl(
      */
     private val copyThreads = CopyOnWriteArraySet<Thread>()
 
-    @Suppress("unused")
+    /**
+     * The acceptor. [close] JOINS it, because on this JDK its exit is what
+     * actually frees the listening descriptor — see [closeBlocking].
+     */
     private val acceptThread: Thread =
         Thread(::acceptLoop, "portfwd-accept-$localPort").apply {
             isDaemon = true
@@ -265,9 +268,29 @@ internal class PortForwardImpl(
      * Stops accepting connections and tears down owned pairs.
      *
      * The lifecycle lock seals pair/thread registration before the snapshots are
-     * taken. A close that cannot prove every copy thread terminated inside the
+     * taken. A close that cannot prove every owned thread terminated inside the
      * aggregate join budget interrupts the stragglers and throws a diagnostic; it
-     * never silently detaches a live thread from [copyThreads].
+     * never silently detaches a live thread from [copyThreads] or leaves the
+     * acceptor holding the listening socket.
+     *
+     * ## Why the accept thread is joined (PR #2480)
+     *
+     * [ServerSocket.close] does NOT release the listening file descriptor while
+     * another thread is parked inside [ServerSocket.accept]. Since the JDK's NIO
+     * socket rewrite the close is *deferred*: it flips the Java-level closed flag
+     * and unparks the acceptor, but the descriptor is only really closed when
+     * that acceptor unwinds out of `accept()` (`NioSocketImpl.endAccept` →
+     * `tryFinishClose`). Until the acceptor is scheduled — an unbounded wait on a
+     * loaded machine — the kernel keeps the socket in its listen table and keeps
+     * completing handshakes on [localPort].
+     *
+     * So a `close()` that returned without joining had not actually closed the
+     * forward: a local client could still connect to (and then hang on) a dead
+     * forward, and re-opening a forward on the same local port right afterwards
+     * — a reconnect, or a user toggling one off and on — raced a descriptor that
+     * was still bound and failed with "Address already in use". Joining the
+     * acceptor is what orders that release before [close] returns; it is the same
+     * discipline the copy threads already got, for the same reason.
      */
     private fun closeBlocking() {
         val pairs = synchronized(lifecycleLock) {
@@ -293,7 +316,16 @@ internal class PortForwardImpl(
 
         val self = Thread.currentThread()
         val deadlineNanos = System.nanoTime() + CLOSE_JOIN_TIMEOUT_MS * NANOS_PER_MILLI
-        val threadsToJoin = synchronized(lifecycleLock) { ArrayList(copyThreads) }
+        // The acceptor goes first: its unwind is the descriptor release, so it
+        // gets the budget before the copiers do. `self` is skipped throughout,
+        // which is what keeps a close reached from one of these threads from
+        // deadlocking on itself.
+        val threadsToJoin = synchronized(lifecycleLock) {
+            ArrayList<Thread>(copyThreads.size + 1).apply {
+                add(acceptThread)
+                addAll(copyThreads)
+            }
+        }
         for (t in threadsToJoin) {
             if (t === self) continue
             val remainingMillis = (deadlineNanos - System.nanoTime()) / NANOS_PER_MILLI
@@ -339,11 +371,8 @@ internal class PortForwardImpl(
         val details = stillAlive.joinToString { "${it.name}(${it.state})" }
         throw IllegalStateException(
             "Port forward 127.0.0.1:$localPort close timed out after " +
-                "$CLOSE_JOIN_TIMEOUT_MS ms; live copy threads: $details",
+                "$CLOSE_JOIN_TIMEOUT_MS ms; live threads: $details",
         )
-        // The accept thread is deliberately not joined: it is a daemon, the
-        // SocketException wakeup is immediate, and joining would deadlock if
-        // close() were ever reached from inside the accept thread itself.
     }
 
     internal companion object {

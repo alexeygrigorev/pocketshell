@@ -2,7 +2,9 @@ package com.pocketshell.core.transport
 
 import kotlinx.coroutines.CoroutineDispatcher
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.connection.channel.OpenFailException
 import net.schmizz.sshj.connection.channel.direct.Session
+import java.io.IOException
 import java.io.InputStream
 
 /**
@@ -26,6 +28,56 @@ internal interface ExecChannel {
     /** Best-effort blocking teardown of the command and its session. Never throws. */
     fun close()
 }
+
+/**
+ * The host refused to open a channel because it had no room for one — the
+ * server side of issue #2120's exhaustion, as opposed to
+ * [ChannelBudgetExhaustedException] which is our own side of it.
+ *
+ * Raised by [SshjHostChannels] instead of letting sshj's `open failed` escape,
+ * so [ChannelBudget.openRetryingHostRefusal] has a transport-neutral signal to
+ * retry on and a fake [HostChannels] can reproduce the condition on the JVM
+ * without an SSH server. See [sessionRefusalAware] for exactly which refusals
+ * map to this and why.
+ */
+internal class ChannelRefusedException(
+    val channelType: String,
+    cause: Throwable,
+) : IOException("host refused a $channelType channel: ${cause.message}", cause)
+
+/**
+ * Translates a refused SESSION-channel open into [ChannelRefusedException].
+ *
+ * Only [OpenFailException.Reason.UNKNOWN_CHANNEL_TYPE] is left alone: it says
+ * the server does not implement `session` at all, which no amount of waiting
+ * fixes. Every other reason is treated as "not right now".
+ *
+ * That is deliberately broad, because the reason code is not a reliable
+ * discriminator and the *channel type* is. OpenSSH answers a `MaxSessions`
+ * overflow (`session_open`'s "no more sessions" in `session.c`) with
+ * `SSH2_OPEN_CONNECT_FAILED` and the message `open failed` — verified against
+ * `tests/docker/Dockerfile.ssh` while reproducing this, where sshd's own log
+ * line count matched the client's refusal count exactly. `CONNECT_FAILED` is
+ * meaningful for a `direct-tcpip` channel, where it means the far end would not
+ * accept the connection; on a `session` channel there is nothing to connect to,
+ * so it can only mean the server declined to create the session. This helper is
+ * therefore applied to session opens only, never to forwarded channels.
+ *
+ * `internal` rather than private so the reason-code mapping — the part that was
+ * wrong the first time this was written, and that only a real sshd revealed —
+ * is pinned directly by a unit test instead of only through the Docker lane.
+ */
+internal inline fun <T> sessionRefusalAware(block: () -> T): T =
+    try {
+        block()
+    } catch (failure: OpenFailException) {
+        if (failure.reason == OpenFailException.Reason.UNKNOWN_CHANNEL_TYPE) {
+            throw failure
+        }
+        throw ChannelRefusedException(SESSION_CHANNEL_TYPE, failure)
+    }
+
+internal const val SESSION_CHANNEL_TYPE = "session"
 
 /**
  * The channel-opening primitives a [HostConnection] needs from its transport.
@@ -53,13 +105,13 @@ internal class SshjHostChannels(
     private val ioDispatcher: CoroutineDispatcher,
 ) : HostChannels {
 
-    override fun openExec(command: String): ExecChannel {
+    override fun openExec(command: String): ExecChannel = sessionRefusalAware {
         // sshj's SessionChannel implements both Session and Command over the
         // same channel; a failure between startSession and exec must close the
         // half-opened session rather than leak it (that leak is one of the ways
         // #2120's budget could be consumed by channels nobody is using).
         val session = client.startSession()
-        return try {
+        try {
             SshjExecChannel(session, session.exec(command))
         } catch (failure: Throwable) {
             runCatching { session.close() }
@@ -68,14 +120,16 @@ internal class SshjHostChannels(
     }
 
     override suspend fun openPty(command: String, cols: Int, rows: Int, term: String): PtyChannel =
-        PtyChannelImpl.open(
-            client = client,
-            command = command,
-            cols = cols,
-            rows = rows,
-            term = term,
-            ioDispatcher = ioDispatcher,
-        )
+        sessionRefusalAware {
+            PtyChannelImpl.open(
+                client = client,
+                command = command,
+                cols = cols,
+                rows = rows,
+                term = term,
+                ioDispatcher = ioDispatcher,
+            )
+        }
 
     override fun sftp(): SftpChannel = SftpChannelImpl(client, ioDispatcher)
 

@@ -33,8 +33,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   [TransportState.Closed] on a deliberate [close]. Both are terminal — a
  *   spent instance is replaced by dialling a new one via the factory.
  *
- * [openPty] (T-3), [sftp] (T-4) and [scheduleGraceClose] (T-5) are future
- * tasks and deliberately throw [NotImplementedError] here.
+ * [openPty] delegates to [PtyChannelImpl] (T-3), [sftp] to a cached
+ * [SftpChannelImpl] (T-4), and [scheduleGraceClose] to [GraceCloseScheduler]
+ * (T-5) — each owns its own logic in its own file; this class only wires the
+ * shared [client]/[ioDispatcher] into them.
  *
  * [ioDispatcher] exists so tests can substitute a controllable dispatcher;
  * [Dispatchers.IO] appears only as the constructor default.

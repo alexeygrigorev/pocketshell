@@ -1,5 +1,8 @@
 package com.pocketshell.next.terminal
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +21,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.next.composer.ComposerBar
+import com.pocketshell.next.composer.ComposerUiState
+import com.pocketshell.next.composer.ComposerViewModel
+import com.pocketshell.next.composer.MessageHistorySheet
+import com.pocketshell.next.composer.SentMessage
+import com.pocketshell.next.composer.SessionSink
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -64,11 +73,22 @@ val TERMINAL_KEY_BAR_KEYS: List<KeyBinding> = listOf(
 
 /**
  * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
- * U-4, U-5 and U-7).
+ * U-4, U-5, U-7 and P-1).
  *
- * The attach is started from a `LaunchedEffect` keyed on the route arguments —
- * [SessionViewModel.open] is idempotent, so a recomposition or a configuration
- * change cannot open a second PTY on the same tmux session.
+ * Two ViewModels, one screen. [SessionViewModel] owns the transport and the
+ * terminal; [ComposerViewModel] owns the draft, its attachments and its
+ * history. They meet at exactly one place — the [SessionSink] built here — and
+ * that seam is deliberately two members wide, so the composer can never grow a
+ * second opinion about whether the session is attached.
+ *
+ * The sink reads `uiState.value` at call time rather than closing over the
+ * collected state: a sink built from a snapshot would answer "live" from
+ * whenever the screen last recomposed, which is precisely when a send would
+ * vanish into a dead pane and the draft would be cleared for it.
+ *
+ * The key bar's raw control bytes (Ctrl+C, Esc, Tab, Enter) go STRAIGHT to
+ * [SessionViewModel.sendBytes] — they are not composed messages and have no
+ * business in the composer's draft/history/attachment machinery.
  */
 @Composable
 fun SessionRoute(
@@ -77,43 +97,76 @@ fun SessionRoute(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionViewModel = hiltViewModel(),
+    composerViewModel: ComposerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val composerState by composerViewModel.state.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
 
+    val sink = remember(viewModel) {
+        object : SessionSink {
+            override val isLive: Boolean get() = viewModel.uiState.value is SessionUiState.Live
+            override fun sendBytes(bytes: ByteArray) = viewModel.sendBytes(bytes)
+        }
+    }
+    LaunchedEffect(hostId, sessionName, sink) {
+        composerViewModel.bind(hostId, sessionName, sink)
+    }
+
+    // `OpenMultipleDocuments` rather than a media picker: the maintainer
+    // attaches logs, patches and screenshots, and the storage-access framework
+    // is the one picker that reaches all three without a storage permission.
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> -> composerViewModel.attach(uris) }
+
     SessionScreen(
         state = state,
+        composerState = composerState,
         sessionName = sessionName,
         onBack = onBack,
         onResized = viewModel::onResized,
         onRetry = viewModel::retryNow,
-        onSend = viewModel::sendBytes,
+        onKeyBarSend = viewModel::sendBytes,
+        onDraftChange = composerViewModel::onDraftChange,
+        onSend = composerViewModel::send,
+        onAttach = { picker.launch(arrayOf("*/*")) },
+        onMicTap = composerViewModel::onMicTap,
+        onCancelRecording = composerViewModel::cancelRecording,
+        onToggleHistory = composerViewModel::toggleHistory,
+        onTogglePreview = composerViewModel::togglePreview,
+        onRemoveAttachment = composerViewModel::removeAttachment,
+        onDismissNotice = composerViewModel::dismissNotice,
+        onDiscardDraft = composerViewModel::discard,
+        onUseHistoryEntry = composerViewModel::useHistoryEntry,
         modifier = modifier,
     )
 }
 
 /**
- * One attached session: a title bar, a full-bleed terminal, and the key bar.
+ * One attached session: a title bar, a full-bleed terminal, the key bar, and
+ * the composer.
  *
- * ## Deliberately almost no chrome
+ * ## Chrome, and what is still absent
  *
- * A name, a way back, the terminal, and four keys. No composer, no conversation
- * tab, no hotkey panel, no scroll affordances — every one of those is a later
- * task or a cut one, and each is a place the pre-rewrite screen accumulated
+ * A name, a way back, the terminal, four keys, and one composer. No
+ * conversation tab, no hotkey panel, no scroll affordances — every one of
+ * those is a cut task, and each is a place the pre-rewrite screen accumulated
  * state that had to agree with the terminal's. The one thing the chrome does
  * say is WHICH session, because the tree can show several with similar names.
  *
  * ## The keyboard shrinks the terminal, it does not cover it
  *
- * [Modifier.imePadding] on the whole column is what makes `stty size` on the
- * remote track the keyboard: the column shrinks, so the terminal slot shrinks,
- * so the vendored view relayouts and reports its new cell count through
- * [onResized] — the single path to `pty.resize`. A keyboard that merely floated
- * over the terminal would leave the remote wrapping at rows the user cannot
- * see, which is exactly the "the last line is under the keyboard" complaint.
- * The same mechanism covers rotation, which reaches the view as an ordinary
- * layout-size change.
+ * [imePadding] on the whole column is what makes `stty size` on the remote
+ * track the keyboard: the column shrinks, so the terminal slot shrinks, so the
+ * vendored view relayouts and reports its new cell count through [onResized]
+ * — the single path to `pty.resize`. The composer is the bottom-most child, so
+ * it rides up with the IME too. That is why the composer is inline rather than
+ * a modal sheet: a sheet floats in its own window and has to be re-anchored
+ * against the IME by hand, which is 289 lines of machinery the old client
+ * carried and this screen does not need. The same mechanism covers rotation,
+ * which reaches the view as an ordinary layout-size change.
  *
  * ## The key bar is up before the terminal is
  *
@@ -123,26 +176,28 @@ fun SessionRoute(
  * terminal eventually gets, and the remote would be resized twice on every
  * attach. It is hidden on `Failed`, where there is nothing to send to.
  *
- * ## Reconnecting keeps the terminal
+ * ## Reconnecting keeps the terminal — and the composer stays mounted through
+ * a failure, on purpose
  *
  * [SessionUiState.Reconnecting] renders the SAME terminal surface as
- * [SessionUiState.Live], with a banner above it. Blanking the pane while the
- * link is down would throw away the last thing the user was reading for no
- * reason: the emulator is simply not being fed, and tmux repaints it on
- * reattach. The banner carries the attempt number and a live countdown so the
- * wait is legible rather than a spinner.
+ * [SessionUiState.Live], with a banner above it — the emulator is simply not
+ * being fed, and tmux repaints it on reattach. The composer never unmounts,
+ * not even on [SessionUiState.Failed]: that is the state in which a draft is
+ * most valuable, and hiding the composer would delete the one thing the send
+ * contract promises to keep.
  *
  * ## A failure offers Retry
  *
- * The ladder gives up eventually (task U-7), and the user gets the manual retry
- * the give-up message names, next to the way back.
+ * The ladder gives up eventually (task U-7), and the user gets the manual
+ * retry the give-up message names, next to the way back.
  *
  * @param onResized the terminal's size in character cells. Called by the
  *   vendored view once it exists, and — before it does — by the pre-attach
  *   estimate, so the PTY opens at the phone's real geometry instead of 80x24.
  * @param onRetry manual retry after the reconnect ladder gives up (task U-7).
- * @param onSend raw bytes for the remote: key bar taps, and Ctrl+key
- *   combinations the key bar armed and the keyboard completed.
+ * @param onKeyBarSend raw bytes for the remote: key bar taps, and Ctrl+key
+ *   combinations the key bar armed and the keyboard completed. Bypasses the
+ *   composer entirely — these are not composed messages.
  * @param cellMetrics the rendered face's cell metrics, used only for the
  *   pre-attach estimate. A seam with the production default, like
  *   [com.pocketshell.next.AppNavHost]'s screens: Robolectric's `Paint` reports
@@ -152,11 +207,23 @@ fun SessionRoute(
 @Composable
 fun SessionScreen(
     state: SessionUiState,
+    composerState: ComposerUiState,
     sessionName: String,
     onBack: () -> Unit,
     onResized: (cols: Int, rows: Int) -> Unit,
     onRetry: () -> Unit,
-    onSend: (ByteArray) -> Unit,
+    onKeyBarSend: (ByteArray) -> Unit,
+    onDraftChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onAttach: () -> Unit,
+    onMicTap: () -> Unit,
+    onCancelRecording: () -> Unit,
+    onToggleHistory: () -> Unit,
+    onTogglePreview: () -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    onDismissNotice: () -> Unit,
+    onDiscardDraft: () -> Unit,
+    onUseHistoryEntry: (SentMessage) -> Unit,
     modifier: Modifier = Modifier,
     cellMetrics: TerminalCellMetrics = rememberTerminalCellMetrics(),
 ) {
@@ -221,7 +288,7 @@ fun SessionScreen(
                     onResized = onResized,
                     ctrlArmed = ctrl != KeyModifierState.Off,
                     onControlBytes = { bytes ->
-                        onSend(bytes)
+                        onKeyBarSend(bytes)
                         // The key that consumed the modifier came from the
                         // keyboard, not from the bar, so the bar's own
                         // auto-clear never fires. A LOCKED Ctrl survives, which
@@ -291,9 +358,31 @@ fun SessionScreen(
             TerminalKeyBar(
                 ctrl = ctrl,
                 onCtrlChange = { ctrl = it },
-                onSend = onSend,
+                onSend = onKeyBarSend,
             )
         }
+
+        ComposerBar(
+            state = composerState,
+            onDraftChange = onDraftChange,
+            onSend = onSend,
+            onAttach = onAttach,
+            onMicTap = onMicTap,
+            onCancelRecording = onCancelRecording,
+            onToggleHistory = onToggleHistory,
+            onTogglePreview = onTogglePreview,
+            onRemoveAttachment = onRemoveAttachment,
+            onDismissNotice = onDismissNotice,
+            onDiscard = onDiscardDraft,
+        )
+    }
+
+    if (composerState.historyOpen) {
+        MessageHistorySheet(
+            messages = composerState.history,
+            onPick = onUseHistoryEntry,
+            onDismiss = onToggleHistory,
+        )
     }
 }
 

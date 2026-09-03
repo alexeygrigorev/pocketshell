@@ -3,6 +3,7 @@ package com.pocketshell.next.terminal
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.platform.LocalView
+import com.pocketshell.next.composer.ComposerUiState
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -333,11 +334,23 @@ class SessionKeyBarTest {
             PocketShellTheme {
                 SessionScreen(
                     state = state,
+                    composerState = ComposerUiState(),
                     sessionName = SESSION,
                     onBack = {},
                     onResized = onResized,
                     onRetry = {},
-                    onSend = onSend,
+                    onKeyBarSend = onSend,
+                    onDraftChange = {},
+                    onSend = {},
+                    onAttach = {},
+                    onMicTap = {},
+                    onCancelRecording = {},
+                    onToggleHistory = {},
+                    onTogglePreview = {},
+                    onRemoveAttachment = {},
+                    onDismissNotice = {},
+                    onDiscardDraft = {},
+                    onUseHistoryEntry = {},
                     cellMetrics = cellMetrics,
                 )
             }

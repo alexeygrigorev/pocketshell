@@ -5,6 +5,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import com.github.takahirom.roborazzi.captureRoboImage
+import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.terminal.SessionScreen
 import com.pocketshell.next.terminal.SessionUiState
 import com.pocketshell.next.terminal.createRemoteTerminalSession
@@ -17,7 +18,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * Fast design renders for the session screen's chrome (tasks U-5 and U-7).
+ * Fast design renders for the session screen's chrome (tasks U-5, U-7 and P-1).
  *
  * Same harness as [HostScreenRenders]: Pixel-7-class viewport, the app's own
  * always-dark theme, PNGs under `app2/build/renders/`.
@@ -40,29 +41,53 @@ import org.robolectric.annotation.GraphicsMode
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class SessionScreenRenders {
 
-    /** Attaching, with the key bar already docked so the layout cannot jump. */
+    /** Attaching, with the key bar and composer already docked so the layout cannot jump. */
     @Test
     fun sessionAttaching() = render("u5-session-attaching") {
         SessionScreen(
             state = SessionUiState.Connecting,
+            composerState = ComposerUiState(),
             sessionName = "git-pocketshell",
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
+            onKeyBarSend = {},
+            onDraftChange = {},
             onSend = {},
+            onAttach = {},
+            onMicTap = {},
+            onCancelRecording = {},
+            onToggleHistory = {},
+            onTogglePreview = {},
+            onRemoveAttachment = {},
+            onDismissNotice = {},
+            onDiscardDraft = {},
+            onUseHistoryEntry = {},
         )
     }
 
-    /** Attached: the four-slot bar under a full-bleed terminal. */
+    /** Attached: the four-slot bar and the composer under a full-bleed terminal. */
     @Test
     fun sessionLiveWithKeyBar() = render("u5-session-key-bar") {
         SessionScreen(
             state = SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(),
             sessionName = "git-pocketshell",
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
+            onKeyBarSend = {},
+            onDraftChange = {},
             onSend = {},
+            onAttach = {},
+            onMicTap = {},
+            onCancelRecording = {},
+            onToggleHistory = {},
+            onTogglePreview = {},
+            onRemoveAttachment = {},
+            onDismissNotice = {},
+            onDiscardDraft = {},
+            onUseHistoryEntry = {},
         )
     }
 
@@ -73,11 +98,23 @@ class SessionScreenRenders {
             state = SessionUiState.Failed(
                 "Could not reconnect to the session. Tap Retry to try again.",
             ),
+            composerState = ComposerUiState(),
             sessionName = "git-pocketshell",
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
+            onKeyBarSend = {},
+            onDraftChange = {},
             onSend = {},
+            onAttach = {},
+            onMicTap = {},
+            onCancelRecording = {},
+            onToggleHistory = {},
+            onTogglePreview = {},
+            onRemoveAttachment = {},
+            onDismissNotice = {},
+            onDiscardDraft = {},
+            onUseHistoryEntry = {},
         )
     }
 

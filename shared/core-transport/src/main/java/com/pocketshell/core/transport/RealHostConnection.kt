@@ -150,8 +150,18 @@ internal class RealHostConnection(
     override suspend fun openPty(command: String, cols: Int, rows: Int, term: String): PtyChannel =
         throw NotImplementedError("PTY channels are rewrite task T-3, not part of T-2")
 
-    override suspend fun sftp(): SftpChannel =
-        throw NotImplementedError("SFTP is rewrite task T-4, not part of T-2")
+    /**
+     * T-4: the single SFTP channel for this connection. `by lazy` gives the
+     * caching the [HostConnection.sftp] contract requires, thread-safely and
+     * without any I/O here — [SftpChannelImpl] opens the remote subsystem
+     * itself on first use.
+     */
+    private val sftpChannel: SftpChannelImpl by lazy { SftpChannelImpl(client, ioDispatcher) }
+
+    override suspend fun sftp(): SftpChannel {
+        requireUsable("sftp")
+        return sftpChannel
+    }
 
     /**
      * T-5: owns the single pending delayed close (D21). All of its logic lives

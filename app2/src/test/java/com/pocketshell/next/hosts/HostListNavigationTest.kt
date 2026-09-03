@@ -130,7 +130,7 @@ class HostListNavigationTest {
                 // provide. This suite is about the host-tap → Tree(hostId)
                 // edge, so the destination is a stand-in echoing the delivered
                 // argument.
-                treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

@@ -75,6 +75,25 @@ sealed class Destination(val pattern: String) {
     }
 
     /**
+     * One file open in the viewer/editor on [ARG_HOST_ID] (task P-3b).
+     *
+     * A separate destination from [Files] rather than a mode inside it, so the
+     * system back gesture does what the user means: from a file, back returns to
+     * the directory that file was opened from, with its scroll position and its
+     * own path argument intact. Folding both into one route would mean
+     * reimplementing that with in-screen state, which is exactly the hand-rolled
+     * navigation the rewrite deleted.
+     *
+     * [ARG_PATH] is a query argument here for the same reason it is on [Files]
+     * (a filesystem path contains `/`), but unlike [Files] it is REQUIRED —
+     * "the viewer with no file" is not a state.
+     */
+    data object FileViewer : Destination("file/{$ARG_HOST_ID}?$ARG_PATH={$ARG_PATH}") {
+        fun route(hostId: Long, path: String): String =
+            "file/$hostId?$ARG_PATH=${encodeSegment(path)}"
+    }
+
+    /**
      * Port forwarding for one host (task P-4).
      *
      * A standalone route rather than a tab inside [Session] on purpose: the
@@ -107,7 +126,7 @@ sealed class Destination(val pattern: String) {
          * no such window.
          */
         val all: List<Destination>
-            get() = listOf(Hosts, Tree, Session, Files, Ports, Settings, Usage)
+            get() = listOf(Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage)
 
         /** The graph's start destination. Getter, for the same reason as [all]. */
         val start: Destination

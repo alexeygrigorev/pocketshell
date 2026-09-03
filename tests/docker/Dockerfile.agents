@@ -14,7 +14,15 @@ FROM alpine:latest
 # registry (see agent-bin/pocketshell), which reads
 # ~/.config/pocketshell/engines.yaml. Without PyYAML the registry silently
 # ignores the fixture's engine rows.
-RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git nano \
+# `openssh-sftp-server` (rewrite task P-3): Alpine ships the SFTP subsystem in
+# its OWN package, so `openssh-server` alone gives an sshd whose
+# `Subsystem sftp /usr/lib/ssh/sftp-server` line points at a binary that is not
+# installed. Every SFTP channel against this fixture then closed immediately —
+# invisible to every test that only ran `exec`, and fatal to the file
+# explorer/viewer journey (J10). `Dockerfile.ssh` already carried the package;
+# this image had drifted from it.
+RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client \
+    tmux procps bash sqlite git nano \
     python3 py3-click py3-yaml \
     && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \

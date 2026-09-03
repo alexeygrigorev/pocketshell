@@ -68,6 +68,11 @@ class AppNavHostTest {
             "Files(hostId=7, path=/home/alexey/notes.md)",
         )
         assertNavigatesTo(nav, Destination.Files.route(hostId = 7), "Files(hostId=7, path=null)")
+        assertNavigatesTo(
+            nav,
+            Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
+            "Viewer(hostId=7, path=/home/alexey/notes.md)",
+        )
         assertNavigatesTo(nav, Destination.Ports.route(hostId = 7), "Ports")
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
@@ -109,13 +114,20 @@ class AppNavHostTest {
                 // resolves its ViewModel through `hiltViewModel()`. The
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
-                treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _ -> Text("Tree(hostId=$hostId)") },
                 // Same rationale again: the P-4 port-forward route resolves its
                 // ViewModel through `hiltViewModel()`. Its own behaviour is
                 // covered by `com.pocketshell.next.ports.PortForwardScreenTest`
                 // and `PortForwardViewModelTest`; what this suite pins is that
                 // `NavHost` accepts the pattern and its Long argument.
                 portsScreen = { Text("Ports") },
+                // Task P-3: the file explorer and viewer resolve their
+                // ViewModels through `hiltViewModel()` too. Their behaviour is
+                // covered by `com.pocketshell.next.files.*`; the stand-ins here
+                // echo the arguments their routes delivered, which is what this
+                // suite pins.
+                filesScreen = { hostId, path, _, _ -> Text("Files(hostId=$hostId, path=$path)") },
+                viewerScreen = { hostId, path, _ -> Text("Viewer(hostId=$hostId, path=$path)") },
             )
         }
         composeRule.waitForIdle()

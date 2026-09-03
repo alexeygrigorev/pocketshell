@@ -46,6 +46,9 @@ const val SESSION_TREE_ERROR_RETRY_TAG: String = "session-tree-error-retry"
 const val SESSION_TREE_LOADING_TAG: String = "session-tree-loading"
 const val SESSION_TREE_EMPTY_TAG: String = "session-tree-empty"
 
+/** The header action that opens this host's file explorer (task P-3a). */
+const val SESSION_TREE_FILES_TAG: String = "session-tree-files"
+
 fun sessionRowTag(name: String): String = "session-row-$name"
 
 fun workspaceHeaderTag(label: String): String = "workspace-header-$label"
@@ -63,6 +66,7 @@ fun workspaceHeaderTag(label: String): String = "workspace-header-$label"
 @Composable
 fun SessionTreeRoute(
     onOpenSession: (String) -> Unit,
+    onOpenFiles: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionTreeViewModel = hiltViewModel(),
 ) {
@@ -74,6 +78,7 @@ fun SessionTreeRoute(
         state = state,
         onRefresh = viewModel::refresh,
         onOpenSession = onOpenSession,
+        onOpenFiles = onOpenFiles,
         modifier = modifier,
     )
 }
@@ -112,6 +117,7 @@ fun SessionTreeScreen(
     state: SessionTreeUiState,
     onRefresh: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onOpenFiles: () -> Unit = {},
     modifier: Modifier = Modifier,
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
@@ -123,6 +129,20 @@ fun SessionTreeScreen(
         ScreenHeader(
             title = "Sessions",
             subtitle = headerSubtitle(state),
+            // Task P-3a: the host's file browser. It lives in the header rather
+            // than behind a menu because this is the app's ONLY way to reach the
+            // explorer until U-4's terminal chrome lands, and browsing a host's
+            // files is a first-class job the maintainer does regularly — not a
+            // secondary action to bury.
+            trailing = {
+                PocketShellButton(
+                    text = "Files",
+                    onClick = onOpenFiles,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(SESSION_TREE_FILES_TAG),
+                )
+            },
         )
 
         if (state.errors.isNotEmpty()) {

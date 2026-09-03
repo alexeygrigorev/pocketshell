@@ -51,8 +51,6 @@ once the core is working and polished, most likely re-homed in `aplexer`
   being removed from the codebase in the same round as this amendment.
 - **P-3c** (file-review + annotation UI) — the maintainer confirmed he never
   uses it; drop from the file-viewer scope entirely.
-- **P-5** (usage/quota panel) — no token/quota UI without agent sessions to
-  meter.
 - **P-8** (git history/diff/status viewer) — dropped, not used.
 - **P-10's `assistant/`** (in-app AI assistant chat) — this is itself "an
   agent," in scope for the same reason U-6's engine picker is cut below.
@@ -78,11 +76,19 @@ slice inside it goes:**
   if it only shows session list state, drop if it shows agent status.
 
 **Explicitly still in scope, confirmed by the maintainer:**
+- **P-1** (composer/prompt composer) — "things I use regularly." Full keep,
+  minus `agentcommands/` per the trim above.
+- **P-2** (voice dictation) — "I use this often." Orthogonal to agents, it's
+  an input method, not a feature about launching/managing agent sessions.
 - **P-3a/P-3b** (file explorer + viewer, minus P-3c's review/annotation) —
-  "keep the file browser."
-- **P-4** (port forwarding) — "it's useful."
-- **P-2** (voice dictation) — orthogonal to agents, it's an input method, not
-  a feature about launching/managing agent sessions.
+  "keep the file browser" / file upload is something he uses regularly.
+- **P-4** (port forwarding) — "I use this sometimes."
+- **P-5** (usage/quota panel) — un-cut 2026-09-03: "I check this from time to
+  time." Back in scope, unchanged from its original task entry below.
+- **U-3** (session tree/list) — already merged; the maintainer wants session
+  switching made EASIER as a priority polish item once the core journeys are
+  proven out (not a new task yet, a direction for later U-3/U-5-adjacent
+  polish work).
 - Everything already merged and not listed above: H-1/H-2/H-3 (server-side
   `--engine` routing in `sessions create` stays dormant/harmless), all of T
   and K (transport/host-CLI plumbing, engine/profile listing included — no
@@ -90,15 +96,26 @@ slice inside it goes:**
   (U-4, U-5, U-7, U-8) — the actual point of the app and the reliability half
   of the maintainer's stated goal.
 
-**Consequences for §A.4's journey set:** J09 (`ConversationViewJourney`) and
-J12 (`UsagePanelJourney`) are dropped along with U-10/P-5. J10
-(`FilesBrowseEditJourney`) drops any review/annotation-specific assertions.
-Ten journeys remain: J01–J08, J10, J11.
+**Still under discussion (2026-09-03) — not yet cut, not yet confirmed kept.**
+The maintainer asked for a further audit beyond this list; do not build any of
+these until one of them gets an explicit answer: P-6's keys/QR
+(biometric passphrase unlock, QR host import/export — SSH key add/edit
+itself stays, just the fancier flows are in question), P-7's `env`/`jobs`
+(currently still marked "keep" above, but reopened), P-9's `snippets/`, the
+`bootstrap/` host-CLI-version probe (arguably reliability infra rather than a
+"feature," flagged as a lean-keep), and P-10's `messaging/`/`notifications/`/
+`systemsurfaces/` (widget/tile).
+
+**Consequences for §A.4's journey set:** J09 (`ConversationViewJourney`) is
+dropped along with U-10. J12 (`UsagePanelJourney`) is back in scope (P-5
+un-cut). J10 (`FilesBrowseEditJourney`) drops any review/annotation-specific
+assertions. Eleven journeys remain: J01–J08, J10, J11, J12.
 
 **Consequences for the task-graph summary:** the original count was 42 tasks
-(6 H, 5 T, 2 K, 3 M, 10 U, 12 P counting P-3a/b/c, 4 X). With U-9/U-10 cut (10
-→ 8 U) and P-3c/P-5/P-8 cut (12 → 9 P), the plan is now **37 tasks**: 6 H (2
-blocked), 5 T, 2 K, 3 M, 8 U, 9 P, 4 X (1 blocked, 1 maintainer-gated).
+(6 H, 5 T, 2 K, 3 M, 10 U, 12 P counting P-3a/b/c, 4 X). With U-9/U-10 cut
+(10 → 8 U) and P-3c/P-8 cut, P-5 un-cut 2026-09-03 (12 → 10 P), the plan is
+now **38 tasks**: 6 H (2 blocked), 5 T, 2 K, 3 M, 8 U, 10 P, 4 X (1 blocked,
+1 maintainer-gated).
 
 ---
 

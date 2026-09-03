@@ -61,13 +61,39 @@ android {
         // with the shipping module until app2 becomes primary at cutover.
         versionCode = 1
         versionName = "0.0.0-dev"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Task U-2: the journey resolves the app's own Hilt singletons through
+        // an `@EntryPoint` declared in androidTest. That entry point is only
+        // part of a component the test APK can cast to when the app under test
+        // runs `HiltTestApplication` — which is exactly what this runner
+        // substitutes. The production `App` it replaces is empty beyond
+        // `@HiltAndroidApp`, so nothing under test is lost.
+        testInstrumentationRunner = "com.pocketshell.next.HiltNextTestRunner"
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debugKeystore")
+
+            // Issue #672 scheme, adopted for app2 by task U-2: let each parallel
+            // worktree install its DEBUG apk under a distinct applicationId
+            // (e.g. `com.pocketshell.next.iapp2`) so two app2 worktrees running
+            // connected tests on the ONE shared emulator do not uninstall each
+            // other. `scripts/connected-test.sh --suffix <token>` passes the
+            // property; with no property this is byte-for-byte the plain
+            // `com.pocketshell.next` build, and the release type is untouched.
+            //
+            // Only `[A-Za-z0-9._]` is accepted (a package-segment token) so a
+            // stray value cannot produce an invalid applicationId.
+            val rawSuffix = (project.findProperty("pocketshellAppIdSuffix") as String?)
+                ?.trim()
+                .orEmpty()
+            if (rawSuffix.isNotEmpty()) {
+                require(rawSuffix.matches(Regex("[A-Za-z0-9._]+"))) {
+                    "pocketshellAppIdSuffix must match [A-Za-z0-9._]+ (got: '$rawSuffix')"
+                }
+                applicationIdSuffix = ".$rawSuffix"
+            }
         }
         release {
             isMinifyEnabled = false
@@ -87,6 +113,19 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    sourceSets {
+        getByName("androidTest") {
+            // Task U-2: the J01 journey authenticates against the Docker SSH
+            // fixture with `tests/docker/test_key`, so the key is packaged as an
+            // androidTest asset and read via
+            // `InstrumentationRegistry.getInstrumentation().context.assets`.
+            // Same mechanism the pre-rewrite app module used; the key is a
+            // disposable fixture credential committed to the repo, never a real
+            // one.
+            assets.srcDir(rootProject.file("tests/docker"))
+        }
     }
 
     packaging {
@@ -164,6 +203,41 @@ dependencies {
     // database, the same pattern :shared:core-storage uses for its DAO tests.
     testImplementation(testFixtures(project(":shared:core-transport")))
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // Task U-2: app2's first INSTRUMENTED tests (journey J01). The androidTest
+    // component already sees the main variant's `implementation` dependencies
+    // (Room, core-transport/sshj, Hilt, Compose), so only the test-only
+    // artifacts are declared here — the same short list the pre-rewrite app
+    // module carried, minus everything J01 does not use.
+    // The journey reaches the app's OWN Hilt-provided DAOs and connections
+    // registry through an `@EntryPoint` declared in androidTest, which needs
+    // Hilt's processor over that source set. Seeding through the app's single
+    // database instance (rather than a second Room instance over the same file)
+    // is what keeps the seed and the running screen looking at one connection
+    // pool; closing the app's registry between tests is what stops a cached
+    // connection from making a later test pass without dialling.
+    kspAndroidTest(libs.hilt.compiler)
+    androidTestImplementation(libs.hilt.android.testing)
+
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    // The journey's INDEPENDENT host-key oracle dials the fixture with sshj
+    // directly (sshj itself is `api` on core-transport, so it is already on this
+    // classpath). BouncyCastle is only an `implementation` detail there, so the
+    // androidTest source set needs its own compile-time handle to install the
+    // full provider before that probe — Android ships a stripped "BC" that can
+    // miss algorithms an OpenSSH server negotiates. Same pinned version the
+    // transport uses; nothing new enters the version catalog.
+    androidTestImplementation(libs.bouncycastle.bcprov)
+    // sshj logs through slf4j. Without a binding on the androidTest classpath
+    // every dial prints a "failed to load class StaticLoggerBinder" banner into
+    // the instrumentation output; the no-op binding keeps the run readable.
+    androidTestRuntimeOnly(libs.slf4j.nop)
 }
 
 // The androidTest APK is packaged separately from the app APK, so it needs the

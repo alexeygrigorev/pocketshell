@@ -6,7 +6,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -27,6 +29,21 @@ class AppNavHostTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    /**
+     * The graph now composes the U-2 connect gate on its start destination, so
+     * it needs a [com.pocketshell.next.connect.ConnectViewModel]. This suite is
+     * still about route patterns and argument encoding — the gate's own
+     * behaviour is covered by
+     * `com.pocketshell.next.connect.ConnectGateNavigationTest` — so it gets the
+     * shared test stack and never taps a host.
+     */
+    private val stack = TestConnectStack()
+
+    @After
+    fun tearDown() {
+        stack.close()
+    }
 
     @Test
     fun `start destination renders the hosts route`() {
@@ -86,6 +103,7 @@ class AppNavHostTest {
                 // graph is covered by
                 // `com.pocketshell.next.hosts.HostListNavigationTest`.
                 hostsScreen = { Text("Hosts") },
+                connectViewModel = { stack.viewModel },
             )
         }
         composeRule.waitForIdle()

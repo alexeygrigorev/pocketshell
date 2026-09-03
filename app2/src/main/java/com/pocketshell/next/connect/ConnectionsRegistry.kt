@@ -114,6 +114,27 @@ class ConnectionsRegistry(
     }
 
     /**
+     * Records [sha256] as the trusted host key for [hostId], returning false
+     * when there is no such host row.
+     *
+     * Lives here (task U-2) because [TrustStore.recordTrusted] is keyed by
+     * [HostTarget] and this class already owns the `hostId -> HostTarget`
+     * mapping. Without it every caller answering a trust prompt would have to
+     * rebuild a target from the host row by hand — three call sites away from
+     * the dial, and free to build a *different* one.
+     *
+     * Deliberately NOT under [mutex]: it touches only the trust store, never
+     * the connection table, and it is called immediately before a retry that
+     * does take the mutex.
+     */
+    suspend fun recordTrusted(hostId: Long, sha256: String): Boolean =
+        withContext(dispatcher) {
+            val host = hostDao.getById(hostId) ?: return@withContext false
+            trustStore.recordTrusted(host.toTarget(), sha256)
+            true
+        }
+
+    /**
      * The live connection for [hostId], or null when there is none (or the
      * stored one is spent). Does not dial.
      */

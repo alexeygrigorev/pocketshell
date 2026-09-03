@@ -28,8 +28,15 @@ name: app2
 # removed first and ALL selection moved into the `changes` job (which already
 # does the per-job half and reports a skipped-but-present job either way).
 #
-# NO EMULATOR LANE YET — app2 has no real screen to drive; that arrives with
-# the U-4 task and gets wired into the journey suite then.
+# NO EMULATOR LANE YET. Task U-2 added app2's first instrumented journey
+# (`J01ConnectAndTrustJourney`), but running it needs an emulator AND the Docker
+# SSH fixture; that lane arrives with U-4 and gets wired into the journey suite
+# then. Until it does, the `app2-unit` job at least COMPILES the androidTest
+# source set, so the journey cannot silently rot against a main-source change
+# (the old module learned this the expensive way: the required Unit job never
+# compiled `androidTest`, so a signature break there surfaced only after merge
+# and took out every connected gate at once — see process.md, "Local Confidence
+# Before CI").
 
 on:
   push:
@@ -388,7 +395,9 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
             2>&1 | tee "${RUNNER_TEMP}/app2-gradle.log"
 
-      # 11 observed when the lane landed; floor 8.
+      # 11 when the lane landed, 59 after task U-2 added the connect-flow and
+      # trust-prompt suites; floor 45 — comfortably under the current count but
+      # far above the point where a whole suite could silently stop running.
       - name: Assert tests actually executed
         if: always() && steps.app2_tests.conclusion != 'skipped'
         run: |
@@ -397,8 +406,20 @@ jobs:
           scripts/check-app2-lane-execution.py \
             --label ":app2:testDebugUnitTest" \
             --results-dir app2/build/test-results/testDebugUnitTest \
-            --min 8 \
+            --min 45 \
             --newer-than "${RUNNER_TEMP}/app2-run-start"
+
+      # Compile-only guard for the instrumented journey (see the header note).
+      # Cheap — no emulator, no Docker — and it is the check that would have
+      # caught an androidTest break before it reached the emulator lane.
+      - name: Compile app2 instrumented tests
+        if: always() && steps.app2_tests.conclusion != 'skipped'
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          ./gradlew :app2:compileDebugAndroidTestKotlin \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
 
       - name: Upload app2 test reports
         if: always()

@@ -22,7 +22,10 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.navArgument
+import com.pocketshell.next.connect.ConnectGate
+import com.pocketshell.next.connect.ConnectViewModel
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -71,12 +74,13 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen] is a seam, not a feature flag: the real host list resolves its
- * ViewModel through `hiltViewModel()`, which needs a Hilt-managed Activity, so
- * a plain Robolectric `createComposeRule()` composition could not host it. The
- * parameter lets a test supply the same screen with an explicitly-constructed
- * ViewModel (over an in-memory database) and still exercise the real
- * navigation edge — the production default is the real screen.
+ * [hostsScreen] and [connectViewModel] are seams, not feature flags: the real
+ * host list and the real connect gate resolve their ViewModels through
+ * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
+ * Robolectric `createComposeRule()` composition could not host them. The
+ * parameters let a test supply the same screen / the same ViewModel built by
+ * hand (over an in-memory database and a scripted connection factory) and still
+ * exercise the real navigation edge — the production defaults are the real ones.
  */
 @Composable
 fun AppNavHost(
@@ -85,6 +89,7 @@ fun AppNavHost(
     hostsScreen: @Composable (onOpenHost: (Long) -> Unit) -> Unit = { onOpenHost ->
         HostListRoute(onOpenHost = onOpenHost)
     },
+    connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
 ) {
     NavHost(
         navController = navController,
@@ -92,7 +97,14 @@ fun AppNavHost(
         modifier = modifier,
     ) {
         composable(Destination.Hosts.pattern) {
-            hostsScreen { hostId -> navController.navigate(Destination.Tree.route(hostId)) }
+            // Task U-2: a host tap DIALS. Only a connected host reaches the
+            // tree; an unknown/changed host key raises the trust sheet first
+            // and a failed dial keeps the user on the list with a retry.
+            ConnectGate(
+                onConnected = { hostId -> navController.navigate(Destination.Tree.route(hostId)) },
+                viewModel = connectViewModel(),
+                content = hostsScreen,
+            )
         }
         composable(
             route = Destination.Tree.pattern,

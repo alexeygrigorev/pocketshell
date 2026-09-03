@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Paths exposed by the `.fileprovider` authority for the crash-reports
+    screen's "Share all reports" `ACTION_SEND` content URI (task P-10):
+
+    - `report-archives/` (must match `REPORT_ARCHIVES_CACHE_DIR` in
+      `CrashReportsViewModel.kt`): the zip bundle `ReportsArchive` builds
+      before handing it to Android's share sheet.
+
+    Scoped to only this cache subdirectory so the authority can't
+    accidentally expose anything else from the app's cache.
+-->
+<paths>
+    <cache-path
+        name="report-archives"
+        path="report-archives/" />
+</paths>

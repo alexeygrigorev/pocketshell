@@ -20,6 +20,7 @@ import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.connect.RoomAuthSecretResolver
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.diagnostics.DiagnosticRecorder
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.hosts.HostImporter
@@ -279,4 +280,24 @@ object AppModule {
         connections: ConnectionsRegistry,
         service: GraceServiceControl,
     ): GraceCoordinator = GraceCoordinator(connections = connections, service = service)
+
+    // -------------------------------------------------------------------------
+    // Diagnostics (task P-10): generic bounded event-log recorder. `crash/`
+    // (CrashReporter/CrashReportStore) records straight to its own on-disk
+    // store and does not go through this bean; this is only the
+    // `DiagnosticEvents`/`DiagnosticEventSink` bus `App.onCreate` installs.
+
+    /**
+     * A `@Singleton` provided here (like [provideGraceCoordinator]) rather than
+     * `@Inject`-constructor-annotated, so [DiagnosticRecorder] keeps a plain
+     * `(Context)` constructor a test can build directly without a Hilt graph —
+     * see `DiagnosticRecorderOffMainTest`/`DiagnosticRecorderTest`. A second
+     * instance would mean a second off-main JSONL store build and a second,
+     * independently-seeded sequence counter, so sharing this one instance is
+     * load-bearing.
+     */
+    @Provides
+    @Singleton
+    fun provideDiagnosticRecorder(@ApplicationContext context: Context): DiagnosticRecorder =
+        DiagnosticRecorder(context)
 }

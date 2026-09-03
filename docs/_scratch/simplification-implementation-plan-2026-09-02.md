@@ -1393,6 +1393,10 @@ needed it.
   text → `sessionVm.sendBytes(text + "\r")` → on `Live` clear draft, on
   anything else KEEP draft + show "not delivered — session offline" chip.
   That chip + preserved draft is the ENTIRE delivery story (diagnosis §3.6).
+  Reconfirmed 2026-09-03: the maintainer's real usage is 2-3 short messages
+  per session, not a queue-worthy volume — resist any temptation, on this
+  task or a later one, to grow this back toward retry/offline-delivery
+  machinery. If `sendBytes` fails, the chip + draft is the whole answer.
 - CREATE: `J07ComposerSendJourney.kt` — compose, send, assert the text
   renders in the terminal viewport; kill the link first and assert the
   draft survives and the chip renders.

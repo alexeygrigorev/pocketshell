@@ -182,7 +182,7 @@ depended on the path you stopped taking, and say what you found.
 
 ## Newly-registered journey tests haven't run on CI yet by definition
 
-A test that is both added and wired into `scripts/ci-journey-suite.sh` in
+A test that is both added and wired into `scripts/ci-app2-journey-suite.sh` in
 the same commit gets its first-ever CI execution only after merging —
 compiling it (`:app:compileDebugAndroidTestKotlin`) proves it links, not
 that it passes under swiftshader frame timing. Run any newly-registered
@@ -246,7 +246,7 @@ The inverse of a vacuous green: a run that passed but whose own artifact reads
 like it failed. Two individually-correct decisions compose into it. The
 emulator gate's classify step computes `SHARD_BUILD_ATTRIBUTION` *before* every
 `write_verdict` branch (so no branch can forget it), and
-`ci-journey-build-phase-timeout.sh` deliberately reads the *preserved
+The deleted journey lane's build-phase timeout helper deliberately read the *preserved
 attempt-1* tree (so a retry cannot hide what happened on the first attempt).
 Together they mean a shard cut mid-Gradle-build on attempt 1 whose retry then
 PASSED writes `CLEAN` + `build_attribution=cold_build_timeout`. An aggregate

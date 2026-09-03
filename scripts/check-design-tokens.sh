@@ -2,13 +2,13 @@
 #
 # check-design-tokens.sh — design-token drift guardrail (issue #461, slice 2 / G7).
 #
-# Flags NEW off-ladder UI literals in app/src/main so the design-system token
+# Flags NEW off-ladder UI literals in the app module's main source so the design-system token
 # migration (Slice D) doesn't lose ground while it's in flight. It does NOT try
 # to fix the existing backlog — that's the multi-PR screen sweep. Instead it
 # pins a per-file BASELINE of the current offenders and fails only when a file
 # gains new ones (or a brand-new file ships with any).
 #
-# What counts as an offender (in app/src/main/**.kt only):
+# What counts as an offender (in $SCAN_DIR/**.kt only):
 #   - RoundedCornerShape(<N>.dp) where <N> is NOT an on-ladder radius
 #     (8 / 14 / 20 / 28 — the PocketShellShapes rungs). Use PocketShellShapes.*
 #     instead of a freehand radius.
@@ -30,7 +30,7 @@
 #   0  no NEW drift (counts <= baseline)            [also: --update succeeded]
 #   1  NEW drift found (a file exceeds its baseline, or a new file has offenders)
 #
-# Cheap: pure grep over app/src/main, runs in well under a second. Intended for
+# Cheap: pure grep over the app module, runs in well under a second. Intended for
 # the reviewer to run from the worktree and (optionally) a future fast CI step;
 # it deliberately does NOT add a slow Gradle/emulator job.
 set -euo pipefail
@@ -39,7 +39,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-SCAN_DIR="app/src/main"
+# The app module's main source root. It was `app/src/main`; the rewrite deleted
+# that module, which silently made this guard scan a directory that does not
+# exist — every count came back zero, the baseline "cleanly" emptied, and a
+# planted off-ladder literal in app2 was NOT flagged. A guard pointed at a
+# missing directory reports perfection, so the existence check below is part of
+# the contract, not a nicety.
+SCAN_DIR="${POCKETSHELL_DESIGN_TOKEN_SCAN_DIR:-app2/src/main}"
 BASELINE_FILE="scripts/design-token-baseline.txt"
 
 # On-ladder allow-lists (kept in sync with shared/ui-kit theme tokens).
@@ -48,6 +54,15 @@ BASELINE_FILE="scripts/design-token-baseline.txt"
 #             labelSmall/labelMono 11
 RADIUS_ALLOWED='RoundedCornerShape\((8|14|20|28)\.dp\)'
 FONTSIZE_ALLOWED='fontSize = (11|13|14|16|20)\.sp'
+
+# EXISTS is not enough — it must have Kotlin in it. A self-test's `mkdir -p`
+# can leave the old `app/src/main` tree behind as empty directories, and an
+# empty root greps exactly like a missing one: zero offenders, "no new drift",
+# a guard reporting perfection over nothing.
+if [[ ! -d "$SCAN_DIR" ]] || [[ -z "$(find "$SCAN_DIR" -name '*.kt' -print -quit 2>/dev/null)" ]]; then
+  echo "check-design-tokens: FAIL — scan root '$SCAN_DIR' is missing or contains no .kt files, so every count would be zero and this guard would report perfection over nothing." >&2
+  exit 1
+fi
 
 # Emit "<count> <file>" for every file under SCAN_DIR that has at least one
 # off-ladder offender. Counts both offender families together.

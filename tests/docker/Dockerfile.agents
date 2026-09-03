@@ -42,14 +42,14 @@ COPY tests/docker/agent-bin/ /usr/local/bin/
 # connected test can leave and reread a genuine pending journal record.
 COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
 COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
-# Issue #1302/#1208: the recovery-journey fixture scripts ship here too. They
-# REUSE this `agents` service (host port 2222) — NO new service/port is needed:
-# the composite recovery journey seeds a tmux session whose new-session PAYLOAD
-# runs one of these scripts, e.g.
-#   sh /opt/pocketshell-agent-fixtures/idle-incremental-claude.sh <MARKER> 40
-#   * idle-incremental-claude.sh — paints a full TUI frame once, then repaints
-#     only a spinner line in place (idle Claude that can never self-heal a lost
-#     grid; recovery must come from the reconciler).
+# The #1302/#1208 idle-incremental-claude.sh TUI fixture was DELETED here (D22).
+# It painted a full TUI frame once and then repainted only a spinner in place —
+# an idle agent that cannot self-heal a lost grid, so recovery had to come from
+# the reconciler. Its only invoker was a composite recovery journey in the
+# removed app module, and no app2 journey drives an agent TUI yet, so it shipped
+# into the image with nothing ever running it (scripts/check-tests-referenced.sh
+# flagged exactly that). Recreate it from git history if app2 grows a
+# terminal-recovery journey that needs the non-self-healing repaint shape.
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
 

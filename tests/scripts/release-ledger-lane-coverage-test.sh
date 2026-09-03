@@ -376,7 +376,6 @@ validated_rc_marker_still_requires_a_genuinely_successful_validation_job() {
 #     and the real --record still refuses to credit an all-skipped class.
 # ---------------------------------------------------------------------------
 LEDGER_SCRIPT="$ROOT_DIR/scripts/check-test-execution-ledger.sh"
-NIGHTLY_SUITE_SCRIPT="$ROOT_DIR/scripts/nightly-extensive-suite.sh"
 CONFIDENCE_GATE_SCRIPT="$ROOT_DIR/scripts/pre-release-confidence-gate.sh"
 
 # The source-set the release job's ledger step actually verifies, read out of
@@ -430,12 +429,19 @@ release_gate_shared_module_classes() {
 }
 
 # The union of every lane that can put a class into the rolling ledger.
+#
+# The nightly lane is NOT one of them any more. It contributed two sources —
+# `--selected-from nightly-phase1` and the suite's own `--print-later-phase-classes`
+# — and both named `:app:connectedDebugAndroidTest` classes from a module the
+# rewrite deleted, so every FQCN they produced was a phantom. The connected lane
+# that actually runs today is app2's (`:app2:connectedDebugAndroidTest`, issue
+# #2474), plus the two shared modules the release confidence gate drives
+# directly.
 ledger_creditable_classes() {
   {
     bash "$LEDGER_SCRIPT" --print-selected --selected-from unit-debug
     bash "$LEDGER_SCRIPT" --print-selected --selected-from unit-release
-    bash "$LEDGER_SCRIPT" --print-selected --selected-from nightly-phase1
-    bash "$NIGHTLY_SUITE_SCRIPT" --print-later-phase-classes
+    bash "$LEDGER_SCRIPT" --print-selected --selected-from app2-journey
     release_gate_shared_module_classes
   } | LC_ALL=C sort -u
 }
@@ -446,14 +452,17 @@ every_registered_class_is_claimed_by_a_lane_that_can_credit_it() {
   release_step_registered_classes > "$registered"
   ledger_creditable_classes > "$creditable"
 
-  [[ "$(wc -l < "$registered")" -gt 500 ]] ||
+  # Floors re-derived for the app2 tree (registered ~178, creditable ~180); the
+  # old >500 described the pre-rewrite client. Low enough to catch a collapsed
+  # derivation, high enough that half the suite disappearing still trips it.
+  [[ "$(wc -l < "$registered")" -gt 120 ]] ||
     fail "registered class derivation collapsed ($(wc -l < "$registered") classes) — the harness would pass vacuously"
-  [[ "$(wc -l < "$creditable")" -gt 500 ]] ||
+  [[ "$(wc -l < "$creditable")" -gt 120 ]] ||
     fail "lane-creditable derivation collapsed ($(wc -l < "$creditable") classes)"
   grep -qx 'com.pocketshell.uikit.components.UiKitPrimitivesTest' "$creditable" ||
     fail "no lane can credit UiKitPrimitivesTest — the release gate must run :shared:ui-kit:connectedDebugAndroidTest (#2435)"
-  grep -qx 'com.pocketshell.app.proof.LongRunningSessionStabilityTest' "$creditable" ||
-    fail "no lane can credit LongRunningSessionStabilityTest — its #794 90s method must run in nightly phase 1 (#2435)"
+  grep -qx 'com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney' "$creditable" ||
+    fail "no lane can credit J06BackgroundGraceReturnJourney — the bg/grace journey must run in the app2 journey lane (#2435)"
 
   local orphans
   orphans="$(LC_ALL=C comm -23 "$registered" "$creditable")"
@@ -487,9 +496,8 @@ run_real_ledger_step() {
       POCKETSHELL_TEST_LEDGER="$sandbox/rolling-ledger.tsv" \
       POCKETSHELL_TEST_AREAS_REPO_ROOT="$ROOT_DIR" \
       POCKETSHELL_TEST_AREAS_MANIFEST="$ROOT_DIR/scripts/test-areas.txt" \
-      POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$ROOT_DIR/scripts/ci-journey-suite.sh" \
+      POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$ROOT_DIR/scripts/ci-app2-journey-suite.sh" \
       POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$ROOT_DIR/scripts/test-unconventional-test-files.txt" \
-      POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="$NIGHTLY_SUITE_SCRIPT" \
       bash "$sandbox/ledger-step.sh" 2>&1
   )
 }
@@ -520,7 +528,7 @@ the_real_ledger_verify_passes_after_a_green_release_run() {
   # The rolling ledger arrives from the unit + nightly caches with everything
   # EXCEPT what this release run is about to record itself.
   LC_ALL=C comm -23 "$creditable" "$release_owned" > "$seeded"
-  [[ "$(wc -l < "$seeded")" -gt 500 ]] ||
+  [[ "$(wc -l < "$seeded")" -gt 120 ]] ||
     fail "seeded rolling ledger collapsed ($(wc -l < "$seeded") classes)"
   [[ "$(wc -l < "$release_owned")" -ge 2 ]] ||
     fail "the release lane owns fewer than 2 classes; the fixture would not exercise --record"
@@ -557,29 +565,16 @@ the_real_ledger_verify_passes_after_a_green_release_run() {
 }
 
 optin_gated_classes_run_where_the_optin_is_and_all_skipped_results_stay_uncredited() {
-  local phase1="$WORK_DIR/optin-phase1.txt"
-  local excluded="$WORK_DIR/optin-excluded.txt"
-  bash "$LEDGER_SCRIPT" --print-selected --selected-from nightly-phase1 | LC_ALL=C sort -u > "$phase1"
-  bash "$NIGHTLY_SUITE_SCRIPT" --print-phase1-exclusions | LC_ALL=C sort -u > "$excluded"
-
-  # Phase 3 is the only phase that passes pocketshellBootstrapScenarios. Any
-  # class it selects must NOT also be selected by phase 1, which passes no
-  # opt-in and would therefore only all-skip it — the exact shape that left
-  # HostCardStatusChipTest / HostCardSetupBadgeTest uncredited for months.
-  local phase3_classes fqcn
-  phase3_classes="$(grep -oE 'com\.pocketshell\.app\.(bootstrap|hosts)\.[A-Za-z0-9_]+' \
-    "$NIGHTLY_SUITE_SCRIPT" | LC_ALL=C sort -u)"
-  [[ -n "$phase3_classes" ]] ||
-    fail "could not read the phase-3 opt-in class set from the nightly suite"
-  while IFS= read -r fqcn; do
-    [[ -n "$fqcn" ]] || continue
-    if grep -qx -- "$fqcn" "$phase1"; then
-      fail "$fqcn needs the pocketshellBootstrapScenarios opt-in but is still selected by nightly phase 1, which passes none — every method there is <skipped/> and the execution ledger will never credit it (#2435)"
-    fi
-    grep -qx -- "$fqcn" "$excluded" ||
-      fail "$fqcn is not in the phase-1 exclusion list, so phase 1 will all-skip it (#2435)"
-  done <<< "$phase3_classes"
-
+  # THE NIGHTLY HALF OF THIS CASE IS DELETED (D22). It compared the nightly
+  # suite's phase-1 exclusion list against the `com.pocketshell.app.bootstrap|hosts`
+  # classes phase 3 selected with `pocketshellBootstrapScenarios`, to catch an
+  # opt-in-gated class parked in a phase that passes no opt-in (the
+  # HostCardStatusChipTest / HostCardSetupBadgeTest shape). Every class on both
+  # sides of that comparison was deleted with the app module, and app2's journey
+  # lane has no opt-in-gated phases at all — it runs one unfiltered
+  # instrumentation pass, so there is no phase for a gated class to be parked in.
+  # Re-add this half if the journey lane ever grows opt-in phases.
+  #
   # And prove the underlying rule with the real script: an all-skipped class is
   # NOT coverage, so parking an opt-in class in a lane without the opt-in can
   # never satisfy --verify.
@@ -622,8 +617,8 @@ detached_instrumentation_runs_produce_ledger_creditable_junit_xml() {
     fail "the #2264 two-phase harness no longer emits JUnit XML; LastSessionProcessRestartProofTest becomes uncreditable again (#2435)"
   grep -q -- '--require-class' "$two_phase" ||
     fail "the #2264 two-phase harness converts without --require-class (an empty run could be credited)"
-  grep -q 'junit-results' "$NIGHTLY_SUITE_SCRIPT" ||
-    fail "nightly phase 5 no longer publishes its converted JUnit XML onto the phase-reports path the rolling ledger records from (#2435)"
+  # The nightly phase-5 publish assertion is gone with the nightly suite; the
+  # two surviving production callers below are the whole contract now.
   grep -q 'instrumentation-log-to-junit-xml.sh' "$ROOT_DIR/scripts/release-emulator-validation.sh" ||
     fail "the release gate's detached am-instrument runs no longer produce ledger JUnit XML (#2435)"
   pass_case "direct am instrument runs produce JUnit XML the real ledger credits (#2435)"
@@ -638,7 +633,11 @@ detached_instrumentation_runs_produce_ledger_creditable_junit_xml() {
 # scripts/check-test-execution-ledger.sh — because that harness is on the Unit
 # critical path through ReleaseGateScriptTest (#2067 C9).
 # ---------------------------------------------------------------------------
-LONG_RUNNING_CLASS='com.pocketshell.app.proof.LongRunningSessionStabilityTest'
+# A LABEL, not a lookup: every use below feeds this name into a synthetic
+# instrumentation transcript and asserts the converter and the real ledger carry
+# it through. Pointed at a live app2 journey so the fixture reads as something
+# the release gate could actually run.
+LONG_RUNNING_CLASS='com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney'
 
 load_detached_instrumentation_recorder() {
   # Take the production helper out of the release wrapper rather than restating

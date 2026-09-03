@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # report-journey-flake.sh — issue #2355, policy D36 "auto-file on first flake".
 #
-# THE SIGNAL. scripts/ci-journey-class-loop-functions.sh already detects the
+# THE SIGNAL. The per-class journey loop that emitted this signal was deleted with the old
+# app module; app2's unfiltered lane surfaces a flake as a differing result
+# between runs of the same commit. The runbook below still applies. It detects the
 # exact D36 flake definition mechanically: a class that FAILS attempt 1 then
 # PASSES attempt 2 with no code change is printed as
 # `JOURNEY_FLAKE_RECOVERED: <fqcn> passed on retry ...` in the journey suite's
@@ -16,7 +18,7 @@
 # issues or quarantining a class on a SINGLE observed flake (D36's window is
 # "first occurrence", but a run killed by infra for an unrelated reason can
 # also print a superficially similar failure-then-recovery). Wiring this
-# directly into tests.yml/pr-journey-smoke.yml (issue #2355's non-goals: avoid
+# directly into tests.yml/app2.yml (issue #2355's non-goals: avoid
 # touching those without a stated reason) would also need `gh` auth threaded
 # into the emulator-journey job and careful de-dup against concurrent shards
 # reporting the same class. Scoped down per the issue's own guidance: this
@@ -35,15 +37,22 @@
 #      actually create/update the tracking issue via `gh issue create` /
 #      `gh issue comment` (de-duplicated by searching for the FQCN in existing
 #      issue titles first).
-#   3. Within 24h of the first occurrence (D36), quarantine it:
-#      scripts/report-journey-flake.sh <fqcn> --quarantine --issue '#NNNN' \
-#        --reason "<short reason>" [--days 14]
-#      This appends a row to scripts/journey-quarantine.txt (fails if one
-#      already exists for that class — re-triage by editing the row directly).
+#   3. Within 24h of the first occurrence (D36), quarantine it. Quarantine is
+#      TWO steps now, because it is enforced at the SOURCE (see
+#      scripts/lib/journey-quarantine.sh's header — app2's lane runs unfiltered
+#      in one process per #2474, so there is no runner-level seam to exempt a
+#      class at):
+#        a) annotate the METHOD:
+#             @Ignore("quarantined: #NNNN, expires YYYY-MM-DD — <reason>")
+#        b) register it:
+#             scripts/report-journey-flake.sh '<fqcn>#<method>' --quarantine \
+#               --issue '#NNNN' --reason "<short reason>" [--days 14]
+#      scripts/check-journey-quarantine-expiry.sh reconciles the two in both
+#      directions, so doing only one of them fails CI.
 #
 # Usage:
 #   scripts/report-journey-flake.sh <fqcn> [--run-url URL] [--dry-run|--file-issue]
-#   scripts/report-journey-flake.sh <fqcn> --quarantine --issue REF --reason TEXT [--days N]
+#   scripts/report-journey-flake.sh <fqcn#method> --quarantine --issue REF --reason TEXT [--days N]
 #   scripts/report-journey-flake.sh --self-test
 
 set -uo pipefail
@@ -67,7 +76,7 @@ A journey class flaked in CI: it failed on the first attempt and passed on an
 immediate retry with no code change (\`JOURNEY_FLAKE_RECOVERED\`), matching the
 D36 flake definition (process.md "Main health ... flake quarantine").
 
-**Class:** \`$fqcn\`
+**Method:** \`$fqcn\`
 **Run:** ${run_url:-<not supplied — attach the run URL manually>}
 
 Per policy D36 this should be quarantined into the non-blocking lane within
@@ -75,14 +84,20 @@ Per policy D36 this should be quarantined into the non-blocking lane within
 quarantining — see scripts/report-journey-flake.sh's header runbook):
 
 \`\`\`
-scripts/report-journey-flake.sh "$fqcn" --quarantine --issue '#<this-issue>' --reason "<short reason>"
+scripts/report-journey-flake.sh "$fqcn#<method>" --quarantine --issue '#<this-issue>' --reason "<short reason>"
 \`\`\`
 
-Quarantine does not skip the class — it still runs every push (and on the
-tier-3 scheduled full-suite cadence) — it only stops a further flake from
-blocking the suite while this is investigated. Expiry is enforced by
-scripts/check-journey-quarantine-expiry.sh; resolve or re-triage before it
-expires.
+Quarantine is applied at the SOURCE, as \`@Ignore("quarantined: #<issue>,
+expires <date> — <reason>")\` on the specific method, plus a row in
+scripts/journey-quarantine.txt. It does NOT remove anything from the run: the
+whole suite still executes together in one instrumentation process (issue
+#2474), so the quarantined class keeps sharing that process and cross-journey
+pollution stays observable for every other test. What changes is only that the
+known-bad assertion reports as skipped-with-reason instead of failing.
+
+Expiry is enforced by scripts/check-journey-quarantine-expiry.sh, which also
+reconciles annotation and row in both directions; resolve or re-triage before
+it expires.
 EOF
 }
 
@@ -147,6 +162,10 @@ cmd_quarantine() {
       *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
     esac
   done
+  case "$fqcn" in
+    *#*) : ;;
+    *) echo "report-journey-flake --quarantine: expected <fqcn>#<method> — quarantine annotates ONE @Test method, so a class-only key would claim more than the @Ignore actually exempts" >&2; exit 1 ;;
+  esac
   [[ -n "$issue" ]] || { echo "report-journey-flake --quarantine: --issue is required" >&2; exit 1; }
   [[ -n "$reason" ]] || { echo "report-journey-flake --quarantine: --reason is required" >&2; exit 1; }
   [[ "$reason" != *$'\t'* ]] || { echo "report-journey-flake --quarantine: --reason must not contain a TAB" >&2; exit 1; }
@@ -208,13 +227,23 @@ run_self_test() {
   local sandbox; sandbox="$(mktemp -d)"
   local qf="$sandbox/journey-quarantine.txt"
   : > "$qf"
-  QUARANTINE_FILE="$qf" cmd_quarantine "com.example.SelfTestFlake" --issue '#1' --reason "self-test" --days 14 >/dev/null
+  QUARANTINE_FILE="$qf" cmd_quarantine "com.example.SelfTestFlake#flaky" --issue '#1' --reason "self-test" --days 14 >/dev/null
   pocketshell_journey_quarantine_load "$qf" >/dev/null
-  if ! pocketshell_journey_quarantine_contains "com.example.SelfTestFlake"; then
+  if ! pocketshell_journey_quarantine_contains "com.example.SelfTestFlake#flaky"; then
     cat "$qf"
     echo "SELF-TEST FAIL: --quarantine did not append a row the loader accepts"; rc=1
+  elif pocketshell_journey_quarantine_contains "com.example.SelfTestFlake#other"; then
+    cat "$qf"
+    echo "SELF-TEST FAIL: quarantining one method also matched a SIBLING method — the exemption would cover tests nobody triaged"; rc=1
   else
-    echo "  ok: --quarantine appends a well-formed, loader-accepted row"
+    echo "  ok: --quarantine appends a well-formed, loader-accepted row that matches only its own method"
+  fi
+  # A class-only key must be refused outright: the @Ignore it implies does not
+  # exist, so the row could never reconcile against the source.
+  if (QUARANTINE_FILE="$qf" cmd_quarantine "com.example.ClassOnly" --issue '#3' --reason "no method" --days 14) 2>/dev/null; then
+    echo "SELF-TEST FAIL: --quarantine accepted a class-only key"; rc=1
+  else
+    echo "  ok: --quarantine refuses a class-only key (quarantine is per method)"
   fi
   # Run in a SUBSHELL: cmd_quarantine's duplicate guard calls `exit 1` (correct
   # for real CLI usage — it must actually terminate the process), and calling
@@ -222,7 +251,7 @@ run_self_test() {
   # one assertion, silently losing every check after it (and PASS) with no
   # FAIL line — exactly a "no result reads as a passing one" trap. `( )` makes
   # that `exit` end only the subshell.
-  if (QUARANTINE_FILE="$qf" cmd_quarantine "com.example.SelfTestFlake" --issue '#2' --reason "dup" --days 14) 2>/dev/null; then
+  if (QUARANTINE_FILE="$qf" cmd_quarantine "com.example.SelfTestFlake#flaky" --issue '#2' --reason "dup" --days 14) 2>/dev/null; then
     echo "SELF-TEST FAIL: --quarantine must refuse to double-quarantine the same class"; rc=1
   else
     echo "  ok: --quarantine refuses a duplicate entry"

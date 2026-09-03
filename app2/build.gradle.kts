@@ -6,6 +6,9 @@
 // Anything the empty scaffold does not need is NOT declared here — later
 // U/P tasks add dependencies alongside the code that consumes them, the same
 // convention the version catalog documents.
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -38,6 +41,105 @@ val duplicateJavaResourceExcludes = listOf(
     "META-INF/notice.txt",
 )
 
+// Issue #2356 (Phase 4 of epic #2350), inherited by app2 when the rewrite's
+// hard cut removed the old `app` module: versionCode/versionName are DERIVED
+// from the git tag being built rather than hand-maintained literals, so a
+// release requires no version-bump commit — the tag pushed by
+// scripts/push-release-tag.sh IS the version declaration. The single source of
+// truth for the derivation is scripts/derive-version.sh (shared with the
+// tools/pocketshell PyPI publish step in .github/workflows/build.yml so the two
+// sides can never independently drift — see scripts/check-version-coupling.sh,
+// which now cross-checks THIS module).
+//
+// MUST NEVER fail/hang the build: any error (script missing, git missing,
+// shallow/tagless checkout, timeout) falls back to a safe placeholder
+// (versionCode=1, versionName="0.0.0-dev") rather than throwing. This is
+// exercised by every ordinary local `scripts/assemble-debug.sh` run and every
+// per-PR CI job, none of which check out full tag history.
+data class PocketshellDerivedVersion(val code: Int, val name: String)
+
+fun derivePocketshellVersion(): PocketshellDerivedVersion {
+    val fallback = PocketshellDerivedVersion(1, "0.0.0-dev")
+    return try {
+        val script = rootProject.file(
+            providers.gradleProperty("pocketshellVersionDeriveScript")
+                .orElse("scripts/derive-version.sh")
+                .get()
+        )
+        if (!script.exists()) return fallback
+        val process = ProcessBuilder("bash", script.absolutePath, "both")
+            .directory(rootProject.projectDir)
+            // Derivation diagnostics are never build output. Discarding stderr
+            // means even a noisy/wedged child cannot fill a pipe and deadlock.
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .start()
+        val stdoutCapture = ByteArrayOutputStream()
+        val stdoutDrainer = Thread({
+            try {
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = process.inputStream.read(buffer)
+                    if (count < 0) break
+                    // Keep only the small protocol prefix while continuing to
+                    // drain everything, so stdout is bounded and cannot block.
+                    val remaining = 64 * 1024 - stdoutCapture.size()
+                    if (remaining > 0) {
+                        stdoutCapture.write(buffer, 0, minOf(count, remaining))
+                    }
+                }
+            } catch (_: Exception) {
+                // Timeout cleanup closes the stream to release this drainer.
+            }
+        }, "pocketshell-version-stdout").apply {
+            isDaemon = true
+            start()
+        }
+        val finished = process.waitFor(15, TimeUnit.SECONDS)
+        if (!finished) {
+            process.descendants().forEach { it.destroyForcibly() }
+            process.destroyForcibly()
+            process.inputStream.close()
+            process.waitFor(1, TimeUnit.SECONDS)
+            stdoutDrainer.join(1000)
+            return fallback
+        }
+        if (process.exitValue() != 0) return fallback
+        stdoutDrainer.join(5000)
+        if (stdoutDrainer.isAlive) {
+            process.inputStream.close()
+            return fallback
+        }
+        val stdout = stdoutCapture.toString(Charsets.UTF_8)
+
+        var code = fallback.code
+        var name = fallback.name
+        var sawCode = false
+        var sawName = false
+        stdout.lineSequence().forEach { line ->
+            when {
+                line.startsWith("VERSION_CODE=") ->
+                    line.removePrefix("VERSION_CODE=").trim().toIntOrNull()?.let {
+                        code = it
+                        sawCode = true
+                    }
+                line.startsWith("VERSION_NAME=") -> {
+                    val value = line.removePrefix("VERSION_NAME=").trim()
+                    if (value.isNotEmpty()) {
+                        name = value
+                        sawName = true
+                    }
+                }
+            }
+        }
+        if (!sawCode || !sawName) return fallback
+        PocketshellDerivedVersion(code, name)
+    } catch (e: Exception) {
+        fallback
+    }
+}
+
+val pocketshellDerivedVersion = derivePocketshellVersion()
+
 android {
     namespace = "com.pocketshell.next"
     compileSdk = 36
@@ -63,10 +165,11 @@ android {
         applicationId = "com.pocketshell.next"
         minSdk = 26
         targetSdk = 35
-        // Placeholder version. The tag-derived versioning (issue #2356) stays
-        // with the shipping module until app2 becomes primary at cutover.
-        versionCode = 1
-        versionName = "0.0.0-dev"
+        // Issue #2356: tag-derived, see derivePocketshellVersion() above. The
+        // old `app` module that used to own this wiring is gone, so app2 IS the
+        // shipping module and must derive the version the release path stamps.
+        versionCode = pocketshellDerivedVersion.code
+        versionName = pocketshellDerivedVersion.name
         // Task U-2: the journey resolves the app's own Hilt singletons through
         // an `@EntryPoint` declared in androidTest. That entry point is only
         // part of a component the test APK can cast to when the app under test
@@ -298,5 +401,19 @@ androidComponents {
         variant.androidTest?.packaging?.resources?.excludes?.addAll(
             duplicateJavaResourceExcludes,
         )
+    }
+}
+
+// Issue #2356: lets scripts/check-version-coupling.sh assert that Gradle's
+// resolved versionCode/versionName (via the exec wiring above) agrees with a
+// DIRECT invocation of scripts/derive-version.sh — a structural check that the
+// exec wiring hasn't drifted from the shared derivation, since there is no
+// longer a static literal to compare against.
+tasks.register("printPocketshellVersion") {
+    group = "help"
+    description = "Prints VERSION_CODE=/VERSION_NAME= as resolved by defaultConfig (issue #2356)."
+    doLast {
+        println("VERSION_CODE=${pocketshellDerivedVersion.code}")
+        println("VERSION_NAME=${pocketshellDerivedVersion.name}")
     }
 }

@@ -55,7 +55,9 @@
 # against a working fixture instead of a frozen one, and a class that still
 # fails is still red — with an honest reason.
 #
-# Sourced by scripts/ci-journey-suite.sh; also runnable standalone:
+# Runnable standalone (its old in-suite caller, scripts/ci-journey-suite.sh,
+# was deleted with the per-class journey lane); its real callers today are
+# tests.yml's `integration` job and scripts/test-ci-journey-fixture-health.sh:
 #   scripts/ci-journey-fixture-health.sh probe   [container]
 #   scripts/ci-journey-fixture-health.sh repair  [container]
 #   scripts/ci-journey-fixture-health.sh gate    <phase> <label>

@@ -252,7 +252,7 @@ exec "$root_dir/gradlew" :app:connectedDebugAndroidTest "$@"
 STUB
   chmod +x "$root/scripts/connected-test.sh"
   # Narrow the class list to two entries so the run is fast and deterministic.
-  python3 - "$root/scripts/ci-journey-suite.sh" <<'PY'
+  python3 - "$root/scripts/ci-app2-journey-suite.sh" <<'PY'
 import sys
 p = sys.argv[1]
 lines = open(p).read().split('\n')
@@ -305,7 +305,7 @@ run_suite_sandbox() {
       JOURNEY_CLASS_TIMEOUT_SECS=30 \
       JOURNEY_NO_OUTPUT_TIMEOUT_SECS=25 \
       JOURNEY_FIXTURE_HEALTH_TSV="$root/artifacts/ci-journey/fixture-health.tsv" \
-      bash "$root/scripts/ci-journey-suite.sh" ) > "$out" 2>&1
+      bash "$root/scripts/ci-app2-journey-suite.sh" ) > "$out" 2>&1
   return $?
 }
 

@@ -120,6 +120,18 @@
 # dependency — rule 4 already has it, and a hand row that duplicates the import
 # graph is how round 1 ended up asserting two edges it did not have.
 #
+# EVERY app2 and core-transport/core-hostapi row carries devgate `full`, and
+# that is deliberate rather than lazy. dev-fast-gate.sh's coarse stages
+# (ui | bootstrap | terminal | full) were cut for the OLD module's screen
+# layout; its pre-#2063 inline arms know nothing about `app2/` or
+# `shared/core-transport/`, so they classify every one of those paths as
+# force-full. scripts/dev-fast-gate-parity-selftest.sh enforces the one-way
+# property that this manifest may never be LESS conservative than those arms,
+# so naming a narrower stage here would be a real loosening of the local gate
+# with nothing behind it. Re-cutting the dev-fast-gate stages around app2's
+# screens is its own piece of work; until then the safe direction is the whole
+# stage.
+#
 # devgate is consumed ONLY by scripts/dev-fast-gate.sh, whose coarse emulator
 # stages (ui | bootstrap | terminal | full) answer a different question from the
 # test areas. It is a per-ROW column, not a per-AREA one, precisely because the
@@ -134,19 +146,16 @@
 # ---------------------------------------------------------------------------
 area   connection-core      always   SSH transport, lease, reconnect, grace, tmux -CC control protocol (D28 core)
 area   terminal-render      always   Terminal emulation, parsing, render and the drain scheduler (#796/#803 ANR class)
-area   conversation-agents  always   Agent detection, conversation source binding and the parsed transcript (#819/#825 class)
 area   app-shell            always   Application entry, DI graph, navigation, startup and test-access seams
-area   tmux-session         changed  The tmux session screen, chrome, pager and session UI state
+area   tmux-session         changed  The session/terminal screen, grace/reconnect coordination and session UI state (app2 `terminal` package)
 area   composer-voice       changed  Prompt composer, outbound queue, dictation, voice assistant and messaging
 area   projects-tree        changed  Session tree, folders, repos and git surfaces
-area   portfwd              changed  Port forwarding core, panel and forwarding service
+area   portfwd              changed  Port forwarding core, panel, notification text and forwarding service
 area   files                changed  File viewer and file explorer
 area   hosts-settings       changed  Hosts, settings, preferences and local storage
 area   share                changed  Share target and attachment intake
 area   usage-costs          changed  Usage panel, provider quotas and cost reporting
-area   bootstrap            changed  Host setup detection, server bootstrap and the host CLI wrapper
-area   notifications        changed  Notifications and system surfaces
-area   release-update       changed  In-app update, release checks and APK install
+area   bootstrap            changed  The Kotlin host-CLI client (:shared:core-hostapi) and app2's host-CLI factory
 area   diagnostics-crash    changed  Diagnostics, crash reporting, env and snippets
 area   ui-shell             changed  Shared ui-kit design system, layout, insets and branding
 area   ci-harness           changed  JVM-driven shell harness tests for the CI scripts
@@ -193,8 +202,7 @@ full   scripts/lib/test-areas.sh                    the classification engine ev
 full   scripts/select-test-areas.sh                 the selection/coverage-guard engine itself
 full   scripts/select-test-areas-selftest.sh        its own red/green self-test
 full   scripts/ci-test-selection-guards.sh          wires the #2063 guards into the unconditional guards-test-selection job
-full   scripts/ci-journey-suite.sh                  the journey registry — defines what "every journey" means
-full   scripts/nightly-extensive-suite.sh           the nightly wholesale-run premise the unconventional-file exemptions rest on
+full   scripts/ci-app2-journey-suite.sh             the journey registry — defines what "every journey" means
 full   scripts/test-unconventional-test-files.txt   the unconventional-@Test exemption baseline this manifest's own guard checks
 full   scripts/check-test-execution-ledger.sh       proves every registered class actually executes
 full   scripts/check-test-execution-ledger-selftest.sh
@@ -202,23 +210,12 @@ full   scripts/check-test-execution-ledger-wiring.py
 full   scripts/ci-record-test-execution-ledger.sh
 full   scripts/check-ci-unit-forced-execution.py    asserts the full Unit run stays forced/uncached
 full   scripts/check-executed-test-counts.sh        the anti-vacuous-green test-count guard (issue #1646)
-full   scripts/check-ci-journey-harness.sh          the journey registry's own wiring guard
-full   scripts/check-ci-journey-harness-selftest.sh
 full   scripts/check-test-validity.sh               D32/#657 regression-proof-validity guard
 full   scripts/check-test-validity-selftest.sh
 full   scripts/check-tests-referenced.sh            proves every tests/scripts/* harness has a live caller
 full   scripts/check-script-interpreter-hygiene.sh  proves every script runs under its own shebang's interpreter (issue #2066)
 full   scripts/connected-test.sh                    how every connected/journey test physically runs (AVD lock, applicationIdSuffix)
 full   scripts/agents-pool.sh                       Docker agents-fixture allocation every parallel journey lane depends on
-full   scripts/ci-journey-retry-budget.sh           journey-suite retry/budget mechanics
-full   scripts/ci-journey-infra-signature.sh        infra-vs-real-failure classification (G5) the quarantine mechanism reuses
-full   scripts/ci-journey-infra-signature.py
-full   scripts/pr-journey-smoke-plan.sh             Phase 2's own consumer of this plan (issue #2354)
-full   scripts/ci-journey-summary-functions.sh      per-push journey suite pass/fail + evidence-section mechanics
-full   scripts/ci-journey-class-loop-functions.sh   per-push journey suite retry-once/flake mechanics
-full   scripts/ci-journey-budget-functions.sh       per-push journey suite budget/timeout/shard mechanics
-full   scripts/ci-journey-class-selection-functions.sh  per-push journey suite class/shard selection mechanics
-full   scripts/ci-journey-core-terminal-functions.sh    per-push journey suite core-terminal proof registry
 full   scripts/journey-quarantine.txt               the flake-quarantine list itself (issue #2355 / D36)
 full   scripts/lib/journey-quarantine.sh            the quarantine list's parsing/consumption library
 full   scripts/check-journey-quarantine-expiry.sh   the quarantine expiry guard (issue #2355 / D36)
@@ -245,36 +242,16 @@ full   gradle.properties             daemon/heap/parallelism config changes ever
 full   cgroups.toml                  local run confinement used by the gates
 full   debug.keystore                signing input for every built APK
 full   shared/test-support/*         the ONE audited settle pump; every runTest consumer depends on it
-# `app/src/proofTest/*` (issue #966 tmux runtime ownership audit, commit
-# f1138533) is not a Gradle source-set NAME — `app/build.gradle.kts` adds it
-# as an EXTRA `java.srcDir` on BOTH the `test` AND `androidTest` source sets,
-# so its content is a shared proof/mutation-matrix fixture library (data
-# classes, enums, no `@Test` methods of its own) compiled into and reused by
-# both. `pocketshell_test_areas_is_test_path()` in scripts/lib/test-areas.sh
-# does not recognise `proofTest` as a test-source-set path segment, so an
-# unmapped `test`/`class` row here would never even be reached — the same
-# shape as shared/test-support/* above, and handled the same way: FULL,
-# rather than teaching the classifier a new source-set name whose files would
-# then be swept into scripts/check-test-execution-ledger.sh's registered-class
-# set as a `*Test.kt`-named file with zero `@Test` methods, which would fail
-# that guard's "never executed (#1851 class)" check on every push instead.
-full   app/src/proofTest/*           shared proof/mutation-matrix fixture library injected into both test and androidTest source sets
-full   app/src/main/java/com/pocketshell/app/di/*             the Hilt/DI graph wires every area together
-full   app/src/main/java/com/pocketshell/app/nav/*            the navigation graph reaches every screen
-full   app/src/main/java/com/pocketshell/app/startup/*        process startup ordering affects every surface
-full   app/src/main/java/com/pocketshell/app/testaccess/*     the seams every androidTest drives the app through
-full   app/src/main/java/com/pocketshell/app/layout/*         shared layout scaffolding used by every screen
-full   app/src/main/java/com/pocketshell/app/App.kt           application object: lifecycle fan-out to every surface
-full   app/src/main/java/com/pocketshell/app/MainActivity.kt  single activity host for every destination
-full   app/src/main/java/com/pocketshell/app/AppTeardownScope.kt      global teardown ordering
-full   app/src/main/java/com/pocketshell/app/MainThreadConfinement.kt main-thread policy enforced app-wide
-full   app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt  D28 god-object seam (#766 residue) where cross-area wedge bugs hide
-full   app/src/main/res/*            theme tokens, strings and drawables reach every screen (#453/#641 class)
-full   app/src/main/AndroidManifest.xml        components, permissions and exported surfaces
-full   app/src/androidTest/AndroidManifest.xml instrumentation manifest for every connected test
-full   app/src/debug/*               debug-variant instrumentation seams (Hilt host activity, Toxiproxy control) every journey builds against
-full   app/lint.xml                  lint configuration applied to every module build
-full   app/*.pro                     R8/ProGuard rules change every release-variant test
+# The old `app` module's force-full rows moved to `app2` with the rewrite's
+# hard cut (D22): the same blast radii exist, in the module that now holds
+# them. `app/src/proofTest/*` has no app2 successor and is simply gone.
+full   app2/src/main/java/com/pocketshell/next/di/*           the Hilt/DI graph wires every area together
+full   app2/src/main/java/com/pocketshell/next/nav/*          the navigation graph reaches every screen
+full   app2/src/main/java/com/pocketshell/next/App.kt         application object: lifecycle fan-out to every surface
+full   app2/src/main/java/com/pocketshell/next/MainActivity.kt  single activity host for every destination
+full   app2/src/main/res/*           theme tokens, strings and drawables reach every screen (#453/#641 class)
+full   app2/src/main/AndroidManifest.xml        components, permissions and exported surfaces
+full   app2/src/debug/*              debug-variant instrumentation seams (Hilt test application) every journey builds against
 
 # ---------------------------------------------------------------------------
 # NOOP — provably cannot affect any test.
@@ -296,11 +273,12 @@ noop   .gitignore                    ignore rules
 # ---------------------------------------------------------------------------
 
 # -- shared modules --
-src    shared/core-ssh/*             connection-core      terminal
-src    shared/core-tmux/*            connection-core      terminal
-src    shared/core-connection/*      connection-core      full
+# core-ssh / core-tmux / core-connection / core-agents were DELETED by the
+# rewrite; :shared:core-transport is the surviving D28 connection core and
+# :shared:core-hostapi is the Kotlin end of the host-CLI wire.
+src    shared/core-transport/*       connection-core      full
 src    shared/core-terminal/*        terminal-render      terminal
-src    shared/core-agents/*          conversation-agents  full
+src    shared/core-hostapi/*         bootstrap            full
 src    shared/core-voice/*           composer-voice       full
 src    shared/core-assistant/*       composer-voice       full
 src    shared/core-portfwd/*         portfwd              full
@@ -308,43 +286,21 @@ src    shared/core-storage/*         hosts-settings       full
 src    shared/core-usage/*           usage-costs          full
 src    shared/ui-kit/*               ui-shell             ui
 
-# -- :app production packages --
-src    app/src/main/java/com/pocketshell/app/ssh/*            connection-core      terminal
-src    app/src/main/java/com/pocketshell/app/sessions/*       connection-core      full
-src    app/src/main/java/com/pocketshell/app/session/*        connection-core      full
-src    app/src/main/java/com/pocketshell/app/connectivity/*   connection-core      full
-src    app/src/main/java/com/pocketshell/app/jobs/*           connection-core      full
-src    app/src/main/java/com/pocketshell/app/terminal/*       terminal-render      terminal
-src    app/src/main/java/com/pocketshell/app/tmux/*           tmux-session         terminal
-src    app/src/main/java/com/pocketshell/app/composer/*       composer-voice       full
-src    app/src/main/java/com/pocketshell/app/voice/*          composer-voice       full
-src    app/src/main/java/com/pocketshell/app/assistant/*      composer-voice       full
-src    app/src/main/java/com/pocketshell/app/messaging/*      composer-voice       full
-src    app/src/main/java/com/pocketshell/app/conversation/*   conversation-agents  full
-src    app/src/main/java/com/pocketshell/app/agents/*         conversation-agents  full
-src    app/src/main/java/com/pocketshell/app/agentcommands/*  conversation-agents  full
-src    app/src/main/java/com/pocketshell/app/cards/*          conversation-agents  full
-src    app/src/main/java/com/pocketshell/app/projects/*       projects-tree        ui
-src    app/src/main/java/com/pocketshell/app/repos/*          projects-tree        full
-src    app/src/main/java/com/pocketshell/app/git/*            projects-tree        full
-src    app/src/main/java/com/pocketshell/app/portfwd/*        portfwd              full
-src    app/src/main/java/com/pocketshell/app/fileviewer/*     files                full
-src    app/src/main/java/com/pocketshell/app/fileexplorer/*   files                full
-src    app/src/main/java/com/pocketshell/app/hosts/*          hosts-settings       full
-src    app/src/main/java/com/pocketshell/app/settings/*       hosts-settings       full
-src    app/src/main/java/com/pocketshell/app/prefs/*          hosts-settings       full
-src    app/src/main/java/com/pocketshell/app/share/*          share                full
-src    app/src/main/java/com/pocketshell/app/usage/*          usage-costs          full
-src    app/src/main/java/com/pocketshell/app/costs/*          usage-costs          full
-src    app/src/main/java/com/pocketshell/app/bootstrap/*      bootstrap            bootstrap
-src    app/src/main/java/com/pocketshell/app/pocketshell/*    bootstrap            full
-src    app/src/main/java/com/pocketshell/app/notifications/*  notifications        full
-src    app/src/main/java/com/pocketshell/app/systemsurfaces/* notifications        full
-src    app/src/main/java/com/pocketshell/app/release/*        release-update       full
-src    app/src/main/java/com/pocketshell/app/diagnostics/*    diagnostics-crash    full
-src    app/src/main/java/com/pocketshell/app/crash/*          diagnostics-crash    full
-src    app/src/main/java/com/pocketshell/app/env/*            diagnostics-crash    full
-src    app/src/main/java/com/pocketshell/app/snippets/*       diagnostics-crash    full
+# -- :app2 production packages --
+src    app2/src/main/java/com/pocketshell/next/connect/*      connection-core      full
+src    app2/src/main/java/com/pocketshell/next/terminal/*     tmux-session         full
+src    app2/src/main/java/com/pocketshell/next/composer/*     composer-voice       full
+src    app2/src/main/java/com/pocketshell/next/voice/*        composer-voice       full
+src    app2/src/main/java/com/pocketshell/next/tree/*         projects-tree        full
+src    app2/src/main/java/com/pocketshell/next/ports/*        portfwd              full
+src    app2/src/main/java/com/pocketshell/next/files/*        files                full
+src    app2/src/main/java/com/pocketshell/next/hosts/*        hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/settings/*     hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/share/*        share                full
+src    app2/src/main/java/com/pocketshell/next/usage/*        usage-costs          full
+src    app2/src/main/java/com/pocketshell/next/hostcli/*      bootstrap            full
+src    app2/src/main/java/com/pocketshell/next/diagnostics/*  diagnostics-crash    full
+src    app2/src/main/java/com/pocketshell/next/crash/*        diagnostics-crash    full
 
 # -- host CLI --
 src    tools/pocketshell/*           host-cli             full
@@ -370,11 +326,9 @@ src    tests/scripts/*               ci-harness           full
 # ---------------------------------------------------------------------------
 
 # -- shared module test trees --
-test   shared/core-ssh/*             connection-core      terminal
-test   shared/core-tmux/*            connection-core      terminal
-test   shared/core-connection/*      connection-core      full
+test   shared/core-transport/*       connection-core      full
 test   shared/core-terminal/*        terminal-render      terminal
-test   shared/core-agents/*          conversation-agents  full
+test   shared/core-hostapi/*         bootstrap            full
 test   shared/core-voice/*           composer-voice       full
 test   shared/core-assistant/*       composer-voice       full
 test   shared/core-portfwd/*         portfwd              full
@@ -382,58 +336,29 @@ test   shared/core-storage/*         hosts-settings       full
 test   shared/core-usage/*           usage-costs          full
 test   shared/ui-kit/*               ui-shell             ui
 
-# -- :app test packages (unit + androidTest share one taxonomy) --
-test   app/src/*/java/com/pocketshell/app/proof/*           connection-core      full
-test   app/src/*/java/com/pocketshell/app/ssh/*             connection-core          full
-test   app/src/*/java/com/pocketshell/app/sessions/*        connection-core      full
-test   app/src/*/java/com/pocketshell/app/session/*         connection-core      full
-test   app/src/*/java/com/pocketshell/app/connectivity/*    connection-core      full
-test   app/src/*/java/com/pocketshell/app/jobs/*            connection-core      full
-test   app/src/*/java/com/pocketshell/app/terminal/*        terminal-render          full
-test   app/src/*/java/com/pocketshell/app/tmux/*            tmux-session             full
-test   app/src/*/java/com/pocketshell/app/composer/*        composer-voice       full
-test   app/src/*/java/com/pocketshell/app/voice/*           composer-voice       full
-test   app/src/*/java/com/pocketshell/app/assistant/*       composer-voice       full
-test   app/src/*/java/com/pocketshell/app/messaging/*       composer-voice       full
-test   app/src/*/java/com/pocketshell/app/conversation/*    conversation-agents  full
-test   app/src/*/java/com/pocketshell/app/agents/*          conversation-agents  full
-test   app/src/*/java/com/pocketshell/app/agentcommands/*   conversation-agents  full
-test   app/src/*/java/com/pocketshell/app/cards/*           conversation-agents  full
-test   app/src/*/java/com/pocketshell/app/projects/*        projects-tree        full
-test   app/src/*/java/com/pocketshell/app/repos/*           projects-tree        full
-test   app/src/*/java/com/pocketshell/app/git/*             projects-tree        full
-test   app/src/*/java/com/pocketshell/app/portfwd/*         portfwd              full
-test   app/src/*/java/com/pocketshell/app/fileviewer/*      files                full
-test   app/src/*/java/com/pocketshell/app/fileexplorer/*    files                full
-test   app/src/*/java/com/pocketshell/app/hosts/*           hosts-settings       full
-test   app/src/*/java/com/pocketshell/app/settings/*        hosts-settings       full
-test   app/src/*/java/com/pocketshell/app/prefs/*           hosts-settings       full
-test   app/src/*/java/com/pocketshell/app/share/*           share                full
-test   app/src/*/java/com/pocketshell/app/usage/*           usage-costs          full
-test   app/src/*/java/com/pocketshell/app/costs/*           usage-costs          full
-test   app/src/*/java/com/pocketshell/app/bootstrap/*       bootstrap            bootstrap
-test   app/src/*/java/com/pocketshell/app/pocketshell/*     bootstrap            full
-test   app/src/*/java/com/pocketshell/app/docker/*          bootstrap            full
-test   app/src/*/java/com/pocketshell/app/notifications/*   notifications        full
-test   app/src/*/java/com/pocketshell/app/systemsurfaces/*  notifications        full
-test   app/src/*/java/com/pocketshell/app/release/*         release-update       full
-test   app/src/*/java/com/pocketshell/app/diagnostics/*     diagnostics-crash    full
-test   app/src/*/java/com/pocketshell/app/crash/*           diagnostics-crash    full
-test   app/src/*/java/com/pocketshell/app/env/*             diagnostics-crash    full
-test   app/src/*/java/com/pocketshell/app/snippets/*        diagnostics-crash    full
-test   app/src/*/java/com/pocketshell/app/ui/*              ui-shell             full
-test   app/src/*/java/com/pocketshell/app/insets/*          ui-shell             full
-test   app/src/*/java/com/pocketshell/app/branding/*        ui-shell             full
-test   app/src/*/java/com/pocketshell/app/scripts/*         ci-harness           full
-test   app/src/*/java/com/pocketshell/app/nav/*             app-shell            full
-test   app/src/*/java/com/pocketshell/app/di/*              app-shell            full
-test   app/src/*/java/com/pocketshell/app/testaccess/*      app-shell            full
-test   app/src/*/java/com/pocketshell/app/test/*            app-shell            full
-# :app ROOT-level test classes (App / MainActivity / lease lifecycle / back trap).
+# -- :app2 test packages (unit + androidTest share one taxonomy) --
+test   app2/src/*/java/com/pocketshell/next/connect/*      connection-core      full
+test   app2/src/*/java/com/pocketshell/next/terminal/*     tmux-session         full
+test   app2/src/*/java/com/pocketshell/next/composer/*     composer-voice       full
+test   app2/src/*/java/com/pocketshell/next/voice/*        composer-voice       full
+test   app2/src/*/java/com/pocketshell/next/tree/*         projects-tree        full
+test   app2/src/*/java/com/pocketshell/next/ports/*        portfwd              full
+test   app2/src/*/java/com/pocketshell/next/files/*        files                full
+test   app2/src/*/java/com/pocketshell/next/hosts/*        hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/settings/*     hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/share/*        share                full
+test   app2/src/*/java/com/pocketshell/next/usage/*        usage-costs          full
+test   app2/src/*/java/com/pocketshell/next/diagnostics/*  diagnostics-crash    full
+test   app2/src/*/java/com/pocketshell/next/crash/*        diagnostics-crash    full
+# The app2 design-render suites (P-6) render app2 composables built from the
+# ui-kit primitives, so a ui-kit token change is what breaks them.
+test   app2/src/*/java/com/pocketshell/next/render/*       ui-shell             full
+test   app2/src/*/java/com/pocketshell/next/nav/*          app-shell            full
+# :app2 ROOT-level test classes (App / nav host / Robolectric side-effect guard).
 # `+([A-Za-z0-9_])` cannot cross `/`, so this row matches only files sitting
-# directly in the `app` package — a test in a NEW subpackage falls through to
+# directly in the `next` package — a test in a NEW subpackage falls through to
 # unmapped => FULL + a loud guard failure, which is the point.
-test   app/src/*/java/com/pocketshell/app/+([A-Za-z0-9_])Test.kt  app-shell  full
+test   app2/src/*/java/com/pocketshell/next/+([A-Za-z0-9_])Test.kt  app-shell  full
 
 # -- host CLI tests --
 test   tools/pocketshell/tests/*     host-cli             full
@@ -441,18 +366,13 @@ test   tools/pocketshell/tests/*     host-cli             full
 # ---------------------------------------------------------------------------
 # PER-CLASS OVERRIDES
 #
-# The conversation-source cluster lives in the com.pocketshell.app.tmux package
-# (it drives the tmux session screen) but its regression class is
-# conversation-source binding — the #819/#825/#962/#1057 worst-reopen area. It
-# must run on every push, so it is pinned to the always-tier
-# conversation-agents area instead of the changed-tier tmux-session area.
+# EMPTY since the rewrite's hard cut (D22). The only overrides this file ever
+# carried were the six conversation-source classes that lived in the old
+# com.pocketshell.app.tmux package while belonging to the conversation-agents
+# area; both the package and the area are gone. app2 has no class whose
+# regression class differs from its package's area — add a row here (and say
+# why) the first time one appears.
 # ---------------------------------------------------------------------------
-class  com.pocketshell.app.tmux.AgentConversationReconnectDockerTest  conversation-agents
-class  com.pocketshell.app.tmux.ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest  conversation-agents
-class  com.pocketshell.app.tmux.ConversationStaysReachableAfterDetectionDropsDockerTest  conversation-agents
-class  com.pocketshell.app.tmux.ConversationTuiCommandJourneyDockerTest  conversation-agents
-class  com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest  conversation-agents
-class  com.pocketshell.app.tmux.TmuxConversationBottomComposerScreenshotTest  conversation-agents
 
 # ---------------------------------------------------------------------------
 # AREA COUPLING — BEHAVIOURAL edges only.
@@ -468,43 +388,31 @@ class  com.pocketshell.app.tmux.TmuxConversationBottomComposerScreenshotTest  co
 # 29 journeys that compile against connection-core production types were not
 # run by a connection-core change.
 # ---------------------------------------------------------------------------
-# The AGENTS.md coupling invariant: composer-always-present and
-# conversation-default are one seam; ComposerAlwaysPresentSwitchJourneyE2eTest
-# breaks across all three.
-couple composer-voice       tmux-session,conversation-agents
-couple tmux-session         composer-voice,conversation-agents,terminal-render
-couple conversation-agents  tmux-session,composer-voice
+# The composer is present on the session screen, so a composer change must run
+# the session-screen journeys and vice versa. (The old third leg of this seam,
+# conversation-agents, was deleted with the agent-detection subsystem.)
+couple composer-voice       tmux-session
+couple tmux-session         composer-voice,terminal-render
 # The two always-tier engine areas fan OUT to the session screen when they
 # actually change. Note this is not redundant with their `always` tier: the
 # closure in lib/test-areas.sh runs over the CHANGED seed areas only and unions
 # the always tier afterwards, so these edges fire on a real connection/terminal
 # change and stay silent when those areas are merely the always-on floor.
-# Without them a pure connection-core change would skip
-# TmuxConnectingStatesScreenshotTest (#750, a D31 third occurrence) and
-# Issue1686QueueDrainWireOracleDockerTest (#1686), both of which live in the
-# app.tmux package but are driven by the transport.
 couple connection-core      tmux-session
 couple terminal-render      tmux-session
 # ui-kit tokens reach every screen (#453/#641): a design-system change selects
 # every UI-bearing area. Deliberately near-full — do not try to be clever here.
-couple ui-shell             tmux-session,composer-voice,projects-tree,files,hosts-settings,share,usage-costs,bootstrap,notifications,release-update,diagnostics-crash,portfwd,conversation-agents
-# The tree creates and resumes sessions and lands on the session screen
-# (#889 ProfileChipRelaunchDockerTest, #881 FolderListScreenE2eTest profiles).
+couple ui-shell             tmux-session,composer-voice,projects-tree,files,hosts-settings,share,usage-costs,bootstrap,diagnostics-crash,portfwd
+# The tree creates and resumes sessions and lands on the session screen.
 couple projects-tree        tmux-session
-# The file viewer is reached from the session screen's path tap and more-menu
-# (TmuxMoreMenuOpenFileTest lives in the tmux package), so a viewer change must
-# run those. There is deliberately NO projects-tree <-> files edge: no journey
-# crosses that boundary, and inventing the edge would cost ~200 classes per
-# tree change for nothing.
+# The file viewer is reached from the session screen, so a viewer change must
+# run those journeys. There is deliberately NO projects-tree <-> files edge: no
+# journey crosses that boundary.
 couple files                tmux-session
-# Host setup writes the host record the tree and sessions read.
+# The host record hosts-settings writes is what the tree and the host-CLI
+# client read back.
 couple hosts-settings       bootstrap,projects-tree
 couple bootstrap            hosts-settings
-# The forwarding service is observed through its notification. BOTH directions:
-# #1198/#1487/#2006 are forwarding-notification regressions, so a change on
-# either side must run the other's journeys.
-couple portfwd              notifications
-couple notifications        portfwd
 # Share hands its payload to the composer, and the composer renders it. Both
 # directions for the same reason.
 couple share                composer-voice

@@ -1,27 +1,13 @@
 {
   "issue": 1932,
   "epic": 1671,
-  "max_runtime_seconds": 1800,
-  "max_artifact_bytes": 2097152,
-  "required_sites": [
-    {
-      "id": "outbound-budget-factory",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreenStateHelpers.kt",
-      "needle": "budget = composer.outboundAttemptBudget"
-    }
-  ],
-  "bindings": [
-    {
-      "id": "outbound-budget-factory",
-      "binding": "OutboundQueueAutoFlushController.boundTo reads the composer's own outboundAttemptBudget",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreenStateHelpers.kt",
-      "anchor": "            OutboundQueueAutoFlushController(budget = composer.outboundAttemptBudget, clock = clock)",
-      "mutation": "            OutboundQueueAutoFlushController(budget = OutboundAttemptBudgetTracker(), clock = clock)",
-      "proof": {
-        "type": "gradle",
-        "task": ":app:testDebugUnitTest",
-        "tests": "com.pocketshell.app.tmux.OutboundDeliveryWindowWiringTest.theOnlyControllerFactoryBindsTheComposersOwnBudget"
-      }
-    }
-  ]
+  "max_runtime_seconds": 900,
+  "max_artifact_bytes": 262144,
+  "pending_recuration": {
+    "issue": "#1932",
+    "expires": "2026-10-04",
+    "reason": "The one curated binding (outbound-budget-factory) lived in the deleted app module's TmuxSessionScreenStateHelpers.kt, wiring OutboundQueueAutoFlushController to the composer's own budget. app2 has no OutboundQueueAutoFlushController and no equivalent binding-proof test, so re-curating means CHOOSING an app2 production binding whose mis-wiring no existing test would catch and AUTHORING the proof that must fail when it is mutated — curation judgment, not a path repoint. Tracked rather than silently dropped: --check-sites fails once this date passes, and --self-test keeps proving the harness mechanism can still go red meanwhile."
+  },
+  "required_sites": [],
+  "bindings": []
 }

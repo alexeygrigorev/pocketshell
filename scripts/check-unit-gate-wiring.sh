@@ -92,8 +92,6 @@ EXEMPT_JOBS=(
   "unit-gate"                # the aggregator itself
   "python"                   # separate required check: Python utility tests (pocketshell)
   "integration"              # batched Docker lane, not a per-PR blocker
-  "emulator-journey"         # batched emulator lane, verdict-gated below
-  "emulator-journey-verdict" # the emulator lane's own aggregate verdict
   "sg"                       # issue #2353: scoped-push plan gate, not a per-PR job
 )
 
@@ -329,12 +327,12 @@ check_workflow() {
     # TWO DELIBERATE BOUNDS, stated rather than pretended away:
     #   * ONE HOP. A harness that sources a production script which merely
     #     mentions a guard is not an invocation. A full transitive closure was
-    #     measured and reaches ordinary production code (nightly-extensive-suite,
+    #     measured and reaches ordinary production code (the release gate,
     #     journey-quarantine) that legitimately names these scripts — a guard
     #     that cries wolf there gets disabled, which is worse than this bound.
     #   * QUOTED STRING LITERALS ONLY. A path a test EXECUTES is a string
     #     literal; a path a comment discusses is prose. Several androidTest
-    #     classes cite `scripts/nightly-extensive-suite.sh` in a comment
+    #     classes cite the deleted nightly suite in a comment
     #     explaining which lane durably gates them, and that is documentation,
     #     not a shell-out.
     harnesses=""

@@ -61,9 +61,9 @@
 #   --selected-file F attendance: selected FQCNs, one per line
 #   --selected-from S attendance: derive selected set from the existing
 #                     taxonomy (unit | unit-debug | unit-release |
-#                     nightly-phase1). Reuses #2065/#2078 wholesale-premise
+#                     app2-journey). Reuses the #2474 wholesale-premise
 #                     coverage; does not invent a second reachability analyzer.
-#                     nightly-phase1 is app/src/androidTest minus the suite's
+#                     app2-journey is the whole app2/src/androidTest set (the
 #                     own notClass list, plus documented nightly-connected
 #                     unconventional rows — the classes
 #                     :app:connectedDebugAndroidTest can actually emit.
@@ -97,7 +97,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${POCKETSHELL_TEST_AREAS_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 MANIFEST="${POCKETSHELL_TEST_AREAS_MANIFEST:-$SCRIPT_DIR/test-areas.txt}"
-JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-journey-suite.sh}"
+JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-app2-journey-suite.sh}"
 
 # shellcheck source=lib/test-areas.sh
 source "$SCRIPT_DIR/lib/test-areas.sh"
@@ -120,7 +120,6 @@ MERGE_ATTENDANCE_DIR=""
 REQUIRE_CLASSES=()
 IDENTITY_PAIRS=()
 UNCONVENTIONAL="${POCKETSHELL_TEST_AREAS_UNCONVENTIONAL:-$SCRIPT_DIR/test-unconventional-test-files.txt}"
-NIGHTLY_SUITE="${POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE:-$SCRIPT_DIR/nightly-extensive-suite.sh}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -247,13 +246,12 @@ is_unit_release_source_set() {
   case "$1" in test|testRelease) return 0 ;; *) return 1 ;; esac
 }
 
-ordinary_unit_class_selected() {
-  # Keep the ordinary Gradle tasks' explicit exclusion in one predicate shared
-  # by current-run attendance and variant-scoped rolling-ledger verification.
-  # Generic `all` / `unit` verification intentionally still registers the
-  # opt-in lane, whose :app:realLlmTest artifact can credit this class.
-  [[ "$1" != *RealLlmTest ]]
-}
+# The `ordinary_unit_class_selected` predicate was DELETED with the opt-in
+# real-LLM lane (D22). It modelled app/build.gradle.kts excluding
+# `**/*RealLlmTest.class` from the ordinary unit tasks while a dedicated
+# `:app:realLlmTest` task included it; the module, the task, the exclusion and
+# the class are all gone. Keeping it would leave an always-true filter in the
+# selector that reads like a policy and enforces nothing.
 
 source_set_included() {
   local fqcn="$1" srcset="$2" tok
@@ -262,8 +260,8 @@ source_set_included() {
     case "$tok" in
       all) return 0 ;;
       unit) is_unit_source_set "$srcset" && return 0 ;;
-      unit-debug) is_unit_debug_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;
-      unit-release) is_unit_release_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;
+      unit-debug) is_unit_debug_source_set "$srcset" && return 0 ;;
+      unit-release) is_unit_release_source_set "$srcset" && return 0 ;;
       androidTest) [[ "$srcset" == "androidTest" ]] && return 0 ;;
     esac
   done
@@ -271,11 +269,12 @@ source_set_included() {
 }
 
 # ---------------------------------------------------------------------------
-# Selected-class sets. unit / unit-debug / unit-release and nightly-phase1
-# reuse the existing taxonomy (#2065/#2078 wholesale premise for nightly).
-# This is NOT a second reachability analyzer: nightly-phase1 is every
-# app/src/androidTest class minus the suite's own notClass list (phase 1
-# runs :app:connectedDebugAndroidTest, not shared-module instrumented tests).
+# Selected-class sets. unit / unit-debug / unit-release and app2-journey reuse
+# the existing taxonomy (the #2474 wholesale premise for the journey lane).
+# This is NOT a second reachability analyzer: app2-journey is every
+# app2/src/androidTest class, because that lane runs
+# :app2:connectedDebugAndroidTest unfiltered (not shared-module instrumented
+# tests, which are other Gradle tasks).
 # ---------------------------------------------------------------------------
 load_selected_file() {
   local f="$1" line
@@ -286,16 +285,39 @@ load_selected_file() {
   done < "$f"
 }
 
-nightly_phase1_exclusions() {
-  if [[ ! -f "$NIGHTLY_SUITE" ]]; then
-    echo "error: nightly suite not found: $NIGHTLY_SUITE" >&2
+# The instrumented lane's androidTest root, read off the suite that actually
+# runs it. The old `nightly-phase1` lane was "every app/src/androidTest class
+# MINUS the nightly suite's notClass list"; both halves died with the app module.
+# app2's lane (issue #2474) runs `:app2:connectedDebugAndroidTest` unfiltered in
+# ONE process, so the selected set is simply every androidTest class in that
+# module — there is no exclusion list to subtract, which is why this reads a task
+# rather than an exclusions mode. The no-filter premise is CHECKED, not assumed:
+# if a class/package/annotation filter ever appears in the command the suite
+# builds, "every class in the module" stops being true and this fails closed.
+journey_lane_android_test_dir() {
+  if [[ ! -f "$JOURNEY_SUITE" ]]; then
+    echo "error: journey suite not found: $JOURNEY_SUITE" >&2
     return 1
   fi
-  if ! grep -q -- '--print-phase1-exclusions' "$NIGHTLY_SUITE"; then
-    echo "error: $NIGHTLY_SUITE has no --print-phase1-exclusions mode, so the wholesale selected set cannot be read from the suite that actually runs" >&2
+  local task
+  task="$(sed -nE 's/^JOURNEY_TASK="([^"]+)".*/\1/p' "$JOURNEY_SUITE" | head -1)"
+  if [[ -z "$task" ]]; then
+    echo "error: $JOURNEY_SUITE has no JOURNEY_TASK=\"...\" assignment, so the wholesale selected set cannot be read from the suite that actually runs" >&2
     return 1
   fi
-  bash "$NIGHTLY_SUITE" --print-phase1-exclusions
+  local args_body
+  args_body="$(sed -n '/^gradle_args() {$/,/^}$/p' "$JOURNEY_SUITE")"
+  if [[ -z "$args_body" ]]; then
+    echo "error: $JOURNEY_SUITE has no gradle_args() function, so its command line cannot be checked for a class filter" >&2
+    return 1
+  fi
+  if grep -Eq 'testInstrumentationRunnerArguments\.(class|package|annotation)=' <<<"$args_body"; then
+    echo "error: $JOURNEY_SUITE now filters what it runs, so 'every androidTest class in $task' is no longer the selected set" >&2
+    return 1
+  fi
+  local mod="${task#:}"
+  mod="${mod%:*}"
+  printf '%s/src/androidTest\n' "${mod//://}"
 }
 
 selected_from_unit() {
@@ -312,63 +334,38 @@ selected_from_unit() {
       release) is_unit_release_source_set "$srcset" || continue ;;
       *) is_unit_source_set "$srcset" || continue ;;
     esac
-    # Real-provider tests stay registered in the taxonomy/rolling ledger, but
-    # testDebugUnitTest and testReleaseUnitTest explicitly exclude them; only
-    # the opt-in :app:realLlmTest task can emit their JUnit artifact.
-    ordinary_unit_class_selected "$fqcn" || continue
     printf '%s\n' "$fqcn"
   done
 }
 
-# Phase 1 is :app:connectedDebugAndroidTest minus notClass. shared/*/src/androidTest
-# and vendored instrumented tests live in other Gradle tasks and must not be
-# in this selected set — a complete app-module union has to be able to go green.
-is_nightly_phase1_path() {
-  case "$1" in
-    app/src/androidTest/*) return 0 ;;
+# The lane runs ONE module's instrumented set. shared/*/src/androidTest and
+# vendored instrumented tests live in other Gradle tasks and must not be in this
+# selected set — a complete module union has to be able to go green.
+is_journey_lane_path() {
+  local dir="$1" path="$2"
+  [[ -n "$dir" ]] || return 1
+  case "$path" in
+    "$dir"/*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-selected_from_nightly_phase1() {
+selected_from_app2_journey() {
   pocketshell_test_areas_build_index
-  local -A excl=()
-  local line fqcn path execu rest
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    excl["$(normalize_cls "$line")"]=1
-  done < <(nightly_phase1_exclusions)
-
+  local dir
+  dir="$(journey_lane_android_test_dir)" || return 1
+  local fqcn path
   for fqcn in "${!POCKETSHELL_TA_CLASS_PATH[@]}"; do
     [[ "${POCKETSHELL_TA_CLASS_SOURCESET[$fqcn]:-}" == "androidTest" ]] || continue
     path="${POCKETSHELL_TA_CLASS_PATH[$fqcn]:-}"
-    is_nightly_phase1_path "$path" || continue
-    [[ -n "${excl[$fqcn]:-}" ]] && continue
+    is_journey_lane_path "$dir" "$path" || continue
     printf '%s\n' "$fqcn"
   done
-
-  # #2065/#2078: unconventional nightly-connected files are selected by the
-  # wholesale run even though no registry keys off their filename. Documented
-  # rows are app/src/androidTest/; a non-app row cannot appear in phase 1.
-  if [[ -f "$UNCONVENTIONAL" ]]; then
-    while IFS=$'\t' read -r path execu rest || [[ -n "$path" ]]; do
-      [[ -z "$path" || "$path" == \#* ]] && continue
-      [[ "$execu" == "nightly-connected" ]] || continue
-      is_nightly_phase1_path "$path" || continue
-      fqcn=""
-      case "$path" in
-        app/src/androidTest/*)
-          fqcn="${path##*/src/androidTest/}"
-          fqcn="${fqcn#java/}"; fqcn="${fqcn#kotlin/}"
-          fqcn="${fqcn%.kt}"; fqcn="${fqcn%.java}"
-          fqcn="${fqcn//\//.}"
-          ;;
-      esac
-      [[ -z "$fqcn" ]] && continue
-      [[ -n "${excl[$fqcn]:-}" ]] && continue
-      printf '%s\n' "$fqcn"
-    done < "$UNCONVENTIONAL"
-  fi
+  # There is deliberately no unconventional-file branch here any more. It existed
+  # for `nightly-connected` exemption rows — an executor kind deleted with the
+  # module it named (see scripts/test-unconventional-test-files.txt). An
+  # instrumented file outside the naming convention has no execution claim the
+  # guards will grant today, so none can be selected into this lane.
 }
 
 load_selected() {
@@ -380,13 +377,13 @@ load_selected() {
     unit) selected_from_unit ;;
     unit-debug) selected_from_unit debug ;;
     unit-release) selected_from_unit release ;;
-    nightly-phase1) selected_from_nightly_phase1 ;;
+    app2-journey) selected_from_app2_journey ;;
     "")
       echo "error: --attendance requires --selected-file or --selected-from" >&2
       return 1
       ;;
     *)
-      echo "error: unknown --selected-from '$SELECTED_FROM' (expected unit, unit-debug, unit-release, or nightly-phase1)" >&2
+      echo "error: unknown --selected-from '$SELECTED_FROM' (expected unit, unit-debug, unit-release, or app2-journey)" >&2
       return 1
       ;;
   esac
@@ -409,11 +406,21 @@ registered_classes() {
   local fqcn
   printf '%s\n' "${!POCKETSHELL_TA_CLASS_PATH[@]}"
 
-  if [[ -f "$JOURNEY_SUITE" ]]; then
-    sed -nE \
-      -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
-      -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
-      "$JOURNEY_SUITE" | grep -E '\.[A-Z][A-Za-z0-9_]*$'
+  # The journey registry used to be a hand-maintained FQCN list that could name
+  # a class the index did not have (or vice versa), so it was UNIONED in here.
+  # It is now derived FROM the tree — every class in the lane's androidTest
+  # module — so it is a subset of the index by construction and a union would be
+  # a no-op. What is NOT a no-op is checking that the derivation still works:
+  # a broken premise must fail this guard rather than quietly shrink the
+  # registered set to "whatever the index happened to contain".
+  local lane_dir
+  if ! lane_dir="$(journey_lane_android_test_dir)"; then
+    echo "::error title=Test-execution ledger (issue #2063)::the instrumented lane's selected set cannot be derived, so the registered class set would silently omit every journey" >&2
+    return 1
+  fi
+  if [[ ! -d "$REPO_ROOT/$lane_dir" ]]; then
+    echo "::error title=Test-execution ledger (issue #2063)::instrumented lane root $lane_dir does not exist" >&2
+    return 1
   fi
 }
 

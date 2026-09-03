@@ -1692,7 +1692,7 @@ class DesignRenders {
      * This case faithfully reproduces those rows with ui-kit primitives as the
      * fast first DESIGN check; the REAL composables are exercised by the
      * connected Compose test `SessionCardFeedRegistryTest` (gated in
-     * `scripts/ci-journey-suite.sh`). Use the emulator run for acceptance.
+     * `scripts/ci-app2-journey-suite.sh`). Use the emulator run for acceptance.
      */
     @Test
     fun sessionCardFeed() = render("session-card-feed") {

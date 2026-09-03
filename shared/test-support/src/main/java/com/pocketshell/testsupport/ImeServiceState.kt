@@ -39,7 +39,7 @@ package com.pocketshell.testsupport
  *
  * [IME_SERVICE_UNAVAILABLE_SIGNATURE] is a *diagnosis carried in the failure
  * message and the summary artifact*. It is NOT registered in
- * `scripts/ci-journey-infra-signature.py`, so it can never downgrade a shard to
+ * `the CI journey infra-signature classifier (deleted with the per-class lane)`, so it can never downgrade a shard to
  * INFRA. Every additional auto-INFRA net is a masking risk; this one would be
  * keyed on state the app itself can influence, so it stays loud. Its job is to
  * make the next red *readable*, not to make it disappear.

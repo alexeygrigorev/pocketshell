@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Issue #2310: keep every hosted emulator-runner invocation reproducible.
 #
-# The release-validation, nightly-extensive, and per-push journey lanes all
+# The release-validation and app2 journey lanes all
 # depend on reactivecircus/android-emulator-runner. A floating major tag lets
 # the action implementation change underneath an otherwise identical commit,
 # so every active workflow reference must use the one audited v2.37.0 commit.
@@ -109,7 +109,7 @@ self_test() {
   }
 
   write_fixture "$valid_root/release-emulator-validation.yml" "$EXPECTED_SHA" " # $EXPECTED_VERSION"
-  write_fixture "$valid_root/nightly-extensive.yml" "$EXPECTED_SHA" " # $EXPECTED_VERSION"
+  write_fixture "$valid_root/app2.yml" "$EXPECTED_SHA" " # $EXPECTED_VERSION"
 
   local failures=0
   printf '== self-test: valid pinned workflows (expect PASS) ==\n'
@@ -140,7 +140,7 @@ self_test() {
   mkdir -p "$wrong_sha_root"
   cp "$valid_root"/*.yml "$wrong_sha_root/"
   sed -i "s/@$EXPECTED_SHA/@0000000000000000000000000000000000000000/" \
-    "$wrong_sha_root/nightly-extensive.yml"
+    "$wrong_sha_root/app2.yml"
   printf '== self-test: different commit SHA (expect FAIL) ==\n'
   if check_workflows "$wrong_sha_root" >"$temp_dir/wrong-sha.out" 2>&1; then
     printf '   -> UNEXPECTED PASS on different SHA\n\n' >&2

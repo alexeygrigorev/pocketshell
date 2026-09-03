@@ -78,31 +78,42 @@ self_test() (
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/component-drift-selftest.XXXXXX")"
   trap 'rm -rf -- "$sandbox"' EXIT
 
-  scan_source="$sandbox/app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt"
-  clean_source="$sandbox/clean/FileViewerScreen.kt"
-  mkdir -p "$(dirname "$scan_source")" "$(dirname "$clean_source")" "$sandbox/shared/ui-kit/src/main" "$sandbox/scripts"
-  cp "$REPO_ROOT/app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt" "$clean_source"
+  # The fixture is a REAL baselined file, so the self-test cannot drift away
+  # from the thing it validates. It used to be the old app module's
+  # FileViewerScreen.kt (mutating its two FormDialog call-sites); the rewrite
+  # deleted that file and every other `app/` entry in the baseline, so the
+  # fixture moved to a surviving ui-kit wrapper. ConfirmDialog.kt is baselined at
+  # exactly 1 accepted raw AlertDialog( call — the wrapper's own — which is the
+  # shape the assertion below needs.
+  local fixture_rel="shared/ui-kit/src/main/java/com/pocketshell/uikit/components/ConfirmDialog.kt"
+  scan_source="$sandbox/$fixture_rel"
+  clean_source="$sandbox/clean/ConfirmDialog.kt"
+  mkdir -p "$(dirname "$scan_source")" "$(dirname "$clean_source")" "$sandbox/scripts"
+  cp "$REPO_ROOT/$fixture_rel" "$clean_source"
   cp "$clean_source" "$scan_source"
   cp "$BASELINE_FILE" "$sandbox/scripts/component-drift-baseline.txt"
   cp "$SCRIPT_DIR/check-component-drift.sh" "$sandbox/scripts/check-component-drift.sh"
   chmod +x "$sandbox/scripts/check-component-drift.sh"
 
+  # GREEN CONTROL first: without it, every red below could be a red the fixture
+  # already had.
   if ! output="$(cd "$sandbox" && scripts/check-component-drift.sh 2>&1)"; then
     printf '%s\n' "$output" >&2
-    echo "FAIL: clean FileViewerScreen source is not accepted by the component-drift guard" >&2
+    echo "FAIL: the clean baselined fixture is not accepted by the component-drift guard" >&2
     exit 1
   fi
+  echo "PASS: the clean baselined fixture is accepted"
 
+  # Each mutation adds ONE new raw call-site of a different guarded widget, so a
+  # guard that only greps for AlertDialog cannot pass all three.
   mutate_and_require_red() {
-    local label="$1"
-    local range_start="$2"
-    local range_end="$3"
-    local mutated_call="$4"
-    mutant_file="$sandbox/$label/FileViewerScreen.kt"
+    local label="$1" added_call="$2"
+    mutant_file="$sandbox/$label/ConfirmDialog.kt"
     mkdir -p "$(dirname "$mutant_file")"
     cp "$clean_source" "$mutant_file"
-    sed -i "/$range_start/,/$range_end/ s/FormDialog(/AlertDialog(/" "$mutant_file"
-    [[ "$(grep -Fxc "$mutated_call" "$mutant_file")" == 1 ]] \
+    printf '\n@Composable\nprivate fun SelfTestDrift%s() {\n    %s\n    )\n}\n' \
+      "$label" "$added_call" >> "$mutant_file"
+    grep -Fq "$added_call" "$mutant_file" \
       || { echo "FAIL: $label mutation did not apply" >&2; exit 1; }
 
     cp "$mutant_file" "$scan_source"
@@ -112,19 +123,32 @@ self_test() (
       exit 1
     fi
     grep -Fq \
-      'DRIFT  app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt: 2 raw component call-sites (baseline 1, +1 new)' \
+      "DRIFT  $fixture_rel: 2 raw component call-sites (baseline 1, +1 new)" \
       <<<"$output" \
       || { printf '%s\n' "$output" >&2; echo "FAIL: $label mutation failed for an unexpected reason" >&2; exit 1; }
     echo "PASS: $label raw-component mutation is rejected"
     cp "$clean_source" "$scan_source"
   }
 
-  mutate_and_require_red \
-    open-path 'if (showOpenPath) {' 'title = "Open path",' '        AlertDialog('
-  mutate_and_require_red \
-    annotation-text 'private fun AnnotationTextDialog(' 'title = "Add text",' '    AlertDialog('
+  mutate_and_require_red AlertDialog 'AlertDialog('
+  mutate_and_require_red Spinner 'CircularProgressIndicator('
+  mutate_and_require_red TextButton 'TextButton('
 
-  echo "PASS: clean source is accepted and both FileViewer form migrations are guarded"
+  # And the other direction: a NEW file with a raw call is drift even though it
+  # has no baseline row at all (this is how a freshly-added screen is caught).
+  local newfile="$sandbox/shared/ui-kit/src/main/java/com/pocketshell/uikit/components/SelfTestBrandNew.kt"
+  printf 'package com.pocketshell.uikit.components\n\nfun x() {\n    TextButton(\n    )\n}\n' > "$newfile"
+  if output="$(cd "$sandbox" && scripts/check-component-drift.sh 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "FAIL: a brand-new unbaselined file with a raw call was accepted" >&2
+    exit 1
+  fi
+  grep -Fq "SelfTestBrandNew.kt" <<<"$output" \
+    || { printf '%s\n' "$output" >&2; echo "FAIL: the new-file case reddened for another reason" >&2; exit 1; }
+  rm -f "$newfile"
+  echo "PASS: a new file carrying a raw component call is rejected"
+
+  echo "PASS: component-drift guard accepts its baseline and rejects every guarded widget"
 )
 
 if [[ "${1:-}" == "--self-test" ]]; then

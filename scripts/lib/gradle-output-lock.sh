@@ -196,7 +196,7 @@ POCKETSHELL_GRADLE_OUTPUT_LOCK_PARENT_POLL_SECONDS="${POCKETSHELL_GRADLE_OUTPUT_
 # nearest subreaper) and keeps its flock forever, so every later canonical run
 # in that worktree burns the full bounded wait and exits 75 without building.
 # That kill is production-real -- `run_bounded` in
-# scripts/ci-journey-budget-functions.sh escalates to `kill -KILL` on the
+# the journey suite's budget helper (deleted with the per-class lane) escalates to `kill -KILL` on the
 # --no-pool connected path, and this box's session harness hard-kills
 # long-running background bash. So the holder watches for its creator's death
 # and drops the lock, giving the output lock the SAME crash contract the AVD

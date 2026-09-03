@@ -4,7 +4,7 @@
 # WHY THIS FILE EXISTS
 #
 # Every registry, guard and Gradle filter in this repo keys off the *Test.kt /
-# *Test.java convention: the journey registry (scripts/ci-journey-suite.sh), the
+# *Test.java convention: the journey registry (scripts/ci-app2-journey-suite.sh), the
 # area manifest (scripts/test-areas.txt via pocketshell_test_areas_fqcn_for_path),
 # the executed-classes ledger (scripts/check-test-execution-ledger.sh) and the
 # validity guards. A @Test-bearing file that does not follow it is invisible to
@@ -20,6 +20,13 @@
 # self-serve escape hatch — name a real regression test `…Harness.kt` and it
 # hides itself, with no reviewer in the loop. A per-file row with a machine-
 # checked justification keeps a human decision in the path.
+#
+# `*Journey.kt` IS part of the convention, and is NOT exempted here. app2's
+# numbered instrumented journeys (J01ConnectAndTrustJourney, …) carry the
+# load-bearing assertion for their user journey, which by this file's own rule
+# means the answer is "be a recognised test class", not "be exempted". They are
+# recognised by pocketshell_test_areas_is_test_class_file, so the class index,
+# the area manifest, the ledger and Gradle `--tests` can all see them.
 #
 # FORMAT — four TAB-separated fields, one row per file. `#` comments and blank
 # lines are ignored.
@@ -41,21 +48,16 @@
 #                                 parked non-source such as *.kt.txt is
 #                                 rejected (#2170): the directory prefix alone
 #                                 is not an execution claim.
-#              nightly-connected  the path is under app/src/androidTest/, is a
-#                                 compiling Kotlin/Java source (*.kt / *.java),
-#                                 and nightly-extensive phase 1 runs
-#                                 :app:connectedDebugAndroidTest WHOLESALE with
-#                                 only a `notClass` exclusion list, so the class
-#                                 executes even though it is in no explicit
-#                                 suite. The guard asserts the class's simple
-#                                 name appears NOWHERE in
-#                                 scripts/nightly-extensive-suite.sh, which is
-#                                 fail-closed: the moment somebody names it
-#                                 there (exclusion, shard pin, comment) the
-#                                 executor claim has to be re-argued. A parked
-#                                 non-source such as *.kt.txt / *.kt.turned-off
-#                                 is rejected even when the prefix matches
-#                                 (#2170).
+#
+#            `unit-source-set` is the ONLY executor kind. The former
+#            `nightly-connected` kind died with the rewrite's hard cut (D22): it
+#            rested on nightly phase 1 running `:app:connectedDebugAndroidTest`
+#            WHOLESALE minus a `notClass` list, and neither the module nor that
+#            shape exists any more (app2's lane runs its whole instrumented set
+#            unfiltered in ONE process, with no exclusion list to be absent
+#            from). An instrumented file that needs an exemption today has no
+#            checkable execution claim, so it does not get one — name it to the
+#            convention instead.
 #
 # <gate>     WHAT accounts for the file, given no registry can see it.
 #              <FQCN>                 a conventional test class that carries the
@@ -78,7 +80,7 @@
 # it here.
 #
 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt	unit-source-set	enumerated-by:scripts/render.sh	Fast design-render harness (#555). Observed executing 68 testcases, 0 skipped, in :shared:ui-kit:testDebugUnitTest, so it is not silently dead. It is also the ONE file here with a stronger registry than the ledger could give it: scripts/render.sh parses every @Test method out of this source and hard-fails when one has no `fun m() = render("label")` mapping — per-METHOD accounting, pinned per push by scripts/render-selftest.sh in the guards-static job ("missing test-to-label mapping is rejected"). The module's execution is separately ledger-observed through the sibling conventional DesignRenderStaticLoadingPolicyTest in this same package. Renaming would break render.sh's RENDER_CLASS/RENDER_SOURCE constants, ~10 render-selftest.sh fixtures and four docs that name the file as the design-iteration entry point, and buy no accounting that is not already there.
-app/src/androidTest/java/com/pocketshell/app/composer/Issue1622DeadBandScreenshotHarness.kt	nightly-connected	com.pocketshell.app.composer.Issue1622ComposerSheetGeometryProofTest	Screenshot STAGING harness (#1622), inert by construction: every method reads the `issue1622HoldMs` instrumentation argument and returns before composing anything when it is absent, so a normal or nightly run passes without asserting. Renaming it would put a deliberately vacuous class into every registry as though it were a gate — the same "looks like coverage, contributes nothing" deception #2065 exists to end, pointed the other way. The geometry it stages a picture of is HARD-asserted by the gate class, which is conventional and wired into scripts/ci-journey-suite.sh.
-app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeDeadSpaceScreenshotHarness.kt	nightly-connected	com.pocketshell.app.composer.PromptComposerImeEmptyDraftDeadSpaceProofTest	Screenshot STAGING harness (#790), inert by construction: gated on the `issue790HoldMs` instrumentation argument, and additionally assumeTrue-skipped when the AVD cannot raise the real soft IME — both justified in the file because the load-bearing dead-space assertion lives in the gate class, which drives a synthetic ime() inset and cannot skip. Renaming would present a skip-prone staging harness as a gate.
-app/src/androidTest/java/com/pocketshell/app/tmux/TerminalHotkeysPanelScreenshotHarness.kt	nightly-connected	com.pocketshell.app.tmux.TerminalHotkeysPanelNoTruncationTest	Screenshot harness (#755): it renders the redesigned hotkeys panel and the keyboard-up launcher chip to PNGs under additional_test_output/ for the maintainer. Its two assertExists() calls only prove the bitmap it is about to save is not of an empty screen; the no-truncation property is asserted by the gate class, and the launcher-above-the-IME property by com.pocketshell.app.tmux.TmuxHotkeysLauncherImeProofTest. An artifact producer named like a gate is the wrong signal to leave in the tree.
-app/src/androidTest/java/com/pocketshell/app/tmux/TmuxComposerLauncherLargeFontScreenshotHarness.kt	nightly-connected	com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest	Screenshot harness (#813): renders the production bottom controls at the maintainer's 412dp / 1.5x-font profile, keyboard down and up, to PNGs for the issue. Same shape as #755 — its assertExists() calls guard the bitmap, not the geometry. The containment proof is the gate class, which is conventional and wired into scripts/ci-journey-suite.sh.
+app2/src/test/java/com/pocketshell/next/render/ComposerRenders.kt	unit-source-set	com.pocketshell.next.composer.ComposerBarTest	Roborazzi design-render harness for the composer (task P-1), the app2 sibling of :shared:ui-kit's DesignRenders. It renders composer states to PNGs under app2/build/renders/ for the maintainer to look at; the file says so itself ("These are renders, not assertions"). Every state it draws is behaviourally asserted by the gate class, and the real acceptance for composer geometry is the emulator journey J07ComposerSendJourney against the actual keyboard. Renaming it to *Test.kt would put a deliberately assertion-free picture-producer into every registry as though it were a gate — the exact "looks like coverage, contributes nothing" deception #2065 exists to end. It executes on every push: it is a compiling Kotlin source under app2/src/test/, so `./gradlew test` runs it unconditionally, which is also what keeps the renders from silently rotting.
+app2/src/test/java/com/pocketshell/next/render/HostScreenRenders.kt	unit-source-set	com.pocketshell.next.hosts.HostListNavigationTest	Roborazzi design-render harness for app2's host-management screens (task P-6). Same shape and same reason as ComposerRenders above: renders, not assertions — "the behaviour of every screen below is covered by its own test class; nothing here is the only check on anything". It lives in app2 rather than ui-kit because ui-kit is a dependency OF app2 and can never see an app2 composable, so scripts/render.sh cannot grow to enumerate it the way it enumerates DesignRenders. Runs unconditionally in the Unit job as a compiling app2/src/test source.
+app2/src/test/java/com/pocketshell/next/render/SessionScreenRenders.kt	unit-source-set	com.pocketshell.next.terminal.SessionScreenTest	Roborazzi design-render harness for the session screen's chrome (tasks U-5/U-7/P-1). It is structurally incapable of being a gate for the thing it pictures: any state that hosts the terminal renders with a BLANK grid on the JVM, because the vendored emulator paints through libtermux.so and its AndroidView takes the whole capture with it. The banner's text is pinned by the gate class and its real appearance by the device screenshot from J05ReconnectAfterDropJourney. Naming a harness with that blind spot *Test.kt would advertise coverage it cannot have. Runs unconditionally in the Unit job as a compiling app2/src/test source.
+app2/src/test/java/com/pocketshell/next/render/ShareScreenRenders.kt	unit-source-set	com.pocketshell.next.share.SharePickerScreenTest	Roborazzi design-render harness for the share target (task P-9). Renders, not assertions — the screen's behaviour is covered by the gate class. It exists because the share surface is the one screen the user meets from OUTSIDE the app, with no chrome to explain what happened, so what each state looks like has to be looked at rather than asserted. Runs unconditionally in the Unit job as a compiling app2/src/test source.

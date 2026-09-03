@@ -240,7 +240,7 @@ is NOT done. Before you even consider `APPROVED`, run this gate:
      session state / connection state), per the F2/F3 rules in `process.md` —
      not a convenient proxy.
    - **Runs in a gate that will actually execute** — per-push CI
-     (`.github/workflows/tests.yml` / `scripts/ci-journey-suite.sh`) or the
+     (`.github/workflows/app2.yml`'s `app2-journey` job) or the
      pre-tag release gate. Confirm it is wired in. A regression test that no gate
      runs is the same as no test.
 

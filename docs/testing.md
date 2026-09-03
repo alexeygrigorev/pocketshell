@@ -280,7 +280,7 @@ fingerprint, so a disturbed lane goes quiet again.
 The
 androidTest target host:port is centralized in `AgentsFixtureTarget`
 (`AndroidSshTestFixtures.kt`), defaulting to `10.0.2.2:2222`, so single-lane and
-CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-journey-suite.sh`
+CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-app2-journey-suite.sh`
 shards across lanes only when `POCKETSHELL_JOURNEY_SHARD=1`; its default is the
 clean single-lane serial loop.
 
@@ -555,7 +555,7 @@ flake quarantine") states the POLICY: a flaking journey class is auto-filed as
 an issue on first occurrence, moved into a non-blocking lane within 24h, and
 carries an expiry so it cannot sit forgotten. #2355 builds the MECHANISM.
 
-**The signal already existed.** `scripts/ci-journey-class-loop-functions.sh`'s
+**The signal already existed.** `scripts/ci-app2-journey-suite.sh`'s
 per-push retry-once loop (issue #712) already detects and names the exact D36
 flake definition — a class that fails attempt 1 and passes attempt 2 with no
 code change — printing `JOURNEY_FLAKE_RECOVERED: <fqcn> ...`. Quarantine builds
@@ -571,7 +571,7 @@ class is treated as quarantined — every failure blocks, never fewer.
 **Consumption — non-blocking, not "removed from coverage".** A quarantined
 class runs on every push exactly like any other selected journey class;
 nothing upstream of the suite's final pass/fail decision changes. Only
-`scripts/ci-journey-summary-functions.sh::finish_ci_journey_suite` changes: a
+`scripts/ci-app2-journey-suite.sh::finish_ci_journey_suite` changes: a
 class that fails BOTH attempts is split into `BLOCKING_FAILED_CLASSES` (drives
 the exit code and the `Failed BOTH attempts` / `JOURNEY_FAILED` section the
 workflow's classify step greps for) and `QUARANTINED_BLOCKED_CLASSES` (gets its
@@ -603,7 +603,7 @@ own `--self-test`): given a flaky class it previews or files/updates a
 de-duplicated tracking issue (`--file-issue`, via `gh`), and separately appends
 a quarantine row (`--quarantine --issue REF --reason TEXT [--days N]`, refuses
 a duplicate). It is deliberately NOT wired to fire unattended from inside
-`tests.yml`/`pr-journey-smoke.yml` this round — see the script's own header for
+`tests.yml`/`app2.yml` this round — see the script's own header for
 the reasoning (duplicate-issue risk, single-flake-vs-genuine-pattern
 judgment, `gh` auth inside the emulator-journey job, de-dup across concurrent
 shards). An on-call/human runs it after seeing `JOURNEY_FLAKE_RECOVERED` (or a
@@ -638,7 +638,7 @@ manifest, the executed-classes ledger, the validity guards — can see them.
 a NEW one fails. #2065 is the other half: a decision per file.
 
 **The premise the decision had to correct first.** "Zero hits in
-`scripts/ci-journey-suite.sh`" was read as "does not execute". It is not.
+`scripts/ci-app2-journey-suite.sh`" was read as "does not execute". It is not.
 Nightly-extensive **phase 1 runs `:app:connectedDebugAndroidTest` wholesale**,
 with only a `notClass` exclusion list — so an androidTest class in no explicit
 suite still executes every night. And `DesignRenders` runs 68 testcases in
@@ -674,7 +674,7 @@ execution is separately ledger-observed through the sibling conventional
 
 - `<executor>` is `unit-source-set` (path must be under `*/src/test/`) or
   `nightly-connected` (path must be under `app/src/androidTest/`, **and** the
-  class's simple name must appear nowhere in `nightly-extensive-suite.sh` —
+  class's simple name must appear nowhere in the journey suite —
   fail-closed, so naming it there for any reason forces the claim to be
   re-argued). An executor the guard cannot check is rejected, not believed.
 - `<gate>` is either a FQCN, resolved through the **same class index** the area
@@ -731,15 +731,15 @@ force-full path is in the diff — plus nightly, plus the release gate.
 | Tier | Trigger | Scope |
 |---|---|---|
 | per-PR / per-push | every push | always-tier + affected areas + their couplings |
-| nightly | `nightly-extensive.yml` cron | everything |
-| nightly binding mutations (#1932 / #1671) | `nightly-extensive.yml` `binding-mutations` job | curated production-binding mutants only |
+| nightly | `app2.yml` cron | everything |
+| nightly binding mutations (#1932 / #1671) | `app2.yml` `binding-mutations` job | curated production-binding mutants only |
 | release gate | `scripts/release-emulator-validation.sh` | everything, unchanged |
 
 ### Production-binding mutation lane (issue #1932)
 
 A conventional constructor change can keep policy-unit tests green while
 bypassing the intended production owner. The curated periodic lane in
-`.github/workflows/nightly-extensive.yml` (`binding-mutations`) applies one
+`.github/workflows/app2.yml` (`app2-journey`, nightly cron) (`binding-mutations`) applies one
 deterministic mutant at a time from
 `scripts/production-binding-manifest.json` and requires the named
 production-wired proof to fail. Attendance and per-binding evidence land on

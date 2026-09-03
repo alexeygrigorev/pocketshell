@@ -10,12 +10,23 @@
 #
 # This guard is the mechanical enforcement of that:
 #   1. the list parses cleanly (scripts/lib/journey-quarantine.sh);
-#   2. every entry's FQCN is a REAL registered journey class (a class that was
-#      renamed or removed from scripts/ci-journey-suite.sh must not sit in the
-#      list unnoticed — its row belongs somewhere real or nowhere);
+#   2. every entry's FQCN is a REAL registered journey class, and names a
+#      `#method` that class actually declares (a class or method renamed away
+#      must not sit in the list unnoticed — its row belongs somewhere real or
+#      nowhere);
 #   3. `added` and `expires` are real ISO dates with `expires` strictly after
 #      `added`;
-#   4. `expires` has not already passed as of today.
+#   4. `expires` has not already passed as of today;
+#   5. RECONCILIATION, list -> source: the named method carries an
+#      `@Ignore("quarantined: #<issue>, expires <expires> ...")` whose issue and
+#      expiry MATCH the row. A row whose @Ignore is missing is a quarantine
+#      that was never in effect; a row whose @Ignore disagrees about the expiry
+#      is two deadlines, one of which nothing enforces;
+#   6. RECONCILIATION, source -> list: every `@Ignore` on an app2 journey
+#      `@Test` has a row. This is the direction that makes the list a QUEUE
+#      rather than a graveyard — without it, anyone can silently `@Ignore` a
+#      journey test forever, with no issue, no expiry and no owner, which is
+#      the exact outcome D36 exists to prevent.
 #
 # Usage:
 #   scripts/check-journey-quarantine-expiry.sh              # check the real list
@@ -28,24 +39,76 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_FILE="$SCRIPT_DIR/journey-quarantine.txt"
-JOURNEY_SUITE="$SCRIPT_DIR/ci-journey-suite.sh"
+# Overridable so the sibling mechanism test can drive the REAL guard against a
+# mutated list without writing into the worktree.
+DEFAULT_FILE="${POCKETSHELL_JOURNEY_QUARANTINE_FILE:-$SCRIPT_DIR/journey-quarantine.txt}"
+JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-app2-journey-suite.sh}"
+# The androidTest root the journey lane runs, derived from the suite (below) so
+# this guard and the selection engine cannot disagree about where journeys live.
+JOURNEY_ROOT_OVERRIDE="${POCKETSHELL_JOURNEY_QUARANTINE_ROOT:-}"
 
 # shellcheck source=scripts/lib/journey-quarantine.sh
 source "$SCRIPT_DIR/lib/journey-quarantine.sh"
 
-# Same shape as scripts/select-test-areas.sh's journey_registry_classes() —
-# kept as its own small copy deliberately (the repo's existing convention:
-# scripts/check-ci-journey-harness.sh also carries its own copy rather than a
-# shared lib none of the three agree to depend on).
+# The androidTest root whose classes the journey lane runs, derived from the
+# suite's own JOURNEY_TASK (issue #2474: the lane runs one module wholesale, so
+# the registry IS that module's instrumented source set).
+journey_root() {
+  if [[ -n "$JOURNEY_ROOT_OVERRIDE" ]]; then
+    printf '%s\n' "$JOURNEY_ROOT_OVERRIDE"
+    return 0
+  fi
+  [[ -f "$JOURNEY_SUITE" ]] || return 1
+  local task mod
+  task="$(sed -nE 's/^JOURNEY_TASK="([^"]+)".*/\1/p' "$JOURNEY_SUITE" | head -1)"
+  [[ -n "$task" ]] || return 1
+  mod="${task#:}"; mod="${mod%:*}"
+  printf '%s/%s/src/androidTest\n' "$REPO_ROOT" "${mod//://}"
+}
+
 journey_registry_classes() {
-  local suite="${1:-$JOURNEY_SUITE}"
-  [[ -f "$suite" ]] || return 0
-  sed -nE \
-    -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
-    -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
-    "$suite" |
-    grep -E '\.[A-Z][A-Za-z0-9_]*$' |
+  local root
+  root="$(journey_root)" || return 0
+  [[ -d "$root" ]] || return 0
+  local f rel
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    grep -qE '^[[:space:]]*@Test([[:space:]]|\(|$)' "$f" || continue
+    rel="${f#"$root"/}"
+    rel="${rel#java/}"; rel="${rel#kotlin/}"
+    rel="${rel%.kt}"; rel="${rel%.java}"
+    printf '%s\n' "${rel//\//.}"
+  done < <(find "$root" -type f \( -name '*.kt' -o -name '*.java' \) 2>/dev/null) |
+    LC_ALL=C sort -u
+}
+
+# Every `@Ignore`-carrying @Test method in the journey root, as `FQCN#method`.
+# This is check 6's input: the source side of the reconciliation.
+journey_ignored_methods() {
+  local root
+  root="$(journey_root)" || return 0
+  [[ -d "$root" ]] || return 0
+  local f rel fqcn
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    rel="${f#"$root"/}"
+    rel="${rel#java/}"; rel="${rel#kotlin/}"
+    rel="${rel%.kt}"; rel="${rel%.java}"
+    fqcn="${rel//\//.}"
+    awk -v cls="$fqcn" '
+      /^[[:space:]]*@Ignore([[:space:]]|\(|$)/ { pending = 1; next }
+      /^[[:space:]]*fun[[:space:]]/ {
+        if (pending) {
+          line = $0
+          sub(/^[[:space:]]*fun[[:space:]]+/, "", line)
+          sub(/[[:space:]]*\(.*$/, "", line)
+          print cls "#" line
+        }
+        pending = 0; next
+      }
+      /^[[:space:]]*$/ { pending = 0 }
+    ' "$f"
+  done < <(find "$root" -type f \( -name '*.kt' -o -name '*.java' \) 2>/dev/null) |
     LC_ALL=C sort -u
 }
 
@@ -95,8 +158,32 @@ check_file() {
     expires="${POCKETSHELL_JQ_EXPIRES[$i]}"
     reason="${POCKETSHELL_JQ_REASON[$i]}"
 
-    if [[ -n "$registry" ]] && ! grep -qxF "$fqcn" <<<"$registry"; then
-      failures+=("$fqcn: not a registered journey class in scripts/ci-journey-suite.sh — remove this row or fix the FQCN")
+    local cls method
+    cls="$(pocketshell_journey_quarantine_class "$fqcn")"
+    method="$(pocketshell_journey_quarantine_method "$fqcn")"
+
+    if [[ -z "$method" ]]; then
+      failures+=("$fqcn: no '#method' — quarantine is per METHOD (an @Ignore annotates one function), so the row must name the exact @Test it exempts")
+    fi
+    if [[ -n "$registry" ]] && ! grep -qxF "$cls" <<<"$registry"; then
+      failures+=("$fqcn: $cls is not a journey class in the lane's androidTest root — remove this row or fix the FQCN")
+    elif [[ -n "$method" ]]; then
+      # Check 5 — list -> source. The @Ignore must exist on that exact method
+      # and agree with the row about who owns it and when it expires.
+      local root src ignore_reason
+      root="$(journey_root || true)"
+      if ! src="$(pocketshell_journey_quarantine_source_for_class "$root" "$cls")"; then
+        failures+=("$fqcn: no source file found for $cls under $root")
+      elif ! ignore_reason="$(pocketshell_journey_quarantine_ignore_reason "$src" "$method")"; then
+        failures+=("$fqcn: the row claims a quarantine but $method carries NO @Ignore in ${src#"$REPO_ROOT"/} — the quarantine is not in effect, so the method still blocks (add the annotation or drop the row)")
+      else
+        if [[ "$ignore_reason" != *"$issue"* ]]; then
+          failures+=("$fqcn: @Ignore text does not name the tracked issue $issue (got: $ignore_reason)")
+        fi
+        if [[ "$ignore_reason" != *"$expires"* ]]; then
+          failures+=("$fqcn: @Ignore text does not name the row's expiry $expires (got: $ignore_reason) — two deadlines means one of them is unenforced")
+        fi
+      fi
     fi
 
     if ! is_iso_date "$added"; then
@@ -121,6 +208,18 @@ check_file() {
       fi
     fi
   done
+
+  # Check 6 — source -> list. An @Ignore with no row has no issue, no expiry
+  # and no owner: it is a permanent silent exclusion, which is precisely the
+  # graveyard D36 forbids. Scanned even when the list is empty or failed to
+  # load, because that is exactly when an untracked @Ignore would slip through.
+  local ignored
+  while IFS= read -r ignored; do
+    [[ -n "$ignored" ]] || continue
+    if ! pocketshell_journey_quarantine_contains "$ignored"; then
+      failures+=("$ignored: @Ignore on a journey @Test with NO row in $(basename "$file") — an untracked quarantine has no issue, no expiry and no owner (add a row or delete the annotation)")
+    fi
+  done < <(journey_ignored_methods)
 
   local f
   for f in "${failures[@]}"; do
@@ -155,10 +254,33 @@ run_self_test() {
 
   local rc=0
 
+  # A SYNTHETIC journey root, so the source-reconciliation cases (5 and 6) can
+  # plant and mutate @Ignore annotations without touching the real tree. Every
+  # case below runs against it via JOURNEY_ROOT_OVERRIDE.
+  local root="$sandbox/androidTest"
+  mkdir -p "$root/java/com/pocketshell/next/probe"
+  write_probe_source() {  # $1 = @Ignore line for flaky() (empty = none)
+    cat > "$root/java/com/pocketshell/next/probe/JZZProbeJourney.kt" <<KT
+package com.pocketshell.next.probe
+import org.junit.Ignore
+import org.junit.Test
+class JZZProbeJourney {
+    @Test
+${1:+$1}
+    fun flaky() {}
+
+    @Test
+    fun healthy() {}
+}
+KT
+  }
+  local IGNORE_OK='    @Ignore("quarantined: #1, expires 2026-01-15 — synthetic")'
+  write_probe_source "$IGNORE_OK"
+  JOURNEY_ROOT_OVERRIDE="$root"
+
+  local real_class="com.pocketshell.next.probe.JZZProbeJourney#flaky"
+
   # 1. A fresh, well-formed, non-expired, registered entry -> clean.
-  local real_class
-  real_class="$(journey_registry_classes | head -1)"
-  [[ -n "$real_class" ]] || { echo "SELF-TEST SETUP FAIL: no registered journey classes found to anchor the fixture against"; return 1; }
   cat > "$sandbox/fresh.txt" <<EOF
 $real_class	#1	2026-01-01	2026-01-15	fresh, not expired
 EOF
@@ -197,11 +319,11 @@ EOF
 
   # 4. Unregistered class name -> must FAIL naming it "not a registered journey class".
   cat > "$sandbox/unregistered.txt" <<EOF
-com.example.NoSuchClassEverRegistered	#1	2026-01-01	2026-01-15	bogus
+com.example.NoSuchClassEverRegistered#nope	#1	2026-01-01	2026-01-15	bogus
 EOF
   out="$(check_file "$sandbox/unregistered.txt" "2026-01-05")"
   count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
-  if [[ "$count" -eq 0 ]] || ! grep -q 'not a registered journey class' <<<"$out"; then
+  if [[ "$count" -eq 0 ]] || ! grep -q 'is not a journey class in the lane' <<<"$out"; then
     echo "$out"
     echo "SELF-TEST FAIL: an unregistered FQCN must FAIL"; rc=1
   else
@@ -221,7 +343,11 @@ EOF
     echo "  ok: expires <= added -> FAIL"
   fi
 
-  # 6. An empty file -> clean (steady state: nothing quarantined).
+  # 6. An empty file, with no @Ignore anywhere -> clean (the steady state:
+  #    nothing quarantined, nothing annotated). The probe source is rewritten
+  #    WITHOUT its annotation first, because an empty list plus a live @Ignore
+  #    is case 8's red, not this one's green.
+  write_probe_source ""
   : > "$sandbox/empty.txt"
   out="$(check_file "$sandbox/empty.txt" "2026-01-05")"
   count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
@@ -230,6 +356,62 @@ EOF
     echo "SELF-TEST FAIL: an empty quarantine list must be clean"; rc=1
   else
     echo "  ok: empty list -> clean"
+  fi
+
+  # 7. RECONCILIATION list -> source: the row is well-formed but the method
+  #    carries NO @Ignore. The quarantine was never in effect, so the method
+  #    still blocks — that must be loud, not a green row.
+  write_probe_source ""
+  out="$(check_file "$sandbox/fresh.txt" "2026-01-05")"
+  count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
+  if [[ "$count" -eq 0 ]] || ! grep -q 'carries NO @Ignore' <<<"$out"; then
+    echo "$out"
+    echo "SELF-TEST FAIL: a row whose method has no @Ignore must FAIL"; rc=1
+  else
+    echo "  ok: row without its @Ignore -> FAIL (quarantine not in effect)"
+  fi
+
+  # 8. RECONCILIATION source -> list: an @Ignore with no row. This is the
+  #    graveyard direction — no issue, no expiry, no owner, forever.
+  write_probe_source "$IGNORE_OK"
+  : > "$sandbox/empty2.txt"
+  out="$(check_file "$sandbox/empty2.txt" "2026-01-05")"
+  count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
+  if [[ "$count" -eq 0 ]] || ! grep -q 'NO row in' <<<"$out"; then
+    echo "$out"
+    echo "SELF-TEST FAIL: an untracked @Ignore must FAIL"; rc=1
+  else
+    echo "  ok: untracked @Ignore -> FAIL (graveyard direction)"
+  fi
+
+  # 9. The @Ignore and the row must agree about the DEADLINE. Two dates means
+  #    one of them is enforced by nothing.
+  write_probe_source '    @Ignore("quarantined: #1, expires 2099-01-01 — synthetic")'
+  out="$(check_file "$sandbox/fresh.txt" "2026-01-05")"
+  count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
+  if [[ "$count" -eq 0 ]] || ! grep -q "does not name the row's expiry" <<<"$out"; then
+    echo "$out"
+    echo "SELF-TEST FAIL: a drifted @Ignore expiry must FAIL"; rc=1
+  else
+    echo "  ok: @Ignore expiry disagreeing with the row -> FAIL"
+  fi
+
+  # 10. Sibling isolation: quarantining `flaky` must NOT exempt `healthy`.
+  #     A class-level match here would silently stop enforcing a method nobody
+  #     triaged, which is why matching is on the whole FQCN#method key.
+  write_probe_source "$IGNORE_OK"
+  cat > "$sandbox/sibling.txt" <<EOF
+com.pocketshell.next.probe.JZZProbeJourney#healthy	#1	2026-01-01	2026-01-15	claims the WRONG method
+EOF
+  out="$(check_file "$sandbox/sibling.txt" "2026-01-05")"
+  count="$(sed -n 's/^FAILCOUNT=//p' <<<"$out")"
+  if [[ "$count" -eq 0 ]] ||
+     ! grep -q 'healthy: the row claims a quarantine but healthy carries NO @Ignore' <<<"$out" ||
+     ! grep -q 'flaky: @Ignore on a journey @Test with NO row' <<<"$out"; then
+    echo "$out"
+    echo "SELF-TEST FAIL: a row naming the wrong sibling method must FAIL in BOTH directions"; rc=1
+  else
+    echo "  ok: sibling methods are independent (row->source and source->list both fire)"
   fi
 
   if [[ "$rc" -eq 0 ]]; then

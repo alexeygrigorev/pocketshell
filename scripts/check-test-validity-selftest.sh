@@ -472,18 +472,18 @@ MUTATED_GUARD=""
 rm -f "$ANDROID_FIX_DIR/C1StaleBaselineTest.kt"
 
 # --------------------------------------------------------------------------
-# J1 — androidTest E2e/Docker class missing ci-journey-suite coverage.
+# J1 — androidTest E2e/Docker class outside the wholesale journey root.
 # --------------------------------------------------------------------------
 echo
 echo "[J1] unwired androidTest journey class"
 
 # BAD: a new journey-shaped androidTest class that is not wired into
-# scripts/ci-journey-suite.sh and has no local reason for staying out.
+# the wholesale journey root and has no local reason for staying out.
 cat > "$ANDROID_FIX_DIR/J1BadUnwiredE2eTest.kt" <<'KT'
 package com.pocketshell.app.validityselftest
 class J1BadUnwiredE2eTest {
     fun journey() {
-        // Load-bearing connected journey proof, but not in ci-journey-suite.
+        // Load-bearing connected journey proof, but outside the journey root.
     }
 }
 KT
@@ -500,7 +500,7 @@ class J1GoodJustifiedDockerTest {
 KT
 
 assert_report present "J1BadUnwiredE2eTest" "J1 — NEW" "J1 fires on an unwired androidTest journey"
-assert_report absent  "J1GoodJustifiedDockerTest" "J1 — NEW" "J1 spares a local ci-journey-suite justification"
+assert_report absent  "J1GoodJustifiedDockerTest" "J1 — NEW" "J1 spares a local journey-root justification"
 assert_exit 1 "J1 unwired androidTest journey hard-fails the guard"
 
 # Remove the BAD J1 so advisory checks can still prove guard-mode exit 0 when

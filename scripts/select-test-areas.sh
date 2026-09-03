@@ -64,12 +64,18 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${POCKETSHELL_TEST_AREAS_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 MANIFEST="${POCKETSHELL_TEST_AREAS_MANIFEST:-$SCRIPT_DIR/test-areas.txt}"
-JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-journey-suite.sh}"
+JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-app2-journey-suite.sh}"
 # Reviewed exemptions for @Test-bearing files outside the naming convention
 # (#2065). Data, not an inline array, so each row carries a checkable
 # justification and so the guard's own reds are self-testable.
 UNCONVENTIONAL="${POCKETSHELL_TEST_AREAS_UNCONVENTIONAL:-$SCRIPT_DIR/test-unconventional-test-files.txt}"
-NIGHTLY_SUITE="${POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE:-$SCRIPT_DIR/nightly-extensive-suite.sh}"
+# The ONE Android application module. Its unit classes are run through a
+# `--tests` FILTER (the module is huge and its task is not per-area), whereas a
+# shared module's `:test` task is emitted unfiltered. The rewrite renamed it
+# `:app` -> `:app2`; it is a variable so the self-test's synthetic mini-repo can
+# name its own, and so a future cutover rename is a one-line change instead of
+# nine scattered string literals.
+APP_MODULE="${POCKETSHELL_TEST_AREAS_APP_MODULE:-:app2}"
 
 # shellcheck source=lib/test-areas.sh
 source "$SCRIPT_DIR/lib/test-areas.sh"
@@ -120,21 +126,83 @@ tracked_files() {
   git -C "$REPO_ROOT" ls-files 2>/dev/null
 }
 
-# Journey registry entries, normalised to FQCNs (the `Class#method` split
-# entries collapse to their class). Parsed with the SAME sed shape
-# check-ci-journey-harness.sh uses, so the two guards cannot disagree about
-# what the registry contains.
-journey_registry_classes() {
-  [[ -f "$JOURNEY_SUITE" ]] || return 0
-  sed -nE \
-    -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
-    -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
-    "$JOURNEY_SUITE" |
-    # Drop the `FQCN_PREFIX="com.pocketshell.app.proof"` assignment itself: a
-    # class simple name always starts uppercase, a package segment never does.
-    grep -E '\.[A-Z][A-Za-z0-9_]*$' |
-    LC_ALL=C sort -u
+# The registered journey classes.
+#
+# The old `app` module's suite iterated an explicit FQCN list, one gradle
+# invocation per class, and this function parsed that list. Issue #2474
+# deliberately replaced that shape: app2's lane runs
+# `:app2:connectedDebugAndroidTest` ONCE, unfiltered, so every journey shares an
+# instrumentation process and cross-journey state leaks are visible (that is how
+# #2477 was found). There is therefore no list to parse — the registry IS the
+# module's whole instrumented source set, and this derives it from the tree.
+#
+# The wholesale premise is CHECKED, not assumed (G6): if the suite ever grows a
+# class/package/annotation filter, or stops naming the task, the derivation
+# stops and the caller sees an empty registry loudly through
+# JOURNEY_REGISTRY_ERROR rather than a silently shrunken one.
+JOURNEY_REGISTRY_ERROR=""
+JOURNEY_REGISTRY_DIR=""
+# Validates the wholesale premise and resolves the androidTest root the suite
+# runs. MUST be called in the CURRENT shell (it sets globals); a caller that
+# only pipes journey_registry_classes through process substitution would never
+# see the error, which is precisely how a broken registry would read as an
+# innocuous "0 journeys".
+journey_registry_validate() {
+  JOURNEY_REGISTRY_ERROR=""
+  JOURNEY_REGISTRY_DIR=""
+  local suite_name; suite_name="$(basename "$JOURNEY_SUITE")"
+  if [[ ! -f "$JOURNEY_SUITE" ]]; then
+    JOURNEY_REGISTRY_ERROR="journey suite not found: $JOURNEY_SUITE"
+    return 1
+  fi
+  local task
+  task="$(sed -nE 's/^JOURNEY_TASK="([^"]+)".*/\1/p' "$JOURNEY_SUITE" | head -1)"
+  if [[ -z "$task" ]]; then
+    JOURNEY_REGISTRY_ERROR="$suite_name: no JOURNEY_TASK=\"…\" assignment, so the wholesale journey set cannot be derived"
+    return 1
+  fi
+  # The no-filter property is read off the ONE function that builds the gradle
+  # command line, not the whole file: the suite's header prose names the filter
+  # it refuses to use, and its own --self-test plants a mutant argument to prove
+  # it stays out. A whole-file grep cannot tell those apart from a real filter.
+  local args_body
+  args_body="$(sed -n '/^gradle_args() {$/,/^}$/p' "$JOURNEY_SUITE")"
+  if [[ -z "$args_body" ]]; then
+    JOURNEY_REGISTRY_ERROR="$suite_name: no gradle_args() function, so the command line it builds cannot be checked for a class filter"
+    return 1
+  fi
+  if grep -Eq 'testInstrumentationRunnerArguments\.(class|package|annotation)=' <<<"$args_body"; then
+    JOURNEY_REGISTRY_ERROR="$suite_name: gradle_args() now filters what it runs, so 'every androidTest class in $task' is no longer the registry"
+    return 1
+  fi
+  # `:app2:connectedDebugAndroidTest` -> app2/src/androidTest
+  local mod="${task#:}"
+  mod="${mod%:*}"
+  local dir="${mod//://}/src/androidTest"
+  if [[ ! -d "$REPO_ROOT/$dir" ]]; then
+    JOURNEY_REGISTRY_ERROR="$suite_name: $task names $dir, which does not exist"
+    return 1
+  fi
+  JOURNEY_REGISTRY_DIR="$dir"
+  return 0
 }
+journey_registry_classes() {
+  local dir="$JOURNEY_REGISTRY_DIR"
+  if [[ -z "$dir" ]]; then
+    journey_registry_validate >/dev/null 2>&1 || return 0
+    dir="$JOURNEY_REGISTRY_DIR"
+  fi
+  [[ -n "$dir" ]] || return 0
+  local f fqcn
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    pocketshell_test_areas_is_test_class_file "$f" || continue
+    grep -qE '^[[:space:]]*@Test([[:space:]]|\(|$)' "$REPO_ROOT/$f" 2>/dev/null || continue
+    fqcn="$(pocketshell_test_areas_fqcn_for_path "$f")" || continue
+    [[ -n "$fqcn" ]] && printf '%s\n' "$fqcn"
+  done < <(git -C "$REPO_ROOT" ls-files "$dir") | LC_ALL=C sort -u
+}
+journey_registry_validate || true
 
 # ---------------------------------------------------------------------------
 # Changed paths
@@ -262,9 +330,9 @@ is_unit_source_set() {
 # Source files Gradle compiles from a test source set into a test APK.
 # A prefix match on the source-set directory is NOT enough: a parked
 # `Foo.kt.txt` / `Foo.kt.turned-off` lives under androidTest/test but is
-# never compiled, so `nightly-connected` / `unit-source-set` would be a
-# false execution claim (#2170). The mutation that reddens 21k is making
-# this always return true (prefix-only).
+# never compiled, so a `unit-source-set` claim over it would be a false
+# execution claim (#2170). The mutation that reddens 21l is making this always
+# return true (prefix-only).
 is_compiling_test_source() {
   case "$1" in
     *.kt|*.java) return 0 ;;
@@ -331,13 +399,13 @@ plan_gradle_unit() {
   local -a app_unit=()
   local fqcn mod total=0
   for fqcn in "${!POCKETSHELL_TA_CLASS_PATH[@]}"; do
-    # `test` / `:app:test` runs the JVM unit source sets only; androidTest and
+    # `test` / `:app2:test` runs the JVM unit source sets only; androidTest and
     # integrationTest classes belong to the emulator and Docker lanes.
     is_unit_source_set "${POCKETSHELL_TA_CLASS_SOURCESET[$fqcn]}" || continue
     total=$((total + 1))
     class_selected "$fqcn" || continue
     mod="${POCKETSHELL_TA_CLASS_MODULE[$fqcn]}"
-    if [[ "$mod" == ":app" ]]; then
+    if [[ "$mod" == "$APP_MODULE" ]]; then
       app_unit+=("$fqcn")
     else
       shared_tasks["$mod:test"]=1
@@ -346,12 +414,12 @@ plan_gradle_unit() {
   printf 'UNIT_MODE=scoped\n'
   printf 'UNIT_SHARED_TASKS=%s\n' \
     "$( [[ "${#shared_tasks[@]}" -gt 0 ]] && printf '%s\n' "${!shared_tasks[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//' )"
-  # No selected :app unit class => NO :app task. `--tests` with a filter that
+  # No selected app-module unit class => NO app-module task. `--tests` with a filter that
   # matches nothing makes Gradle fail the task ("No tests found for given
   # includes"), and a CI job that dies on an empty selection is a worse failure
   # mode than running too much.
   if [[ "${#app_unit[@]}" -gt 0 ]]; then
-    printf 'UNIT_GRADLE_TASKS=:app:test\n'
+    printf 'UNIT_GRADLE_TASKS=%s:test\n' "$APP_MODULE"
   else
     printf 'UNIT_GRADLE_TASKS=\n'
   fi
@@ -378,7 +446,7 @@ shared_selected_unit_class_count() {
   for fqcn in "${!POCKETSHELL_TA_CLASS_PATH[@]}"; do
     is_unit_source_set "${POCKETSHELL_TA_CLASS_SOURCESET[$fqcn]}" || continue
     mod="${POCKETSHELL_TA_CLASS_MODULE[$fqcn]}"
-    [[ "$mod" == ":app" ]] && continue
+    [[ "$mod" == "$APP_MODULE" ]] && continue
     class_selected "$fqcn" && mods["$mod"]=1
   done
   for fqcn in "${!POCKETSHELL_TA_CLASS_PATH[@]}"; do
@@ -506,7 +574,14 @@ verify_manifest() {
       journeyless+=("$fqcn")
     fi
   done < <(journey_registry_classes)
-  if [[ "${#journeyless[@]}" -gt 0 ]]; then
+  if [[ -n "$JOURNEY_REGISTRY_ERROR" ]]; then
+    echo "FAIL: the journey registry could not be derived, so every journey-based check below is vacuous:"
+    echo "  $JOURNEY_REGISTRY_ERROR"
+    failures=$((failures + 1))
+  elif [[ "$(journey_registry_classes | wc -l | tr -d ' ')" -eq 0 ]]; then
+    echo "FAIL: the journey registry is EMPTY — a zero-journey registry passes every journey check vacuously (G3)"
+    failures=$((failures + 1))
+  elif [[ "${#journeyless[@]}" -gt 0 ]]; then
     echo "FAIL: ${#journeyless[@]} registered journey class(es) resolve to no area:"
     printf '  %s\n' "${journeyless[@]}"
     failures=$((failures + 1))
@@ -581,33 +656,17 @@ verify_manifest() {
     [[ -z "${exempt_exec[$f]:-}" ]] && hidden_new+=("$f")
   done < <(tracked_files)
 
-  # The PREMISE under every `nightly-connected` row, checked ONCE: nightly
-  # phase 1 runs :app:connectedDebugAndroidTest WHOLESALE and subtracts a
-  # `notClass` list. Without this, a per-row "the class is not excluded" check
-  # is a green assertion over a property that no longer holds — flip phase 1 to
-  # a `class=` allowlist and every row would silently start lying while the
-  # guard stayed green (G6). Checked only when a row actually depends on it.
-  local nightly_wholesale=1 nightly_phase1=""
-  local -a nightly_rows=()
-  local e_path
-  for e_path in "${exempt_paths[@]}"; do
-    [[ "${exempt_exec[$e_path]}" == "nightly-connected" ]] && nightly_rows+=("$e_path")
-  done
-  if [[ "${#nightly_rows[@]}" -gt 0 && -f "$NIGHTLY_SUITE" ]]; then
-    nightly_phase1="$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$NIGHTLY_SUITE")"
-    if [[ -z "$nightly_phase1" ]]; then
-      nightly_wholesale=0
-      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase-1 invocation block not found, so the wholesale premise behind every 'nightly-connected' row is unverifiable")
-    elif ! grep -Fq ':app:connectedDebugAndroidTest' <<<"$nightly_phase1" ||
-         ! grep -Fq 'RunnerArguments.notClass=' <<<"$nightly_phase1"; then
-      nightly_wholesale=0
-      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase 1 no longer runs :app:connectedDebugAndroidTest minus a notClass list — the 'nightly-connected' rows rest on that shape")
-    elif grep -Eq 'RunnerArguments\.(class|package|annotation)=' <<<"$nightly_phase1"; then
-      nightly_wholesale=0
-      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase 1 now restricts what it runs (class/package/annotation filter) — it is an allowlist, so 'nightly-connected' no longer follows from merely not being excluded")
-    fi
-  fi
-
+  # The `nightly-connected` executor kind was DELETED with the rewrite's hard
+  # cut (D22). It claimed that nightly phase 1 ran `:app:connectedDebugAndroidTest`
+  # WHOLESALE minus a `notClass` list, so a class in no explicit suite still
+  # executed. Both halves of that claim are gone: the `app` module no longer
+  # exists, and app2's lane (scripts/ci-app2-journey-suite.sh, issue #2474) runs
+  # `:app2:connectedDebugAndroidTest` unfiltered in ONE process with no
+  # exclusion list at all. Keeping the executor would be a claim the guard can
+  # no longer check against anything real — the exact "I could not check" ==
+  # "I checked and it is fine" laundering #2065 exists to refuse. `unit-source-set`
+  # is the only executor kind, and an androidTest-path row is now rejected
+  # outright rather than granted a nightly premise that does not exist.
   for e_path in "${exempt_paths[@]}"; do
     if [[ -z "${hidden_seen[$e_path]:-}" ]]; then
       hidden_stale+=("$e_path")
@@ -628,30 +687,8 @@ verify_manifest() {
           exempt_bad+=("$e_path: executor 'unit-source-set' but the file is not a compiling Kotlin/Java source, so \`./gradlew test\` cannot execute it")
         fi
         ;;
-      nightly-connected)
-        case "$e_path" in
-          app/src/androidTest/*) : ;;
-          *) exempt_bad+=("$e_path: executor 'nightly-connected' but the path is not under app/src/androidTest/") ;;
-        esac
-        if ! is_compiling_test_source "$e_path"; then
-          exempt_bad+=("$e_path: executor 'nightly-connected' but the file is not a compiling Kotlin/Java source, so :app:connectedDebugAndroidTest cannot execute it")
-        fi
-        if [[ ! -f "$NIGHTLY_SUITE" ]]; then
-          exempt_bad+=("$e_path: executor 'nightly-connected' cannot be checked — nightly suite not found: $NIGHTLY_SUITE")
-        elif [[ "$nightly_wholesale" -eq 1 ]]; then
-          # Nightly phase 1 runs :app:connectedDebugAndroidTest WHOLESALE with a
-          # `notClass` exclusion list, which is why a class in no explicit suite
-          # still executes. Fail-closed on ANY mention of the simple name: an
-          # exclusion, a shard pin or even a comment means the wholesale claim
-          # has to be argued again rather than inherited.
-          local simple="${e_path##*/}"; simple="${simple%.kt}"; simple="${simple%.java}"
-          if grep -Fq "$simple" "$NIGHTLY_SUITE"; then
-            exempt_bad+=("$e_path: executor 'nightly-connected' claims the wholesale nightly run reaches it, but $simple is named in $(basename "$NIGHTLY_SUITE") — re-argue the claim")
-          fi
-        fi
-        ;;
       *)
-        exempt_bad+=("$e_path: unknown executor '${exempt_exec[$e_path]}' (expected unit-source-set or nightly-connected)")
+        exempt_bad+=("$e_path: unknown executor '${exempt_exec[$e_path]}' (expected unit-source-set — 'nightly-connected' was deleted with the app module it named)")
         ;;
     esac
     # The gate is what accounts for the file. A FQCN is resolved through the
@@ -734,21 +771,63 @@ verify_manifest() {
   #    below is now in the same spirit as its siblings, and the seam is floored
   #    PER END, because the round-2 defect (B6) was precisely a healthy-looking
   #    total (15 packages) hiding one whole end at zero — nothing in `shared/*`.
+  #
+  #    RECALIBRATED FOR THE app2 REWRITE. Every floor here was calibrated
+  #    against the old 602K-line tree; the rewrite's hard cut took the client to
+  #    ~54K lines (issue #2471), so the ORIGINAL floors no longer describe a
+  #    broken mechanism — they describe the codebase existing at all, and they
+  #    fire on a tree that is healthy. Each floor below is re-derived from the
+  #    measured value on this tree with roughly a third of headroom, so it still
+  #    catches "someone deleted half the suite" while passing a codebase that is
+  #    legitimately smaller. Measured on the app2 tree when recalibrated:
+  #      indexed test classes 172, production packages 34, import lines 213,
+  #      cross-area classes 75, host-CLI seam 8 packages / 55 classes
+  #      (1 producer, 1 consumer, 8 vocabulary, 4 under shared/),
+  #      20 live Click commands.
+  #
+  #    The two ENDS collapsed to ONE package each, and that is architectural,
+  #    not a narrowing: the rewrite centralised every host-CLI call behind a
+  #    single client instead of scattering `pocketshell …` strings across a
+  #    dozen packages. A `>= 1` count floor on those two ends would be exactly
+  #    the toothless shape B7 rejected, so the count is NOT what protects them
+  #    any more — SEAM_PKG_PINS below names the packages that must stay on the
+  #    seam. A named pin does not decay as the codebase changes size, and it
+  #    goes red on precisely the B6 defect (`:shared:core-usage:test`, the
+  #    strict reader of `pocketshell usage --json`, dropping off the wire).
   local -a index_fail=()
-  [[ "$POCKETSHELL_TA_INDEX_CLASSES"      -ge 500 ]] || index_fail+=("indexed test classes = $POCKETSHELL_TA_INDEX_CLASSES (< 500)")
-  [[ "$POCKETSHELL_TA_INDEX_PROD_PKGS"    -ge 30  ]] || index_fail+=("production packages mapped = $POCKETSHELL_TA_INDEX_PROD_PKGS (< 30)")
-  [[ "$POCKETSHELL_TA_INDEX_IMPORT_LINES" -ge 1000 ]] || index_fail+=("com.pocketshell import lines scanned = $POCKETSHELL_TA_INDEX_IMPORT_LINES (< 1000)")
-  [[ "$POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES" -ge 200 ]] || index_fail+=("test classes with a cross-area production dependency = $POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES (< 200)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS" -ge 12 ]] || index_fail+=("host-CLI wire-seam PRODUCER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS (< 12) — the invoke marker /$POCKETSHELL_TA_HOSTCLI_MARKER/ has narrowed (#847 lockstep coupling)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS" -ge 15 ]] || index_fail+=("host-CLI wire-seam CONSUMER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS (< 15) — the reply end of the wire has narrowed (finding B6)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS" -ge 14 ]] || index_fail+=("host-CLI wire-seam VOCABULARY packages = $POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS (< 14) — packages naming a real subcommand have narrowed")
+  local -a SEAM_PKG_PINS=(
+    # The B6 class itself: the STRICT / fail-loud NDJSON reader. If this package
+    # leaves the seam, a tools/pocketshell/src/pocketshell/usage.py change stops
+    # running the test that a schema drift breaks.
+    "com.pocketshell.core.usage"
+    # The Kotlin end of every host-CLI verb (HostCliClient + the sessions/engines
+    # JSON models). A `pocketshell` subcommand or payload change breaks here
+    # first; #847 / v0.4.10 was exactly this contract.
+    "com.pocketshell.core.hostapi"
+    # The screens built out of what the CLI emits: the session tree
+    # (`sessions --json`) and the usage panel (`usage --json`).
+    "com.pocketshell.next.tree"
+    "com.pocketshell.next.usage"
+  )
+  local seam_pkg
+  for seam_pkg in "${SEAM_PKG_PINS[@]}"; do
+    [[ -n "${POCKETSHELL_TA_PROD_PKG_HOSTCLI[$seam_pkg]:-}" ]] ||
+      index_fail+=("host-CLI wire seam no longer reaches $seam_pkg — a tools/pocketshell change would stop running the tests that read what it emits (#847/#1509/B6)")
+  done
+  [[ "$POCKETSHELL_TA_INDEX_CLASSES"      -ge 120 ]] || index_fail+=("indexed test classes = $POCKETSHELL_TA_INDEX_CLASSES (< 120)")
+  [[ "$POCKETSHELL_TA_INDEX_PROD_PKGS"    -ge 24  ]] || index_fail+=("production packages mapped = $POCKETSHELL_TA_INDEX_PROD_PKGS (< 24)")
+  [[ "$POCKETSHELL_TA_INDEX_IMPORT_LINES" -ge 150 ]] || index_fail+=("com.pocketshell import lines scanned = $POCKETSHELL_TA_INDEX_IMPORT_LINES (< 150)")
+  [[ "$POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES" -ge 45 ]] || index_fail+=("test classes with a cross-area production dependency = $POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES (< 45)")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS" -ge 1 ]] || index_fail+=("host-CLI wire-seam PRODUCER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS (< 1) — the invoke marker /$POCKETSHELL_TA_HOSTCLI_MARKER/ has narrowed (#847 lockstep coupling)")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS" -ge 1 ]] || index_fail+=("host-CLI wire-seam CONSUMER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS (< 1) — the reply end of the wire has narrowed (finding B6)")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS" -ge 6 ]] || index_fail+=("host-CLI wire-seam VOCABULARY packages = $POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS (< 6) — packages naming a real subcommand have narrowed")
   # The live command count has a floor so a dead/empty reader cannot satisfy
   # the guard at zero. Import and runtime failures are a separate fail-closed
   # condition; they must never be laundered into a smaller vocabulary.
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS" -ge 12 ]] || index_fail+=("host-CLI live Click commands read = $POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS (< 12) — the live vocabulary reader is dead or empty")
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE" -eq 0 ]] || index_fail+=("host-CLI live vocabulary reader could not import/read $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE: $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS" -ge 8 ]] || index_fail+=("host-CLI wire-seam packages under shared/ = $POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS (< 8) — this is EXACTLY the B6 defect: it was 0 while the total looked healthy, and :shared:core-usage:test (the strict parser of \`pocketshell usage --json\`) did not run on a host-CLI change")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES" -ge 600 ]] || index_fail+=("test classes depending on the host CLI = $POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES (< 600) — #1509 / the usage parser would stop running on a tools/pocketshell change")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS" -ge 3 ]] || index_fail+=("host-CLI wire-seam packages under shared/ = $POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS (< 3) — this is EXACTLY the B6 defect: it was 0 while the total looked healthy, and :shared:core-usage:test (the strict parser of \`pocketshell usage --json\`) did not run on a host-CLI change")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES" -ge 35 ]] || index_fail+=("test classes depending on the host CLI = $POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES (< 35) — #1509 / the usage parser would stop running on a tools/pocketshell change")
   if [[ "${#index_fail[@]}" -gt 0 ]]; then
     echo "FAIL: the import-dependency index looks broken, so selection would under-run:"
     printf '  %s\n' "${index_fail[@]}"
@@ -904,7 +983,7 @@ if want_inv I2; then
   fi
 
   # I4: the FULL selection covers every class and every journey.
-  run_selection <<<"scripts/ci-journey-suite.sh"
+  run_selection <<<"scripts/ci-app2-journey-suite.sh"
   if [[ "$SELECT_MODE" != "full" ]]; then
     echo "FAIL I4: a scripts/ change did not force a full run"
     failures=$((failures + 1))
@@ -1077,18 +1156,25 @@ if want_inv I8; then
     # strings), both in com.pocketshell.uikit.model.
     "com.pocketshell.uikit.model.SessionAgentKindOptionTest|host-cli"
   )
+  # RE-PINNED for app2 (the rewrite's hard cut deleted every class the old pin
+  # set named). The PROPERTIES pinned are unchanged — a host-CLI change must
+  # still run the journeys that read what the CLI emits, and a transport change
+  # must still run the journeys that drive it end to end — only the classes
+  # carrying them moved.
   local -a PINS=(
     # #1509 G10 + #847 / v0.4.10: host-CLI/client version is a RUNTIME lockstep.
-    "com.pocketshell.app.projects.FolderListHostOutdatedTreeVersionDaemonDockerTest|host-cli"
-    "com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest|host-cli"
+    # The tree journey is the successor of the FolderList* pins: it is the
+    # screen built from `pocketshell sessions --json`, so a producer-side schema
+    # or version change is exactly what breaks it.
+    "com.pocketshell.next.tree.J02SessionTreeListJourney|host-cli"
+    "com.pocketshell.next.tree.J04CreateSessionJourney|host-cli"
+    # #1318: the usage panel is the STRICT reader of `pocketshell usage --json`.
+    "com.pocketshell.next.usage.J12UsagePanelJourney|host-cli"
     # D28 connection core: journeys that drive transport production types.
-    "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest|connection-core"
-    "com.pocketshell.app.diagnostics.ConnectionLogHostMirrorReconnectDockerTest|connection-core"
-    "com.pocketshell.app.projects.Issue1876FolderListMobileRttDockerTest|connection-core"
-    "com.pocketshell.app.projects.ProfileChipRelaunchDockerTest|connection-core"
-    "com.pocketshell.app.hosts.HostResumeLastSessionE2eTest|connection-core"
-    "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest|connection-core"
-    "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest|connection-core"
+    "com.pocketshell.next.connect.J01ConnectAndTrustJourney|connection-core"
+    "com.pocketshell.next.terminal.J03AttachAndTypeJourney|connection-core"
+    "com.pocketshell.next.terminal.J05ReconnectAfterDropJourney|connection-core"
+    "com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney|connection-core"
   )
   local -A registry=()
   while IFS= read -r j; do [[ -n "$j" ]] && registry["$j"]=1; done < <(journey_registry_classes)
@@ -1149,12 +1235,22 @@ if want_inv I10; then
     #      are the SAME set: every emitted `:app` filter is an exact FQCN of a
     #      selected :app unit class, every selected :app unit class is emitted,
     #      and no filter contains a glob metacharacter at all.
+    #
+    #      G3: the equality this asserts is between two sets that can BOTH be
+    #      empty, and an empty-vs-empty match is not evidence of anything. That
+    #      is not hypothetical — when the app module was renamed :app -> :app2
+    #      and this check still asked for ":app", every probe emitted zero
+    #      filters and I10 went green over nothing while the real plan silently
+    #      stopped running the app module's unit tests. So the totals are
+    #      counted and a zero total is itself a failure.
     local -a i10_fail=()
     local probe_path filters tok
+    local i10_probe_count=0 i10_emitted_total=0
     for probe_path in "docs/testing.md" "${rep[usage-costs]:-}" "${rep[portfwd]:-}" "${rep[connection-core]:-}"; do
       [[ -z "$probe_path" ]] && continue
       run_selection <<<"$probe_path"
       [[ "$SELECT_MODE" == "scoped" ]] || continue
+      i10_probe_count=$((i10_probe_count + 1))
       filters="$(plan_gradle_unit | sed -n 's/^UNIT_GRADLE_FILTERS=//p')"
       local -A emitted=()
       local n_emitted=0 n_both_variants=0
@@ -1164,25 +1260,25 @@ if want_inv I10; then
             i10_fail+=("[$probe_path] emitted filter '$tok' contains a glob metacharacter — Gradle's '*' crosses package dots (B3)")
             continue ;;
         esac
-        if [[ "${POCKETSHELL_TA_CLASS_MODULE[$tok]:-}" != ":app" ]] || \
+        if [[ "${POCKETSHELL_TA_CLASS_MODULE[$tok]:-}" != "$APP_MODULE" ]] || \
            ! is_unit_source_set "${POCKETSHELL_TA_CLASS_SOURCESET[$tok]:-}"; then
-          i10_fail+=("[$probe_path] emitted filter '$tok' is not an :app unit test class")
+          i10_fail+=("[$probe_path] emitted filter '$tok' is not an $APP_MODULE unit test class")
           continue
         fi
         emitted["$tok"]=1
         n_emitted=$((n_emitted + 1))
         [[ "${POCKETSHELL_TA_CLASS_SOURCESET[$tok]}" == "test" ]] && n_both_variants=$((n_both_variants + 1))
       done
-      # `:app:test` runs testDebugUnitTest AND testReleaseUnitTest with the SAME
+      # `:app2:test` runs testDebugUnitTest AND testReleaseUnitTest with the SAME
       # --tests set. A set consisting only of `testDebug`/`testRelease`-only
       # classes would make the other variant fail with "No tests found for given
       # includes" — CI red for a selection that is otherwise correct. At least one
       # filter must name a class present in both variants.
       if [[ "$n_emitted" -gt 0 && "$n_both_variants" -eq 0 ]]; then
-        i10_fail+=("[$probe_path] every emitted filter is variant-only; the other :app unit variant would fail with 'No tests found'")
+        i10_fail+=("[$probe_path] every emitted filter is variant-only; the other $APP_MODULE unit variant would fail with 'No tests found'")
       fi
       for c in "${!POCKETSHELL_TA_CLASS_PATH[@]}"; do
-        [[ "${POCKETSHELL_TA_CLASS_MODULE[$c]}" == ":app" ]] || continue
+        [[ "${POCKETSHELL_TA_CLASS_MODULE[$c]}" == "$APP_MODULE" ]] || continue
         is_unit_source_set "${POCKETSHELL_TA_CLASS_SOURCESET[$c]}" || continue
         if class_selected "$c"; then
           [[ -n "${emitted[$c]:-}" ]] || i10_fail+=("[$probe_path] $c is selected but NOT in the emitted --tests filter")
@@ -1190,14 +1286,20 @@ if want_inv I10; then
           [[ -z "${emitted[$c]:-}" ]] || i10_fail+=("[$probe_path] $c is emitted but not selected")
         fi
       done
+      i10_emitted_total=$((i10_emitted_total + n_emitted))
       unset emitted
     done
+    if [[ "$i10_probe_count" -eq 0 ]]; then
+      i10_fail+=("no probe produced a scoped selection, so the plan-vs-command equality was never actually asked (G3)")
+    elif [[ "$i10_emitted_total" -eq 0 ]]; then
+      i10_fail+=("every probe emitted ZERO $APP_MODULE --tests filters across $i10_probe_count scoped probe(s) — an empty-set match is not a match; the app module's unit classes are not reaching the emitted plan")
+    fi
     if [[ "${#i10_fail[@]}" -gt 0 ]]; then
       echo "FAIL I10: ${#i10_fail[@]} plan/command mismatch(es) — the reported selection is not what Gradle would run:"
       printf '  %s\n' "${i10_fail[@]}" | head -20
       failures=$((failures + 1))
     else
-      echo "OK I10: the emitted :app --tests filter is exactly the selected :app unit class set, with no wildcards"
+      echo "OK I10: the emitted $APP_MODULE --tests filter is exactly the selected $APP_MODULE unit class set ($i10_emitted_total filter(s) over $i10_probe_count probe(s)), with no wildcards"
     fi
   fi
 

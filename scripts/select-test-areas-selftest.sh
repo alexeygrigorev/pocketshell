@@ -76,7 +76,16 @@ class BetaTest
 KT
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/AlwaysE2eTest.kt" <<'KT'
 package com.pocketshell.app.proof
-class AlwaysE2eTest
+class AlwaysE2eTest {
+  @Test fun always() {}
+}
+KT
+mkdir -p "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/beta"
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/beta/BetaJourneyTest.kt" <<'KT'
+package com.pocketshell.app.beta
+class BetaJourneyTest {
+  @Test fun beta() {}
+}
 KT
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/SharedFixture.kt" <<'KT'
 package com.pocketshell.app.proof
@@ -84,13 +93,17 @@ object SharedFixture
 KT
 echo "# docs" > "$SANDBOX/docs/notes.md"
 
-cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
+# The journey registry is DERIVED from the module the suite runs wholesale
+# (#2474), so the sandbox's suite carries the same shape the real one does: a
+# JOURNEY_TASK and a gradle_args() with no class filter in it. The registry is
+# then whatever @Test-bearing test classes live under that module's androidTest
+# tree — here AlwaysE2eTest (pcore, always-tier) and BetaJourneyTest (beta).
+cat > "$SANDBOX/scripts/ci-app2-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash
-FQCN_PREFIX="com.pocketshell.app.proof"
-JOURNEY_CLASSES=(
-  "$FQCN_PREFIX.AlwaysE2eTest"
-  "com.pocketshell.app.beta.BetaTest"
-)
+JOURNEY_TASK=":app:connectedDebugAndroidTest"
+gradle_args() {
+  printf '%s\n' "$JOURNEY_TASK" "--no-daemon"
+}
 SH
 
 BASE_MANIFEST="$SANDBOX/scripts/test-areas.txt"
@@ -125,7 +138,8 @@ run_select() {
   printf '%s\n' "$@" |
     POCKETSHELL_TEST_AREAS_REPO_ROOT="$SANDBOX" \
     POCKETSHELL_TEST_AREAS_MANIFEST="$manifest" \
-    POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SANDBOX/scripts/ci-journey-suite.sh" \
+    POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SANDBOX/scripts/ci-app2-journey-suite.sh" \
+    POCKETSHELL_TEST_AREAS_APP_MODULE=":app" \
     bash "$SANDBOX/scripts/select-test-areas.sh" --changed-stdin --print-plan-only 2>&1
 }
 
@@ -199,7 +213,8 @@ fi
 out="$(printf '' |
   POCKETSHELL_TEST_AREAS_REPO_ROOT="$SANDBOX" \
   POCKETSHELL_TEST_AREAS_MANIFEST="$BASE_MANIFEST" \
-  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SANDBOX/scripts/ci-journey-suite.sh" \
+  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SANDBOX/scripts/ci-app2-journey-suite.sh" \
+    POCKETSHELL_TEST_AREAS_APP_MODULE=":app" \
   bash "$SANDBOX/scripts/select-test-areas.sh" --changed-stdin --print-plan-only 2>&1)"
 if [[ "$(field "$out" MODE)" == "full" ]]; then
   ok "6 empty changed-path set => MODE=full"
@@ -264,12 +279,12 @@ fi
 # CASE 11 — a `class` override beats the package glob.
 # ===========================================================================
 cat "$BASE_MANIFEST" > "$SANDBOX/mut-override.txt"
-echo "class  com.pocketshell.app.beta.BetaTest  pcore" >> "$SANDBOX/mut-override.txt"
+echo "class  com.pocketshell.app.beta.BetaJourneyTest  pcore" >> "$SANDBOX/mut-override.txt"
 before="$(run_select "$BASE_MANIFEST" "docs/notes.md")"
 after="$(run_select "$SANDBOX/mut-override.txt" "docs/notes.md")"
-if [[ "$(field "$before" JOURNEY_CLASSES)" != *"com.pocketshell.app.beta.BetaTest"* ]] &&
-   [[ "$(field "$after" JOURNEY_CLASSES)" == *"com.pocketshell.app.beta.BetaTest"* ]]; then
-  ok "11 a class override moves BetaTest into the always tier (it now runs on a docs-only diff)"
+if [[ "$(field "$before" JOURNEY_CLASSES)" != *"com.pocketshell.app.beta.BetaJourneyTest"* ]] &&
+   [[ "$(field "$after" JOURNEY_CLASSES)" == *"com.pocketshell.app.beta.BetaJourneyTest"* ]]; then
+  ok "11 a class override moves BetaJourneyTest into the always tier (it now runs on a docs-only diff)"
 else
   bad "11 class override had no effect: before=$(field "$before" JOURNEY_CLASSES) after=$(field "$after" JOURNEY_CLASSES)"
 fi
@@ -313,12 +328,19 @@ fi
 # Without this, 13a is just "a guard that says OK".
 # ===========================================================================
 real_mut="$SANDBOX/real-manifest-mutant.txt"
-grep -v '^src    shared/core-ssh/\*' "$SCRIPT_DIR/test-areas.txt" |
-  grep -v '^test   shared/core-ssh/\*' > "$real_mut"
+grep -v '^src    shared/core-transport/\*' "$SCRIPT_DIR/test-areas.txt" |
+  grep -v '^test   shared/core-transport/\*' > "$real_mut"
+# Prove the mutation landed before reading a verdict out of it (#1641): the old
+# version of this case named shared/core-ssh, a module the rewrite deleted, so
+# it removed NOTHING and asserted a red the guard was producing for its own
+# reasons.
+if [[ "$(wc -l < "$real_mut")" -ge "$(wc -l < "$SCRIPT_DIR/test-areas.txt")" ]]; then
+  bad "14 MUTATION DID NOT APPLY — no core-transport rule was removed, so 14's verdict would be meaningless"
+fi
 if POCKETSHELL_TEST_AREAS_MANIFEST="$real_mut" bash "$SELECT" --verify-manifest >/dev/null 2>&1; then
-  bad "14 removing the core-ssh rules did NOT redden --verify-manifest — the guard is decorative"
+  bad "14 removing the core-transport rules did NOT redden --verify-manifest — the guard is decorative"
 else
-  ok "14 removing the core-ssh rules reddens --verify-manifest (guard is live)"
+  ok "14 removing the core-transport rules reddens --verify-manifest (guard is live)"
 fi
 
 # ===========================================================================
@@ -349,17 +371,16 @@ mkdir -p "$MUTDIR/lib"
 cp "$SCRIPT_DIR/select-test-areas.sh" "$MUTDIR/select-test-areas.sh"
 cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"
 cp "$SCRIPT_DIR/test-areas.txt" "$MUTDIR/test-areas.txt"
-cp "$SCRIPT_DIR/ci-journey-suite.sh" "$MUTDIR/ci-journey-suite.sh"
+cp "$SCRIPT_DIR/ci-app2-journey-suite.sh" "$MUTDIR/ci-app2-journey-suite.sh"
 # The copies resolve their data relative to their own dir, so a copy that is not
-# given these reads a MISSING exemption list / nightly suite and reddens for a
-# reason that has nothing to do with the mutation under test (#2065).
+# given this reads a MISSING exemption list and reddens for a reason that has
+# nothing to do with the mutation under test (#2065).
 cp "$SCRIPT_DIR/test-unconventional-test-files.txt" "$MUTDIR/test-unconventional-test-files.txt"
-cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$MUTDIR/nightly-extensive-suite.sh"
 
 run_mut() {  # run the MUTATED copy against the REAL tree
   POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
   POCKETSHELL_TEST_AREAS_MANIFEST="${MUT_MANIFEST:-$MUTDIR/test-areas.txt}" \
-  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$MUTDIR/ci-journey-suite.sh" \
+  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$MUTDIR/ci-app2-journey-suite.sh" \
   bash "$MUTDIR/select-test-areas.sh" "$@" 2>&1
 }
 
@@ -385,11 +406,14 @@ run_mut() {  # run the MUTATED copy against the REAL tree
 hostcli_plan="$(printf 'tools/pocketshell/src/pocketshell/tree.py\n' |
   bash "$SELECT" --changed-stdin --print-plan-only 2>/dev/null)"
 before_hostcli="$(sed -n 's/^JOURNEY_CLASSES=//p' <<<"$hostcli_plan")"
-if [[ "$before_hostcli" == *"FolderListHostOutdatedTreeVersionDaemonDockerTest"* ]] &&
-   [[ "$before_hostcli" == *"FolderListOldCliHydrateDockerTest"* ]]; then
-  ok "16a a tools/pocketshell change runs the old-host-CLI journeys (#1509 G10, #847 class)"
+# The old FolderList* old-CLI journeys were deleted with the app module. Their
+# successors are the two app2 journeys built on what the CLI emits: the session
+# tree (`pocketshell sessions --json`) and the usage panel (`usage --json`).
+if [[ "$before_hostcli" == *"J02SessionTreeListJourney"* ]] &&
+   [[ "$before_hostcli" == *"J12UsagePanelJourney"* ]]; then
+  ok "16a a tools/pocketshell change runs the host-CLI-reading journeys (#1509 G10, #847 class)"
 else
-  bad "16a a host-CLI change does NOT run the old-CLI journeys: $before_hostcli"
+  bad "16a a host-CLI change does NOT run the host-CLI-reading journeys: $before_hostcli"
 fi
 hostcli_tasks="$(sed -n 's/^UNIT_SHARED_TASKS=//p' <<<"$hostcli_plan")"
 if [[ " $hostcli_tasks " == *" :shared:core-usage:test "* ]] &&
@@ -409,7 +433,7 @@ fi
 out="$(POCKETSHELL_TA_HOSTCLI_MARKER='ZZ_NO_SUCH_HOST_CLI_MARKER_ZZ' \
        POCKETSHELL_TA_HOSTCLI_CLI_SOURCE='tools/pocketshell/no_such_cli.py' \
        bash "$SELECT" --coverage-invariant --only I9 2>&1)"
-if grep -q 'FAIL I9' <<<"$out" && grep -q 'FolderListHostOutdatedTreeVersionDaemonDockerTest' <<<"$out"; then
+if grep -q 'FAIL I9' <<<"$out" && grep -q 'J02SessionTreeListJourney' <<<"$out"; then
   ok "16c killing every end of the seam reddens the #1509 lockstep pin by name"
 else
   bad "16c the #1509 pin survived a completely dead wire seam:\n$(grep -E '^(OK|FAIL) I9' <<<"$out")"
@@ -457,7 +481,16 @@ fi
 # a stale literal, and legitimate growth of the seam cannot fake a failure.
 clean_manifest="$(bash "$SELECT" --verify-manifest 2>&1)"
 unmutated_producer="$(sed -n 's/.*wire-seam packages = \([0-9]\{1,\}\) producer .*/\1/p' <<<"$clean_manifest")"
-out="$(POCKETSHELL_TA_HOSTCLI_MARKER='PocketshellCommand' bash "$SELECT" --verify-manifest 2>&1)"
+# WHICH ALTERNATIVE IS DROPPED IS TREE-DEPENDENT, and this case must drop one
+# that actually matches something. On the old tree the two string literals were
+# the load-bearing half and `PocketshellCommand` was the survivor; after the
+# rewrite it is the other way round — `PocketshellCommand` is the ONLY
+# alternative any production file still matches (UsageFormat.kt), so keeping it
+# would make this a no-op mutation asserting a red it never caused. The marker
+# below is the shipped expression minus that alternative: a plausible "someone
+# trimmed the regex" edit, distinct from 16b's nonsense marker that matches
+# nothing anywhere.
+out="$(POCKETSHELL_TA_HOSTCLI_MARKER='"pocketshell |pocketshell --' bash "$SELECT" --verify-manifest 2>&1)"
 producer_line="$(grep -E 'wire-seam PRODUCER packages = [0-9]+ \(< [0-9]+\)' <<<"$out" || true)"
 eroded_producer="$(sed -n 's/.*wire-seam PRODUCER packages = \([0-9]\{1,\}\) (< [0-9]\{1,\}).*/\1/p' <<<"$producer_line")"
 producer_floor="$(sed -n 's/.*wire-seam PRODUCER packages = [0-9]\{1,\} (< \([0-9]\{1,\}\)).*/\1/p' <<<"$producer_line")"
@@ -478,18 +511,17 @@ mut_copy() {  # $1 = dir name -> echoes a runner-ready dir
   cp "$SCRIPT_DIR/select-test-areas.sh" "$d/select-test-areas.sh"
   cp "$SCRIPT_DIR/lib/test-areas.sh"    "$d/lib/test-areas.sh"
   cp "$SCRIPT_DIR/test-areas.txt"       "$d/test-areas.txt"
-  cp "$SCRIPT_DIR/ci-journey-suite.sh"  "$d/ci-journey-suite.sh"
+  cp "$SCRIPT_DIR/ci-app2-journey-suite.sh"  "$d/ci-app2-journey-suite.sh"
   # See the MUTDIR note: without these a copy fails on missing #2065 data
   # rather than on the mutation the case is about.
   cp "$SCRIPT_DIR/test-unconventional-test-files.txt" "$d/test-unconventional-test-files.txt"
-  cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$d/nightly-extensive-suite.sh"
   printf '%s\n' "$d"
 }
 run_copy() {  # $1 = dir, rest = args
   local d="$1"; shift
   POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
   POCKETSHELL_TEST_AREAS_MANIFEST="$d/test-areas.txt" \
-  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$d/ci-journey-suite.sh" \
+  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$d/ci-app2-journey-suite.sh" \
   bash "$d/select-test-areas.sh" "$@" 2>&1
 }
 
@@ -505,16 +537,21 @@ else
   bad "16e MUTATION DID NOT APPLY — the consumer-end call is still present in the copy, so 16e's verdict would be meaningless"
 fi
 out="$(run_copy "$B6DIR" --verify-manifest)"
+# The shared-reach COUNT no longer moves under this mutation (core-usage is on
+# the seam by vocabulary as well as by consumption, and the two ends deliberately
+# overlap on the holes the reviewer found), so the load-bearing assertion is the
+# per-END floor: deleting the reply end of the wire must be named as such.
+# 16e-2 below is the other half — that the emitted PLAN really moves.
 if grep -q 'wire-seam CONSUMER packages = 0' <<<"$out" &&
-   grep -q 'wire-seam packages under shared/ = 3' <<<"$out"; then
-  ok "16e deleting the CONSUMER end reddens the shared-reach floor — the round-2 seam (invoker-only, 0 shared packages) can no longer be green"
+   ! grep -q '^PASS: manifest verified' <<<"$out"; then
+  ok "16e deleting the CONSUMER end reddens the per-end floor by name — the round-2 seam (invoker-only) can no longer be green"
 else
   bad "16e the round-2 invoker-only seam is still green:\n$out"
 fi
 out="$(printf 'tools/pocketshell/src/pocketshell/usage.py\n' |
   POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
   POCKETSHELL_TEST_AREAS_MANIFEST="$B6DIR/test-areas.txt" \
-  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$B6DIR/ci-journey-suite.sh" \
+  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$B6DIR/ci-app2-journey-suite.sh" \
   bash "$B6DIR/select-test-areas.sh" --changed-stdin --print-plan-only 2>&1 |
   sed -n 's/^UNIT_SHARED_TASKS=//p')"
 # Assert on the modules the CONSUMER end is the SOLE route to. core-usage,
@@ -549,10 +586,26 @@ else
   bad "16f MUTATION DID NOT APPLY"
 fi
 out="$(run_copy "$B6BDIR" --verify-manifest)"
-if grep -q '^PASS: manifest verified' <<<"$out"; then
-  ok "16f-a dropping one seam package leaves every --verify-manifest floor GREEN (this is exactly how the round-2 hole hid)"
+# ROUND-2 SHAPE, RE-DERIVED FOR app2. This case used to assert that dropping one
+# seam package left every --verify-manifest floor GREEN, so that only the I9 unit
+# pin could catch it — that WAS the round-2 hole, on a tree where the consumer end
+# spanned 15 packages and losing one moved no count below its bound. The rewrite
+# centralised every host-CLI call behind one client, so the consumer end is a
+# SINGLE package and dropping it takes that count to zero: the "healthy totals
+# hiding one hole" shape is not reproducible here, and asserting it would be
+# asserting a property this tree does not have.
+#
+# What must hold instead — and what is actually load-bearing as the seam changes
+# size — is that the drop is named. The count floor happens to fire today because
+# the end has one package; the NAMED pin fires regardless of how many packages
+# the end grows back to, which is the protection that does not decay. Both are
+# asserted, the pin first, because it is the one that survives the seam growing.
+if grep -q 'host-CLI wire seam no longer reaches com.pocketshell.core.usage' <<<"$out" &&
+   grep -q 'wire-seam CONSUMER packages = 0' <<<"$out" &&
+   ! grep -q '^PASS: manifest verified' <<<"$out"; then
+  ok "16f-a dropping the one seam package that IS the wire contract is named by the seam pin (and, on this tree, also empties the consumer end)"
 else
-  bad "16f-a the one-package mutation reddened a floor, so 16f-b would not prove the pin is load-bearing:\n$out"
+  bad "16f-a the one-package mutation was not named by the seam pin:\n$out"
 fi
 out="$(run_copy "$B6BDIR" --coverage-invariant)"
 if grep -q 'FAIL I9' <<<"$out" &&
@@ -676,7 +729,7 @@ $dynamic_guard"
   if [[ "$broken_guard_rc" -ne 0 ]] &&
      grep -qF 'host-CLI live vocabulary reader could not import/read' <<<"$broken_guard" &&
      grep -qF "ModuleNotFoundError: No module named 'pocketshell_issue_2070_missing'" <<<"$broken_guard" &&
-     grep -qF 'host-CLI wire-seam VOCABULARY packages = 0 (< 14)' <<<"$broken_guard" &&
+     grep -qF 'host-CLI wire-seam VOCABULARY packages = 0 (< 6)' <<<"$broken_guard" &&
      grep -qF 'host-CLI live Click commands read = 0 (< 12)' <<<"$broken_guard" &&
      ! grep -q '^PASS: manifest verified' <<<"$broken_guard"; then
     ok "16k-b the real --verify-manifest broken-import run is nonzero and names the unreadable import plus both vocabulary under-floor diagnostics"
@@ -765,7 +818,7 @@ sed -i "s|import\[\[:space:\]\]+com\\\\.pocketshell\\\\.|import[[:space:]]+zz_no
 if grep -q 'zz_no_such_package_zz' "$MUTDIR/lib/test-areas.sh" &&
    [[ "$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
          POCKETSHELL_TEST_AREAS_MANIFEST="$MUTDIR/test-areas.txt" \
-         POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$MUTDIR/ci-journey-suite.sh" \
+         POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$MUTDIR/ci-app2-journey-suite.sh" \
          bash "$MUTDIR/select-test-areas.sh" --verify-manifest 2>&1 |
          grep -c 'import lines scanned = 0')" -eq 1 ]]; then
   : # mutant confirmed live: zero import lines reach the dependency index
@@ -773,10 +826,24 @@ else
   bad "17 MUTATION DID NOT APPLY — the import scan is still live in the copy, so 17's verdict would be meaningless"
 fi
 out="$(run_mut --coverage-invariant --only I8,I9)"
-if grep -q 'FAIL I8' <<<"$out" && grep -qE 'ForwardingNetworkRideThroughE2eTest|ConnectionLogHostMirrorReconnectDockerTest|Issue1876FolderListMobileRttDockerTest' <<<"$out"; then
-  ok "17 disabling the import-derived deps reddens I8, naming the escaping journeys"
+# WHICH CHECK CATCHES THIS IS TREE-DEPENDENT, and pinning the wrong one makes the
+# case vacuous. On the old tree, 29 journeys reached connection-core ONLY through
+# the import graph, so killing the derivation reddened I8's escape scan by name.
+# app2 has 11 journeys, and every area they import is either always-tier
+# (connection-core, terminal-render, app-shell) or inside the `couple` closure of
+# the area they live in — so the closure alone still selects all 11 and I8 has
+# nothing to report. That is not the derivation being dead weight: the UNIT half
+# still depends on it entirely, and killing it drops
+# `com.pocketshell.core.storage.AppDatabaseTest` (the CLI-lockstep schema test,
+# reached from `host-cli` only by import) straight out of the plan. So the
+# assertion is I9, by name — the check that this tree's structure actually routes
+# the failure to. If a future journey imports across an uncoupled boundary, I8
+# becomes load-bearing again and this case should grow that assertion back.
+if grep -q 'FAIL I9' <<<"$out" &&
+   grep -q 'does NOT select unit class com.pocketshell.core.storage.AppDatabaseTest' <<<"$out"; then
+  ok "17 disabling the import-derived deps reddens the pinned blast-radius check, naming the escaping lockstep class"
 else
-  bad "17 the escape scan survived a disabled import derivation:\n$(grep -E '^(OK|FAIL) I[89]' <<<"$out")"
+  bad "17 the import-derived dependency edges are not load-bearing:\n$(grep -E '^(OK|FAIL) I[89]' <<<"$out")"
 fi
 cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"   # restore
 
@@ -787,17 +854,17 @@ cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"   # restore
 # dots, so the command ran all 485 :app unit classes while the plan reported a
 # fraction of them. Mutation: reinstate that wildcard. I10 must redden.
 # ---------------------------------------------------------------------------
-filters="$(printf 'app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt\n' |
+filters="$(printf 'app2/src/main/java/com/pocketshell/next/usage/UsageScreen.kt\n' |
   bash "$SELECT" --changed-stdin --print-plan-only 2>/dev/null |
   sed -n 's/^UNIT_GRADLE_FILTERS=//p')"
 if [[ -n "$filters" && "$filters" != *"*"* ]]; then
-  ok "18a the emitted :app filter is exact class names, with no glob metacharacter"
+  ok "18a the emitted app-module filter is exact class names, with no glob metacharacter"
 else
-  bad "18a emitted filter still contains a wildcard: $filters"
+  bad "18a emitted filter is empty or still contains a wildcard: $filters"
 fi
-sed -i 's|^      app_unit+=("$fqcn")$|      app_unit+=("com.pocketshell.app.*Test")|' \
+sed -i 's|^      app_unit+=("$fqcn")$|      app_unit+=("com.pocketshell.next.*Test")|' \
   "$MUTDIR/select-test-areas.sh"
-grep -q 'com.pocketshell.app.\*Test' "$MUTDIR/select-test-areas.sh" ||
+grep -q 'com.pocketshell.next.\*Test' "$MUTDIR/select-test-areas.sh" ||
   bad "18b MUTATION DID NOT APPLY — the wildcard mutant is not live in the copy"
 out="$(run_mut --coverage-invariant --only I10)"
 if grep -q 'FAIL I10' <<<"$out" && grep -q 'glob metacharacter' <<<"$out"; then
@@ -878,9 +945,8 @@ fi
 #
 # These run against the REAL tree deliberately: the property under test is about
 # the real exemption list and the real files it pins, and a synthetic mini-repo
-# would only prove the parser parses. Only the exemption file (and, for 21f, the
-# nightly suite) is swapped for a mutated copy; everything else is the shipped
-# guard reading the shipped tree. The verdict is read from the specific FAIL
+# would only prove the parser parses. Only the exemption file is swapped for a
+# mutated copy; everything else is the shipped guard reading the shipped tree. The verdict is read from the specific FAIL
 # line, not the exit code, since the real tree emits many other checks.
 # 21k–21m (#2170) also plant a tracked non-source via a private index copy.
 # ---------------------------------------------------------------------------
@@ -888,9 +954,8 @@ UNCONV_REAL="$SCRIPT_DIR/test-unconventional-test-files.txt"
 UNCONVDIR="$SANDBOX/unconventional"
 mkdir -p "$UNCONVDIR"
 
-run_unconv() {  # $1 = exemption file, $2 = nightly suite (optional)
+run_unconv() {  # $1 = exemption file
   POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$1" \
-  POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="${2:-$SCRIPT_DIR/nightly-extensive-suite.sh}" \
   bash "$SELECT" --verify-manifest 2>&1
 }
 
@@ -908,7 +973,10 @@ else
   # SAME code path a newly added unconventional @Test file takes: this is the
   # #1851 shape, and it is the one red that must never be losable.
   grep -v '^shared/ui-kit' "$UNCONV_REAL" > "$UNCONVDIR/no-designrenders.txt"
-  if grep -q 'DesignRenders' "$UNCONVDIR/no-designrenders.txt"; then
+  # Anchored at the start of the line: the app2 render rows NAME DesignRenders
+  # in their justification prose, so an unanchored grep would report the
+  # mutation dead while it was in fact applied.
+  if grep -q '^shared/ui-kit.*DesignRenders' "$UNCONVDIR/no-designrenders.txt"; then
     bad "21a MUTATION DID NOT APPLY — the DesignRenders row is still in the copy, so 21a's verdict would be meaningless"
   fi
   out="$(run_unconv "$UNCONVDIR/no-designrenders.txt")"
@@ -948,22 +1016,13 @@ else
     bad "21c an exemption with no reason survived:\n$(grep -E 'convention|exemption' <<<"$out")"
   fi
 
-  # 21d — The executor claim must match the path. Claiming the unit source set
-  # for an androidTest file would assert `./gradlew test` runs it, which is the
-  # exact false "it executes somewhere" this guard is supposed to refuse.
-  sed 's|\(TerminalHotkeysPanelScreenshotHarness.kt\t\)nightly-connected|\1unit-source-set|' \
-    "$UNCONV_REAL" > "$UNCONVDIR/wrong-executor.txt"
-  out="$(run_unconv "$UNCONVDIR/wrong-executor.txt")"
-  if grep -q "executor 'unit-source-set' but the path is not under \*/src/test/" <<<"$out"; then
-    ok "21d claiming the unit source set for an androidTest path reddens"
-  else
-    bad "21d a false unit-source-set executor claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
-  fi
-
   # 21e — An executor the guard cannot check is rejected, not believed. This is
   # the "I could not check" != "I checked and it is fine" rule.
-  sed 's|\(TerminalHotkeysPanelScreenshotHarness.kt\t\)nightly-connected|\1runs-somewhere-trust-me|' \
+  sed 's|\(ShareScreenRenders.kt\t\)unit-source-set|\1runs-somewhere-trust-me|' \
     "$UNCONV_REAL" > "$UNCONVDIR/unknown-executor.txt"
+  if ! grep -qP 'ShareScreenRenders\.kt\truns-somewhere-trust-me' "$UNCONVDIR/unknown-executor.txt"; then
+    bad "21e MUTATION DID NOT APPLY — the executor is unchanged in the copy"
+  fi
   out="$(run_unconv "$UNCONVDIR/unknown-executor.txt")"
   if grep -q "unknown executor 'runs-somewhere-trust-me'" <<<"$out"; then
     ok "21e an unverifiable executor claim is rejected rather than believed"
@@ -971,70 +1030,44 @@ else
     bad "21e an unknown executor claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
   fi
 
-  # 21f — `nightly-connected` rests on nightly phase 1 running
-  # :app:connectedDebugAndroidTest WHOLESALE. The moment a class is named in the
-  # nightly suite (exclusion, shard pin, even a comment) that claim stops being
-  # inherited and has to be re-argued. Fail-closed on the simple name.
-  cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$UNCONVDIR/nightly.sh"
-  printf '\n# MUTANT 21f\nJOURNEY_EXCLUDED_CLASSES+=("$FQCN_PREFIX.TerminalHotkeysPanelScreenshotHarness")\n' \
-    >> "$UNCONVDIR/nightly.sh"
-  if ! grep -q 'MUTANT 21f' "$UNCONVDIR/nightly.sh"; then
-    bad "21f MUTATION DID NOT APPLY — the nightly exclusion is not live in the copy"
+  # 21f — THE DELETED EXECUTOR KIND STAYS DELETED. `nightly-connected` rested on
+  # nightly phase 1 running `:app:connectedDebugAndroidTest` WHOLESALE minus a
+  # `notClass` list; the rewrite deleted that module and that lane, and app2's
+  # suite runs unfiltered with no exclusion list to be absent from. A row that
+  # still claims it must be REJECTED as unknown, not quietly honoured — a
+  # resurrected kind whose premise nothing can check is the #2065 lie in its
+  # purest form. (This replaces the old 21f/21i/21j trio, which mutated the
+  # nightly suite's phase-1 shape; there is no phase 1 to mutate any more.)
+  sed 's|\(ShareScreenRenders.kt\t\)unit-source-set|\1nightly-connected|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/resurrected-nightly.txt"
+  if ! grep -qP 'ShareScreenRenders\.kt\tnightly-connected' "$UNCONVDIR/resurrected-nightly.txt"; then
+    bad "21f MUTATION DID NOT APPLY — the resurrected nightly-connected row is not in the copy"
   fi
-  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly.sh")"
-  if grep -q "executor 'nightly-connected' claims the wholesale nightly run reaches it" <<<"$out" &&
-     grep -q 'TerminalHotkeysPanelScreenshotHarness' <<<"$out"; then
-    ok "21f excluding an exempted harness from the nightly wholesale run reddens its executor claim"
+  out="$(run_unconv "$UNCONVDIR/resurrected-nightly.txt")"
+  if grep -q "unknown executor 'nightly-connected'" <<<"$out"; then
+    ok "21f a resurrected 'nightly-connected' executor claim is rejected — the deleted kind cannot come back by data alone"
   else
-    bad "21f a harness excluded from nightly kept its 'nightly-connected' claim:\n$(grep -E 'exemption' -A3 <<<"$out")"
-  fi
-
-  # 21i / 21j — The PREMISE under `nightly-connected`, not just the per-row
-  # check. "The class is not excluded" only implies "it runs" while phase 1 is a
-  # WHOLESALE run minus a notClass list. Flip phase 1 to an allowlist, or drop
-  # the subtraction, and every row would silently start lying with the per-row
-  # check still green — the G6 shape where the assertion survives the bug.
-  sed 's|\(-Pandroid.testInstrumentationRunnerArguments.notClass="\$JOURNEY_NOTCLASS_ARG" \\\)|\1\n  -Pandroid.testInstrumentationRunnerArguments.class="com.pocketshell.app.proof.Allowlisted" \\|' \
-    "$SCRIPT_DIR/nightly-extensive-suite.sh" > "$UNCONVDIR/nightly-allowlist.sh"
-  if [[ "$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$UNCONVDIR/nightly-allowlist.sh" |
-           grep -c 'RunnerArguments.class=')" -ne 1 ]]; then
-    bad "21i MUTATION DID NOT APPLY — phase 1 in the copy is not an allowlist, so 21i's verdict would be meaningless"
-  fi
-  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly-allowlist.sh")"
-  if grep -q 'phase 1 now restricts what it runs' <<<"$out"; then
-    ok "21i turning nightly phase 1 into a class= allowlist reddens every nightly-connected row's premise"
-  else
-    bad "21i phase 1 became an allowlist and the nightly-connected rows stayed green:\n$(grep -E 'exemption' -A3 <<<"$out")"
-  fi
-
-  sed '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/ s|^  -Pandroid.testInstrumentationRunnerArguments.notClass=.*|  \\|' \
-    "$SCRIPT_DIR/nightly-extensive-suite.sh" > "$UNCONVDIR/nightly-noexclude.sh"
-  if [[ "$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$UNCONVDIR/nightly-noexclude.sh" |
-           grep -c 'RunnerArguments.notClass=')" -ne 0 ]]; then
-    bad "21j MUTATION DID NOT APPLY — phase 1 in the copy still subtracts a notClass list"
-  fi
-  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly-noexclude.sh")"
-  if grep -q 'phase 1 no longer runs :app:connectedDebugAndroidTest minus a notClass list' <<<"$out"; then
-    ok "21j losing the wholesale-minus-notClass shape reddens the nightly-connected premise"
-  else
-    bad "21j the wholesale premise survived losing its shape:\n$(grep -E 'exemption' -A3 <<<"$out")"
+    bad "21f the deleted nightly-connected executor was still honoured:\n$(grep -E 'exemption' -A3 <<<"$out")"
   fi
 
   # 21g — The gate must be a class the registries can actually see. Resolved
   # through the SAME class index the area manifest and the ledger use, so
   # "the real assertion lives over there" cannot point at a name that does not
   # exist, or at another invisible file.
-  sed 's|com.pocketshell.app.tmux.TerminalHotkeysPanelNoTruncationTest|com.pocketshell.app.tmux.TotallyFineGateTest|' \
+  sed 's|com.pocketshell.next.share.SharePickerScreenTest|com.pocketshell.next.share.TotallyFineGateTest|' \
     "$UNCONV_REAL" > "$UNCONVDIR/ghost-gate.txt"
+  if ! grep -q 'TotallyFineGateTest' "$UNCONVDIR/ghost-gate.txt"; then
+    bad "21g MUTATION DID NOT APPLY — the gate is unchanged in the copy"
+  fi
   out="$(run_unconv "$UNCONVDIR/ghost-gate.txt")"
-  if grep -q "gate 'com.pocketshell.app.tmux.TotallyFineGateTest' is not a known test class" <<<"$out"; then
+  if grep -q "gate 'com.pocketshell.next.share.TotallyFineGateTest' is not a known test class" <<<"$out"; then
     ok "21g a gate naming a class no registry knows reddens"
   else
     bad "21g a ghost gate class survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
   fi
 
   # 21h — An `enumerated-by:` registry must actually enumerate THIS file.
-  sed 's|enumerated-by:scripts/render.sh|enumerated-by:scripts/ci-journey-suite.sh|' \
+  sed 's|enumerated-by:scripts/render.sh|enumerated-by:scripts/ci-app2-journey-suite.sh|' \
     "$UNCONV_REAL" > "$UNCONVDIR/wrong-enumerator.txt"
   out="$(run_unconv "$UNCONVDIR/wrong-enumerator.txt")"
   if grep -q 'does not reference this path, so it cannot be enumerating it' <<<"$out"; then
@@ -1044,12 +1077,11 @@ else
   fi
 
   # -------------------------------------------------------------------------
-  # #2170 — a nightly-connected / unit-source-set row is a claim that the
-  # file EXECUTES in that lane. Path-prefix matching accepts any file under
-  # the source-set directory, including a parked `*.kt.txt` / `*.kt.turned-off`
-  # that Gradle never compiles. The rows below are the currently-passing
-  # lie: they are green on a prefix-only matcher and must be red once the
-  # guard requires a compiling Kotlin/Java source.
+  # #2170 — a `unit-source-set` row is a claim that the file EXECUTES in that
+  # lane. Path-prefix matching accepts any file under the source-set directory,
+  # including a parked `*.kt.turned-off` that Gradle never compiles, and any
+  # file under a DIFFERENT source set entirely. 21d and 21l are the two halves
+  # of that; 21m is the mutation that proves 21l is not decorative.
   #
   # The plant is tracked via a private GIT_INDEX_FILE copy so `git ls-files`
   # (what the guard inventories) sees it, without touching the real index.
@@ -1063,7 +1095,7 @@ else
     local rel="$1" abs="$SCRIPT_DIR/../$1"
     mkdir -p "$(dirname "$abs")"
     cat > "$abs" <<'KT'
-package com.pocketshell.app.proof
+package com.pocketshell.next.parked
 import org.junit.Test
 class Issue2170NonCompilingParked {
     @Test
@@ -1081,38 +1113,66 @@ KT
 
   run_unconv_planted() {  # $1 = exemption file, $2 = select-test-areas.sh (optional)
     POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$1" \
-    POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="$SCRIPT_DIR/nightly-extensive-suite.sh" \
     GIT_INDEX_FILE="$ISSUE2170_INDEX" \
     bash "${2:-$SELECT}" --verify-manifest 2>&1
   }
 
-  ISSUE2170_NIGHTLY_PATH="app/src/androidTest/java/com/pocketshell/app/proof/Issue2170NonCompilingParked.kt.txt"
+  # A COMPILING, conventionally-invisible androidTest source: the compiling
+  # check cannot fire on it, so the only thing that can redden 21d is the
+  # source-set check itself.
+  ISSUE2170_ANDROID_PATH="app2/src/androidTest/java/com/pocketshell/next/connect/Issue2170ParkedHarness.kt"
   ISSUE2170_UNIT_PATH="shared/ui-kit/src/test/java/com/pocketshell/uikit/render/Issue2170NonCompilingParked.kt.turned-off"
-  ISSUE2170_GATE="com.pocketshell.app.composer.Issue1622ComposerSheetGeometryProofTest"
-  plant_hidden_unconventional "$ISSUE2170_NIGHTLY_PATH"
+  ISSUE2170_GATE="com.pocketshell.next.composer.ComposerBarTest"
 
+  # 21d — The executor claim must match the path. `unit-source-set` asserts
+  # `./gradlew test` runs the file; claiming it for an androidTest path is the
+  # exact false "it executes somewhere" this guard refuses. With
+  # `nightly-connected` deleted there is now NO executor that can cover an
+  # instrumented path, which is the point: name it to the convention instead.
+  plant_hidden_unconventional "$ISSUE2170_ANDROID_PATH"
   {
     cat "$UNCONV_REAL"
-    printf '%s\tnightly-connected\t%s\tparked non-source — must be rejected (#2170)\n' \
-      "$ISSUE2170_NIGHTLY_PATH" "$ISSUE2170_GATE"
-  } > "$UNCONVDIR/parked-nightly.txt"
-  if ! grep -Fq "$ISSUE2170_NIGHTLY_PATH" "$UNCONVDIR/parked-nightly.txt"; then
-    bad "21k MUTATION DID NOT APPLY — the parked nightly-connected row is missing from the copy"
+    printf '%s\tunit-source-set\t%s\tandroidTest path claiming the unit lane — must be rejected\n' \
+      "$ISSUE2170_ANDROID_PATH" "$ISSUE2170_GATE"
+  } > "$UNCONVDIR/wrong-executor.txt"
+  if ! grep -Fq "$ISSUE2170_ANDROID_PATH" "$UNCONVDIR/wrong-executor.txt"; then
+    bad "21d MUTATION DID NOT APPLY — the androidTest unit-source-set row is missing from the copy"
   fi
-  out="$(run_unconv_planted "$UNCONVDIR/parked-nightly.txt")"
-  if grep -Fq "$ISSUE2170_NIGHTLY_PATH" <<<"$out" &&
-     grep -q "executor 'nightly-connected' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
-    ok "21k a nightly-connected row for a parked .kt.txt under app/src/androidTest/ reddens (prefix-only matching is the lie)"
+  out="$(run_unconv_planted "$UNCONVDIR/wrong-executor.txt")"
+  if grep -Fq "$ISSUE2170_ANDROID_PATH" <<<"$out" &&
+     grep -q "executor 'unit-source-set' but the path is not under \*/src/test/" <<<"$out" &&
+     ! grep -q "$ISSUE2170_ANDROID_PATH: executor 'unit-source-set' but the file is not a compiling" <<<"$out"; then
+    ok "21d claiming the unit source set for an androidTest path reddens on the source set, not on some other check"
   else
-    bad "21k a nightly-connected row for a non-compiling androidTest path survived (the #2170 currently-passing case):\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
+    bad "21d a false unit-source-set executor claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+  unplant_hidden_unconventional "$ISSUE2170_ANDROID_PATH"
+
+  # 21l — unit-source-set + */src/test/ + a file Gradle will not compile. A
+  # prefix-only `*/src/test/*` matcher accepts it; the compiling-source check is
+  # what must reject it.
+  plant_hidden_unconventional "$ISSUE2170_UNIT_PATH"
+  {
+    cat "$UNCONV_REAL"
+    printf '%s\tunit-source-set\t%s\tparked non-source — must be rejected (#2170)\n' \
+      "$ISSUE2170_UNIT_PATH" "$ISSUE2170_GATE"
+  } > "$UNCONVDIR/parked-unit.txt"
+  if ! grep -Fq "$ISSUE2170_UNIT_PATH" "$UNCONVDIR/parked-unit.txt"; then
+    bad "21l MUTATION DID NOT APPLY — the parked unit-source-set row is missing from the copy"
+  fi
+  out="$(run_unconv_planted "$UNCONVDIR/parked-unit.txt")"
+  if grep -Fq "$ISSUE2170_UNIT_PATH" <<<"$out" &&
+     grep -q "executor 'unit-source-set' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
+    ok "21l a unit-source-set row for a parked .kt.turned-off under */src/test/ reddens (the #2170 mirror)"
+  else
+    bad "21l a unit-source-set row for a non-compiling src/test path survived:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
   fi
 
-  # 21m — G6: a prefix-only matcher must redden 21k. Restore the old
-  # `is_compiling_test_source` (always-true ≡ path-prefix only) on a private
-  # copy and assert the planted nightly-connected .kt.txt is ACCEPTED. If it
-  # is still rejected, 21k is red for the wrong reason (stale / gate / hidden)
-  # and the new assertion is decorative. Runs while the nightly plant is
-  # still the only extra tracked file.
+  # 21m — G6: a prefix-only matcher must redden 21l. Restore the old
+  # `is_compiling_test_source` (always-true == path-prefix only) on a private
+  # copy and assert the planted `.kt.turned-off` is ACCEPTED. If it is still
+  # rejected, 21l is red for the wrong reason (stale / gate / hidden) and its
+  # assertion is decorative.
   prefix_only="$(mut_copy issue2170-prefix-only)"
   if ! grep -q 'is_compiling_test_source()' "$prefix_only/select-test-areas.sh"; then
     bad "21m MUTATION DID NOT APPLY — is_compiling_test_source() is missing from the copy, so a prefix-only revert cannot be shown"
@@ -1130,41 +1190,19 @@ KT
       out="$(
         POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
         POCKETSHELL_TEST_AREAS_MANIFEST="$prefix_only/test-areas.txt" \
-        POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$prefix_only/ci-journey-suite.sh" \
-        POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$UNCONVDIR/parked-nightly.txt" \
-        POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="$prefix_only/nightly-extensive-suite.sh" \
+        POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$prefix_only/ci-app2-journey-suite.sh" \
+        POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$UNCONVDIR/parked-unit.txt" \
         GIT_INDEX_FILE="$ISSUE2170_INDEX" \
         bash "$prefix_only/select-test-areas.sh" --verify-manifest 2>&1
       )"
-      if grep -q "executor 'nightly-connected' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
-        bad "21m prefix-only matcher still rejected the parked .kt.txt — 21k is red for another reason:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
+      if grep -q "executor 'unit-source-set' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
+        bad "21m prefix-only matcher still rejected the parked .kt.turned-off — 21l is red for another reason:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
       elif grep -q "OK: no new @Test-bearing file outside" <<<"$out"; then
-        ok "21m a prefix-only matcher accepts the parked nightly-connected .kt.txt (the mutation that reddens 21k)"
+        ok "21m a prefix-only matcher accepts the parked unit-source-set .kt.turned-off (the mutation that reddens 21l)"
       else
         bad "21m prefix-only matcher did not cleanly accept the parked row (verdict is not the shipped-list OK):\n$(grep -E 'convention|exemption|FAIL' <<<"$out")"
       fi
     fi
-  fi
-
-  # 21l — the mirror: unit-source-set + */src/test/ + a file Gradle will not
-  # compile. Same shape, other executor. A prefix-only `*/src/test/*` matcher
-  # accepts it. Swap the plant so the extra tracked file is this one only.
-  unplant_hidden_unconventional "$ISSUE2170_NIGHTLY_PATH"
-  plant_hidden_unconventional "$ISSUE2170_UNIT_PATH"
-  {
-    cat "$UNCONV_REAL"
-    printf '%s\tunit-source-set\t%s\tparked non-source — must be rejected (#2170)\n' \
-      "$ISSUE2170_UNIT_PATH" "$ISSUE2170_GATE"
-  } > "$UNCONVDIR/parked-unit.txt"
-  if ! grep -Fq "$ISSUE2170_UNIT_PATH" "$UNCONVDIR/parked-unit.txt"; then
-    bad "21l MUTATION DID NOT APPLY — the parked unit-source-set row is missing from the copy"
-  fi
-  out="$(run_unconv_planted "$UNCONVDIR/parked-unit.txt")"
-  if grep -Fq "$ISSUE2170_UNIT_PATH" <<<"$out" &&
-     grep -q "executor 'unit-source-set' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
-    ok "21l a unit-source-set row for a parked .kt.turned-off under */src/test/ reddens (the #2170 mirror)"
-  else
-    bad "21l a unit-source-set row for a non-compiling src/test path survived:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
   fi
 fi
 

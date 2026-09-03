@@ -13,7 +13,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD="$SCRIPT_DIR/check-test-execution-ledger.sh"
 
 SANDBOX="$(mktemp -d)"
-cleanup() { rm -rf "$SANDBOX"; }
+cleanup() {
+  local pl
+  for pl in "${VARIANT_PLANTS[@]:-}"; do
+    [[ -n "$pl" ]] || continue
+    rm -f "$SCRIPT_DIR/../$pl"
+    GIT_INDEX_FILE="${VARIANT_INDEX:-}" git -C "$SCRIPT_DIR/.." update-index --remove -- "$pl" 2>/dev/null || true
+    # Also unwind the directories the plant created. An EMPTY source root greps
+    # exactly like a missing one, and a sibling guard (check-design-tokens.sh)
+    # reads "root exists" as "root is scannable" — leftover empty dirs from a
+    # self-test are how that guard silently reported perfection over nothing.
+    ( cd "$SCRIPT_DIR/.." && rmdir -p --ignore-fail-on-non-empty "$(dirname "$pl")" 2>/dev/null || true )
+  done
+  [[ -n "${VARIANT_INDEX:-}" ]] && rm -f "$VARIANT_INDEX"
+  rm -rf "$SANDBOX"
+}
+VARIANT_INDEX=""
+VARIANT_PLANTS=()
 trap cleanup EXIT
 
 PASS=0
@@ -249,7 +265,10 @@ bash "$SELECT" --list-classes 2>/dev/null |
   awk -v n="$REAL_NOW" -F'\t' '{print $1"\t"n"\tunit"}' > "$REAL_LEDGER"
 real_count="$(wc -l < "$REAL_LEDGER" | tr -d ' ')"
 
-if [[ "$real_count" -lt 500 ]]; then
+# Floor re-derived for the app2 tree (183 registered classes today; the old
+# 500 was calibrated against the pre-rewrite 602K-line client). Far enough
+# below to detect a broken listing, not normal size.
+if [[ "$real_count" -lt 150 ]]; then
   bad "11 could not build a real-tree ledger (only $real_count classes) — the class listing is broken"
 elif out="$(bash "$GUARD" --verify --ledger "$REAL_LEDGER" --now "$REAL_NOW" 2>&1)"; then
   ok "11 a complete fresh ledger of all $real_count REAL registered classes passes --verify"
@@ -259,7 +278,7 @@ fi
 
 # CASE 12 — selectivity for case 11: drop ONE real class and the guard must name
 # it. Without this, case 11 could pass with the guard doing nothing.
-dropped="com.pocketshell.core.ssh.SshLeaseManagerTest"
+dropped="com.pocketshell.core.transport.GraceCloseSchedulerTest"
 grep -v "^${dropped}	" "$REAL_LEDGER" > "$SANDBOX/real-ledger-minus.tsv"
 if out="$(bash "$GUARD" --verify --ledger "$SANDBOX/real-ledger-minus.tsv" --now "$REAL_NOW" 2>&1)"; then
   bad "12 dropping $dropped from the real ledger did NOT redden the guard:\n$out"
@@ -270,23 +289,27 @@ else
 fi
 
 # CASE 13 — the EXACT round-1 defect, reproduced through the FQCN resolver on
-# the real tree: with the core-ssh rules removed from the manifest, every
-# core-ssh class must be reported as belonging to NO area. Round 1 produced this
-# red from an intact manifest, because the resolver could not find the files.
-real_mut="$SANDBOX/real-manifest-no-core-ssh.txt"
-grep -v '^src    shared/core-ssh/\*' "$SCRIPT_DIR/test-areas.txt" |
-  grep -v '^test   shared/core-ssh/\*' > "$real_mut"
+# the real tree: with a shared module's rules removed from the manifest, every
+# class in that module must be reported as belonging to NO area. Round 1
+# produced this red from an INTACT manifest, because the resolver could not find
+# the files at all — that is the defect, and this case is the deliberate version
+# of the same red. The module is core-transport: the round-1 write-up names
+# core-ssh, which the rewrite deleted, and core-transport is the surviving
+# connection core that inherited its role.
+real_mut="$SANDBOX/real-manifest-no-core-transport.txt"
+grep -v '^src    shared/core-transport/\*' "$SCRIPT_DIR/test-areas.txt" |
+  grep -v '^test   shared/core-transport/\*' > "$real_mut"
 if out="$(POCKETSHELL_TEST_AREAS_MANIFEST="$real_mut" \
           bash "$GUARD" --verify --ledger "$REAL_LEDGER" --now "$REAL_NOW" 2>&1)"; then
-  bad "13 removing the core-ssh manifest rules did NOT redden the real-tree area check:\n$out"
-elif grep -q 'belong to NO area' <<<"$out" && grep -q 'com.pocketshell.core.ssh.' <<<"$out"; then
-  ok "13 removing the core-ssh rules reddens the real-tree 'no area' check, naming core-ssh classes"
+  bad "13 removing the core-transport manifest rules did NOT redden the real-tree area check:\n$out"
+elif grep -q 'belong to NO area' <<<"$out" && grep -q 'com.pocketshell.core.transport.' <<<"$out"; then
+  ok "13 removing the core-transport rules reddens the real-tree 'no area' check, naming core-transport classes"
 else
   bad "13 guard failed for the wrong reason:\n$out"
 fi
 
 # CASE 14 — the round-1 defect ITSELF, replayed as a code mutation: a resolver
-# that only knows about `app/src/**` roots. That is precisely what
+# that only knows about the app module's own roots. That is precisely what
 # POCKETSHELL_TA_CLASS_SEARCH_ROOTS was, and it made this guard red for 183
 # classes while every synthetic case stayed green. The mutation must reproduce
 # that exact red, and it must be proven LIVE first.
@@ -295,19 +318,19 @@ mkdir -p "$MUTDIR/lib"
 cp "$GUARD" "$MUTDIR/check-test-execution-ledger.sh"
 cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"
 cp "$SCRIPT_DIR/test-areas.txt" "$MUTDIR/test-areas.txt"
-sed -i '/registry entries$/a\  if [[ "$fqcn" != com.pocketshell.app.* ]]; then printf ""; return 1; fi' \
+sed -i '/registry entries$/a\  if [[ "$fqcn" != com.pocketshell.next.* ]]; then printf ""; return 1; fi' \
   "$MUTDIR/lib/test-areas.sh"
-if ! grep -q 'if \[\[ "\$fqcn" != com.pocketshell.app.\* \]\]; then printf ""; return 1; fi' "$MUTDIR/lib/test-areas.sh"; then
+if ! grep -q 'if \[\[ "\$fqcn" != com.pocketshell.next.\* \]\]; then printf ""; return 1; fi' "$MUTDIR/lib/test-areas.sh"; then
   bad "14 MUTATION DID NOT APPLY — the app-only resolver mutant is not live, so 14's verdict would be meaningless"
 else
   out="$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)" \
          POCKETSHELL_TEST_AREAS_MANIFEST="$MUTDIR/test-areas.txt" \
-         POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SCRIPT_DIR/ci-journey-suite.sh" \
+         POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SCRIPT_DIR/ci-app2-journey-suite.sh" \
          bash "$MUTDIR/check-test-execution-ledger.sh" --verify --ledger "$REAL_LEDGER" --now "$REAL_NOW" 2>&1)"
   if grep -q 'belong to NO area' <<<"$out" &&
-     grep -q 'com.pocketshell.core.ssh.' <<<"$out" &&
-     grep -q 'com.pocketshell.core.connection.' <<<"$out"; then
-    ok "14 an app-only class resolver (the round-1 shape) reddens the real-tree guard for core-ssh and core-connection"
+     grep -q 'com.pocketshell.core.transport.' <<<"$out" &&
+     grep -q 'com.pocketshell.core.hostapi.' <<<"$out"; then
+    ok "14 an app-module-only class resolver (the round-1 shape) reddens the real-tree guard for core-transport and core-hostapi"
   else
     bad "14 the app-only-roots resolver did NOT reproduce the round-1 red:\n$(grep -E 'OK:|FAIL:' <<<"$out")"
   fi
@@ -575,12 +598,49 @@ fi
 # was not the load-bearing selected-vs-executed check.
 # ===========================================================================
 SELECT="${SELECT:-$SCRIPT_DIR/select-test-areas.sh}"
-PIN_COLD="com.pocketshell.app.proof.ColdInstallE2eTest"
-PIN_WORKFLOW="com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
+PIN_COLD="com.pocketshell.next.connect.J01ConnectAndTrustJourney"
+PIN_WORKFLOW="com.pocketshell.next.terminal.J03AttachAndTypeJourney"
 SHARED_ANDROIDTEST="com.pocketshell.uikit.components.UiKitPrimitivesTest"
-RELEASE_ONLY="com.pocketshell.core.connection.ConnectionControllerConfinementDefaultReleaseTest"
-DEBUG_ONLY="com.pocketshell.core.connection.ConnectionControllerConfinementDefaultDebugTest"
-REAL_LLM_ONLY="com.pocketshell.app.assistant.AssistantAgentLoopRealLlmTest"
+# VARIANT-ONLY FIXTURES ARE PLANTED, NOT FOUND.
+#
+# Cases 26-28 exist for one property: a testDebugUnitTest artifact is NOT
+# acceptance for a Release-scoped selection, because a single Gradle variant
+# cannot emit the other variant's source set. That was a real round-1 hole. It
+# needs a class that lives ONLY in `src/testRelease` and one that lives ONLY in
+# `src/testDebug`, and the rewrite left the tree with neither — every surviving
+# unit test is in the shared `src/test` set.
+#
+# Deleting the cases would retire a guard because its fixture went away, which
+# is the wrong direction: the property is still true of the build and would
+# still hide the same hole. So the fixtures are planted into a PRIVATE
+# GIT_INDEX_FILE copy (the same mechanism select-test-areas-selftest.sh uses for
+# #2170), which is what `git ls-files` — and therefore the class index — reads.
+# The real worktree index is never touched, and the plants are removed on exit.
+RELEASE_ONLY="com.pocketshell.next.settings.LedgerVariantProbeReleaseTest"
+DEBUG_ONLY="com.pocketshell.next.settings.LedgerVariantProbeDebugTest"
+RELEASE_ONLY_PATH="app2/src/testRelease/java/com/pocketshell/next/settings/LedgerVariantProbeReleaseTest.kt"
+DEBUG_ONLY_PATH="app2/src/testDebug/java/com/pocketshell/next/settings/LedgerVariantProbeDebugTest.kt"
+
+VARIANT_INDEX="$(mktemp)"
+cp "$(git -C "$SCRIPT_DIR/.." rev-parse --absolute-git-dir)/index" "$VARIANT_INDEX"
+VARIANT_PLANTS=()
+plant_variant_probe() {  # $1 = repo-relative path, $2 = simple class name
+  local rel="$1" cls="$2" abs="$SCRIPT_DIR/../$1"
+  mkdir -p "$(dirname "$abs")"
+  cat > "$abs" <<KT
+package com.pocketshell.next.settings
+import org.junit.Test
+class $cls {
+    @Test
+    fun variantProbe() {}
+}
+KT
+  VARIANT_PLANTS+=("$rel")
+  GIT_INDEX_FILE="$VARIANT_INDEX" git -C "$SCRIPT_DIR/.." update-index --add -- "$rel"
+}
+plant_variant_probe "$RELEASE_ONLY_PATH" "LedgerVariantProbeReleaseTest"
+plant_variant_probe "$DEBUG_ONLY_PATH" "LedgerVariantProbeDebugTest"
+export GIT_INDEX_FILE="$VARIANT_INDEX"
 
 write_junit_from_list() {
   local dest="$1" list="$2" n
@@ -608,40 +668,33 @@ write_asserted_union_tsv() {
   } > "$dest"
 }
 
-# Independent app-module union: taxonomy :app + androidTest, plus the
-# documented nightly-connected unconventional rows (already
-# app/src/androidTest/). NOT derived from --selected-from nightly-phase1.
+# Independent app-module androidTest union, derived from the taxonomy listing
+# rather than from `--selected-from app2-journey` — the whole point of cases 24
+# and 24b is to compare the lane's own selector against a set built a different
+# way. The former second half of this union (documented `nightly-connected`
+# unconventional rows) is gone with that executor kind: no instrumented file
+# outside the naming convention can be selected into the lane any more, so the
+# only source is the index.
 APP_UNION="$SANDBOX/app-androidtest-union.txt"
-{
-  bash "$SELECT" --list-classes 2>/dev/null |
-    awk -F'\t' '$4=="androidTest" && $3==":app" {print $1}'
-  awk -F'\t' '
-    $1 ~ /^#/ || $1 == "" { next }
-    $2 == "nightly-connected" && $1 ~ /^app\/src\/androidTest\// {
-      p=$1
-      sub(/^app\/src\/androidTest\//, "", p)
-      sub(/^java\//, "", p)
-      sub(/^kotlin\//, "", p)
-      sub(/\.kt$/, "", p)
-      sub(/\.java$/, "", p)
-      gsub(/\//, ".", p)
-      print p
-    }
-  ' "$SCRIPT_DIR/test-unconventional-test-files.txt"
-} | LC_ALL=C sort -u > "$APP_UNION"
+bash "$SELECT" --list-classes 2>/dev/null |
+  awk -F'\t' '$4=="androidTest" && $3==":app2" {print $1}' |
+  LC_ALL=C sort -u > "$APP_UNION"
 app_union_n=$(grep -cve '^$' "$APP_UNION" || true)
 
-# CASE 24 — complete app-module union PASSES merge-attendance against
-# --selected-from nightly-phase1 WITHOUT --report. The two pins must be
-# asserted. If nightly-phase1 still selected shared-module androidTest
-# classes, those 21 would be missing and this would RED.
+# CASE 24 — the complete app-module androidTest union PASSES merge-attendance
+# against --selected-from app2-journey WITHOUT --report. The two pins must be
+# asserted. If the lane's selector still reached shared-module androidTest
+# classes (:shared:ui-kit's and :shared:core-terminal's live in OTHER Gradle
+# tasks), those would be missing from this artifact and this would RED.
 APP_MERGE="$SANDBOX/app-union-merge"
 mkdir -p "$APP_MERGE"
 write_asserted_union_tsv "$APP_MERGE/phase1-attendance.tsv" "$APP_UNION"
-if [[ "$app_union_n" -lt 50 ]]; then
-  bad "24 independent app androidTest union is implausibly small ($app_union_n)"
+# Floor re-derived for app2's journey set (11 today, J01-J08 + J10-J12); the old
+# 50 described the pre-rewrite app module's connected suite.
+if [[ "$app_union_n" -lt 8 ]]; then
+  bad "24 independent app2 androidTest union is implausibly small ($app_union_n)"
 elif out="$(bash "$GUARD" --merge-attendance "$APP_MERGE" \
-            --selected-from nightly-phase1 \
+            --selected-from app2-journey \
             --require-class "$PIN_COLD" \
             --require-class "$PIN_WORKFLOW" \
             --out "$SANDBOX/app-union-merged.tsv" 2>&1)"; then
@@ -656,13 +709,13 @@ else
   bad "24 complete app-module union should pass merge-attendance (nightly-phase1 too wide?):\n$out"
 fi
 
-# CASE 24b — --print-selected nightly-phase1 contains no FQCN outside the
+# CASE 24b — --print-selected app2-journey contains no FQCN outside the
 # independent app union. Fails without --report if selected-from still
 # includes a shared-module androidTest class.
-NIGHTLY_SEL="$SANDBOX/nightly-phase1-selected.txt"
-if ! bash "$GUARD" --print-selected --selected-from nightly-phase1 \
+NIGHTLY_SEL="$SANDBOX/app2-journey-selected.txt"
+if ! bash "$GUARD" --print-selected --selected-from app2-journey \
       > "$NIGHTLY_SEL" 2>"$SANDBOX/nightly-sel.err"; then
-  bad "24b --print-selected nightly-phase1 failed:\n$(cat "$SANDBOX/nightly-sel.err")"
+  bad "24b --print-selected app2-journey failed:\n$(cat "$SANDBOX/nightly-sel.err")"
 else
   extra_n=0
   extra_sample=""
@@ -676,16 +729,16 @@ else
   if [[ "$extra_n" -eq 0 ]] && grep -qxF "$PIN_COLD" "$NIGHTLY_SEL" &&
      grep -qxF "$PIN_WORKFLOW" "$NIGHTLY_SEL" &&
      ! grep -qxF "$SHARED_ANDROIDTEST" "$NIGHTLY_SEL"; then
-    ok "24b nightly-phase1 selected set is a subset of the app-module union (no shared androidTest FQCN)"
+    ok "24b app2-journey selected set is a subset of the app-module union (no shared androidTest FQCN)"
   else
-    bad "24b nightly-phase1 selected set contains $extra_n non-app class(es):\n${extra_sample}"
+    bad "24b app2-journey selected set contains $extra_n non-app class(es):\n${extra_sample}"
   fi
 fi
 
 # CASE 25 — adding a shared/*/src/androidTest FQCN to the selected set REDS
 # merge-attendance WITHOUT --report. Proves case 24 is the comparison of
 # selector vs artifact, not a pin grep.
-WIDE_SEL="$SANDBOX/nightly-plus-shared.txt"
+WIDE_SEL="$SANDBOX/app2-journey-plus-shared.txt"
 { cat "$NIGHTLY_SEL"; echo "$SHARED_ANDROIDTEST"; } | LC_ALL=C sort -u > "$WIDE_SEL"
 if out="$(bash "$GUARD" --merge-attendance "$APP_MERGE" \
           --selected-file "$WIDE_SEL" 2>&1)"; then
@@ -700,8 +753,7 @@ fi
 # is NOT acceptance. testDebugUnitTest cannot emit the testRelease class.
 DEBUG_LIST="$SANDBOX/unit-debug-classes.txt"
 bash "$SELECT" --list-classes 2>/dev/null |
-  awk -F'\t' -v opt_in="$REAL_LLM_ONLY" \
-    '($4=="test" || $4=="testDebug") && $1 != opt_in {print $1}' |
+  awk -F'\t' '($4=="test" || $4=="testDebug") {print $1}' |
   LC_ALL=C sort -u > "$DEBUG_LIST"
 DEBUG_XML_DIR="$SANDBOX/unit-debug-xml"
 mkdir -p "$DEBUG_XML_DIR"
@@ -716,17 +768,14 @@ else
 fi
 
 # CASE 27 — an independently Gradle-shaped Debug artifact +
-# --selected-from unit-debug PASSES. The artifact list above deliberately
-# models app/build.gradle.kts's ordinary-task RealLlmTest exclusion instead of
-# being copied from this guard's selected set. Both the Release-only and the
-# opt-in real-LLM FQCN must therefore be absent from the selected set.
+# --selected-from unit-debug PASSES. The artifact list above is built from the
+# taxonomy listing by SOURCE SET, independently of this guard's own selected
+# set, so the two can disagree. The Release-only FQCN must be absent from it.
 if ! bash "$GUARD" --print-selected --selected-from unit-debug \
       > "$SANDBOX/unit-debug-selected.txt" 2>"$SANDBOX/unit-debug-sel.err"; then
   bad "27 --print-selected unit-debug failed:\n$(cat "$SANDBOX/unit-debug-sel.err")"
 elif grep -qxF "$RELEASE_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
   bad "27 unit-debug selected set still contains $RELEASE_ONLY"
-elif grep -qxF "$REAL_LLM_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
-  bad "27 unit-debug selected set still contains opt-in-only $REAL_LLM_ONLY"
 elif ! grep -qxF "$DEBUG_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
   bad "27 unit-debug selected set dropped $DEBUG_ONLY"
 elif out="$(bash "$GUARD" --attendance --results-root "$DEBUG_XML_DIR" \
@@ -736,13 +785,11 @@ else
   bad "27 unit-debug attendance against a complete Debug-shaped list should pass:\n$out"
 fi
 
-# CASE 28 — Release-scoped selected set includes the testRelease class but not
-# the opt-in real-LLM class; dropping the ordinary testRelease class from the
-# independently Gradle-shaped artifact still REDS.
+# CASE 28 — the Release-scoped selected set includes the testRelease class;
+# dropping it from the independently Gradle-shaped artifact still REDS.
 RELEASE_LIST="$SANDBOX/unit-release-classes.txt"
 bash "$SELECT" --list-classes 2>/dev/null |
-  awk -F'\t' -v opt_in="$REAL_LLM_ONLY" \
-    '($4=="test" || $4=="testRelease") && $1 != opt_in {print $1}' |
+  awk -F'\t' '($4=="test" || $4=="testRelease") {print $1}' |
   LC_ALL=C sort -u > "$RELEASE_LIST"
 if ! bash "$GUARD" --print-selected --selected-from unit-release \
       > "$SANDBOX/unit-release-selected.txt" 2>"$SANDBOX/unit-release-sel.err"; then
@@ -751,8 +798,6 @@ elif ! grep -qxF "$RELEASE_ONLY" "$SANDBOX/unit-release-selected.txt"; then
   bad "28 unit-release selected set dropped $RELEASE_ONLY"
 elif grep -qxF "$DEBUG_ONLY" "$SANDBOX/unit-release-selected.txt"; then
   bad "28 unit-release selected set still contains $DEBUG_ONLY"
-elif grep -qxF "$REAL_LLM_ONLY" "$SANDBOX/unit-release-selected.txt"; then
-  bad "28 unit-release selected set still contains opt-in-only $REAL_LLM_ONLY"
 else
   RELEASE_XML_DIR="$SANDBOX/unit-release-xml"
   mkdir -p "$RELEASE_XML_DIR"
@@ -774,37 +819,28 @@ else
   fi
 fi
 
-# CASE 29 — preserving the opt-in lane means excluding RealLlmTest only from
-# ordinary attendance, not deleting it from the taxonomy or its dedicated
-# Gradle task. This pins both halves of that contract.
-UNIT_SELECTED="$SANDBOX/unit-selected.txt"
-if ! bash "$GUARD" --print-selected --selected-from unit > "$UNIT_SELECTED"; then
-  bad "29 unscoped ordinary-unit selected set could not be produced"
-elif ! grep -qF "${REAL_LLM_ONLY}"$'\t' "$REAL_LEDGER"; then
-  bad "29 opt-in real-LLM class disappeared from the registered taxonomy"
-elif ! grep -qF 'test.exclude("**/*RealLlmTest.class")' "$SCRIPT_DIR/../app/build.gradle.kts"; then
-  bad "29 app ordinary Gradle tasks no longer exclude RealLlmTest"
-elif ! grep -qF 'include("**/*RealLlmTest.class")' "$SCRIPT_DIR/../app/build.gradle.kts"; then
-  bad "29 :app:realLlmTest no longer includes RealLlmTest"
-elif grep -qxF "$REAL_LLM_ONLY" "$UNIT_SELECTED"; then
-  bad "29 unscoped ordinary-unit selected set still contains $REAL_LLM_ONLY"
-else
-  grep -v "^${REAL_LLM_ONLY}"$'\t' "$REAL_LEDGER" > "$SANDBOX/real-ledger-minus-real-llm.tsv"
-  if out="$(bash "$GUARD" --verify \
-            --ledger "$SANDBOX/real-ledger-minus-real-llm.tsv" \
-            --source-set unit --now "$REAL_NOW" 2>&1)"; then
-    bad "29 generic unit ledger verification stopped requiring opt-in $REAL_LLM_ONLY:\n$out"
-  elif grep -q 'NEVER executed' <<<"$out" && grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
-    ok "29 RealLlmTest remains registered in generic rolling verification and opt-in while ordinary variants exclude it"
-  else
-    bad "29 generic unit rolling-ledger registration failed for the wrong reason:\n$out"
-  fi
-fi
+# CASE 29 — DELETED with the opt-in real-LLM lane (D22). It pinned a two-sided
+# contract: `app/build.gradle.kts` excluded `**/*RealLlmTest.class` from the
+# ordinary unit tasks while a dedicated `:app:realLlmTest` task included it, and
+# the ledger mirrored that in `ordinary_unit_class_selected`. The app module, the
+# task, the exclusion and the only `*RealLlmTest` class were all removed by the
+# rewrite, so the case could only assert against a build file that no longer
+# exists. The predicate it guarded is deleted from the ledger in the same change
+# rather than left behind as an always-true filter — a modelled exclusion with
+# nothing to exclude is exactly the kind of decoration that later reads as
+# coverage.
 
-# CASE 30 — LIVE selector mutation: remove the shipped exclusion and run the
-# independently Gradle-shaped Debug artifact. Attendance must RED on exactly
-# the opt-in class. This is the defect from PR #2230's Debug/Release jobs, and
-# proves case 27 would not stay green if the production selector regressed.
+# CASE 30 — LIVE selector mutation: widen the Debug-scoped selector so it also
+# claims the OTHER variant's source set, then run the independently
+# Gradle-shaped Debug artifact. Attendance must RED on exactly the
+# testRelease-only class. This is the defect from PR #2230's Debug/Release jobs,
+# and proves case 27 would not stay green if the production selector regressed.
+#
+# The mutation target moved with the rewrite: it used to be the
+# `ordinary_unit_class_selected` RealLlmTest exclusion, which was deleted with
+# the opt-in lane (see case 29). The variant filter is the filter
+# `selected_from_unit` still applies, so it is the one whose removal must be
+# loud.
 UNIT_MUT_DIR="$SANDBOX/mut-unit-selector"
 mkdir -p "$UNIT_MUT_DIR/lib"
 cp "$GUARD" "$UNIT_MUT_DIR/check-test-execution-ledger.sh"
@@ -815,15 +851,15 @@ import sys
 
 p = sys.argv[1]
 s = open(p).read()
-anchor = '    ordinary_unit_class_selected "$fqcn" || continue\n'
-assert s.count(anchor) == 1, "ordinary RealLlmTest exclusion anchor not unique"
-s = s.replace(anchor, '    : # MUTANT 30: ordinary selector re-includes RealLlmTest\n')
+anchor = '      debug) is_unit_debug_source_set "$srcset" || continue ;;\n'
+assert s.count(anchor) == 1, "unit-debug variant selector anchor not unique"
+s = s.replace(anchor, '      debug) is_unit_source_set "$srcset" || continue ;; # MUTANT 30: selector claims both variants\n')
 open(p, "w").write(s)
 PY
 mut_guard_md5="$(md5sum "$UNIT_MUT_DIR/check-test-execution-ledger.sh" | cut -d' ' -f1)"
 if [[ "$clean_guard_md5" == "$mut_guard_md5" ]] ||
    ! grep -q 'MUTANT 30' "$UNIT_MUT_DIR/check-test-execution-ledger.sh"; then
-  bad "30 MUTATION DID NOT APPLY — the ordinary-selector mutant is not live"
+  bad "30 MUTATION DID NOT APPLY — the variant-selector mutant is not live"
 else
   out="$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
           POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
@@ -831,16 +867,16 @@ else
             --attendance --results-root "$DEBUG_XML_DIR" \
             --selected-from unit-debug 2>&1)"
   if grep -q 'FAIL: 1 selected class(es) produced NO result' <<<"$out" &&
-     grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
-    ok "30 live re-inclusion mutant reddens Debug attendance on exactly $REAL_LLM_ONLY"
+     grep -qF "$RELEASE_ONLY" <<<"$out"; then
+    ok "30 live variant-widening mutant reddens Debug attendance on exactly $RELEASE_ONLY"
   else
-    bad "30 live re-inclusion mutant failed for the wrong reason:\n$out"
+    bad "30 live variant-widening mutant failed for the wrong reason:\n$out"
   fi
 fi
 
 # CASE 31 — selectivity in the other direction: excluding the opt-in class
 # must not make attendance tolerant of an ordinary selected class disappearing.
-GENERAL_UNIT="com.pocketshell.core.ssh.SshLeaseManagerTest"
+GENERAL_UNIT="com.pocketshell.core.transport.GraceCloseSchedulerTest"
 DEBUG_MINUS_GENERAL="$SANDBOX/unit-debug-minus-general.txt"
 if ! grep -qxF "$GENERAL_UNIT" "$DEBUG_LIST"; then
   bad "31 independent Debug artifact does not contain $GENERAL_UNIT; missing-class mutation cannot run"
@@ -897,9 +933,10 @@ else
 fi
 
 # CASE 34 — LIVE verify-path mutation. Keep selected_from_unit() intact so
-# attendance stays green, but bypass the ordinary-task exclusion only in the
-# final --verify source-set filter. The whole sequence must then RED on exactly
-# the opt-in class, proving cases 32-33 constrain the reviewer's actual seam.
+# attendance stays green, but widen the variant filter only in the final
+# --verify source-set arm. The whole sequence must then RED on exactly the
+# testRelease-only class, proving cases 32-33 constrain the reviewer's actual
+# seam — the two filters are separate code paths and drift independently.
 VERIFY_MUT_DIR="$SANDBOX/mut-unit-verify"
 mkdir -p "$VERIFY_MUT_DIR/lib"
 cp "$GUARD" "$VERIFY_MUT_DIR/check-test-execution-ledger.sh"
@@ -910,11 +947,11 @@ import sys
 
 p = sys.argv[1]
 s = open(p).read()
-anchor = '      unit-debug) is_unit_debug_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;\n'
-assert s.count(anchor) == 1, "variant verify exclusion anchor not unique"
+anchor = '      unit-debug) is_unit_debug_source_set "$srcset" && return 0 ;;\n'
+assert s.count(anchor) == 1, "variant verify arm anchor not unique"
 s = s.replace(
     anchor,
-    '      unit-debug) is_unit_debug_source_set "$srcset" && return 0 ;; # MUTANT 34: verify re-includes RealLlmTest\n',
+    '      unit-debug) is_unit_source_set "$srcset" && return 0 ;; # MUTANT 34: verify claims both variants\n',
 )
 open(p, "w").write(s)
 PY
@@ -929,8 +966,8 @@ else
           "$DEBUG_XML_DIR" unit-debug unit-debug "$VERIFY_MUT_LEDGER" 2>&1)"
   if grep -q 'PASS: every selected class produced a result' <<<"$out" &&
      grep -q 'FAIL: 1 registered class(es) have NEVER executed' <<<"$out" &&
-     grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
-    ok "34 live verify-only drift mutant reddens after green attendance on exactly $REAL_LLM_ONLY"
+     grep -qF "$RELEASE_ONLY" <<<"$out"; then
+    ok "34 live verify-only drift mutant reddens after green attendance on exactly $RELEASE_ONLY"
   else
     bad "34 live verify-only drift mutant failed for the wrong reason:\n$out"
   fi
@@ -947,7 +984,7 @@ if out="$(run_unit_wrapper_sequence "$GUARD" "$DEBUG_XML_DIR" unit-debug \
   bad "35 wrapper sequence tolerated missing ordinary class $GENERAL_UNIT:\n$out"
 elif grep -q 'FAIL: 1 selected class(es) produced NO result' <<<"$out" &&
      grep -qF "$GENERAL_UNIT" <<<"$out" &&
-     ! grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
+     ! grep -qF "$RELEASE_ONLY" <<<"$out"; then
   ok "35 full wrapper sequence still reddens on exactly one missing ordinary selected class"
 else
   bad "35 wrapper missing-class mutation failed for the wrong reason:\n$out"

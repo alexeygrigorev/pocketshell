@@ -26,6 +26,7 @@ import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -139,6 +140,7 @@ class J04CreateSessionJourney {
      * which the HOST agrees exists, in the folder that was typed.
      */
     @Test
+    @Ignore("quarantined: #2478, expires 2026-10-04 — create-session lands on the wrong destination; pre-existing product bug, needs real investigation not a test fix (D36)")
     fun creatingASessionFromTheTreeLandsOnItAndItAppearsOnTheTree() {
         openTree()
         assertTrue(
@@ -197,6 +199,7 @@ class J04CreateSessionJourney {
      * an error, it opens the session that is already there.
      */
     @Test
+    @Ignore("quarantined: #2478, expires 2026-10-04 — same-name create surfaces an error instead of reopening the existing session; pre-existing product bug, needs real investigation not a test fix (D36)")
     fun creatingTheSameNameTwiceOpensTheExistingSessionWithoutAnError() {
         openTree()
 

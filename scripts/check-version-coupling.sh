@@ -4,14 +4,14 @@ set -uo pipefail
 # PR-time version-coupling guard for issue #948, RESTRUCTURED for #2356
 # (Phase 4 of epic #2350).
 #
-# BEFORE #2356: app/build.gradle.kts's `versionName` and
+# BEFORE #2356: the shipping module's `versionName` and
 # tools/pocketshell/pyproject.toml's `version` were two hand-maintained
 # string literals, and this guard compared them for equality — catching the
 # 2026-06-25 drift (app 0.4.16 vs package 0.4.14) that nagged the maintainer
 # with the in-app host-version-mismatch banner.
 #
 # AFTER #2356: neither side is a hand-maintained literal any more.
-# app/build.gradle.kts derives versionCode/versionName at CONFIGURATION TIME
+# app2/build.gradle.kts derives versionCode/versionName at CONFIGURATION TIME
 # from scripts/derive-version.sh (the git tag being built). The
 # tools/pocketshell PyPI version is STAMPED from the same script into
 # pyproject.toml immediately before `uv build`/`python -m build`
@@ -19,7 +19,7 @@ set -uo pipefail
 # literal that can independently drift going forward.
 #
 # So there is no longer "two hand-maintained numbers" to compare. What CAN
-# still drift is the WIRING: a bug in app/build.gradle.kts's exec/parsing
+# still drift is the WIRING: a bug in app2/build.gradle.kts's exec/parsing
 # code, or a future edit to the PyPI stamp step, silently reimplementing the
 # derivation instead of calling scripts/derive-version.sh. This guard now
 # checks exactly that "single source of truth" property, structurally:
@@ -28,12 +28,12 @@ set -uo pipefail
 #      logic itself is sound: version-code is monotonic across synthetic
 #      tags, version-name matches the documented convention, and both fall
 #      back cleanly with no tags / no git).
-#   2. app/build.gradle.kts's Gradle-resolved versionCode/versionName
-#      (via `:app:printPocketshellVersion`) EXACTLY matches a direct
+#   2. app2/build.gradle.kts's Gradle-resolved versionCode/versionName
+#      (via `:app2:printPocketshellVersion`) EXACTLY matches a direct
 #      invocation of `scripts/derive-version.sh both` run against the same
 #      ref — proving the Gradle exec wiring has not drifted from the script
 #      it calls.
-#   3. Every consumer that needs a version (app/build.gradle.kts, and the
+#   3. Every consumer that needs a version (app2/build.gradle.kts, and the
 #      PyPI publish step in .github/workflows/build.yml) references
 #      scripts/derive-version.sh BY PATH, rather than embedding its own
 #      independent `git describe`/`git tag` logic — the property "not two
@@ -55,7 +55,7 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DERIVE_SCRIPT_REL="scripts/derive-version.sh"
-GRADLE_REL="app/build.gradle.kts"
+GRADLE_REL="app2/build.gradle.kts"
 BUILD_WORKFLOW_REL=".github/workflows/build.yml"
 
 usage() {
@@ -64,9 +64,9 @@ Usage: scripts/check-version-coupling.sh [--skip-gradle] [--self-test]
 
 Verifies scripts/derive-version.sh is the SOLE source of truth for both the
 Android versionCode/versionName and the tools/pocketshell PyPI version
-(issue #2356): its own self-test passes, app/build.gradle.kts's Gradle-
+(issue #2356): its own self-test passes, app2/build.gradle.kts's Gradle-
 resolved version matches a direct script invocation, and both
-app/build.gradle.kts and .github/workflows/build.yml reference the script by
+app2/build.gradle.kts and .github/workflows/build.yml reference the script by
 path rather than reimplementing the git derivation independently.
 
 --skip-gradle skips the Gradle-resolved-version cross-check (step 2), for a
@@ -111,8 +111,8 @@ check_gradle_matches_script() {
   fi
 
   local gradle_out
-  if ! gradle_out="$(cd "$repo_root" && ./gradlew -q :app:printPocketshellVersion 2>&1)"; then
-    fail "':app:printPocketshellVersion' failed:"
+  if ! gradle_out="$(cd "$repo_root" && ./gradlew -q :app2:printPocketshellVersion 2>&1)"; then
+    fail "':app2:printPocketshellVersion' failed:"
     printf '%s\n' "$gradle_out" >&2
     return 1
   fi
@@ -152,7 +152,7 @@ FAKE
   if ! gradle_out="$(cd "$repo_root" && timeout 35s ./gradlew -q \
       --no-configuration-cache \
       -PpocketshellVersionDeriveScript="$fake" \
-      :app:printPocketshellVersion 2>&1)"; then
+      :app2:printPocketshellVersion 2>&1)"; then
     rm -rf "$tmp"
     fail "Gradle did not return the safe fallback within the outer 35s guard:"
     printf '%s\n' "$gradle_out" >&2
@@ -194,7 +194,7 @@ check_single_source_reference() {
   fi
 
   [[ "$ok" -eq 1 ]] || return 1
-  printf 'OK: app/build.gradle.kts and the Build workflow both reference scripts/derive-version.sh (single source of truth).\n'
+  printf 'OK: app2/build.gradle.kts and the Build workflow both reference scripts/derive-version.sh (single source of truth).\n'
   return 0
 }
 
@@ -206,21 +206,21 @@ run_self_test() {
   local failures=0
 
   # --- Fixture pair for step 3 (grep-based reference check) ---
-  mkdir -p "$tmp/wired/app" "$tmp/wired/.github/workflows"
+  mkdir -p "$tmp/wired/app2" "$tmp/wired/.github/workflows"
   printf 'versionCode = derived.code // scripts/derive-version.sh\n' \
-    > "$tmp/wired/app/build.gradle.kts"
+    > "$tmp/wired/app2/build.gradle.kts"
   printf 'run: scripts/derive-version.sh both\n' \
     > "$tmp/wired/.github/workflows/build.yml"
 
-  mkdir -p "$tmp/drifted/app" "$tmp/drifted/.github/workflows"
+  mkdir -p "$tmp/drifted/app2" "$tmp/drifted/.github/workflows"
   printf 'versionCode = 92 // hand-maintained, no derivation\n' \
-    > "$tmp/drifted/app/build.gradle.kts"
+    > "$tmp/drifted/app2/build.gradle.kts"
   printf 'run: echo "0.4.45" > pyproject.toml\n' \
     > "$tmp/drifted/.github/workflows/build.yml"
 
   printf '== self-test: single-source reference, wired tree (expect PASS) ==\n'
   if check_single_source_reference \
-    "$tmp/wired/app/build.gradle.kts" "$tmp/wired/.github/workflows/build.yml" >/dev/null; then
+    "$tmp/wired/app2/build.gradle.kts" "$tmp/wired/.github/workflows/build.yml" >/dev/null; then
     printf '   -> PASS as expected\n\n'
   else
     printf '   -> UNEXPECTED FAIL on wired tree\n\n' >&2
@@ -229,7 +229,7 @@ run_self_test() {
 
   printf '== self-test: single-source reference, drifted tree (expect FAIL) ==\n'
   if check_single_source_reference \
-    "$tmp/drifted/app/build.gradle.kts" "$tmp/drifted/.github/workflows/build.yml" >/dev/null 2>&1; then
+    "$tmp/drifted/app2/build.gradle.kts" "$tmp/drifted/.github/workflows/build.yml" >/dev/null 2>&1; then
     printf '   -> UNEXPECTED PASS on drifted tree\n\n' >&2
     failures=$((failures + 1))
   else

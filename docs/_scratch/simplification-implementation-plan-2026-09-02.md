@@ -35,6 +35,73 @@ match on the quoted identifier, not the number.
 
 ---
 
+## Scope amendment (2026-09-03, maintainer directive)
+
+The maintainer cut scope after H/T/K/M and U-1..U-3 had already landed on the
+`stable` branch, to focus the rewrite on a fast, reliable, testable core before
+adding anything back. **This section overrides the task entries below it where
+they conflict.** Cut features are deferred, not deleted-forever — they return
+once the core is working and polished, most likely re-homed in `aplexer`
+("Muxer") rather than rebuilt client-side.
+
+**Cut entirely — do not implement:**
+- **U-9** (agent badges + state polling) — no agent-state UI at all for now.
+- **U-10** (conversation view, Journey J09) — dropped; H-4's `sessions
+  transcript` server command and K-2's `HostCliClient.transcriptCommand` are
+  being removed from the codebase in the same round as this amendment.
+- **P-3c** (file-review + annotation UI) — the maintainer confirmed he never
+  uses it; drop from the file-viewer scope entirely.
+- **P-5** (usage/quota panel) — no token/quota UI without agent sessions to
+  meter.
+- **P-8** (git history/diff/status viewer) — dropped, not used.
+- **P-10's `assistant/`** (in-app AI assistant chat) — this is itself "an
+  agent," in scope for the same reason U-6's engine picker is cut below.
+- **P-10's `costs/`** (AI cost tracking) — same category as the usage panel.
+
+**Trim, don't fully cut — the surrounding feature stays, the agent-specific
+slice inside it goes:**
+- **U-6** (create session, Journey J04) — drop the engine/profile picker
+  entirely; the sheet is folder-path input only (plain shell session name +
+  `--cwd`, no `--engine`/`--profile`). `HostCliClient.createSession`'s
+  `engine`/`profile` params stay unused by app2 client code, harmlessly.
+- **P-1** (composer) — drop `agentcommands/` (the engine-specific slash-command
+  autocomplete). Keep the rest of the composer as-is: it is the send path for
+  ANY session, not just agent-launched ones.
+- **P-7** (thin host-CLI features) — drop `cards/` (agent-session
+  checklists/notes) and `repos/` ("clone from GitHub" / repo management —
+  not needed right now). Keep `env/` and `jobs/`, which are host utilities
+  unrelated to agent launching.
+- **P-10** (misc chrome) — before porting `messaging/`, read what it actually
+  is; if it's agent-completion notifications, drop it with the rest of this
+  list. Keep `crash/` and the trimmed `diagnostics/` core (both are
+  infra, not agent surface). `systemsurfaces/` (widget/tile) is fine to keep
+  if it only shows session list state, drop if it shows agent status.
+
+**Explicitly still in scope, confirmed by the maintainer:**
+- **P-3a/P-3b** (file explorer + viewer, minus P-3c's review/annotation) —
+  "keep the file browser."
+- **P-4** (port forwarding) — "it's useful."
+- **P-2** (voice dictation) — orthogonal to agents, it's an input method, not
+  a feature about launching/managing agent sessions.
+- Everything already merged and not listed above: H-1/H-2/H-3 (server-side
+  `--engine` routing in `sessions create` stays dormant/harmless), all of T
+  and K (transport/host-CLI plumbing, engine/profile listing included — no
+  UI consumes it, that's fine), M-1..M-3, U-1..U-3, and the terminal core
+  (U-4, U-5, U-7, U-8) — the actual point of the app and the reliability half
+  of the maintainer's stated goal.
+
+**Consequences for §A.4's journey set:** J09 (`ConversationViewJourney`) and
+J12 (`UsagePanelJourney`) are dropped along with U-10/P-5. J10
+(`FilesBrowseEditJourney`) drops any review/annotation-specific assertions.
+Ten journeys remain: J01–J08, J10, J11.
+
+**Consequences for the task-graph summary:** the original count was 42 tasks
+(6 H, 5 T, 2 K, 3 M, 10 U, 12 P counting P-3a/b/c, 4 X). With U-9/U-10 cut (10
+→ 8 U) and P-3c/P-5/P-8 cut (12 → 9 P), the plan is now **37 tasks**: 6 H (2
+blocked), 5 T, 2 K, 3 M, 8 U, 9 P, 4 X (1 blocked, 1 maintainer-gated).
+
+---
+
 ## Part A — Target structure
 
 ### A.1 Where the new code lives

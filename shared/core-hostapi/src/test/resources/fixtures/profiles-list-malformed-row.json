@@ -1,0 +1,15 @@
+{
+  "profiles": [
+    {
+      "name": "Claude",
+      "engine": "claude",
+      "config_dir": null,
+      "default": true
+    },
+    {
+      "name": "Orphan",
+      "config_dir": "/home/alexey/.orphan",
+      "default": false
+    }
+  ]
+}

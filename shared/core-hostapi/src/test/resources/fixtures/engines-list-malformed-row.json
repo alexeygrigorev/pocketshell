@@ -1,0 +1,27 @@
+{
+  "engines": [
+    {
+      "id": "claude",
+      "family": "claude",
+      "harness": "claude",
+      "label": "Claude",
+      "provider_mark": "Anthropic",
+      "usage_provider": "claude",
+      "enabled": true,
+      "available": true,
+      "available_for_create": true,
+      "unavailable_reason": null,
+      "force_available": null
+    },
+    {
+      "id": "codex",
+      "family": "codex",
+      "harness": "codex",
+      "label": "Codex",
+      "provider_mark": "OpenAI",
+      "enabled": true,
+      "available": true,
+      "unavailable_reason": null
+    }
+  ]
+}

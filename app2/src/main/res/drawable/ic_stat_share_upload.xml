@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Status-bar icon for the share-target upload notification (rewrite task P-9).
+
+    An upload arrow over a tray: the same "leaving the phone, landing on the
+    host" idea the share gesture is, and clearly distinct from the forwarding
+    glyph's two opposing arrows so the two notifications are tellable apart at
+    status-bar size.
+
+    Status-bar icons MUST be white-on-transparent (alpha only) — Android
+    re-tints them per system theme. Authored at 24dp like ic_stat_forwarding.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,15h2V8h3l-4,-5 -4,5h3v7zM5,17h14v2H5v-2z" />
+</vector>

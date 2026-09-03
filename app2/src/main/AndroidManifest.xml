@@ -53,6 +53,41 @@
         </activity>
 
         <!--
+            Task P-9: the system share target. `exported` because that is what
+            "appears in the share sheet" means — and why ShareActivity treats
+            its intent as untrusted input.
+
+            `excludeFromRecents`, and the default `standard` launch mode
+            (deliberately NOT MainActivity's `singleTask`): a share is a
+            one-shot transaction that finishes itself, so it must neither join
+            the task the user's live terminal session lives in nor leave a
+            second PocketShell card in Recents afterwards.
+
+            One `*/*` filter per action rather than a list of specific types:
+            the destination is a directory on a Unix box, which takes any bytes,
+            so narrowing the filter would only hide PocketShell from the share
+            sheet for file types it handles perfectly well. `*/*` also matches
+            the `text/plain` selection/URL share, which arrives with no stream.
+        -->
+        <activity
+            android:name=".share.ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Send to host"
+            android:theme="@style/Theme.PocketShellNext">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!--
             Task P-4: the port-forwarding foreground service.
 
             `foregroundServiceType="specialUse"` because keeping a user-initiated

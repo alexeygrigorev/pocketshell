@@ -7,6 +7,7 @@ import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.Buffer
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
+import net.schmizz.sshj.userauth.password.PasswordFinder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.rules.TestRule
 import org.junit.runner.Description
@@ -141,6 +142,70 @@ object AgentsFixture {
     }
 
     /**
+     * Runs [command] on the fixture over its OWN sshj connection and returns
+     * stdout, failing the test on a non-zero exit.
+     *
+     * Deliberately NOT routed through the app's [ConnectionsRegistry]: this is
+     * how a journey SEEDS the host state it is about to assert on, and seeding
+     * through the connection under test would mean the seed step and the code
+     * under test share a transport — a broken app connection would then look
+     * like a broken fixture. It is also called before the app has dialled at
+     * all (from the pre-launch seed rule), when no app connection exists.
+     *
+     * Host-key verification is intentionally skipped here: the fixture's key is
+     * whatever the container minted, and [probeHostKeyFingerprint] is the place
+     * this suite makes assertions about it.
+     */
+    fun exec(command: String, timeoutMs: Int = 20_000): String {
+        ensureBouncyCastle()
+        val client = SSHClient(DefaultConfig())
+        try {
+            client.addHostKeyVerifier(object : HostKeyVerifier {
+                override fun verify(hostname: String, p: Int, key: PublicKey): Boolean = true
+
+                override fun findExistingAlgorithms(hostname: String, p: Int): List<String> =
+                    emptyList()
+            })
+            client.connectTimeout = timeoutMs
+            client.timeout = timeoutMs
+            client.connect(host, port)
+            client.authPublickey(
+                USER,
+                client.loadKeys(privateKeyPem(), null as String?, null as PasswordFinder?),
+            )
+            client.startSession().use { session ->
+                val running = session.exec(command)
+                val stdout = running.inputStream.bufferedReader().readText()
+                val stderr = running.errorStream.bufferedReader().readText()
+                running.join()
+                val exit = running.exitStatus ?: -1
+                check(exit == 0) {
+                    "fixture command failed (exit $exit): $command\nstdout: $stdout\nstderr: $stderr"
+                }
+                return stdout
+            }
+        } finally {
+            runCatching { client.disconnect() }
+        }
+    }
+
+    /**
+     * Writes [content] to [remotePath] on the fixture.
+     *
+     * Uses a quoted heredoc rather than `printf`/`echo` so the payload survives
+     * the remote shell byte-for-byte — JSON is full of `$`, `"` and backslashes,
+     * every one of which an unquoted heredoc or an echo would rewrite.
+     * `EOF_POCKETSHELL_FIXTURE` is used as the delimiter because it cannot
+     * occur inside a JSON document.
+     */
+    fun writeFile(remotePath: String, content: String) {
+        exec(
+            "cat > $remotePath <<'EOF_POCKETSHELL_FIXTURE'\n" +
+                content.trimEnd() + "\nEOF_POCKETSHELL_FIXTURE\n",
+        )
+    }
+
+    /**
      * OpenSSH-style `SHA256:<base64-no-padding>` of a host key's wire encoding.
      *
      * Deliberately recomputed here rather than reused from
@@ -186,14 +251,14 @@ class SeedBeforeLaunchRule(private val seed: suspend (Description) -> Unit) : Te
 
 /** Screenshot capture for journey evidence. Writes into the app's external files dir. */
 object JourneyScreenshots {
-    fun capture(name: String): File {
+    fun capture(name: String, journey: String = "j01-connect-trust"): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(250)
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
         val dir = File(
             instrumentation.targetContext.getExternalFilesDir(null),
-            "j01-connect-trust",
+            journey,
         )
         check(dir.exists() || dir.mkdirs()) { "could not create ${dir.absolutePath}" }
         val file = File(dir, "$name.png")

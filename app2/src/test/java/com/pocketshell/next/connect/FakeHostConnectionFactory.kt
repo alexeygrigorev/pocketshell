@@ -46,6 +46,18 @@ class FakeHostConnectionFactory(
     /** When non-null, the next dial returns [ConnectResult.Failed] with this message. */
     var failWith: String? = null
 
+    /**
+     * Applied to every [FakeHostConnection] as it is produced, before it is
+     * handed to the caller.
+     *
+     * The registry dials LAZILY — the connection a screen will run commands on
+     * does not exist until that screen asks for it — so a test cannot script
+     * exec replies up front by holding the object. This hook is where "when the
+     * dial happens, this is what the host answers" is expressed (task U-3's
+     * session-tree tests script `pocketshell sessions list --json` through it).
+     */
+    var script: (FakeHostConnection) -> Unit = {}
+
     val dialCount: Int get() = synchronized(lock) { dialedTargets.size }
 
     val targets: List<HostTarget> get() = synchronized(lock) { dialedTargets.toList() }
@@ -78,6 +90,7 @@ class FakeHostConnectionFactory(
             failWith?.let { return ConnectResult.Failed(it, null) }
 
             val connection = FakeHostConnection(target)
+            script(connection)
             synchronized(lock) { producedConnections += connection }
             return ConnectResult.Connected(connection)
         } finally {

@@ -5,6 +5,7 @@ import androidx.room.Room
 import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.hostapi.HostCliClient
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.transport.AuthSecretResolver
 import com.pocketshell.core.transport.HostConnectionFactory
@@ -13,6 +14,8 @@ import com.pocketshell.core.transport.TrustStore
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.connect.RoomAuthSecretResolver
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.hostcli.asRemoteExec
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -114,4 +117,18 @@ object AppModule {
         hostDao: HostDao,
         @IoDispatcher dispatcher: CoroutineDispatcher,
     ): ConnectionsRegistry = ConnectionsRegistry(factory, trustStore, hostDao, dispatcher)
+
+    /**
+     * The host-CLI seam (task U-3). Deliberately NOT a `@Singleton` client: a
+     * `HostCliClient` is bound to one live [com.pocketshell.core.transport.HostConnection]
+     * and a connection is spent once its transport dies, so what is shared is
+     * the *recipe*, and each screen builds a client over whatever connection
+     * [ConnectionsRegistry] hands it at that moment.
+     *
+     * The binding itself is stateless, hence the singleton on the factory.
+     */
+    @Provides
+    @Singleton
+    fun provideHostCliClientFactory(): HostCliClientFactory =
+        HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) }
 }

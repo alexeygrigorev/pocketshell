@@ -1,5 +1,6 @@
 package com.pocketshell.next.hosts
 
+import androidx.compose.material3.Text
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -124,6 +125,12 @@ class HostListNavigationTest {
                     HostListRoute(onOpenHost = onOpenHost, viewModel = vm)
                 },
                 connectViewModel = { stack.viewModel },
+                // The U-3 session tree resolves its ViewModel through
+                // `hiltViewModel()`, which this plain compose rule cannot
+                // provide. This suite is about the host-tap → Tree(hostId)
+                // edge, so the destination is a stand-in echoing the delivered
+                // argument.
+                treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

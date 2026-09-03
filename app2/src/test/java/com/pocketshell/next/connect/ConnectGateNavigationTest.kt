@@ -1,5 +1,6 @@
 package com.pocketshell.next.connect
 
+import androidx.compose.material3.Text
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -152,6 +153,11 @@ class ConnectGateNavigationTest {
                     HostListRoute(onOpenHost = onOpenHost, viewModel = hostListViewModel)
                 },
                 connectViewModel = { stack.viewModel },
+                // Same reason: the U-3 session tree resolves its ViewModel
+                // through `hiltViewModel()`. This suite is about the connect
+                // gate's navigation edge, so the destination is a stand-in that
+                // echoes the argument the route delivered.
+                treeScreen = { hostId, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

@@ -305,6 +305,91 @@ assert_mutant_classifications "drop truncated-run pattern" "$truncated_mutant" \
   "$empty_only=PRODUCT_FAILURE" \
   "$product_only=PRODUCT_FAILURE"
 
+# ---------------------------------------------------------------------------
+# G6: removing one new signature reddens only that signature's fixture.
+# ---------------------------------------------------------------------------
+classify_with() {
+  local lib="$1" exit_code="$2" report_root="$3"
+  bash -c '
+    set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$1"
+    classify_nightly_phase "$2" "$3"
+  ' _ "$lib" "$exit_code" "$report_root"
+}
+
+mutate_classifier() {
+  local dest="$1" old="$2" new="$3"
+  python3 - "$CLASSIFIER" "$dest" "$old" "$new" <<'PY'
+from pathlib import Path
+import sys
+
+src, dest, old, new = sys.argv[1:]
+text = Path(src).read_text()
+count = text.count(old)
+if count != 1:
+    raise SystemExit(f"G6 needle count is {count}, expected 1: {old!r}")
+Path(dest).write_text(text.replace(old, new))
+PY
+}
+
+assert_mutant_classifications() {
+  local label="$1" lib="$2"
+  shift 2
+  local actual pair fixture want
+  local flipped=() kept_wrong=()
+  for pair in "$@"; do
+    fixture="${pair%%=*}"
+    want="${pair#*=}"
+    actual="$(classify_with "$lib" 1 "$fixture")"
+    if [[ "$actual" != "$want" ]]; then
+      if [[ "$want" == PRODUCT_FAILURE ]]; then
+        flipped+=("${fixture##*/}:$actual")
+      else
+        kept_wrong+=("${fixture##*/}: expected $want got $actual")
+      fi
+    fi
+  done
+  if (( ${#flipped[@]} + ${#kept_wrong[@]} > 0 )); then
+    printf 'FAIL [G6 %s]: did not redden=%s over-reddened=%s\n' \
+      "$label" "${flipped[*]:-none}" "${kept_wrong[*]:-none}"
+    failures=$((failures + 1))
+  else
+    printf 'ok   [G6 %s] selective\n' "$label"
+  fi
+}
+
+not_found_mutant="$SANDBOX/classifier-no-not-found.sh"
+mutate_classifier "$not_found_mutant" \
+  "_NIGHTLY_DEVICE_NOT_FOUND_PATTERN=\"device( '[^']+'| [^[:space:]]+)? not found\"" \
+  '_NIGHTLY_DEVICE_NOT_FOUND_PATTERN="device not-found-signature-removed"'
+assert_mutant_classifications "drop not-found phrase" "$not_found_mutant" \
+  "$not_found_only=PRODUCT_FAILURE" \
+  "$unquoted_not_found=PRODUCT_FAILURE" \
+  "$bare_not_found=PRODUCT_FAILURE" \
+  "$offline_only=INFRA_DEVICE_OFFLINE" \
+  "$unauthorized_only=INFRA_DEVICE_OFFLINE" \
+  "$still_connecting_only=INFRA_DEVICE_OFFLINE" \
+  "$truncated_only=INFRA_TRUNCATED_RUN" \
+  "$incident_both=INFRA_TRUNCATED_RUN" \
+  "$empty_only=PRODUCT_FAILURE" \
+  "$product_only=PRODUCT_FAILURE"
+
+truncated_mutant="$SANDBOX/classifier-no-truncated.sh"
+mutate_classifier "$truncated_mutant" \
+  "_NIGHTLY_TRUNCATED_RUN_PATTERN='Expected[[:space:]]+([0-9]+)[[:space:]]+tests?,[[:space:]]+received[[:space:]]+([0-9]+)'" \
+  "_NIGHTLY_TRUNCATED_RUN_PATTERN='truncated-run-signature-removed ([0-9]+) ([0-9]+)'"
+assert_mutant_classifications "drop truncated-run pattern" "$truncated_mutant" \
+  "$truncated_only=PRODUCT_FAILURE" \
+  "$truncated_in_body=PRODUCT_FAILURE" \
+  "$offline_only=INFRA_DEVICE_OFFLINE" \
+  "$not_found_only=INFRA_DEVICE_OFFLINE" \
+  "$unauthorized_only=INFRA_DEVICE_OFFLINE" \
+  "$still_connecting_only=INFRA_DEVICE_OFFLINE" \
+  "$incident_both=INFRA_DEVICE_OFFLINE" \
+  "$empty_only=PRODUCT_FAILURE" \
+  "$product_only=PRODUCT_FAILURE"
+
 if [[ "$failures" -ne 0 ]]; then
   printf 'NIGHTLY PHASE CLASSIFICATION SELF-TEST FAIL: %s failure(s)\n' "$failures"
   exit 1

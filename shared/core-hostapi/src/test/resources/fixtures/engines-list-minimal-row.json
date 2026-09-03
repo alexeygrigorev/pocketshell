@@ -1,0 +1,11 @@
+{
+  "engines": [
+    {
+      "id": "futurecode",
+      "label": "FutureCode",
+      "available_for_create": false,
+      "unavailable_reason": "`futurecode` is not installed on this host (not on PATH).",
+      "some_field_this_build_has_never_seen": {"nested": [1, 2, 3]}
+    }
+  ]
+}

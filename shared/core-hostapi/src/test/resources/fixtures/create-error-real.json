@@ -1,0 +1,4 @@
+{
+  "schema": 2,
+  "error": "pocketshell: `tmuxctl` is not installed on this host. Install it via `uv tool install tmuxctl` or `pipx install tmuxctl` and re-run."
+}

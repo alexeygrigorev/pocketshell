@@ -1,0 +1,40 @@
+{
+  "profiles": [
+    {
+      "name": "Claude",
+      "engine": "claude",
+      "config_dir": null,
+      "default": true
+    },
+    {
+      "name": "Claude (Z.AI)",
+      "engine": "claude",
+      "config_dir": "/home/alexey/.zlaude",
+      "default": false
+    },
+    {
+      "name": "Codex",
+      "engine": "codex",
+      "config_dir": null,
+      "default": true
+    },
+    {
+      "name": "Godex",
+      "engine": "codex",
+      "config_dir": "/home/alexey/.godex",
+      "default": false
+    },
+    {
+      "name": "Zcodex",
+      "engine": "codex",
+      "config_dir": "/home/alexey/.zcodex",
+      "default": false
+    },
+    {
+      "name": "Zodex",
+      "engine": "codex",
+      "config_dir": "/home/alexey/.zodex",
+      "default": false
+    }
+  ]
+}

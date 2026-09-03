@@ -163,7 +163,7 @@ class HostListNavigationTest {
                 // provide. This suite is about the host list header's tap →
                 // `Destination.Settings` edge, so the destination is a
                 // stand-in that just names itself.
-                settingsScreen = { _, _ -> Text("Settings") },
+                settingsScreen = { _, _, _ -> Text("Settings") },
                 connectViewModel = { stack.viewModel },
                 // The U-3 session tree resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot

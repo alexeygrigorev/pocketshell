@@ -25,8 +25,10 @@ import java.nio.charset.StandardCharsets
  * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
- * routes task P-6 adds ([HostForm], [SshKeys], [HostQr], [QrScan]). A new screen
- * is a new object here, never an ad-hoc string at a call site.
+ * routes task P-6 adds ([HostForm], [SshKeys], [HostQr], [QrScan]), plus
+ * [CrashReports] (task P-10's local crash-report browser, reached from
+ * Settings → Diagnostics). A new screen is a new object here, never an ad-hoc
+ * string at a call site.
  */
 sealed class Destination(val pattern: String) {
 
@@ -152,6 +154,19 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "workspace-roots/$hostId"
     }
 
+    /**
+     * The local crash-report browser (task P-10), opened from Settings →
+     * Diagnostics.
+     *
+     * Argument-free on purpose: crash reports are captured by
+     * `CrashReporter.install()` into the app's own `filesDir`, so they belong to
+     * the installation rather than to any host or session. Nothing about the
+     * screen varies by route.
+     */
+    data object CrashReports : Destination("crash-reports") {
+        fun route(): String = pattern
+    }
+
     companion object {
         const val ARG_HOST_ID: String = "hostId"
 
@@ -179,7 +194,7 @@ sealed class Destination(val pattern: String) {
         val all: List<Destination>
             get() = listOf(
                 Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
-                HostForm, SshKeys, HostQr, QrScan, WorkspaceRoots,
+                HostForm, SshKeys, HostQr, QrScan, WorkspaceRoots, CrashReports,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

@@ -77,6 +77,7 @@ class AppNavHostTest {
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
         assertNavigatesTo(nav, Destination.WorkspaceRoots.route(hostId = 7), "WorkspaceRoots(hostId=7)")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
+        assertNavigatesTo(nav, Destination.CrashReports.route(), "CrashReports")
         assertNavigatesTo(nav, Destination.SshKeys.route(), "SshKeys")
         assertNavigatesTo(nav, Destination.HostQr.route(hostId = 7), "HostQr")
         assertNavigatesTo(nav, Destination.QrScan.route(), "QrScan")
@@ -143,7 +144,7 @@ class AppNavHostTest {
                 // other stand-in above. Their own behaviour is covered by
                 // `com.pocketshell.next.settings.*`; this suite pins that
                 // `NavHost` accepts both patterns and decodes the host id.
-                settingsScreen = { _, _ -> Text("Settings") },
+                settingsScreen = { _, _, _ -> Text("Settings") },
                 workspaceRootsScreen = { hostId, _ -> Text("WorkspaceRoots(hostId=$hostId)") },
                 connectViewModel = { stack.viewModel },
                 // Same rationale as `hostsScreen`: the real session tree
@@ -175,6 +176,13 @@ class AppNavHostTest {
                 // Task P-5: the real usage panel resolves `UsageViewModel`
                 // through `hiltViewModel()`, same rationale as the others.
                 usageScreen = { Text("Usage") },
+                // Issue #2476: the crash-report browser resolves
+                // `CrashReportsViewModel` through `hiltViewModel()` too. The
+                // real screen inside the real graph, reached by tapping the
+                // Settings row, is covered by
+                // `com.pocketshell.next.settings.SettingsNavigationTest`; this
+                // suite pins that `NavHost` accepts the pattern.
+                crashReportsScreen = { Text("CrashReports") },
             )
         }
         composeRule.waitForIdle()

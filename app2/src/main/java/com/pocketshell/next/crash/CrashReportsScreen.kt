@@ -57,9 +57,9 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Ported (unchanged behaviour, package only) from the old app's
- * `com.pocketshell.app.crash.CrashReportsScreen` (rewrite task P-10). Not yet
- * wired into app2's navigation graph — see the P-10 status comment for why
- * that is a deliberate, separate follow-up.
+ * `com.pocketshell.app.crash.CrashReportsScreen` (rewrite task P-10), and wired
+ * into app2's navigation graph as [com.pocketshell.next.nav.Destination.CrashReports]
+ * — reached from Settings → Diagnostics (issue #2476).
  */
 private val DialogScrimColor = Color(0xCC000000)
 
@@ -68,12 +68,21 @@ internal const val CRASH_REPORTS_DELETE_ALL_TAG = "crash:deleteAll"
 internal const val CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG = "crash:deleteAll:confirm"
 internal const val CRASH_REPORTS_DELETE_ALL_CANCEL_TAG = "crash:deleteAll:cancel"
 
+/**
+ * [viewModel] is a seam, exactly like every other app2 route composable
+ * ([com.pocketshell.next.usage.UsageRoute],
+ * [com.pocketshell.next.settings.WorkspaceRootsRoute], …): production resolves
+ * it through `hiltViewModel()`, a Robolectric composition — which has no
+ * Hilt-managed Activity to resolve against — hands in one built by hand. The
+ * composable is `internal` because [CrashReportsViewModel] is; both are visible
+ * to `MainActivity` (same module) and to the unit-test source set.
+ */
 @Composable
-fun CrashReportsScreen(
+internal fun CrashReportsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    viewModel: CrashReportsViewModel = hiltViewModel(),
 ) {
-    val viewModel: CrashReportsViewModel = hiltViewModel()
     val context = LocalContext.current
     val reports by viewModel.reports.collectAsStateWithLifecycle()
     val shareAllState by viewModel.shareAllState.collectAsStateWithLifecycle()

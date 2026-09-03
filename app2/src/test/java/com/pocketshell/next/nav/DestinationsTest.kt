@@ -19,6 +19,7 @@ class DestinationsTest {
         assertEquals("hosts", Destination.Hosts.route())
         assertEquals("settings", Destination.Settings.route())
         assertEquals("usage", Destination.Usage.route())
+        assertEquals("crash-reports", Destination.CrashReports.route())
     }
 
     @Test
@@ -37,10 +38,10 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 13 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
-        // plus the five routes task P-6 added: the four host-management ones
-        // and WorkspaceRoots.
-        assertEquals(13, patterns.size)
+        // 14 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
+        // the five routes task P-6 added (the four host-management ones and
+        // WorkspaceRoots), and CrashReports (issue #2476).
+        assertEquals(14, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }

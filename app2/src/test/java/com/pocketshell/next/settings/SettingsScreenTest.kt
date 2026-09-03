@@ -80,6 +80,24 @@ class SettingsScreenTest {
         assertEquals(9L, openedHostId)
     }
 
+    /**
+     * Issue #2476: the Diagnostics row is the ONLY entry point into the
+     * crash-report browser, so "the row exists and fires its callback" is the
+     * whole contract this screen owns; the navigation edge it feeds is pinned
+     * by [SettingsNavigationTest].
+     */
+    @Test
+    fun `tapping the crash reports row opens the crash report browser`() {
+        var openCount = 0
+        setContent(onOpenCrashReports = { openCount++ })
+
+        composeRule.onNodeWithTag(SETTINGS_CRASH_REPORTS_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Crash reports").assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_CRASH_REPORTS_TAG).performClick()
+
+        assertEquals(1, openCount)
+    }
+
     @Test
     fun `the installed build identity renders in the About footer`() {
         setContent(buildInfo = AppBuildInfo(versionName = "0.5.0", versionCode = 500))
@@ -108,6 +126,7 @@ class SettingsScreenTest {
         onUsageWarnThresholdChange: (Int) -> Unit = {},
         onBackgroundGraceChange: (Long) -> Unit = {},
         onOpenWorkspaceRoots: (Long) -> Unit = {},
+        onOpenCrashReports: () -> Unit = {},
     ) {
         composeRule.setContent {
             SettingsScreen(
@@ -120,6 +139,7 @@ class SettingsScreenTest {
                 onUsageWarnThresholdChange = onUsageWarnThresholdChange,
                 onBackgroundGraceChange = onBackgroundGraceChange,
                 onOpenWorkspaceRoots = onOpenWorkspaceRoots,
+                onOpenCrashReports = onOpenCrashReports,
             )
         }
     }

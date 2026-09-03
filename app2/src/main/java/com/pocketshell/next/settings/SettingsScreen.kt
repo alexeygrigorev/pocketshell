@@ -52,6 +52,7 @@ const val SETTINGS_TERMINAL_SIZE_VALUE_TAG: String = "settings-terminal-size-val
 const val SETTINGS_USAGE_WARN_SLIDER_TAG: String = "settings-usage-warn-slider"
 const val SETTINGS_USAGE_WARN_VALUE_TAG: String = "settings-usage-warn-value"
 const val SETTINGS_WORKSPACE_EMPTY_TAG: String = "settings-workspace-empty"
+const val SETTINGS_CRASH_REPORTS_TAG: String = "settings-crash-reports"
 const val SETTINGS_VERSION_TAG: String = "settings-version"
 
 fun backgroundGraceOptionTag(millis: Long): String = "settings-grace-$millis"
@@ -76,6 +77,7 @@ data class AppBuildInfo(val versionName: String, val versionCode: Long?) {
 fun SettingsRoute(
     onBack: () -> Unit,
     onOpenWorkspaceRoots: (Long) -> Unit,
+    onOpenCrashReports: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -94,6 +96,7 @@ fun SettingsRoute(
         onUsageWarnThresholdChange = viewModel::setUsageWarnThresholdPercent,
         onBackgroundGraceChange = viewModel::setBackgroundGraceMillis,
         onOpenWorkspaceRoots = onOpenWorkspaceRoots,
+        onOpenCrashReports = onOpenCrashReports,
         modifier = modifier,
     )
 }
@@ -102,7 +105,7 @@ fun SettingsRoute(
  * App settings (rewrite task P-6) — the old client's settings surface, ported
  * minus everything that configured deleted machinery.
  *
- * Five sections, ordered most-used-first, all built from ui-kit primitives so
+ * Six sections, ordered most-used-first, all built from ui-kit primitives so
  * this screen adds no visual vocabulary of its own:
  *
  *  1. **Terminal** — glyph size, and the background grace window (which is a
@@ -111,7 +114,10 @@ fun SettingsRoute(
  *  2. **Voice** — the dictation language hint.
  *  3. **Usage** — the "approaching limit" percent for the quota panel.
  *  4. **Workspace** — a host picker into that host's saved roots.
- *  5. **About** — the installed build, as a footer.
+ *  5. **Diagnostics** — the local crash-report browser (issue #2476). It sits
+ *     next to About because both answer "what build am I on and what went
+ *     wrong with it", which is the question a user has when reporting a bug.
+ *  6. **About** — the installed build, as a footer.
  *
  * Stateless: every value comes in, every change goes out. See [AppSettings] for
  * the table of ported-away fields, and [SettingsRepository] for which of the
@@ -128,6 +134,7 @@ fun SettingsScreen(
     onUsageWarnThresholdChange: (Int) -> Unit,
     onBackgroundGraceChange: (Long) -> Unit,
     onOpenWorkspaceRoots: (Long) -> Unit,
+    onOpenCrashReports: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -247,6 +254,21 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+            }
+
+            item {
+                SettingsSection("Diagnostics") {
+                    ListRow(
+                        title = "Crash reports",
+                        // Kept short on purpose: `ListRow`'s subtitle is a
+                        // single ellipsized line at this density, so anything
+                        // longer renders as "…" (caught in the #2476 render).
+                        subtitle = "Recorded on this device",
+                        trailing = { NavigationChevron() },
+                        onClick = onOpenCrashReports,
+                        modifier = Modifier.testTag(SETTINGS_CRASH_REPORTS_TAG),
+                    )
                 }
             }
 

@@ -37,8 +37,8 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 7 = the plan's fixed six plus Ports (task P-4).
-        assertEquals(7, patterns.size)
+        // 8 = the plan's fixed six, plus Ports (task P-4) and FileViewer (P-3b).
+        assertEquals(8, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -54,7 +54,19 @@ class DestinationsTest {
             Destination.Files.pattern,
             Destination.Files.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
+        assertMatchesPattern(
+            Destination.FileViewer.pattern,
+            Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
+        )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
+    }
+
+    @Test
+    fun `viewer route encodes the file path into its query argument`() {
+        val route = Destination.FileViewer.route(hostId = 3, path = "/home/alexey/my notes.md")
+
+        assertEquals("file/3?path=%2Fhome%2Falexey%2Fmy%20notes.md", route)
+        assertEquals(2, route.substringBefore('?').split("/").size)
     }
 
     @Test

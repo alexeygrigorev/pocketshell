@@ -77,7 +77,11 @@ class SessionTreeRouteTest {
 
         composeRule.setContent {
             PocketShellTheme {
-                SessionTreeRoute(onOpenSession = { opened += it }, viewModel = viewModel)
+                SessionTreeRoute(
+                    onOpenSession = { opened += it },
+                    onOpenFiles = {},
+                    viewModel = viewModel,
+                )
             }
         }
         composeRule.waitForIdle()

@@ -26,6 +26,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
+import com.pocketshell.next.files.FileExplorerRoute
+import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
@@ -77,9 +79,10 @@ const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
- * [hostsScreen], [connectViewModel], [treeScreen], [sessionScreen] and
- * [portsScreen] are seams, not feature flags: the real host list, connect
- * gate, session tree, terminal and port-forward panel resolve their
+ * [hostsScreen], [connectViewModel], [treeScreen], [sessionScreen],
+ * [portsScreen], [filesScreen] and [viewerScreen] are seams, not feature
+ * flags: the real host list, connect gate, session tree, terminal,
+ * port-forward panel, file explorer and file viewer resolve their
  * ViewModels through `hiltViewModel()`, which needs a Hilt-managed Activity,
  * so a plain Robolectric `createComposeRule()` composition could not host
  * them. The parameters let a test supply the same screen / the same
@@ -95,13 +98,28 @@ fun AppNavHost(
         HostListRoute(onOpenHost = onOpenHost)
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
-    treeScreen: @Composable (hostId: Long, onOpenSession: (String) -> Unit) -> Unit =
-        { _, onOpenSession -> SessionTreeRoute(onOpenSession = onOpenSession) },
+    treeScreen: @Composable (
+        hostId: Long,
+        onOpenSession: (String) -> Unit,
+        onOpenFiles: () -> Unit,
+    ) -> Unit = { _, onOpenSession, onOpenFiles ->
+        SessionTreeRoute(onOpenSession = onOpenSession, onOpenFiles = onOpenFiles)
+    },
     sessionScreen: @Composable (hostId: Long, sessionName: String, onBack: () -> Unit) -> Unit =
         { hostId, sessionName, onBack ->
             SessionRoute(hostId = hostId, sessionName = sessionName, onBack = onBack)
         },
     portsScreen: @Composable () -> Unit = { PortForwardRoute() },
+    filesScreen: @Composable (
+        hostId: Long,
+        path: String?,
+        onOpenFile: (String) -> Unit,
+        onBack: () -> Unit,
+    ) -> Unit = { _, _, onOpenFile, onBack ->
+        FileExplorerRoute(onOpenFile = onOpenFile, onBack = onBack)
+    },
+    viewerScreen: @Composable (hostId: Long, path: String?, onBack: () -> Unit) -> Unit =
+        { _, _, onBack -> ViewerRoute(onBack = onBack) },
 ) {
     NavHost(
         navController = navController,
@@ -127,9 +145,17 @@ fun AppNavHost(
             // from its own SavedStateHandle, so the screen keeps working under
             // process death without the navigation layer re-supplying it.
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
-            treeScreen(hostId) { sessionName ->
-                navController.navigate(Destination.Session.route(hostId, sessionName))
-            }
+            treeScreen(
+                hostId,
+                { sessionName ->
+                    navController.navigate(Destination.Session.route(hostId, sessionName))
+                },
+                // Task P-3a: the host's file browser. Opened with no path, so
+                // the explorer resolves the account's home directory itself.
+                // The plan's terminal kebab will later navigate to this same
+                // route WITH the session's workspace path.
+                { navController.navigate(Destination.Files.route(hostId)) },
+            )
         }
         composable(
             route = Destination.Session.pattern,
@@ -158,9 +184,30 @@ fun AppNavHost(
                 },
             ),
         ) { entry ->
-            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID)
-            val path = entry.arguments?.getString(Destination.ARG_PATH)
-            RoutePlaceholder("Files(hostId=$hostId, path=$path)")
+            // Task P-3a: the real remote file explorer. Like the tree, the
+            // ViewModel reads both arguments from its own SavedStateHandle, so
+            // the screen survives process death without navigation re-supplying
+            // them; the hostId is read here only to build the viewer route.
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            filesScreen(
+                hostId,
+                entry.arguments?.getString(Destination.ARG_PATH),
+                { filePath -> navController.navigate(Destination.FileViewer.route(hostId, filePath)) },
+                { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = Destination.FileViewer.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_PATH) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            // Task P-3b: the real file viewer/editor.
+            viewerScreen(
+                entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L,
+                entry.arguments?.getString(Destination.ARG_PATH),
+            ) { navController.popBackStack() }
         }
         composable(
             route = Destination.Ports.pattern,

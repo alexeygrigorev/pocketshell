@@ -153,8 +153,14 @@ internal class RealHostConnection(
     override suspend fun sftp(): SftpChannel =
         throw NotImplementedError("SFTP is rewrite task T-4, not part of T-2")
 
-    override fun scheduleGraceClose(graceMs: Long): GraceHandle =
-        throw NotImplementedError("Grace-close is rewrite task T-5, not part of T-2")
+    /**
+     * T-5: owns the single pending delayed close (D21). All of its logic lives
+     * in [GraceCloseScheduler]; it runs on this connection's [ioDispatcher], so
+     * a test that injects a virtual-time dispatcher controls the grace timer.
+     */
+    private val grace = GraceCloseScheduler(ioDispatcher) { close() }
+
+    override fun scheduleGraceClose(graceMs: Long): GraceHandle = grace.schedule(graceMs)
 
     override suspend fun close() {
         // Idempotent: only the first call touches the transport. Set `closing`

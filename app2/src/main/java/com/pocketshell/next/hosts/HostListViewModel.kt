@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 /**
  * One rendered row of the host list.
@@ -60,9 +61,22 @@ data class HostListUiState(
  */
 @HiltViewModel
 class HostListViewModel @Inject constructor(
-    hostDao: HostDao,
+    private val hostDao: HostDao,
     @IoDispatcher dispatcher: CoroutineDispatcher,
 ) : ViewModel() {
+
+    /**
+     * Remove a host (task P-6). Deliberately the only write on this ViewModel:
+     * the row's other management actions are navigations, and add/edit belongs
+     * to [AddEditHostViewModel] where the form state lives.
+     *
+     * No optimistic update — Room's invalidation re-emits the list, so the row
+     * disappearing IS the confirmation, and there is no local copy that could
+     * disagree with the table.
+     */
+    fun delete(hostId: Long) {
+        viewModelScope.launch { hostDao.deleteById(hostId) }
+    }
 
     val state: StateFlow<HostListUiState> =
         hostDao.getAll()

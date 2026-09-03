@@ -24,8 +24,9 @@ import java.nio.charset.StandardCharsets
  *
  * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
- * route rather than a tab inside [Session]). A new screen is a new object here,
- * never an ad-hoc string at a call site.
+ * route rather than a tab inside [Session]) and the three host-management
+ * routes task P-6 adds ([HostForm], [SshKeys], [HostQr], [QrScan]). A new screen
+ * is a new object here, never an ad-hoc string at a call site.
  */
 sealed class Destination(val pattern: String) {
 
@@ -107,8 +108,45 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "ports/$hostId"
     }
 
+    /**
+     * The add/edit host form (task P-6).
+     *
+     * [ARG_HOST_ID] is a query argument with a `-1` default rather than a path
+     * segment, because "add" and "edit" are the same screen and Add has no id.
+     * That default is load-bearing: it means the form's identity is always
+     * present in its `SavedStateHandle`, so `AddEditHostViewModel` never has to
+     * keep a mutable id field — which is exactly what made the audit's F1
+     * edit-then-add overwrite possible in the old client.
+     */
+    data object HostForm : Destination("host-form?$ARG_HOST_ID={$ARG_HOST_ID}") {
+        /** [hostId] `null` opens a blank Add form; an id opens that host for editing. */
+        fun route(hostId: Long? = null): String =
+            "host-form?$ARG_HOST_ID=${hostId ?: NO_HOST_ID}"
+    }
+
+    /** Manage registered SSH keys: generate, import, delete (task P-6). */
+    data object SshKeys : Destination("ssh-keys") {
+        fun route(): String = pattern
+    }
+
+    /** Render one host as a QR code for another device to scan (task P-6). */
+    data object HostQr : Destination("host-qr/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "host-qr/$hostId"
+    }
+
+    /** Scan a QR to import a host (task P-6). */
+    data object QrScan : Destination("qr-scan") {
+        fun route(): String = pattern
+    }
+
     companion object {
         const val ARG_HOST_ID: String = "hostId"
+
+        /**
+         * "No host" for [HostForm]. `NavType.LongType` has no null, so Add
+         * carries this sentinel rather than an absent argument.
+         */
+        const val NO_HOST_ID: Long = -1L
         const val ARG_SESSION_NAME: String = "sessionName"
         const val ARG_PATH: String = "path"
 
@@ -126,7 +164,10 @@ sealed class Destination(val pattern: String) {
          * no such window.
          */
         val all: List<Destination>
-            get() = listOf(Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage)
+            get() = listOf(
+                Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
+                HostForm, SshKeys, HostQr, QrScan,
+            )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */
         val start: Destination

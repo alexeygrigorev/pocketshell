@@ -12,6 +12,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
+    // Task P-6: the fast design-render loop (issue #555) for app2's own screens.
+    // `scripts/render.sh` only knows about :shared:ui-kit's DesignRenders, and it
+    // cannot grow to cover these — ui-kit is a dependency OF app2, so it can
+    // never see an app2 composable. The same Roborazzi harness lives here
+    // instead, rendering to the same `build/renders/` convention.
+    alias(libs.plugins.roborazzi)
 }
 
 // :shared:core-transport brings sshj, which brings BouncyCastle
@@ -194,6 +200,15 @@ dependencies {
     // dependency there and arrives on this classpath with core-transport.
     implementation(project(":shared:core-portfwd"))
 
+    // Task P-6: QR host import/export. `zxing-core` is the encoder/decoder used
+    // to render a host QR and to read one out of a still image;
+    // `zxing-android-embedded` adds the CameraX-backed `DecoratedBarcodeView`
+    // the live scanner hosts in an `AndroidView`. Both were already pinned in
+    // the version catalog for the shipping client's #129 scanner — no new
+    // catalog entries, and the same versions that shipped.
+    implementation(libs.zxing.core)
+    implementation(libs.zxing.android.embedded)
+
     // The nav graph is exercised as a real composition on the host JVM
     // (Robolectric + createComposeRule), the same way :shared:ui-kit tests its
     // primitives — a route pattern that `NavHost` rejects, or an argument that
@@ -209,6 +224,14 @@ dependencies {
     testImplementation(libs.compose.ui.test.junit4)
     // Supplies the empty host Activity `createComposeRule()` launches.
     debugImplementation(libs.compose.ui.test.manifest)
+
+    // Task P-6: Roborazzi renders app2's own screens to PNG on the host JVM, so
+    // a design change to the host form / key manager / QR screens can be looked
+    // at in seconds. Same versions :shared:ui-kit uses; nothing new in the
+    // catalog.
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
 
     // Task M-3: the connections registry is driven on the host JVM against the
     // scripted FakeHostConnection (no sshj, no network) plus an in-memory Room

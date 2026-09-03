@@ -1,0 +1,39 @@
+scenario=tmux-typed-prompt-at-cursor
+issue=102 (reopened)
+session_name=issue102-tmux
+marker=issue102-tmux hi
+edited_marker=issue102-tmux
+backspaces=3
+terminal_grid_columns=62
+terminal_grid_rows=42
+terminal_bounds=Rect(5, 700 - 1075, 2116)
+visible_terminal_chars=111
+
+capture_policy:
+authoritative=direct TerminalView viewport render plus terminal emulator visible text
+advisory=full-device/window screenshots; not used for terminal ink assertions
+advisory_device_strategy=this scenario does not emit advisory device screenshots; the authoritative viewport render and visible-terminal sidecar are the proofs of typed-prompt-at-cursor correctness
+
+authoritative_captures:
+issue102-tmux-00-attached-viewport.png name=issue102-tmux-00-attached grid=62x42 bounds=Rect(5, 700 - 1075, 2116) viewport_bright_pixels=3267 viewport_sha256=127e7b40523508608d3b9127e9d2b26619fc6efedfdc6e2880332177b18f4aac visible_terminal_chars=54
+issue102-tmux-01-tui-smoke-viewport.png name=issue102-tmux-01-tui-smoke grid=62x42 bounds=Rect(5, 700 - 1075, 2116) viewport_bright_pixels=7445 viewport_sha256=1c69149348e7562850b9d3106b890d2f2ebda601693da89183aeeda2f2cb6b90 visible_terminal_chars=98
+issue102-tmux-02-typed-viewport.png name=issue102-tmux-02-typed grid=62x42 bounds=Rect(5, 700 - 1075, 2116) viewport_bright_pixels=8723 viewport_sha256=1825b35c4ee20fa8a0c0e12453240c097263ef3a43b9cbc1a45211a31e827c0e visible_terminal_chars=114
+issue102-tmux-03-backspaced-viewport.png name=issue102-tmux-03-backspaced grid=62x42 bounds=Rect(5, 700 - 1075, 2116) viewport_bright_pixels=8523 viewport_sha256=91c464b848d5be2a802d616f13ee60d398efbf9b08847e9022d35daf2d0e30fb visible_terminal_chars=111
+issue102-tmux-04-submitted-viewport.png name=issue102-tmux-04-submitted grid=62x42 bounds=Rect(5, 700 - 1075, 2116) viewport_bright_pixels=8538 viewport_sha256=8d0ddd2035ef1d0b0516cb0ea7965639fe70d33c7259760c1799b0f3b9dbb2db visible_terminal_chars=111
+
+per_stage_stamps:
+[issue102-tmux] host_row_visible at 41158319
+[issue102-tmux] picker_visible at 41159381
+[issue102-tmux] tmux_session_screen_mounted at 41161299
+[issue102-tmux] terminal_session_attached at 41162404
+[issue102-tmux] tui_smoke_welcome_visible at 41163515
+[issue102-tmux] marker_visible at 41166079
+[issue102-tmux] backspace_visible at 41167149
+[issue102-tmux] enter_visible at 41168171
+
+visible_terminal:
+PocketShell interactive TUI smoke
+mode:normal
+draft:
+last:issue102-tmux
+controls: type edit enter arrows ctrl-c

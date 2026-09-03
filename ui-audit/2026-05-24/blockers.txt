@@ -1,0 +1,29 @@
+Surfaces that could not be reached / observations:
+
+- Settings: No top-bar settings icon or hamburger menu visible from the
+  hosts list. The only top-bar items are "Crashes", "Import", and "Keys"
+  tab labels. No theme/dark-mode toggle was discoverable from the
+  PocketShell UI without entering Android system settings; theme toggle
+  was therefore skipped.
+- Long-press on host card: swipe-with-zero-distance (800ms hold and
+  1500ms hold) both registered as a regular tap, opening the "Tmux
+  sessions" sheet (capture 36 shows the same sheet as capture 20). No
+  context menu appeared, so no separate context-menu screenshot exists.
+- 14-key-generate-dialog.png: tapping Generate did not open a dialog;
+  it generated a key immediately. The "dialog" filename was kept for
+  ordering but the content is the Keys tab still showing two buttons;
+  see 14-keys-generate-result.png and 15-keys-with-content.png for the
+  populated list.
+- AWS Gate (com.alexeygrigorev.phoneawsauth) repeatedly stole focus
+  from PocketShell during the run (it has an auto-launch schedule on
+  this emulator). It was force-stopped mid-run; some screenshots
+  (10-back-to-hosts.png) captured a transient launcher/AWS Gate state
+  rather than PocketShell. PocketShell was relaunched and the affected
+  surfaces were re-captured.
+- Real SSH connection to 127.0.0.1:22 was refused (no SSH server in
+  the emulator). The "connect failed" terminal/sheet state is what a
+  user would see; no successful-connect terminal screenshots are
+  included.
+- Dictate / mic permission flow: tapping the mic opened the Prompt
+  Composer (24-mic-press.png) but pressing the inner mic was not
+  exercised (no microphone permission prompt captured).

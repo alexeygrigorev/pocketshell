@@ -1,5 +1,8 @@
 package com.pocketshell.core.transport
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -326,6 +329,43 @@ class RealHostConnectionIntegrationTest {
             val result = connection.exec("echo still-alive")
             assertEquals(0, result.exitCode)
             assertEquals("still-alive", result.stdout.trim())
+        } finally {
+            connection.close()
+        }
+    }
+
+    @Test(timeout = 180_000)
+    fun manyConcurrentExecsOnOneConnectionNeverSurfaceARawServerRefusal() = runBlocking {
+        // Issue #2120, end-to-end: this is the maintainer's exact reported
+        // scenario (many concurrent execs sharing one SSH connection) driven
+        // over a real sshd, not a fake. `MaxSessions` is unset in
+        // tests/docker/sshd_config, so it is OpenSSH's default of 10 — the
+        // same value the incident's diagnosis was built on. The production
+        // #2120 fix sizes RealHostConnection's channel budget to 8 (under 10),
+        // so 16 concurrent execs — comfortably more than the server would
+        // ever grant at once — must all complete without any raw sshj
+        // "open failed" reaching a caller.
+        val connection = connectTrusted(newFactory(), targetFor(container!!), InMemoryTrustStore())
+        try {
+            // Each command sleeps briefly so the channels are genuinely open
+            // concurrently on the wire — an instant echo could finish (and
+            // free its budget permit) before the next one even asks, which
+            // would hide the exhaustion this test exists to rule out.
+            val jobs = List(16) { i ->
+                async(Dispatchers.Default) {
+                    runCatching { connection.exec("sleep 0.3 && echo done-$i") }
+                }
+            }
+            val outcomes = jobs.awaitAll()
+
+            outcomes.forEachIndexed { i, outcome ->
+                val result = outcome.getOrElse {
+                    fail("exec #$i must not throw under the production channel budget: $it") as Nothing
+                }
+                assertFalse("exec #$i must not time out", result.timedOut)
+                assertEquals("exec #$i", 0, result.exitCode)
+                assertEquals("done-$i", result.stdout.trim())
+            }
         } finally {
             connection.close()
         }

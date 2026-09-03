@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.SSHClient
@@ -38,13 +40,28 @@ import java.util.concurrent.atomic.AtomicBoolean
  * (T-5) — each owns its own logic in its own file; this class only wires the
  * shared [client]/[ioDispatcher] into them.
  *
+ * ## Channel budget (issue #2120)
+ *
+ * Because D28 shares ONE connection per host, every channel this class opens
+ * competes for the server's per-connection `MaxSessions` (OpenSSH default: 10).
+ * Exceeding it is what produced the reported `open failed` crash on
+ * session-create with 14 sessions open. Every opening path here therefore takes
+ * a [ChannelBudget] permit before the open request goes out and holds it for the
+ * channel's life, so the client never asks for a channel the server would
+ * refuse. See [ChannelBudget] for the sizing rationale and the exhaustion
+ * behaviour.
+ *
  * [ioDispatcher] exists so tests can substitute a controllable dispatcher;
- * [Dispatchers.IO] appears only as the constructor default.
+ * [Dispatchers.IO] appears only as the constructor default. [channels] and
+ * [budget] are injectable for the same reason — production always uses the
+ * sshj-backed opener and the default budget.
  */
 internal class RealHostConnection(
     override val target: HostTarget,
     private val client: SSHClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val channels: HostChannels = SshjHostChannels(client, ioDispatcher),
+    private val budget: ChannelBudget = ChannelBudget(),
 ) : HostConnection {
 
     private val _state = MutableStateFlow<TransportState>(TransportState.Connected)
@@ -78,27 +95,31 @@ internal class RealHostConnection(
 
     override suspend fun exec(command: String, timeoutMs: Long): ExecResult {
         requireUsable("exec")
-        return withContext(ioDispatcher) {
+        // #2120: the permit is taken BEFORE the channel-open request goes out and
+        // released only after the bounded teardown below has run, so a burst of
+        // execs queues here instead of getting `open failed` from the server.
+        return budget.withPermit("exec") { execOnChannel(command, timeoutMs) }
+    }
+
+    private suspend fun execOnChannel(command: String, timeoutMs: Long): ExecResult =
+        withContext(ioDispatcher) {
             // One session channel per call. sshj's SessionChannel implements
             // both Session and Command over the same channel.
-            val session = client.startSession()
-            var cmd: net.schmizz.sshj.connection.channel.direct.Session.Command? = null
+            val channel = channels.openExec(command)
             try {
-                val running = session.exec(command)
-                cmd = running
                 val stdout = ByteArrayOutputStream()
                 val stderr = ByteArrayOutputStream()
                 coroutineScope {
                     // Blocking channel-stream reads. sshj's ChannelInputStream
                     // parks on an interruptible monitor wait, so runInterruptible
                     // makes job cancellation interrupt (and thus unpark) them.
-                    val outReader = launch { runInterruptible { drain(running.inputStream, stdout) } }
-                    val errReader = launch { runInterruptible { drain(running.errorStream, stderr) } }
+                    val outReader = launch { runInterruptible { drain(channel.stdout, stdout) } }
+                    val errReader = launch { runInterruptible { drain(channel.stderr, stderr) } }
                     val finished = withTimeoutOrNull(timeoutMs) {
                         outReader.join()
                         errReader.join()
                         // Waits for the channel close that carries exit-status.
-                        runInterruptible { running.join() }
+                        runInterruptible { channel.join() }
                         true
                     }
                     if (finished == null) {
@@ -125,7 +146,7 @@ internal class RealHostConnection(
                         ExecResult(
                             // Null when the server reported no exit status; -1
                             // mirrors the old core-ssh behaviour.
-                            exitCode = running.exitStatus ?: -1,
+                            exitCode = channel.exitStatus ?: -1,
                             stdout = snapshot(stdout),
                             stderr = snapshot(stderr),
                             timedOut = false,
@@ -136,31 +157,32 @@ internal class RealHostConnection(
                 // Bounded, interruptible, uncancellable best-effort teardown: a
                 // stuck remote must not let Channel.close() wedge the exec path
                 // for the full channel timeout, and the teardown must still run
-                // even when the caller cancelled us.
+                // even when the caller cancelled us. The budget permit is only
+                // released once this has returned (withPermit's finally wraps
+                // this whole call), so a queued caller never overlaps a channel
+                // we are still tearing down.
                 withContext(NonCancellable) {
                     withTimeoutOrNull(CLOSE_TIMEOUT_MS) {
-                        runInterruptible {
-                            runCatching { cmd?.close() }
-                            runCatching { session.close() }
-                        }
+                        runInterruptible { channel.close() }
                     }
                 }
             }
         }
-    }
 
     override suspend fun openPty(command: String, cols: Int, rows: Int, term: String): PtyChannel {
         requireUsable("openPty")
         // All the PTY machinery lives in PtyChannelImpl (rewrite task T-3);
         // this connection only owns the client and the dispatcher it runs on.
-        return PtyChannelImpl.open(
-            client = client,
-            command = command,
-            cols = cols,
-            rows = rows,
-            term = term,
-            ioDispatcher = ioDispatcher,
-        )
+        // A PTY holds its channel until it ends, so it holds its #2120 permit
+        // for the same span — released by BudgetedPtyChannel.
+        val permit = budget.acquire("openPty")
+        val opened = try {
+            channels.openPty(command, cols, rows, term)
+        } catch (failure: Throwable) {
+            permit.release()
+            throw failure
+        }
+        return BudgetedPtyChannel(opened, permit)
     }
 
     /**
@@ -169,10 +191,21 @@ internal class RealHostConnection(
      * without any I/O here — [SftpChannelImpl] opens the remote subsystem
      * itself on first use.
      */
-    private val sftpChannel: SftpChannelImpl by lazy { SftpChannelImpl(client, ioDispatcher) }
+    private val sftpChannel: SftpChannel by lazy { channels.sftp() }
+
+    /** Guards the one-shot SFTP permit reservation below. */
+    private val sftpLock = Mutex()
+    private var sftpPermit: ChannelPermit? = null
 
     override suspend fun sftp(): SftpChannel {
         requireUsable("sftp")
+        // Exactly ONE permit, however many times this is called: the cached
+        // channel opens at most one SFTP subsystem channel for the whole life of
+        // the connection. It has no close() of its own (it dies with the
+        // connection), so [close] is what returns the permit.
+        sftpLock.withLock {
+            if (sftpPermit == null) sftpPermit = budget.acquire("sftp")
+        }
         return sftpChannel
     }
 
@@ -192,14 +225,24 @@ internal class RealHostConnection(
         localPort: Int,
     ): PortForward {
         requireUsable("openPortForward")
-        return withContext(ioDispatcher) {
-            PortForwardImpl(
-                channels = PortForwardImpl.sshjOpener(client),
-                remoteHost = remoteHost,
-                remotePort = remotePort,
-                localPort = localPort,
-                ioDispatcher = ioDispatcher,
-            )
+        // One permit for the forward's whole life, released when it closes.
+        // Deliberately NOT one per accepted client: `direct-tcpip` channels are
+        // not what `MaxSessions` counts, and D21 gives forwarding its own
+        // connection anyway (that policy lives in the app layer, so this method
+        // cannot assume it). A single conservative reservation keeps the shared
+        // budget honest if a forward is ever opened on an interactive
+        // connection, without pretending to police a different limit.
+        val permit = budget.acquire("openPortForward")
+        return try {
+            withContext(ioDispatcher) {
+                BudgetedPortForward(
+                    delegate = channels.openPortForward(remoteHost, remotePort, localPort),
+                    permit = permit,
+                )
+            }
+        } catch (failure: Throwable) {
+            permit.release()
+            throw failure
         }
     }
 
@@ -220,7 +263,54 @@ internal class RealHostConnection(
         withContext(ioDispatcher) {
             runCatching { client.disconnect() }
         }
+        // The SFTP channel has no close() of its own — it dies with the
+        // transport — so this is where its permit comes back. Every other
+        // permit is owned by something with its own end (exec's finally, the
+        // PTY/forward decorators), and a spent connection is never reused.
+        sftpLock.withLock { sftpPermit?.release() }
         settle(TransportState.Closed)
+    }
+
+    /**
+     * Holds one [ChannelBudget] permit for the life of a PTY channel.
+     *
+     * Released on [close] AND when the channel's [PtyChannel.exit] completes: a
+     * remote process that exits ends the server's session channel whether or not
+     * the app ever calls close(), and a permit stranded on a dead channel is
+     * exactly how #2120's budget would silently shrink back to nothing.
+     * [ChannelPermit.release] is idempotent, so both firing is fine.
+     */
+    private class BudgetedPtyChannel(
+        private val delegate: PtyChannel,
+        private val permit: ChannelPermit,
+    ) : PtyChannel by delegate {
+
+        init {
+            delegate.exit.invokeOnCompletion { permit.release() }
+        }
+
+        override suspend fun close() {
+            try {
+                delegate.close()
+            } finally {
+                permit.release()
+            }
+        }
+    }
+
+    /** Holds one [ChannelBudget] permit for the life of a port forward. */
+    private class BudgetedPortForward(
+        private val delegate: PortForward,
+        private val permit: ChannelPermit,
+    ) : PortForward by delegate {
+
+        override suspend fun close() {
+            try {
+                delegate.close()
+            } finally {
+                permit.release()
+            }
+        }
     }
 
     /** Terminal states are sticky: the first Lost/Closed wins, later ones are ignored. */

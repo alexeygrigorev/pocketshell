@@ -41,10 +41,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import click
 
+from . import aplexer as _aplexer
 from . import resume as _resume
 from . import session_enum as _session_enum
 
@@ -534,3 +537,296 @@ def sessions_create(
     completed = subprocess.run(argv, check=False)
     if completed.returncode != 0:
         ctx.exit(completed.returncode)
+
+
+# ---------------------------------------------------------------------------
+# `sessions attach` — resolve a name, then BECOME the attached session
+# ---------------------------------------------------------------------------
+#
+# The client (`exec pocketshell sessions attach --hide-status '<name>'`) runs
+# this over its SSH channel and expects the process to turn INTO the session,
+# so the happy path never returns: it resolves the name against exactly the
+# same enumeration `sessions list` uses, then `execvp`s either `a attach` or
+# `tmux attach-session`. Everything that can go wrong has to be decided
+# BEFORE the exec, hence the up-front binary + socket resolution.
+#
+# Exit codes (stable contract for the client):
+#   3   no session by that name
+#   4   ambiguous — several sessions match
+#   5   matched a tmux session but its server socket could not be located
+#   127 the `tmux` / `a` binary needed to attach is not installed
+
+ATTACH_EXIT_NOT_FOUND = 3
+ATTACH_EXIT_AMBIGUOUS = 4
+ATTACH_EXIT_NO_SOCKET = 5
+ATTACH_EXIT_NO_BINARY = 127
+
+#: Shortest aplexer-id prefix accepted as a selector. Shorter than this and a
+#: "prefix" is really a guess, so it is rejected as not-found rather than
+#: silently attaching to whichever session happened to sort first.
+APLEXER_ID_PREFIX_MIN = 8
+
+#: Per-probe timeout for the `tmux has-session` socket sweep.
+TMUX_PROBE_TIMEOUT_S = 2.0
+
+#: Whole-sweep budget. The socket directory accumulates hundreds of dead
+#: sockets from past runs (~4 ms each to reject); newest-first ordering means
+#: the live one is normally hit in the first handful, and the budget keeps a
+#: pathological directory from stalling an interactive attach.
+TMUX_SOCKET_SWEEP_BUDGET_S = 5.0
+
+
+def _resolve_aplexer_binary() -> Optional[str]:
+    """Locate the ``a`` (aplexer) CLI, honouring ``APLEXER_BIN``.
+
+    Wrapped rather than calling :func:`pocketshell.aplexer.which_a` inline so
+    the attach-time availability check has its own monkeypatch seam: patching
+    ``which_a`` itself would also silence the enumeration probe that produced
+    the aplexer rows in the first place.
+    """
+    return _aplexer.which_a()
+
+
+def _exec(argv: list[str]) -> None:
+    """Replace this process with ``argv`` — does not return on success.
+
+    Isolated as a module-level seam so the unit suite can capture the argv a
+    resolution produced instead of actually exec'ing the test runner away.
+    """
+    os.execvp(argv[0], argv)
+
+
+def _tmux_has_session(socket_path: str, name: str) -> bool:
+    """Whether the tmux server on ``socket_path`` owns session ``name``.
+
+    ``-t '=name'`` is tmux's exact-match form; without the ``=`` tmux would
+    accept a prefix and happily report a different session.
+    """
+    try:
+        completed = subprocess.run(
+            ["tmux", "-S", socket_path, "has-session", "-t", f"={name}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=TMUX_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _find_tmux_socket(name: str) -> Optional[str]:
+    """Locate the tmux socket serving session ``name``.
+
+    tmuxctl runs one server per session on ``tmuxctl-<name>`` under
+    ``${TMUX_TMPDIR:-/tmp}/tmux-<uid>``, so the name-derived path is tried
+    first and confirmed with ``has-session`` (the file can outlive its
+    server). Anything else — a session on the shared ``default`` socket, or
+    one created by a different tool — is found by sweeping the socket
+    directory newest-first and asking each server whether it owns the name.
+    """
+    socket_dir = _session_enum.tmux_socket_dir()
+    derived = socket_dir / f"{_session_enum.TMUXCTL_SOCKET_PREFIX}{name}"
+    if derived.exists() and _tmux_has_session(str(derived), name):
+        return str(derived)
+    if not socket_dir.is_dir():
+        return None
+    deadline = time.monotonic() + TMUX_SOCKET_SWEEP_BUDGET_S
+    for candidate in _sweep_candidates(socket_dir, derived):
+        if time.monotonic() > deadline:
+            break
+        if _tmux_has_session(str(candidate), name):
+            return str(candidate)
+    return None
+
+
+def _sweep_candidates(socket_dir: Path, derived: Path) -> list[Path]:
+    """Socket-directory entries to probe, newest first (``derived`` excluded)."""
+    entries: list[tuple[float, Path]] = []
+    try:
+        listing = list(socket_dir.iterdir())
+    except OSError:
+        return []
+    for entry in listing:
+        if entry == derived:
+            continue
+        try:
+            if entry.is_dir():
+                continue
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        entries.append((mtime, entry))
+    entries.sort(key=lambda item: (-item[0], str(item[1])))
+    return [entry for _mtime, entry in entries]
+
+
+def _match_attach_target(
+    rows: Sequence[_session_enum.LiveSession], name: str
+) -> list[_session_enum.LiveSession]:
+    """Resolve ``name`` to candidate rows, most-specific rule first.
+
+    tmux name (exact) beats aplexer display name (exact) beats aplexer id
+    (prefix). Returning a list rather than a single row is deliberate: the
+    caller distinguishes "nothing matched" from "several matched" and must
+    never pick one arbitrarily.
+    """
+    exact_tmux = [
+        row
+        for row in rows
+        if row.manager == _session_enum.MANAGER_TMUX and row.name == name
+    ]
+    if exact_tmux:
+        return exact_tmux
+    exact_aplexer = [
+        row
+        for row in rows
+        if row.manager == _session_enum.MANAGER_APLEXER and row.name == name
+    ]
+    if exact_aplexer:
+        return exact_aplexer
+    if len(name) < APLEXER_ID_PREFIX_MIN:
+        return []
+    return [
+        row
+        for row in rows
+        if row.aplexer_id and row.aplexer_id.startswith(name)
+    ]
+
+
+def _attach_live_rows() -> tuple[list[_session_enum.LiveSession], list[dict[str, str]]]:
+    """Enumerate exactly like `sessions list --json` does.
+
+    Attach must resolve against the same name set the user just listed, so
+    this reuses the `tmuxctl list` capture + `enumerate_live_sessions` path
+    rather than a second, subtly-different enumeration.
+    """
+    tmuxctl = _run_tmuxctl_capture(["list"])
+    returncode = int(tmuxctl.get("returncode", 0))
+    ok = returncode == 0
+    error = None
+    if not ok:
+        error = (
+            str(tmuxctl.get("stderr") or "").strip()
+            or f"`tmuxctl list` exited {returncode}"
+        )
+    return _session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=str(tmuxctl.get("stdout") or "") if ok else None,
+        tmuxctl_error=error,
+        enrich_tmux=True,
+    )
+
+
+def _describe_candidate(row: _session_enum.LiveSession) -> str:
+    if row.manager == _session_enum.MANAGER_APLEXER and row.aplexer_id:
+        return f"  {row.name}  ({row.manager} {row.aplexer_id})"
+    return f"  {row.name}  ({row.manager})"
+
+
+@sessions_group.command(
+    "attach",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("name")
+@click.option(
+    "--hide-status",
+    is_flag=True,
+    default=False,
+    help=(
+        "Turn the tmux status bar off for this session before attaching "
+        "(session-scoped `set-option status off`). Ignored for aplexer "
+        "sessions, which draw no tmux status bar."
+    ),
+)
+@click.pass_context
+def sessions_attach(ctx: click.Context, name: str, hide_status: bool) -> None:
+    """Attach to a live session, replacing this process with it.
+
+    NAME is a tmux session name, an aplexer display name
+    (`<workspace>:<tag>`), or an aplexer id prefix of at least 8 characters.
+    Resolution uses the same enumeration as `sessions list`, so any name that
+    listing shows can be attached.
+
+    On success this process is REPLACED by `tmux attach-session` (or
+    `a attach`) and never returns. Exit 3 = no such session, 4 = ambiguous,
+    5 = tmux session found but its socket could not be located, 127 = the
+    attach binary is missing.
+    """
+    rows, _errors = _attach_live_rows()
+    matches = _match_attach_target(rows, name)
+    if not matches:
+        click.echo(f"no session named {name!r}", err=True)
+        ctx.exit(ATTACH_EXIT_NOT_FOUND)
+        return
+    if len(matches) > 1:
+        click.echo(f"ambiguous session name {name!r}; candidates:", err=True)
+        for row in matches:
+            click.echo(_describe_candidate(row), err=True)
+        ctx.exit(ATTACH_EXIT_AMBIGUOUS)
+        return
+
+    row = matches[0]
+    if row.manager == _session_enum.MANAGER_APLEXER:
+        if _resolve_aplexer_binary() is None:
+            click.echo(
+                "pocketshell: `a` (aplexer) is not installed on this host; "
+                f"cannot attach to {row.name!r}.",
+                err=True,
+            )
+            ctx.exit(ATTACH_EXIT_NO_BINARY)
+            return
+        _exec(["a", "attach", str(row.aplexer_id)])
+        return
+
+    if shutil.which("tmux") is None:
+        click.echo(
+            "pocketshell: `tmux` is not installed on this host; "
+            f"cannot attach to {row.name!r}.",
+            err=True,
+        )
+        ctx.exit(ATTACH_EXIT_NO_BINARY)
+        return
+    socket_path = _find_tmux_socket(row.name)
+    if socket_path is None:
+        click.echo(
+            f"pocketshell: found tmux session {row.name!r} in the listing but "
+            "no tmux server socket serves it; it may have just exited.",
+            err=True,
+        )
+        ctx.exit(ATTACH_EXIT_NO_SOCKET)
+        return
+    target = f"={row.name}"
+    if hide_status:
+        # Session-scoped and deliberately not restored on detach: the client
+        # asking for --hide-status owns its own chrome for that session.
+        #
+        # The target here is `=name:` (trailing colon), NOT the `=name` used
+        # for attach-session: `set-option -t` takes a *pane* target, and
+        # tmux 3.4 rejects a bare `=name` there with "no such session"
+        # (verified live) — silently leaving the status bar on. The trailing
+        # colon makes it "current pane of the window of session =name" while
+        # keeping the `=` exact-match on the session name.
+        completed = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "set-option",
+                "-t",
+                f"={row.name}:",
+                "status",
+                "off",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            # Not fatal — the user asked to attach, and a visible status bar
+            # beats refusing to connect. But never fail silently.
+            detail = str(completed.stderr or "").strip() or "unknown error"
+            click.echo(
+                f"pocketshell: could not hide the tmux status bar: {detail}",
+                err=True,
+            )
+    _exec(["tmux", "-S", socket_path, "attach-session", "-t", target])

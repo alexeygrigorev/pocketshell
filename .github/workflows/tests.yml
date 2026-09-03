@@ -1,6 +1,8 @@
 name: Tests
 
-# Issue #41: run JVM unit tests and Testcontainers-driven integration tests.
+# Issue #41: run JVM unit tests and the Docker-backed fixture checks. (The
+# Testcontainers integration graph this workflow used to run was removed with
+# the modules it covered; the surviving one lives in app2.yml.)
 # Issue #816/#953: PRs run the cheap merge gate; Docker/emulator validation is
 # batched on main pushes or manual dispatch so every trivial/independent PR does
 # not sit in the heavy runner queue. The main-push concurrency group cancels
@@ -213,8 +215,14 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Docker integration guard (#2094)
-        run: scripts/check-ci-docker-integration-execution.py --self-test && scripts/check-ci-docker-integration-execution.py
+      # The #2094 Docker-integration forced-execution guard was DELETED with the
+      # four-task graph it pinned (the old app, core-ssh, core-portfwd and
+      # core-tmux integrationTest tasks — every one of those modules was removed
+      # by the rewrite's hard cut). The surviving Docker integration lane is
+      # core-transport's, in .github/workflows/app2.yml
+      # (job `transport-integration`), which carries its own anti-vacuous-green
+      # guard (scripts/check-app2-lane-execution.py: fresh-run marker,
+      # executed = tests - skipped, per-lane floor). D22: no shim kept here.
 
       # Issue #1766: render PNGs are direct test side effects, so Gradle can
       # otherwise return FROM-CACHE/UP-TO-DATE for a second, differently
@@ -729,7 +737,7 @@ jobs:
           scripts/test-ci-journey-dead-channel-oracle.sh
 
       # Issue #1814: the first journey class on a shard used to pay for the cold
-      # `:app:compileDebugKotlin` INSIDE its own per-class budget, so it could
+      # app-module Kotlin compile INSIDE its own per-class budget, so it could
       # time out for a reason unrelated to the test — and an `exit 124 /
       # outer_timeout / raw-junit count=0` build-phase timeout is
       # indistinguishable from a genuine journey failure. This guard drives the
@@ -898,11 +906,18 @@ jobs:
           scripts/ci-test-selection-guards.sh
 
   # ---------------------------------------------------------------------------
-  # Issue #2060 (CI Phase A): the dex ratchet needs a real `:app:assembleDebug` —
-  # ~5 min of the old `unit` job's serial prefix and the ONLY guard step that
-  # compiles anything. Splitting it out takes it off the Unit critical path AND
-  # gives the workflow a cheap "the tree compiles and packages" signal ~6 min in,
-  # which is what `emulator-journey` gates on (see its `needs:` note).
+  # Issue #2060 (CI Phase A): split out of the `unit` job so the ONE step that
+  # compiles anything runs off the Unit critical path, and so the workflow gets a
+  # cheap "the tree compiles" signal early, which is what `emulator-journey` gates
+  # on (see its `needs:` note).
+  #
+  # The job's original payload — the #1685 dex register-pressure ratchet over the
+  # old app module's debug APK — was DELETED with that module (rewrite hard cut);
+  # it gated `com.pocketshell.app.tmux.TmuxSessionScreen`, which no longer exists
+  # and has no app2 successor. The job KEEPS its key and display name because
+  # both are load-bearing outside this file (unit-gate's needs/env/loop,
+  # scripts/check-unit-gate-wiring.sh's self-test fixtures, scripts/watch-ci.py's
+  # job list); renaming is a separate, wider change.
   dex:
     name: Dex register-pressure ratchet
     runs-on: ubuntu-latest
@@ -942,40 +957,26 @@ jobs:
           chmod +x scripts/check-version-coupling.sh
           scripts/check-version-coupling.sh
 
-      # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
-      # composable family. TmuxSessionScreen is the app's MAIN screen and a single
-      # enormous composable; when its compiled dex method frame crosses ART's
-      # 256-register WIDE-REGISTER cliff the class fails on-device verification
-      # (java.lang.VerifyError) and the screen crashes at load — invisible to the
-      # JVM unit tests. This has recurred THREE times (#1158/#1362/#1685). The
-      # existing on-device proof (TmuxSessionScreenArtVerifyE2eTest) only runs in
-      # the batched post-merge emulator lane, which is exactly why recurrence #3
-      # shipped. This guard runs PER-PR in the cheap Unit lane: it dexes the debug
-      # APK and asserts every TmuxSessionScreen* method stays under a budget (200)
-      # that keeps a hard margin below the 256 cliff, so a creep back toward the
-      # cliff is a per-PR RED here instead of a phone crash later. --self-test
-      # proves the parser/budget red->green logic (no APK) first; then a debug
-      # build + the real check. dexdump comes from the runner's Android build-tools.
-      - name: Dex register-pressure ratchet (issue #1685)
-        run: |
-          chmod +x scripts/check-dex-register-pressure.sh
-          scripts/check-dex-register-pressure.sh --self-test
-          # Issue #2060: --max-workers matches the real 4-vCPU runner (was 2,
-          # sized for the pre-2024 box). AGP dexing/resources are Worker API tasks
-          # that genuinely fan out; peak memory is unchanged (parallel=false).
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
-            --max-workers=4 \
-            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
-          scripts/check-dex-register-pressure.sh
+      # The #1685 dex register-pressure ratchet step lived here. It assembled the
+      # old app module's debug APK and dexed it to keep every
+      # `com.pocketshell.app.tmux.TmuxSessionScreen*` method under the 256-register
+      # ART verifier cliff. Both the module and the composable were removed by the
+      # rewrite's hard cut, so the Gradle command could not even configure. Deleted
+      # rather than repointed: app2 has no TmuxSessionScreen equivalent yet, and
+      # inventing a placeholder target would be coverage theatre (D22).
+      # scripts/check-dex-register-pressure.sh is now uncalled; it is left on disk
+      # for whoever re-lands an equivalent app2 screen ratchet.
 
       # Issues #1720/#2117. COMPILE ONLY; running stays in the emulator lane.
-      # All three source sets, not just :app. Rationale + the pinned property:
+      # Rationale + the pinned property:
       # scripts/check-androidtest-compile-wiring.sh (guards-static).
+      # The old app module's androidTest compile was dropped with that module.
+      # app2's androidTest source set is compiled by its own lane
+      # (.github/workflows/app2.yml, job `app2-unit`), not duplicated here.
       - name: "Compile androidTest source sets (issues #1720, #2117)"
         run: |
           ./gradlew --no-daemon --stacktrace --max-workers=4 \
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
-            :app:compileDebugAndroidTestKotlin \
             :shared:core-terminal:compileDebugAndroidTestKotlin \
             :shared:ui-kit:compileDebugAndroidTestKotlin
 
@@ -1135,6 +1136,24 @@ jobs:
       - {uses: actions/checkout@v6, with: {fetch-depth: 0}}
       - {id: p, run: "scripts/ci-plan.sh --before ${{github.event.before}}"}
 
+  # This job used to run the four-task Testcontainers integration graph over the
+  # old app, core-ssh, core-portfwd and core-tmux modules.
+  # ALL FOUR modules were removed by the rewrite's hard cut, so that Gradle
+  # command failed at configuration time — the job could not run at all. The
+  # command, its #2094 run-marker/verify pair and its report upload are deleted
+  # (D22, no shim), NOT repointed: the one surviving JVM Docker integration suite
+  # is `:shared:core-transport:integrationTest`, which already has a lane in
+  # .github/workflows/app2.yml (`transport-integration`) with its own execution
+  # guard; duplicating it here would run it twice per push for no signal.
+  #
+  # What REMAINS is the part that never depended on the deleted modules: the two
+  # REAL-Docker fixture smokes (#1937 tmux-wrapper images, #2143 SSH/tmux fixture
+  # health). Their stubbed counterparts run per-push in `guards-ci-harness`; this
+  # is the only place they are exercised against actual containers, and app2.yml
+  # deliberately does not copy them. The job key and display name are kept
+  # verbatim because `Integration tests (Docker)` is a named contract outside this
+  # file (scripts/watch-ci.py, scripts/ci-run-jobs.sh, scripts/ci-red-issue.sh,
+  # full-suite-notify.yml, tools/pocketshell tests, process.md).
   integration:
     name: Integration tests (Docker)
     if: github.event_name != 'pull_request'
@@ -1182,32 +1201,6 @@ jobs:
       - name: "Shared SSH/tmux fixture health on a REAL fixture (issue #2143)"
         run: POCKETSHELL_FIXTURE_HEALTH_REAL_DOCKER=1 scripts/test-ci-journey-fixture-health.sh
 
-      - name: Integration run marker (#2094)
-        run: touch "${RUNNER_TEMP}/integration-test-run-start"
-
-      - name: Run integration tests
-        id: integration_tests
-        timeout-minutes: 45
-        run: |
-          set -o pipefail
-          ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest --rerun-tasks --no-build-cache --no-daemon --stacktrace --console=plain 2>&1 | tee "${RUNNER_TEMP}/integration-test-gradle.log"
-
-      - name: Verify integration execution (#2094)
-        if: always() && steps.integration_tests.conclusion != 'skipped'
-        run: scripts/check-ci-docker-integration-execution.py --verify-results --newer-than "${RUNNER_TEMP}/integration-test-run-start" --gradle-log "${RUNNER_TEMP}/integration-test-gradle.log"
-
-      - name: Upload integration test reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: integration-test-reports
-          path: |
-            **/build/reports/tests/
-            **/build/test-results/
-          # Issue #1809: same re-run hygiene as the unit job's upload.
-          overwrite: true
-          if-no-files-found: error
-
   # ---------------------------------------------------------------------------
   # Per-push emulator-journey job (issue #691, the #638 mandate that never
   # landed). Runs the LOAD-BEARING terminal-attach/switch JOURNEY proof on the
@@ -1246,10 +1239,12 @@ jobs:
     #
     # Option (a) was to drop `needs:` and accept the emulator spend on red runs.
     # We took option (b): a CHEAP fast-fail dependency recovering almost all of
-    # the 37 min while keeping the cost protection. `dex` is it — the ~6-min
-    # `:app:assembleDebug`, proof the tree COMPILES AND PACKAGES, the failure
-    # class that would otherwise waste every runner (each ~8 min into the suite's
-    # warm build before hitting the same break). `python` is ~1 min and fully
+    # the 37 min while keeping the cost protection. `dex` is it — proof the tree
+    # COMPILES, the failure class that would otherwise waste every runner (each
+    # ~8 min into the suite's warm build before hitting the same break). NOTE: it
+    # used to assemble the old app module's debug APK, so it also proved the tree
+    # PACKAGES; with that module gone it now only compiles (androidTest source
+    # sets), a weaker but still useful fast-fail. `python` is ~1 min and fully
     # overlapped by `dex`, so it is free and keeps fail-fast on version coupling.
     # Given up deliberately: a commit whose TESTS are red but which compiles still
     # spends the runners. Bounded — `main` pushes already passed the required

@@ -202,7 +202,6 @@ full   scripts/check-test-execution-ledger-wiring.py
 full   scripts/ci-record-test-execution-ledger.sh
 full   scripts/check-ci-unit-forced-execution.py    asserts the full Unit run stays forced/uncached
 full   scripts/check-executed-test-counts.sh        the anti-vacuous-green test-count guard (issue #1646)
-full   scripts/check-ci-docker-integration-execution.py
 full   scripts/check-ci-journey-harness.sh          the journey registry's own wiring guard
 full   scripts/check-ci-journey-harness-selftest.sh
 full   scripts/check-test-validity.sh               D32/#657 regression-proof-validity guard

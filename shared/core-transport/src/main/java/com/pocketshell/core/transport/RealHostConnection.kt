@@ -147,8 +147,19 @@ internal class RealHostConnection(
         }
     }
 
-    override suspend fun openPty(command: String, cols: Int, rows: Int, term: String): PtyChannel =
-        throw NotImplementedError("PTY channels are rewrite task T-3, not part of T-2")
+    override suspend fun openPty(command: String, cols: Int, rows: Int, term: String): PtyChannel {
+        requireUsable("openPty")
+        // All the PTY machinery lives in PtyChannelImpl (rewrite task T-3);
+        // this connection only owns the client and the dispatcher it runs on.
+        return PtyChannelImpl.open(
+            client = client,
+            command = command,
+            cols = cols,
+            rows = rows,
+            term = term,
+            ioDispatcher = ioDispatcher,
+        )
+    }
 
     override suspend fun sftp(): SftpChannel =
         throw NotImplementedError("SFTP is rewrite task T-4, not part of T-2")

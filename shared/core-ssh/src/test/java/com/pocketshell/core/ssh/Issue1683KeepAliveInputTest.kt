@@ -1,9 +1,13 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -25,12 +29,14 @@ import org.junit.Test
 class Issue1683KeepAliveInputTest {
 
     private val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+    private val eventSignal = Channel<Unit>(capacity = 16)
 
     @Before
     fun installSink() {
         events.clear()
         SshDiagnostics.install { event, fields ->
             synchronized(events) { events += event to fields }
+            eventSignal.trySend(Unit)
         }
     }
 
@@ -55,6 +61,13 @@ class Issue1683KeepAliveInputTest {
         advanceTimeBy(1_000L); runCurrent() // miss 1
         advanceTimeBy(1_000L); runCurrent() // miss 2
         advanceTimeBy(1_000L); runCurrent() // miss 3 -> death budget crossed
+        keepAlive.stop()
+
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000L) {
+                repeat(4) { eventSignal.receive() }
+            }
+        }
 
         val misses = synchronized(events) { events.filter { it.first == "keepalive_miss" } }
         assertEquals("every miss tick is an INPUT", 3, misses.size)
@@ -76,7 +89,5 @@ class Issue1683KeepAliveInputTest {
             false,
             crossings.last().second["inboundActivityAdvanced"],
         )
-
-        keepAlive.stop()
     }
 }

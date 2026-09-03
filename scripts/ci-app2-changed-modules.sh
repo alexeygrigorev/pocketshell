@@ -66,6 +66,12 @@ declare -a SHARED_PREFIXES=(
   ".github/workflows/app2.yml"
   "scripts/ci-app2-changed-modules.sh"
   "scripts/check-app2-lane-execution.py"
+  # Issue #2474: the app2-journey lane's runner. It is app2-only in effect, but
+  # listing it here rather than under the app2 module keeps this list identical
+  # to app2.yml's trigger-level `paths:` union — the two must not drift, or a
+  # change to the runner triggers the workflow while every lane inside it
+  # deselects itself.
+  "scripts/ci-app2-journey-suite.sh"
 )
 
 emit() {
@@ -223,6 +229,14 @@ self_test() {
   commit_file ".github/workflows/app2.yml"
   check "the workflow itself (shared)" true true true true
 
+  # Issue #2474: the journey lane's runner. app2.yml's trigger-level `paths:`
+  # starts a run when it changes, so this list must select a lane for it — an
+  # entry present in one place and missing in the other yields a run whose every
+  # job deselects itself.
+  git -C "$tmp" reset -q --hard "$base"
+  commit_file "scripts/ci-app2-journey-suite.sh"
+  check "the journey runner (shared)" true true true true
+
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/core-hostapi/x.kt"
   commit_file "app2/y.kt"
@@ -263,8 +277,9 @@ self_test() {
     echo "ok   [unknown base fails open]"
   fi
 
-  if [[ $checks -ne 13 ]]; then
-    echo "FAIL: expected 13 checks, ran $checks" >&2
+  # Bumped 13 -> 14 by issue #2474's journey-runner case.
+  if [[ $checks -ne 14 ]]; then
+    echo "FAIL: expected 14 checks, ran $checks" >&2
     status=1
   fi
 

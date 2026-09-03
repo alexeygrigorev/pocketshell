@@ -1424,9 +1424,17 @@ creating, so a re-run is still deterministic).
 
 The port is read from the `agentsPort` instrumentation argument and defaults to
 2222 (`AgentsFixture` in `app2/src/androidTest`), so `--pool` works unchanged.
-There is no CI emulator lane for app2 yet — that arrives with rewrite task U-4;
-until then `.github/workflows/app2.yml`'s unit job compiles the androidTest
-source set so the journey cannot rot unnoticed.
+
+`J05ReconnectAfterDropJourney` also dials through the `network-fault-proxy`
+Toxiproxy, so the whole set needs `agents` AND `network-fault-proxy` up.
+
+CI lane (issue #2474): `.github/workflows/app2.yml`'s `app2-journey` job — the
+same API-35 AVD the other emulator lanes use, both fixtures, then
+`scripts/ci-app2-journey-suite.sh`, which is `:app2:connectedDebugAndroidTest`
+with NO class filter so all 11 journeys share one instrumentation process and
+cross-journey pollution (#2477) stays visible. Batched on pushes to
+`stable`/`main` and `gh workflow run app2.yml --ref stable`, never per-PR. The
+job header and that script's header carry the rest.
 
 ### Short app-switch reconnect proof
 

@@ -32,15 +32,18 @@ name: app2
 # removed first and ALL selection moved into the `changes` job (which already
 # does the per-job half and reports a skipped-but-present job either way).
 #
-# NO EMULATOR LANE YET. Task U-2 added app2's first instrumented journey
-# (`J01ConnectAndTrustJourney`), but running it needs an emulator AND the Docker
-# SSH fixture; that lane arrives with U-4 and gets wired into the journey suite
-# then. Until it does, the `app2-unit` job at least COMPILES the androidTest
-# source set, so the journey cannot silently rot against a main-source change
-# (the old module learned this the expensive way: the required Unit job never
-# compiled `androidTest`, so a signature break there surfaced only after merge
-# and took out every connected gate at once — see process.md, "Local Confidence
-# Before CI").
+# TWO LAYERS OF androidTest PROTECTION.
+#   * `app2-unit` COMPILES the androidTest source set on every run — cheap, no
+#     emulator — so a journey cannot silently rot against a main-source change
+#     (the old module learned this the expensive way: the required Unit job
+#     never compiled `androidTest`, so a signature break there surfaced only
+#     after merge and took out every connected gate at once — see process.md,
+#     "Local Confidence Before CI").
+#   * `app2-journey` (issue #2474) actually RUNS the whole set — J01-J08,
+#     J10-J12 — on an emulator against the Docker `agents` +
+#     `network-fault-proxy` fixtures. Batched on push/dispatch, never per-PR;
+#     that job's own header carries the one-unfiltered-run and no-`needs:`
+#     decisions.
 
 on:
   push:
@@ -64,6 +67,7 @@ on:
       - ".github/workflows/app2.yml"
       - "scripts/ci-app2-changed-modules.sh"
       - "scripts/check-app2-lane-execution.py"
+      - "scripts/ci-app2-journey-suite.sh"
   pull_request:
     paths:
       - "app2/**"
@@ -80,6 +84,7 @@ on:
       - ".github/workflows/app2.yml"
       - "scripts/ci-app2-changed-modules.sh"
       - "scripts/check-app2-lane-execution.py"
+      - "scripts/ci-app2-journey-suite.sh"
   workflow_dispatch:
 
 concurrency:
@@ -115,6 +120,15 @@ jobs:
         run: |
           chmod +x scripts/ci-app2-changed-modules.sh
           scripts/ci-app2-changed-modules.sh --self-test
+
+      # Issue #2474: wired HERE, in the cheap always-runs job, not inside the
+      # emulator job it belongs to — the journey lane is skipped on PRs, so a
+      # self-test living there would only ever run on the push that already
+      # broke `stable`. It needs no JDK, no Docker and no emulator.
+      - name: Self-test the app2 journey runner
+        run: |
+          chmod +x scripts/ci-app2-journey-suite.sh
+          scripts/ci-app2-journey-suite.sh --self-test
 
       - name: Select lanes
         id: select
@@ -593,3 +607,217 @@ jobs:
             app2/build/test-results/
           overwrite: true
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # app2 journey lane (issue #2474) — the emulator lane the header note above
+  # promised. app2's 11 instrumented journeys (J01-J08, J10-J12) all passed by
+  # hand and NONE of them ran in CI: `app2-unit` only COMPILES the androidTest
+  # source set, so any journey regression stayed invisible until a human
+  # happened to run scripts/connected-test.sh.
+  #
+  # ONE JOB, ONE UNFILTERED RUN. No shard matrix and no per-class invocation,
+  # deliberately: the whole set runs in a SINGLE instrumentation process, which
+  # is the only shape that can see one journey leaking state into the next.
+  # That is not hypothetical — running the set together for the first time is
+  # exactly what surfaced issue #2477's cross-journey pollution, which a
+  # per-class lane would have been green through. scripts/ci-app2-journey-suite.sh
+  # owns the invocation and its --self-test (run in the `changes` job above)
+  # asserts a class filter can never creep back in.
+  #
+  # NOT A PER-PR GATE. Emulator + Docker + 11 journeys is ~30-45 min, so it
+  # follows the established split (process.md, "Protected `main` checks"): heavy
+  # Docker/emulator work batches on push and manual dispatch while PRs keep the
+  # cheap required checks. The `github.event_name != 'pull_request'` half of the
+  # `if:` below is that decision. The push trigger covers `main` and `stable`
+  # (see the `on:` block), and `workflow_dispatch` gives an on-demand run.
+  #
+  # NO `needs: app2-unit`. tests.yml gates its emulator matrix on a cheap
+  # compile job (`dex`) to protect the Actions budget; app2's only equivalent is
+  # `app2-unit` itself, up to 25 min, which would nearly double this lane's wall
+  # clock. Instead the fast-fail moved INSIDE this job: the APKs are assembled
+  # in a normal step BEFORE the emulator boots, so a tree that does not compile
+  # reddens without ever spending an AVD, and the in-emulator run starts warm.
+  app2-journey:
+    name: app2 journey suite (emulator + Docker agents)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.app2 == 'true' }}
+    runs-on: ubuntu-latest
+    # BUDGET, and why the two step caps below matter more than this one. The
+    # 11-journey run measured 15 min locally on a warm build; the assemble step
+    # is ~8 min warm and up to ~25 cold; the action's own cold boot is capped at
+    # 900 s. The job cap (90) is deliberately LOOSER than the sum of the step
+    # caps (30 assemble + 45 journey + ~10 setup), because a job that hits ITS
+    # cap is killed by GitHub and uploads NOTHING — the `if: always()` report
+    # steps never run and a wedge produces zero evidence. Letting the STEP time
+    # out first keeps the artifacts, which is the whole point of the lane.
+    timeout-minutes: 90
+
+    steps:
+      # fetch-depth 0 (#2381): the APK's versionName derives from the git tag,
+      # and scripts/ci-journey-fixture-retry.sh stamps the `agents` fixture with
+      # the SAME derivation. A shallow clone makes the APK report the
+      # `0.0.0-dev` placeholder while the fixture is stamped from the tag, and a
+      # host/client version mismatch is precisely the state journeys must not
+      # start from. scripts/check-emulator-apk-version-wiring.sh enforces this
+      # on every emulator-booting job.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + suite script executable
+        run: chmod +x ./gradlew scripts/ci-app2-journey-suite.sh
+
+      - name: Verify Docker is available
+        run: docker info
+
+      # Assemble BEFORE the emulator boots (see the job header): a compile break
+      # fails here in minutes with no AVD spent, and the in-action gradle run
+      # then only has to install and instrument.
+      - name: Assemble app2 debug + androidTest APKs
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          ./gradlew :app2:assembleDebug :app2:assembleDebugAndroidTest \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Same two hosted-runner failure modes tests.yml and pr-journey-smoke.yml
+      # hit (#760 disk pressure FATAL-ing the AVD create, #771 the stock
+      # sdkmanager crashing so the emulator action's own license accept dies).
+      # Reusing the exact scripts keeps this lane's provisioning identical to
+      # theirs rather than a second copy that can drift.
+      - name: Free disk space for the AVD
+        run: scripts/ci-emulator-free-disk.sh
+
+      - name: Initialize journey artifacts
+        run: mkdir -p artifacts/app2-journey
+
+      - name: Repair Android cmdline-tools + accept licenses (issue #771)
+        run: scripts/ci-emulator-repair-sdk-tools.sh
+
+      - name: Build SSH base image
+        run: scripts/ci-journey-fixture-retry.sh sshd -- docker compose -f tests/docker/docker-compose.yml build sshd
+
+      # `agents` on 2222 is what AgentsFixture dials (10.0.2.2:2222 from the
+      # emulator) for all 11 journeys.
+      - name: Start Docker fixture (agents)
+        run: scripts/ci-journey-fixture-retry.sh agents -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
+
+      - name: Wait for the agents fixture to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+
+      # J05ReconnectAfterDropJourney dials the fixture THROUGH this Toxiproxy
+      # (2228) and cuts the link over its control API (8474) — see
+      # app2/src/androidTest/.../connect/ToxiproxyControl.kt. Started explicitly,
+      # and its API polled, so J05 fails loudly on a missing fixture instead of
+      # silently degrading. None of the 11 journeys touch the old-CLI (2238),
+      # daemon (2239) or packet-loss (2229) fixtures, so those stay down.
+      - name: Start Docker fixture (network-fault-proxy)
+        run: |
+          scripts/ci-journey-fixture-retry.sh network-fault-proxy -- docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8474/version; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy
+          exit 1
+
+      # The execution guard below credits only result XML newer than this
+      # marker, so a task that was skipped, UP-TO-DATE or died before running
+      # cannot be certified by a previous run's leftovers.
+      - name: Mark journey-run start
+        run: touch "${RUNNER_TEMP}/app2-journey-run-start"
+
+      - name: Run the full app2 journey suite on the emulator
+        id: journey
+        # See the job's `timeout-minutes` note: this cap must fire BEFORE the
+        # job cap so the report/artifact steps below still run on a wedge.
+        timeout-minutes: 45
+        # Pinned to the same v2.37.0 commit tests.yml and pr-journey-smoke.yml
+        # use (#771), so a floating-tag bump cannot silently change SDK-install
+        # behaviour under this lane alone.
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          # API 35 / pixel_7 / swiftshader, identical to the other two emulator
+          # lanes — one AVD definition to reason about across the repo.
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
+          script: scripts/ci-app2-journey-suite.sh
+
+      # G3: a green `BUILD SUCCESSFUL` proves nothing on its own. 30 tests across
+      # the 11 journey classes ran when this lane landed; floor 26 tolerates
+      # ordinary churn while a lost class (2-5 tests each) or a vacuous
+      # zero-executed run still reddens. `--newer-than` rejects stale XML.
+      - name: Assert the journeys actually executed
+        if: always() && steps.journey.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":app2:connectedDebugAndroidTest" \
+            --results-dir app2/build/outputs/androidTest-results/connected/debug \
+            --min 26 \
+            --newer-than "${RUNNER_TEMP}/app2-journey-run-start"
+
+      - name: Collect Docker logs
+        if: always()
+        run: |
+          mkdir -p artifacts/docker
+          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt 2>&1 || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>&1 || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>&1 || true
+
+      # The actionable half of a red run: the per-class HTML report says WHICH
+      # journey failed, the raw gradle log and logcat say why, and the journey
+      # screenshots pulled off the device show what was on screen.
+      - name: Upload app2 journey reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-journey-reports
+          path: |
+            app2/build/reports/androidTests/
+            app2/build/outputs/androidTest-results/
+            app2/build/outputs/connected_android_test_additional_output/
+            artifacts/app2-journey/
+            artifacts/docker/
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Stop Docker fixtures
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

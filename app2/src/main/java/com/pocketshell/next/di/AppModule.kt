@@ -24,7 +24,10 @@ import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.hosts.HostImporter
 import com.pocketshell.next.hosts.SshKeyStore
+import com.pocketshell.next.terminal.AndroidGraceServiceControl
 import com.pocketshell.next.terminal.ForegroundSignal
+import com.pocketshell.next.terminal.GraceCoordinator
+import com.pocketshell.next.terminal.GraceServiceControl
 import com.pocketshell.next.terminal.ProcessForegroundSignal
 import com.pocketshell.next.terminal.ReconnectController
 import dagger.Module
@@ -242,4 +245,31 @@ object AppModule {
     @Provides
     @Singleton
     fun provideForegroundSignal(signal: ProcessForegroundSignal): ForegroundSignal = signal
+
+    // -------------------------------------------------------------------------
+    // Background grace (task U-8, D21).
+
+    @Provides
+    @Singleton
+    fun provideGraceServiceControl(
+        @ApplicationContext context: Context,
+    ): GraceServiceControl = AndroidGraceServiceControl(context)
+
+    /**
+     * A `@Singleton`, and that is load-bearing twice over: it registers a
+     * process-lifecycle observer AND an activity-lifecycle callback, and it owns
+     * the pending grace handles. A second instance would arm a second delayed
+     * close on every connection and cancel only its own.
+     *
+     * Provided rather than `@Inject`-annotated so the class keeps the plan's
+     * §C.4 constructor — a clock and a grace default a test can substitute
+     * without a graph. [com.pocketshell.next.MainActivity] is what calls
+     * `register()`; nothing here starts anything eagerly.
+     */
+    @Provides
+    @Singleton
+    fun provideGraceCoordinator(
+        connections: ConnectionsRegistry,
+        service: GraceServiceControl,
+    ): GraceCoordinator = GraceCoordinator(connections = connections, service = service)
 }

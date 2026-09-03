@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Status-bar icon for the D21 grace foreground service (rewrite task U-8).
+
+    A terminal window with a prompt caret and a command line — the same glyph
+    the pre-rewrite client used for its session notification, so the mark a user
+    already associates with "PocketShell is holding my session" is unchanged.
+
+    Status-bar icons MUST be white-on-transparent (alpha only); Android
+    re-tints them per system theme, so the fillColor is opaque white and the
+    rest of the canvas is transparent. Authored at 24dp like the other
+    notification small icons in this module.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,5h16c1.1,0 2,0.9 2,2v10c0,1.1 -0.9,2 -2,2H4c-1.1,0 -2,-0.9 -2,-2V7c0,-1.1 0.9,-2 2,-2zM4,7v10h16V7H4zM6,9.3l3,2.7 -3,2.7v-2l1,-0.7 -1,-0.7V9.3zM11,14h5v1.5h-5V14z" />
+</vector>

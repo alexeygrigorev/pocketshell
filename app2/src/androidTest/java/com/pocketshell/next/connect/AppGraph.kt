@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.ComposerDraftStore
 import com.pocketshell.next.terminal.GraceCoordinator
+import com.pocketshell.next.voice.PendingTranscriptionStore
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -50,6 +51,14 @@ interface AppGraph {
      * inferring the D21 window's state from the notification tray alone.
      */
     fun graceCoordinator(): GraceCoordinator
+
+    /**
+     * Task P-2. The offline-dictation queue, so a journey can seed a
+     * "recorded while offline" row directly — the same way a real dictation
+     * would have parked it — without operating a real microphone (which an
+     * instrumented test cannot do).
+     */
+    fun pendingTranscriptionStore(): PendingTranscriptionStore
 }
 
 /** The app-under-test's Hilt graph. */

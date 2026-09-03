@@ -9,9 +9,14 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.transport.ExecResult
 import com.pocketshell.core.transport.FakeHostConnection
 import com.pocketshell.core.transport.FakeSftpChannel
+import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.connect.FakeHostConnectionFactory
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.voice.ConnectivityProbe
+import com.pocketshell.next.voice.PendingTranscriptionDelivery
+import com.pocketshell.next.voice.PendingTranscriptionStore
+import com.pocketshell.next.voice.WhisperClientFactory
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +60,19 @@ class TestComposerStack(homeDirectory: String = "/home/testuser") {
     val drafts = ComposerDraftStore(context, Dispatchers.Unconfined)
 
     val speech = FakeSpeechRecognitionProvider()
+
+    /** Real store over the same in-memory Room DB — same reasoning as [db]. */
+    val pendingTranscriptions = PendingTranscriptionStore(context, db.pendingTranscriptionDao())
+
+    /** Task P-2: the two seams [PendingTranscriptionDelivery] needs, test-owned. */
+    val whisperClientFactory = FakeWhisperClientFactory()
+    val connectivity = FakeConnectivityProbe()
+
+    val queuedDictations = PendingTranscriptionDelivery(
+        store = pendingTranscriptions,
+        whisper = whisperClientFactory,
+        connectivity = connectivity,
+    )
 
     /** Fixed clock so attachment file names are deterministic. */
     var nowMs: Long = 1_700_000_000_000L
@@ -109,6 +127,7 @@ class TestComposerStack(homeDirectory: String = "/home/testuser") {
         drafts = drafts,
         history = db.sentMessageDao(),
         stager = stager,
+        queuedDictations = queuedDictations,
         speech = speech,
     )
 
@@ -202,4 +221,22 @@ class FakeSpeechRecognitionProvider(var available: Boolean = true) : SpeechRecog
     fun final(text: String) = requireNotNull(listener).onFinal(text)
 
     fun error(message: String) = requireNotNull(listener).onError(message)
+}
+
+/**
+ * A scripted [WhisperClientFactory] (task P-2): `client` is `null` until a
+ * test "stores an API key" by setting it.
+ */
+class FakeWhisperClientFactory(var client: WhisperClient? = null) : WhisperClientFactory {
+    override fun create(): WhisperClient? = client
+}
+
+/** A [WhisperClient] whose one transcription result the test scripts. */
+class FakeWhisperClient(var result: Result<String> = Result.success("")) : WhisperClient {
+    override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> = result
+}
+
+/** A scripted [ConnectivityProbe] (task P-2): the test flips [online] directly. */
+class FakeConnectivityProbe(var online: Boolean = true) : ConnectivityProbe {
+    override fun refresh(): Boolean = online
 }

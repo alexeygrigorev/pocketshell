@@ -205,6 +205,10 @@ dependencies {
     // supervisor). It hands back `core-transport` types, so it is an `api`
     // dependency there and arrives on this classpath with core-transport.
     implementation(project(":shared:core-portfwd"))
+    // Task P-2: the Whisper dictation arm's client, audio recorder, price
+    // catalogue and encrypted API-key storage — reused unchanged from the old
+    // client's `:shared:core-voice`.
+    implementation(project(":shared:core-voice"))
 
     // Task P-6: QR host import/export. `zxing-core` is the encoder/decoder used
     // to render a host QR and to read one out of a still image;

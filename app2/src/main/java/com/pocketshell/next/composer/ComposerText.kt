@@ -54,6 +54,23 @@ internal object ComposerText {
      */
     fun sessionKey(hostId: Long, sessionName: String): String = "$hostId/$sessionName"
 
+    /**
+     * Joins a draft and a dictated transcript (task P-2).
+     *
+     * A space between them, not a newline: dictation continues a sentence far
+     * more often than it starts a paragraph, and the user can always type the
+     * newline themselves. Shared by live dictation
+     * ([AndroidSpeechRecognitionDelegate]) and offline-queued delivery
+     * ([ComposerViewModel.onForegroundResume]) so both arms merge a transcript
+     * into the draft the same way.
+     */
+    fun appendDictated(base: String, transcript: String): String = when {
+        transcript.isBlank() -> base
+        base.isBlank() -> transcript
+        base.endsWith(" ") || base.endsWith("\n") -> base + transcript
+        else -> "$base $transcript"
+    }
+
     /** The short label for a staged attachment tile: its remote file name. */
     fun attachmentDisplayName(remotePath: String): String {
         val trimmed = remotePath.trimEnd('/')

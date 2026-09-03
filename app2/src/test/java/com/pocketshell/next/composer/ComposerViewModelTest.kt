@@ -8,6 +8,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -449,6 +450,74 @@ class ComposerViewModelTest {
         assertFalse(viewModel.state.value.micAvailable)
         assertEquals(RecordingState.Idle, viewModel.state.value.recording)
         assertTrue(viewModel.state.value.notice is ComposerNotice.Problem)
+    }
+
+    // ------------------------------------------------ offline-queued dictation
+
+    /**
+     * The subway case (task P-2): a dictation recorded with no signal is
+     * parked as audio, not lost. Coming back to the foreground is what
+     * delivers it — appended to the draft exactly as a live dictation would
+     * have been, and persisted so it survives a process death too.
+     */
+    @Test
+    fun `a dictation queued while offline lands in the draft on the next foreground resume`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("please")
+            advanceUntilIdle()
+
+            stack.pendingTranscriptions.idGenerator = { "offline-take" }
+            stack.pendingTranscriptions.enqueueAudio(
+                audio = ByteArray(32) { it.toByte() },
+                destinationContext = com.pocketshell.core.storage.entity.PendingTranscriptionEntity.DESTINATION_COMPOSER,
+                initialError = com.pocketshell.next.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+            )
+            stack.whisperClientFactory.client = FakeWhisperClient(Result.success("run the tests now"))
+            stack.connectivity.online = true
+
+            viewModel.onForegroundResume()
+            awaitDraftChange(viewModel, from = "please")
+
+            assertEquals("please run the tests now", viewModel.state.value.draft)
+            assertTrue(viewModel.state.value.notice is ComposerNotice.Info)
+            assertEquals("please run the tests now", stack.drafts.load(SESSION_KEY).text)
+        }
+
+    /** Nothing queued: a foreground resume is a no-op, not a spurious notice. */
+    @Test
+    fun `a foreground resume with nothing queued leaves the draft alone`() = runTest(dispatcher) {
+        val viewModel = bound()
+        viewModel.onDraftChange("untouched")
+        advanceUntilIdle()
+
+        viewModel.onForegroundResume()
+        // Real (non-virtual) wait: `deliverQueued()` hops through the real
+        // `Dispatchers.IO` inside `PendingTranscriptionStore`, so there is
+        // nothing to advance on the virtual clock — just settle it.
+        repeat(20) { advanceUntilIdle(); Thread.sleep(5) }
+
+        assertEquals("untouched", viewModel.state.value.draft)
+        assertNull(viewModel.state.value.notice)
+    }
+
+    /**
+     * Waits for [ComposerViewModel.onForegroundResume]'s launch to land.
+     *
+     * `advanceUntilIdle()` alone is not enough here: `deliverQueued()`
+     * genuinely hops onto the real `Dispatchers.IO` inside
+     * [com.pocketshell.next.voice.PendingTranscriptionStore] (a pure P-2
+     * lift, unaltered), so the virtual test clock has nothing to fast-forward
+     * through while that real background work is in flight. A short bounded
+     * real-time poll is what actually waits for it.
+     */
+    private fun TestScope.awaitDraftChange(viewModel: ComposerViewModel, from: String, timeoutMs: Long = 3_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (viewModel.state.value.draft == from && System.currentTimeMillis() < deadline) {
+            advanceUntilIdle()
+            Thread.sleep(5)
+        }
+        advanceUntilIdle()
     }
 
     // --------------------------------------------------------------- helpers

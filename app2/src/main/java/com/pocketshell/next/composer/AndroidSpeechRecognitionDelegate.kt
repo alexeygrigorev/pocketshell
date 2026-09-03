@@ -189,23 +189,12 @@ internal class AndroidSpeechRecognitionDelegate(
     private fun String.isNoTextFailure(): Boolean = isBlank() || this == NO_TEXT_MESSAGE
 
     private companion object {
-        const val UNAVAILABLE_MESSAGE =
-            "Voice input isn't available on this device yet."
-        const val NO_TEXT_MESSAGE = "Nothing was heard — try again."
-        const val FAILED_MESSAGE = "Voice input failed — try again."
+        const val UNAVAILABLE_MESSAGE = SpeechMessages.UNAVAILABLE
+        const val NO_TEXT_MESSAGE = SpeechMessages.NO_TEXT
+        const val FAILED_MESSAGE = SpeechMessages.FAILED
 
-        /**
-         * Joins the pre-dictation draft and the live transcript.
-         *
-         * A space between them, not a newline: dictation continues a sentence
-         * far more often than it starts a paragraph, and the user can always
-         * type the newline themselves.
-         */
-        fun append(base: String, transcript: String): String = when {
-            transcript.isBlank() -> base
-            base.isBlank() -> transcript
-            base.endsWith(" ") || base.endsWith("\n") -> base + transcript
-            else -> "$base $transcript"
-        }
+        /** See [ComposerText.appendDictated]; shared with offline-queued delivery. */
+        fun append(base: String, transcript: String): String =
+            ComposerText.appendDictated(base, transcript)
     }
 }

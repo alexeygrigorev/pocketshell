@@ -21,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.next.composer.ComposerBar
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.composer.ComposerViewModel
@@ -113,6 +115,14 @@ fun SessionRoute(
     LaunchedEffect(hostId, sessionName, sink) {
         composerViewModel.bind(hostId, sessionName, sink)
     }
+
+    // Task P-2: the composer becoming visible again is the trigger for
+    // delivering anything dictated while the device was offline (the subway
+    // case) — see `ComposerViewModel.onForegroundResume`'s KDoc. `ON_START`
+    // rather than `ON_RESUME`: it also fires on the very first composition,
+    // which is exactly when a queued dictation from the last session should
+    // surface.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { composerViewModel.onForegroundResume() }
 
     // `OpenMultipleDocuments` rather than a media picker: the maintainer
     // attaches logs, patches and screenshots, and the storage-access framework

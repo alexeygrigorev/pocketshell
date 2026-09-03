@@ -16,8 +16,6 @@ import com.pocketshell.core.transport.RealHostConnectionFactory
 import com.pocketshell.core.transport.TrustStore
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.composer.ComposerAttachmentStager
-import com.pocketshell.next.composer.SpeechRecognitionProvider
-import com.pocketshell.next.composer.UnavailableSpeechRecognitionProvider
 import com.pocketshell.next.connect.RoomAuthSecretResolver
 import com.pocketshell.next.connect.RoomTrustStore
 import com.pocketshell.next.hostcli.HostCliClientFactory
@@ -124,19 +122,10 @@ object AppModule {
         @IoDispatcher dispatcher: CoroutineDispatcher,
     ): ComposerAttachmentStager = ComposerAttachmentStager(context.contentResolver, dispatcher)
 
-    /**
-     * No speech recognizer yet.
-     *
-     * Task P-2 lifts the old client's voice stack (`AndroidSpeechRecognitionProvider`
-     * and friends) verbatim and REPLACES this binding; P-1 owns the composer
-     * seam, the mic affordance and the transcript-merge rules, not the engine.
-     * Until then the mic renders disabled, which is the truthful state rather
-     * than a button that quietly does nothing.
-     */
-    @Provides
-    @Singleton
-    fun provideSpeechRecognitionProvider(): SpeechRecognitionProvider =
-        UnavailableSpeechRecognitionProvider
+    // The recognizer behind the mic lives in `VoiceModule` (task P-2). It is a
+    // separate module so an instrumented journey can `@UninstallModules` the
+    // voice graph and script a dictation without also uninstalling the database
+    // and the connection stack.
 
     // -------------------------------------------------------------------------
     // Host management (task P-6): the key store the add/edit form picks from,

@@ -54,6 +54,28 @@ interface SpeechRecognitionSession {
     fun cancel()
 }
 
+/**
+ * The user-facing strings a dictation can produce, in one place.
+ *
+ * They live on the SEAM rather than inside [AndroidSpeechRecognitionDelegate]
+ * because the delegate's "a failure after speech keeps the text" rule matches
+ * on [NO_TEXT] verbatim: a provider that invents its own wording for the same
+ * condition would silently lose a transcribed paragraph. P-2's providers emit
+ * these; the delegate reads them.
+ */
+object SpeechMessages {
+
+    const val UNAVAILABLE: String = "Voice input isn't available on this device yet."
+
+    /**
+     * The recognizer finished without hearing anything. Load-bearing string:
+     * see [AndroidSpeechRecognitionDelegate]'s failure handling.
+     */
+    const val NO_TEXT: String = "Nothing was heard — try again."
+
+    const val FAILED: String = "Voice input failed — try again."
+}
+
 /** The no-recognizer binding. Replaced by task P-2's real provider. */
 object UnavailableSpeechRecognitionProvider : SpeechRecognitionProvider {
     override fun isAvailable(): Boolean = false

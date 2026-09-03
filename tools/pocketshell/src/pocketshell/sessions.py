@@ -109,6 +109,32 @@ def _emit_envelope(ctx: click.Context, envelope: dict[str, Any]) -> None:
         ctx.exit(exit_code)
 
 
+def _is_schema2_list_envelope(value: Any) -> bool:
+    """Validate a daemon ``sessions.list --json`` reply as schema 2.
+
+    A daemon process started from an older PocketShell answers the same
+    method with a schema-1 body. Per D22 there is no compatibility path for
+    that: the reply is treated as malformed so the skew surfaces loudly
+    instead of a schema-1 document reaching a schema-2 parser.
+    """
+    from pocketshell import daemon as _daemon
+
+    if not _daemon.is_command_envelope(value):
+        return False
+    import json as _json
+
+    try:
+        payload = _json.loads(str(value.get("stdout") or ""))
+    except ValueError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema") == _session_enum.SCHEMA_VERSION
+        and isinstance(payload.get("sessions"), list)
+        and isinstance(payload.get("errors"), list)
+    )
+
+
 def _try_daemon_sessions_list(
     *,
     sort_by: Optional[str],
@@ -128,7 +154,9 @@ def _try_daemon_sessions_list(
         params=params,
         socket_path=socket_path,
         timeout=5.0,
-        result_validator=_daemon.is_command_envelope,
+        result_validator=(
+            _is_schema2_list_envelope if as_json else _daemon.is_command_envelope
+        ),
     )
 
 
@@ -145,18 +173,29 @@ def _list_envelope(
     args.extend(extra_args)
     tmuxctl = _run_tmuxctl_capture(args)
     tmux_stdout = str(tmuxctl.get("stdout") or "")
-    tmux_ok = int(tmuxctl.get("returncode", 0)) == 0
-    sessions = _session_enum.enumerate_live_sessions(
+    tmux_returncode = int(tmuxctl.get("returncode", 0))
+    tmux_ok = tmux_returncode == 0
+    tmux_error = None
+    if not tmux_ok:
+        tmux_error = (
+            str(tmuxctl.get("stderr") or "").strip()
+            or f"`tmuxctl {' '.join(args)}` exited {tmux_returncode}"
+        )
+    sessions, errors = _session_enum.enumerate_live_sessions(
         tmuxctl_stdout=tmux_stdout if tmux_ok else None,
+        tmuxctl_error=tmux_error,
+        enrich_tmux=as_json,
     )
     if as_json:
         import json as _json
 
         return {
-            "stdout": _json.dumps(_session_enum.json_payload(sessions), indent=2)
+            "stdout": _json.dumps(
+                _session_enum.json_payload(sessions, errors), indent=2
+            )
             + "\n",
             "stderr": "" if tmux_ok else str(tmuxctl.get("stderr") or ""),
-            "returncode": 0 if sessions or tmux_ok else int(tmuxctl.get("returncode", 1)),
+            "returncode": 0 if sessions or tmux_ok else tmux_returncode,
         }
     appendix = _session_enum.format_aplexer_table(sessions)
     stdout = tmux_stdout

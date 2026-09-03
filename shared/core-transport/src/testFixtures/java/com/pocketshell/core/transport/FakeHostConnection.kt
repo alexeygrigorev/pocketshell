@@ -405,7 +405,10 @@ class FakeSftpChannel internal constructor(
         val normalized = normalize(path)
         val bytes = files[normalized] ?: throw IOException("no such file: $normalized")
         if (bytes.size > maxBytes) {
-            throw IOException("$normalized is ${bytes.size} bytes, over the $maxBytes byte limit")
+            // Same typed failure the sshj-backed SftpChannelImpl raises, so a
+            // consumer's "too large to open" branch is exercised identically
+            // against the fake and against a real host.
+            throw SftpFileTooLargeException(normalized, bytes.size.toLong(), maxBytes)
         }
         return bytes.copyOf()
     }

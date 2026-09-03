@@ -9,7 +9,14 @@
 # extend this one in later issues.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server openssh-client \
+# openssh-sftp-server is a SEPARATE alpine package: `openssh-server` alone
+# ships no /usr/lib/ssh/sftp-server, so the `Subsystem sftp` line in
+# sshd_config silently resolved to nothing and every SFTP session died with
+# "EOF while reading packet" during subsystem init (found by the rewrite T-4
+# SftpChannel integration suite). The `test -x` below makes a future package
+# rename fail the image build instead of the tests.
+RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client \
+    && test -x /usr/lib/ssh/sftp-server \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \

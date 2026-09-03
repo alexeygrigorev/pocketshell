@@ -160,6 +160,28 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Holds the user's already-connected SSH session open for a bounded 90-second window while the app is backgrounded, so returning to it does not require a reconnect. Shows a live count-down and stops itself when the window ends." />
         </service>
+
+        <!--
+            Task P-10: the crash-reports screen's "Share all reports" action
+            zips local crash reports into `cacheDir/report-archives/` and hands
+            the bundle to `ACTION_SEND` via a content URI (`ReportsArchive`,
+            `CrashReportsViewModel`) — never a raw `file://` URI, which Android
+            N+ blocks with a `FileUriExposedException`.
+
+            `exported="false"`: only PocketShell's own code may resolve a URI
+            through this authority; `grantUriPermissions` is what lets the
+            share-sheet target app read the one file it was granted, without
+            opening the whole cache directory.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/crash_report_export_paths" />
+        </provider>
     </application>
 
 </manifest>

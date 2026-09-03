@@ -11,6 +11,7 @@ import com.pocketshell.core.transport.FakePtyChannel
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
+import com.termux.terminal.TerminalSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -24,6 +25,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -58,6 +60,7 @@ class SessionViewModelTest {
 
     private val dispatcher = StandardTestDispatcher()
     private val store = ViewModelStore()
+    private val foreground = FakeForegroundSignal(initiallyForeground = true)
     private lateinit var stack: TestConnectStack
 
     @Before
@@ -234,8 +237,10 @@ class SessionViewModelTest {
     }
 
     /**
-     * The PTY ending is the whole of U-4's failure handling: no reconnect, no
-     * retry, just an honest "it ended" (task U-7 owns the rest).
+     * A resolved exit STATUS means the session really ended — you typed `exit`,
+     * or the attach command could not find it. That is not a reconnect case,
+     * and the ladder must not run for it: reattaching to a session that is gone
+     * would burn 18 seconds and then say the same thing, less clearly.
      */
     @Test
     fun `the session ending flips the screen to Failed with its exit status`() =
@@ -250,7 +255,7 @@ class SessionViewModelTest {
 
             // Exit 3 is `sessions attach`'s "no session named ...".
             pty().finish(3)
-            settle()
+            settleFor(3_000)
 
             val state = viewModel.uiState.value
             assertTrue("expected Failed, got $state", state is SessionUiState.Failed)
@@ -259,11 +264,50 @@ class SessionViewModelTest {
                 "the message should name the session and its exit status, got: $message",
                 message.contains(SESSION) && message.contains("3"),
             )
+            // And nothing tried to reattach behind that message.
+            assertEquals(1, connection().ptyRequests.size)
         }
 
-    /** A dropped transport — output completes with no exit status at all. */
+    // --- reconnect (task U-7) -------------------------------------------------
+
+    /**
+     * A channel that ends with NO exit status is the link going away under a
+     * session that is still alive on the host, so the screen reattaches instead
+     * of ending — on the SAME connection when that connection is still good,
+     * which is the cheap common case (a killed channel, not a dead socket).
+     */
     @Test
-    fun `output ending without an exit status still flips the screen to Failed`() =
+    fun `a channel ending without an exit status reattaches`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        val attached = terminalOf(viewModel)
+
+        pty().finish(null)
+        settleFor(3_000)
+
+        val state = viewModel.uiState.value
+        assertTrue("expected Live again, got $state", state is SessionUiState.Live)
+        assertEquals("a second PTY must have been opened", 2, connection().ptyRequests.size)
+        assertSame("the reattach must reuse the same terminal", attached, terminalOf(viewModel))
+
+        clear()
+    }
+
+    /**
+     * The headline U-7 behaviour: a lost transport shows the reconnect banner
+     * over the LAST FRAME rather than clearing the screen or ending the
+     * session.
+     *
+     * The dial is held down (`failWith`) so the state can be observed at all —
+     * the first rung is 0 ms, so a link that comes straight back would be
+     * `Live` again before any assertion could run.
+     */
+    @Test
+    fun `a lost transport shows Reconnecting over the terminal it was showing`() =
         runTest(dispatcher) {
             val hostId = stack.seedHost()
             livePty()
@@ -271,14 +315,201 @@ class SessionViewModelTest {
 
             viewModel.open(hostId, SESSION)
             settle()
-
-            pty().finish(null)
+            val attached = terminalOf(viewModel)
+            pty().emitText("last-frame-before-the-drop\r\n")
             settle()
 
+            stack.factory.failWith = "no route to host"
+            dropLink()
+            // Long enough for rung 0 (a 0 ms wait) to fire and fail, short
+            // enough that rung 1's one-second countdown is still running.
+            settleFor(400)
+
             val state = viewModel.uiState.value
-            assertTrue("expected Failed, got $state", state is SessionUiState.Failed)
-            assertTrue((state as SessionUiState.Failed).message.contains(SESSION))
+            assertTrue("expected Reconnecting, got $state", state is SessionUiState.Reconnecting)
+            state as SessionUiState.Reconnecting
+            assertSame("the emulator must survive the drop", attached, state.terminal)
+            // What the user was reading is still on screen: tmux repaints on
+            // reattach, so there is deliberately no clear, no snapshot and no
+            // reseed. A cleared pane here is the symptom this task exists for.
+            assertTrue(
+                "the last frame must still be in the screen buffer, got: " +
+                    transcriptOf(viewModel),
+                transcriptOf(viewModel).contains("last-frame-before-the-drop"),
+            )
+            // Rung 0 fired at once and failed, so the screen is now counting
+            // down rung 1 — the ladder is running, not stuck at zero.
+            assertEquals(1, state.attempt)
+            assertTrue(
+                "the banner needs a countdown to render, got ${state.retryInMs}",
+                state.retryInMs in 1..1_000,
+            )
         }
+
+    /**
+     * Recovery: a fresh connection, the same terminal, and typing works again.
+     *
+     * `dialCount == 2` is the load-bearing number — a `Lost` [HostConnection]
+     * never self-heals, so a reattach that reused it would attach to nothing.
+     */
+    @Test
+    fun `reconnecting dials a fresh connection and comes back Live`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        val attached = terminalOf(viewModel)
+
+        dropLink()
+        settleFor(2_000)
+
+        val state = viewModel.uiState.value
+        assertTrue("expected Live, got $state", state is SessionUiState.Live)
+        assertSame("the reattach must reuse the same terminal", attached, terminalOf(viewModel))
+        assertEquals("a FRESH connection, never the lost one", 2, stack.factory.dialCount)
+        assertEquals(1, latestConnection().ptyRequests.size)
+
+        // And the recovered session is usable, not just green: bytes typed
+        // after the reconnect leave through the NEW channel.
+        terminalOf(viewModel).write("echo j05-back\r")
+        settle()
+        assertEquals("echo j05-back\r", latestPty().writtenText)
+
+        clear()
+    }
+
+    /** The ladder is finite, and what it leaves behind names the way out. */
+    @Test
+    fun `exhausting the ladder fails with a message offering Retry`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+
+        stack.factory.failWith = "no route to host"
+        dropLink()
+        // 0 + 1s + 2s + 5s + 10s = 18s of ladder, plus slack.
+        settleFor(20_000)
+
+        val state = viewModel.uiState.value
+        assertTrue("expected Failed, got $state", state is SessionUiState.Failed)
+        assertTrue(
+            "the give-up message must point at the manual retry, got: " +
+                (state as SessionUiState.Failed).message,
+            state.message.contains("Retry"),
+        )
+        // Five rungs means five attempts — no sixth, and no storm.
+        assertEquals("one initial dial plus five ladder rungs", 6, stack.factory.dialCount)
+    }
+
+    /**
+     * Retry means "start over", not "skip one wait": the counter goes back to
+     * the first rung, which is what makes a tap after a long outage try
+     * immediately instead of at the 10-second rung.
+     */
+    @Test
+    fun `retryNow restarts the ladder at its first rung`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+
+        stack.factory.failWith = "no route to host"
+        dropLink()
+        // Rungs 0 (0 ms), 1 (1 s) and 2 (2 s) are spent; the screen is now
+        // waiting out rung 3, the 5-second one.
+        settleFor(3_500)
+        assertEquals(3, (viewModel.uiState.value as SessionUiState.Reconnecting).attempt)
+
+        viewModel.retryNow()
+        settleFor(500)
+
+        // Rung 0 fired at once (and failed, the dial is still down), so the
+        // screen is back to counting down rung 1. Without the reset it would
+        // have been rung 4.
+        val state = viewModel.uiState.value
+        assertTrue("expected Reconnecting, got $state", state is SessionUiState.Reconnecting)
+        assertEquals(1, (state as SessionUiState.Reconnecting).attempt)
+    }
+
+    /** And Retry is still there after the ladder gave up. */
+    @Test
+    fun `retryNow recovers a session the ladder gave up on`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        val attached = terminalOf(viewModel)
+
+        stack.factory.failWith = "no route to host"
+        dropLink()
+        settleFor(20_000)
+        assertTrue(viewModel.uiState.value is SessionUiState.Failed)
+
+        stack.factory.failWith = null
+        viewModel.retryNow()
+        settleFor(1_000)
+
+        assertTrue("expected Live, got " + viewModel.uiState.value, viewModel.uiState.value is SessionUiState.Live)
+        assertSame(attached, terminalOf(viewModel))
+
+        clear()
+    }
+
+    /**
+     * D21, and the reason [ForegroundSignal] exists: a backgrounded app makes
+     * NO reconnect attempt — not a dial, not a countdown tick — no matter how
+     * long it is away. The pre-rewrite client's reconnect storms were this
+     * assertion missing.
+     */
+    @Test
+    fun `no reconnect attempt fires while the app is backgrounded`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        val attached = terminalOf(viewModel)
+        assertEquals(1, stack.factory.dialCount)
+
+        foreground.background()
+        dropLink()
+        // Far longer than the whole ladder, which would have given up twice
+        // over if it had been running.
+        settleFor(60_000)
+
+        val state = viewModel.uiState.value
+        assertTrue("expected Reconnecting, got $state", state is SessionUiState.Reconnecting)
+        state as SessionUiState.Reconnecting
+        assertEquals("the ladder must not have advanced a rung", 0, state.attempt)
+        assertEquals(
+            "no dial may happen behind the launcher",
+            1,
+            stack.factory.dialCount,
+        )
+
+        // Coming back is what starts it — and it starts at once.
+        foreground.foreground()
+        settleFor(1_000)
+
+        assertTrue(
+            "expected Live after returning, got " + viewModel.uiState.value,
+            viewModel.uiState.value is SessionUiState.Live,
+        )
+        assertEquals(2, stack.factory.dialCount)
+        assertSame(attached, terminalOf(viewModel))
+
+        clear()
+    }
 
     @Test
     fun `sendBytes after a failure does not throw and does not resurrect the screen`() =
@@ -397,6 +628,11 @@ class SessionViewModelTest {
             clients = HostCliClientFactory { connection ->
                 HostCliClient(connection.asRemoteExec())
             },
+            // The REAL ladder, not a test-shortened one: the reconnect
+            // assertions below are about the shipped timings, and a ladder
+            // substituted here would leave nothing pinning them.
+            reconnect = ReconnectController(),
+            foreground = foreground,
             dispatcher = dispatcher,
         )
         val factory = object : ViewModelProvider.Factory {
@@ -418,10 +654,34 @@ class SessionViewModelTest {
 
     private fun connection(): FakeHostConnection = stack.factory.connections.single()
 
+    /** The connection from the most recent dial — after a reconnect there are two. */
+    private fun latestConnection(): FakeHostConnection = stack.factory.connections.last()
+
     private fun pty(): FakePtyChannel = connection().openedPtys.single()
 
+    /** The PTY the session is attached through right now. */
+    private fun latestPty(): FakePtyChannel = latestConnection().openedPtys.last()
+
     private fun transcriptOf(viewModel: SessionViewModel): String =
-        (viewModel.uiState.value as SessionUiState.Live).terminal.emulator.screen.transcriptText
+        terminalOf(viewModel).emulator.screen.transcriptText
+
+    /** The emulator the screen is showing, in whichever state it is showing it. */
+    private fun terminalOf(viewModel: SessionViewModel): TerminalSession =
+        when (val state = viewModel.uiState.value) {
+            is SessionUiState.Live -> state.terminal
+            is SessionUiState.Reconnecting -> state.terminal
+            else -> error("no terminal on screen: $state")
+        }
+
+    /**
+     * The link goes away underneath a live session.
+     *
+     * `markLost` is the transport's OWN drop report (sshj's disconnect listener
+     * on a dead socket), which is the event a real network loss produces — and
+     * it also makes the spent connection unusable, so a reattach has to dial a
+     * fresh one exactly as it would on a device.
+     */
+    private fun dropLink() = connection().markLost("network dropped")
 
     /**
      * Runs the virtual clock far enough for the attach chain AND several input
@@ -433,11 +693,21 @@ class SessionViewModelTest {
      * main thread by design (upstream's contract) and Robolectric's looper is
      * paused, so queued `MSG_NEW_INPUT` messages sit there until dispatched.
      */
-    private fun TestScope.settle() {
-        repeat(SETTLE_ROUNDS) {
+    private fun TestScope.settle() = settleFor(SETTLE_STEP_MS * SETTLE_ROUNDS)
+
+    /**
+     * [settle] for a named span of virtual time — the reconnect ladder's rungs
+     * are seconds apart, and stepping through them in [SETTLE_STEP_MS] slices
+     * keeps the coroutine/looper hand-off working the same way it does for the
+     * short waits.
+     */
+    private fun TestScope.settleFor(totalMs: Long) {
+        var elapsed = 0L
+        while (elapsed < totalMs) {
             advanceTimeBy(SETTLE_STEP_MS)
             runCurrent()
             Shadows.shadowOf(Looper.getMainLooper()).idle()
+            elapsed += SETTLE_STEP_MS
         }
     }
 

@@ -20,6 +20,9 @@ import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.hosts.HostImporter
 import com.pocketshell.next.hosts.SshKeyStore
+import com.pocketshell.next.terminal.ForegroundSignal
+import com.pocketshell.next.terminal.ProcessForegroundSignal
+import com.pocketshell.next.terminal.ReconnectController
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -175,4 +178,27 @@ object AppModule {
     @Singleton
     fun provideHostCliClientFactory(): HostCliClientFactory =
         HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) }
+
+    // -------------------------------------------------------------------------
+    // Reconnect (task U-7).
+
+    /**
+     * The reconnect ladder. Provided rather than `@Inject`-annotated so the
+     * class stays exactly the plan's §C.3 shape — a plain constructor with a
+     * defaulted list, constructible by any test without a graph.
+     *
+     * Not a `@Singleton`: it is stateless (the attempt counter lives on the
+     * session), so sharing one buys nothing and would only invite state.
+     */
+    @Provides
+    fun provideReconnectController(): ReconnectController = ReconnectController()
+
+    /**
+     * A `@Singleton` because it registers a process-lifecycle observer: a
+     * second instance would be a second observer for a lifecycle there is only
+     * one of.
+     */
+    @Provides
+    @Singleton
+    fun provideForegroundSignal(signal: ProcessForegroundSignal): ForegroundSignal = signal
 }

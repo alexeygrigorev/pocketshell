@@ -176,6 +176,12 @@ dependencies {
     // where the lifecycle-event effects live.
     implementation(libs.lifecycle.runtime.compose)
 
+    // Task U-7: `ProcessLifecycleOwner` — the process-wide foreground/background
+    // signal the reconnect ladder is gated on (D21: no dialling from behind the
+    // launcher). It lives in its own artifact, which also ships the
+    // androidx.startup initializer that makes the owner dispatch at all.
+    implementation(libs.lifecycle.process)
+
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     // `hiltViewModel()` inside a `composable {}` destination (task U-1). Also

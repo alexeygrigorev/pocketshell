@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.core.transport.PtyChannel
+import com.pocketshell.core.transport.TransportState
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.di.IoDispatcher
 import com.pocketshell.next.hostcli.HostCliClientFactory
@@ -17,9 +18,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,10 +33,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * What the session screen can be showing.
  *
- * Three states, not four: there is deliberately no `Reconnecting`. A dropped
- * transport lands on [Failed] and the user goes back to the tree — reconnect is
- * rewrite task U-7, and stubbing half of it here would mean writing the state
- * machine twice.
+ * [Reconnecting] is a first-class state rather than a flavour of [Failed]
+ * because the two look nothing alike to a user: one keeps the last frame on
+ * screen under a countdown and comes back by itself, the other is over.
  */
 sealed interface SessionUiState {
 
@@ -45,51 +50,97 @@ sealed interface SessionUiState {
      */
     data class Live(val terminal: TerminalSession) : SessionUiState
 
-    /** Never attached, or the session ended. [message] is user-facing text. */
+    /**
+     * The link went away and a fresh attach is on the ladder (task U-7).
+     *
+     * [attempt] is 0-based, exactly as [ReconnectController] counts.
+     * [retryInMs] is what is LEFT of the current wait and ticks down once a
+     * second, so the screen can render a live countdown while staying a pure
+     * function of this state. (The plan sketched an absolute `nextRetryAtMs`;
+     * rendering that needs a clock AND a ticking timer inside a composable, and
+     * an unbounded composable timer is the classic never-idle hang under both
+     * Robolectric and instrumented Compose tests. The remaining-time form moves
+     * the tick to the one place already driven by a virtual clock in tests.)
+     *
+     * [terminal] is the SAME emulator instance the session was [Live] on: tmux
+     * repaints on reattach, so there is deliberately no client-side snapshot or
+     * reseed — the last frame simply stays on screen, under the banner, until
+     * new bytes arrive. Carrying it here rather than letting the screen remember
+     * the last live one keeps the screen stateless.
+     */
+    data class Reconnecting(
+        val attempt: Int,
+        val retryInMs: Long,
+        val terminal: TerminalSession,
+    ) : SessionUiState
+
+    /** Never attached, the session ended, or the ladder ran out. [message] is user-facing. */
     data class Failed(val message: String) : SessionUiState
 }
 
 /**
- * One attached session (rewrite task U-4, journey J03) — the point of the app.
+ * One attached session (rewrite tasks U-4 and U-7, journeys J03 and J05) — the
+ * point of the app.
  *
  * ## The whole lifecycle, in one place
  *
- * [open] does four things and stops: get the host's live connection from
+ * [open] does four things: get the host's live connection from
  * [ConnectionsRegistry], ask [HostCliClientFactory] for the attach command,
  * open a PTY channel running it, and pump that channel into the vendored
- * terminal emulator through a [TerminalPtyBridge]. There is no lease, no
- * refcount, no pool, no shadow session tree and no reconnect supervisor. When
- * the channel ends, the screen says so.
+ * terminal emulator through a [TerminalPtyBridge]. [attachOnce] is that whole
+ * sequence, and the reconnect loop re-runs the SAME function — there is no
+ * second, subtly different attach path, which is what kept the pre-rewrite
+ * client's reconnect and its first connect from ever agreeing.
+ *
+ * There is no lease, no refcount, no pool and no shadow session tree. The
+ * reconnect supervisor is [ReconnectController] — a ladder and a give-up.
+ *
+ * ## What counts as a drop
+ *
+ * A resolved exit STATUS means the remote command really ran and exited: the
+ * session is over (you typed `exit`, or `sessions attach` said "no such
+ * session" with exit 3) and the screen says so. A channel that ends with NO
+ * status, or a [TransportState.Lost], is the link going away underneath a
+ * session that is still alive on the host — that is the reconnect case. The
+ * distinction is the transport's own: sshj carries `exit-status` on the channel
+ * close, and a dropped socket has none to carry.
+ *
+ * ## Nothing runs while the app is away
+ *
+ * Every rung of the ladder — the countdown as well as the dial — is gated on
+ * [ForegroundSignal]. D21's "no background work" is not a soft target here: a
+ * backgrounded app that kept dialling would be the reconnect storm the rewrite
+ * exists to delete. Coming back to the foreground resets the ladder and tries
+ * at once, as does [retryNow].
  *
  * ## Trust is not answered here
  *
  * A [ConnectResult.NeedsTrust] becomes [SessionUiState.Failed] with a message
- * pointing at the host list, exactly as the session tree does (task U-3). Two
- * screens able to write the trust store is two places a host key can be
- * accepted, and the host list is the one that owns that decision.
+ * pointing at the host list, exactly as the session tree does (task U-3), and
+ * it is NOT retried: two screens able to write the trust store is two places a
+ * host key can be accepted, and the host list is the one that owns that
+ * decision.
  *
- * ## Size
+ * ## Size and budget
  *
- * The PTY is opened at [TerminalPtyBridge.DEFAULT_COLS] x
+ * The PTY opens at [TerminalPtyBridge.DEFAULT_COLS] x
  * [TerminalPtyBridge.DEFAULT_ROWS] — the size a remote shell assumes when
  * nobody has said otherwise — because at `open()` time no view has been laid
- * out yet and therefore no real geometry exists. The screen reports the real
- * size through [onResized] as soon as the terminal view knows its font metrics
- * (typically the first frame), and that call is the single path to
- * `pty.resize`. Polishing that path — rotation, IME insets, the key bar — is
- * task U-5.
- *
- * ## Budget
+ * out and therefore no real geometry exists; [onResized] is the single path to
+ * `pty.resize` once the view knows its font metrics.
  *
  * The rewrite plan caps this file at 600 lines and the public surface at
- * [uiState], [open], [sendBytes], [onResized] and [onCleared]. Nothing here is
- * annotated for tests: the seams are the three constructor parameters, and the
- * unit suite drives the real class over a scripted `FakeHostConnection`.
+ * [uiState], [open], [sendBytes], [retryNow], [onResized] and [onCleared].
+ * Nothing here is annotated for tests: the seams are the constructor
+ * parameters, and the unit suite drives the real class over a scripted
+ * `FakeHostConnection` and a fake foreground signal.
  */
 @HiltViewModel
 class SessionViewModel @Inject constructor(
     private val registry: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val reconnect: ReconnectController,
+    private val foreground: ForegroundSignal,
     @IoDispatcher private val dispatcher: CoroutineDispatcher,
 ) : ViewModel() {
 
@@ -106,8 +157,22 @@ class SessionViewModel @Inject constructor(
     private val pumpScope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private var attachJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var watchJob: Job? = null
     private var bridge: TerminalPtyBridge? = null
     private var channel: PtyChannel? = null
+
+    /**
+     * The ONE emulator front end for this screen's whole life.
+     *
+     * Created by [open] and never replaced: a reattach that built a second
+     * [TerminalSession] would hand the screen an empty grid, which is exactly
+     * the "terminal cleared itself while reconnecting" symptom this task exists
+     * to prevent.
+     */
+    private var terminal: TerminalSession? = null
+
+    private var hostId: Long? = null
 
     /** The session's own name, kept so an end-of-session message can say which. */
     private var sessionLabel: String? = null
@@ -115,18 +180,44 @@ class SessionViewModel @Inject constructor(
     private var cols: Int = TerminalPtyBridge.DEFAULT_COLS
     private var rows: Int = TerminalPtyBridge.DEFAULT_ROWS
 
+    init {
+        // Coming back to the app is a reason to try NOW, on a fresh ladder: the
+        // wait the loop is parked on was sized for a network blip, not for
+        // however long the phone was in a pocket.
+        viewModelScope.launch {
+            foreground.isForeground.drop(1).filter { it }.collect {
+                if (_uiState.value is SessionUiState.Reconnecting) restartLadder()
+            }
+        }
+    }
+
     /**
      * Attaches to [sessionName] on [hostId].
      *
      * Idempotent by design: the screen calls it from a `LaunchedEffect`, which
      * re-runs on configuration change and on returning to a recomposed route,
      * and a second attach would open a second PTY on the same tmux session.
-     * A repeat call after a failure is also ignored — retry is task U-7; today
-     * the user goes back to the tree.
+     * A repeat call after a failure is also ignored — [retryNow] is the retry.
      */
     fun open(hostId: Long, sessionName: String) {
         if (attachJob != null) return
-        attachJob = viewModelScope.launch { attach(hostId, sessionName) }
+        this.hostId = hostId
+        this.sessionLabel = sessionName
+        // Built before the dial so every later state — including a reconnect
+        // that starts before the first attach ever landed — has a terminal to
+        // show, and so `terminal` is never null once the screen is open.
+        this.terminal = createRemoteTerminalSession(cols = cols, rows = rows)
+        attachJob = viewModelScope.launch {
+            // A FIRST attach that cannot reach the host is a failure, not a
+            // reconnect episode: there is nothing to reconnect TO yet, and a
+            // ladder here would hide a wrong hostname behind 18 seconds of
+            // countdown. The ladder starts only after a session was live.
+            when (val outcome = attachOnce()) {
+                AttachOutcome.Attached -> Unit
+                is AttachOutcome.Refused -> fail(outcome.message)
+                is AttachOutcome.Unreachable -> fail(outcome.message)
+            }
+        }
     }
 
     /**
@@ -134,8 +225,9 @@ class SessionViewModel @Inject constructor(
      *
      * Used by the screen for anything that is not a keystroke the vendored
      * terminal view already handles itself (that input path goes straight into
-     * the session's own queue and out through the bridge). A failure flips
-     * [uiState]; whether a caller's draft survives is the caller's business.
+     * the session's own queue and out through the bridge). While reconnecting
+     * there is no channel and the call is dropped; whether a caller's draft
+     * survives is the caller's business.
      */
     fun sendBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
@@ -145,8 +237,30 @@ class SessionViewModel @Inject constructor(
                 target.write(bytes)
             } catch (failure: Throwable) {
                 if (failure is kotlinx.coroutines.CancellationException) throw failure
-                fail("Could not send to the session: " + describe(failure))
+                // A PTY write only throws on a channel that is already gone, so
+                // this is a link-down report like any other and goes through the
+                // one place that decides between "ended" and "reconnect". Making
+                // it its own failure message would mean a drop noticed by typing
+                // ended the screen while a drop noticed by the output pump
+                // reconnected.
+                val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { target.exit.await() }
+                settleEnd(target, status)
             }
+        }
+    }
+
+    /**
+     * The user asking for another go — from the reconnect banner or from a
+     * failure. Resets the ladder to its first rung and tries immediately.
+     *
+     * Ignored while [SessionUiState.Live] (nothing to retry) and while
+     * [SessionUiState.Connecting] (the first attach is still in flight, and a
+     * second one would open a second PTY).
+     */
+    fun retryNow() {
+        when (_uiState.value) {
+            is SessionUiState.Reconnecting, is SessionUiState.Failed -> restartLadder()
+            SessionUiState.Connecting, is SessionUiState.Live -> Unit
         }
     }
 
@@ -155,8 +269,8 @@ class SessionViewModel @Inject constructor(
      *
      * Called by the screen whenever the vendored view recomputes its geometry.
      * Before the bridge exists the size is only remembered, so a resize that
-     * lands during the dial still opens the PTY at the right size instead of
-     * being lost.
+     * lands during the dial — or during a reconnect — still opens the PTY at
+     * the right size instead of being lost.
      */
     fun onResized(cols: Int, rows: Int) {
         if (cols <= 0 || rows <= 0) return
@@ -185,6 +299,10 @@ class SessionViewModel @Inject constructor(
     override fun onCleared() {
         attachJob?.cancel()
         attachJob = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        watchJob?.cancel()
+        watchJob = null
         bridge?.stop()
         bridge = null
         val open = channel
@@ -202,54 +320,91 @@ class SessionViewModel @Inject constructor(
 
     // --- attach --------------------------------------------------------------
 
-    private suspend fun attach(hostId: Long, sessionName: String) {
-        sessionLabel = sessionName
-        val connection = when (val result = registry.getOrConnect(hostId)) {
+    /** What one pass of [attachOnce] can come back with. */
+    private sealed interface AttachOutcome {
+
+        /** Attached; [SessionUiState.Live] is on screen. */
+        data object Attached : AttachOutcome
+
+        /**
+         * The host said no in a way another dial cannot fix (an unconfirmed
+         * host key, a session that is not there). Ends the ladder.
+         */
+        data class Refused(val message: String) : AttachOutcome
+
+        /** Could not reach the host this time. The ladder's business. */
+        data class Unreachable(val message: String) : AttachOutcome
+    }
+
+    /**
+     * One full attach: connection → attach command → PTY → pumps → [Live].
+     *
+     * The single attach path, shared by [open] and the reconnect ladder. It
+     * always asks [ConnectionsRegistry] for the connection rather than holding
+     * one, which is what makes a reconnect use a FRESH transport: a spent
+     * `HostConnection` never self-heals, and the registry treats a
+     * dead-but-stored entry as absent and dials a new one.
+     */
+    private suspend fun attachOnce(): AttachOutcome {
+        val host = hostId ?: return AttachOutcome.Refused("No host to attach to.")
+        val sessionName = sessionLabel ?: return AttachOutcome.Refused("No session to attach to.")
+
+        val connection = when (val result = registry.getOrConnect(host)) {
             is ConnectResult.Connected -> result.connection
 
-            is ConnectResult.NeedsTrust -> return fail(
+            is ConnectResult.NeedsTrust -> return AttachOutcome.Refused(
                 "This host's key still needs to be confirmed. Open it from the " +
                     "host list to review the key.",
             )
 
-            is ConnectResult.Failed -> return fail(result.message)
+            is ConnectResult.Failed -> return AttachOutcome.Unreachable(result.message)
         }
 
         val command = runCatching { clients.create(connection).attachCommand(sessionName) }
             .getOrElse { failure ->
-                return fail("Could not build the attach command: " + describe(failure))
+                return AttachOutcome.Refused(
+                    "Could not build the attach command: " + describe(failure),
+                )
             }
 
-        val terminal = createRemoteTerminalSession(cols = cols, rows = rows)
+        val emulator = terminal
+            ?: createRemoteTerminalSession(cols = cols, rows = rows).also { terminal = it }
 
         val pty = try {
             openPty(connection, command)
         } catch (failure: Throwable) {
             if (failure is kotlinx.coroutines.CancellationException) throw failure
-            return fail("Could not attach to \"$sessionName\": " + describe(failure))
+            return AttachOutcome.Unreachable(
+                "Could not attach to \"$sessionName\": " + describe(failure),
+            )
         }
 
         val pump = TerminalPtyBridge(
             pty = pty,
-            emulator = terminal,
+            emulator = emulator,
             scope = pumpScope,
-            onOutputEnded = { onChannelEnded(pty) },
+            onOutputEnded = { onOutputEnded(pty) },
         )
         channel = pty
         bridge = pump
         pump.start()
-        _uiState.value = SessionUiState.Live(terminal)
+        _uiState.value = SessionUiState.Live(emulator)
 
-        // Second observer, on the other end of the channel. The output stream
-        // and the channel close normally end together, but they are separate
-        // events on the transport and either can be the one that arrives — a
-        // stream torn down without a close, or a close whose stream never
-        // completed. [endSession] is first-wins, so whichever fires reports and
-        // the other is a no-op.
-        viewModelScope.launch {
-            val status = pty.exit.await()
-            endSession(endedMessage(status))
+        // Two more observers, on the other end of the channel. The output
+        // stream, the channel close and the transport's own state are three
+        // separate events and any of them can be the one that arrives first —
+        // a stream torn down without a close, a close whose stream never
+        // completed, or a transport that reported the drop before either.
+        // [settleEnd] is first-wins on the channel identity, so whichever fires
+        // decides and the others are no-ops.
+        watchJob = viewModelScope.launch {
+            launch { settleEnd(pty, pty.exit.await()) }
+            launch {
+                connection.state.first { it is TransportState.Lost }
+                settleEnd(pty, status = null)
+            }
         }
+        return AttachOutcome.Attached
     }
 
     private suspend fun openPty(connection: HostConnection, command: String): PtyChannel =
@@ -263,23 +418,123 @@ class SessionViewModel @Inject constructor(
      *
      * The exit status is waited for BRIEFLY rather than skipped: the stream and
      * the channel close land within milliseconds of each other, and the status
-     * is the difference between "you typed exit" (0) and "there is no such
-     * session" (3, `sessions attach`'s own contract). The wait is bounded
-     * because a server that never sends one must not leave the screen on
-     * "Attaching…" forever.
+     * is what tells an ended session apart from a dropped link. The wait is
+     * bounded because a server that never sends one must not hold up the
+     * reconnect.
      */
-    private fun onChannelEnded(ended: PtyChannel) {
+    private fun onOutputEnded(ended: PtyChannel) {
         if (channel !== ended) return
         viewModelScope.launch {
             val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { ended.exit.await() }
-            endSession(endedMessage(status))
+            settleEnd(ended, status)
         }
     }
 
-    private fun endSession(message: String) {
-        if (_uiState.value is SessionUiState.Failed) return
-        bridge?.stop()
-        fail(message)
+    /**
+     * The channel [ended] is over. [status] is the remote's exit status, or
+     * null when there was none — which is the whole discriminator between an
+     * ended session and a dropped link (see the class doc).
+     */
+    private fun settleEnd(ended: PtyChannel, status: Int?) {
+        if (channel !== ended) return
+        if (status != null) {
+            bridge?.stop()
+            bridge = null
+            channel = null
+            fail(endedMessage(status))
+            return
+        }
+        beginReconnect()
+    }
+
+    // --- reconnect -----------------------------------------------------------
+
+    /**
+     * The link went away under a live session: keep the last frame, say so, and
+     * start the ladder.
+     */
+    private fun beginReconnect() {
+        val emulator = terminal ?: return fail(endedMessage(null))
+        releaseChannel()
+        // Said immediately, before the first rung, so a user coming back to the
+        // screen never sees a stale "attached" over a dead session.
+        _uiState.value = SessionUiState.Reconnecting(attempt = 0, retryInMs = 0, terminal = emulator)
+        restartLadder()
+    }
+
+    /**
+     * Runs (or re-runs) the ladder from its first rung.
+     *
+     * The previous run is cancelled AND joined inside the new coroutine rather
+     * than fire-and-forget, so a Retry tap or a foreground return can never
+     * leave two ladders dialling the same session at once.
+     */
+    private fun restartLadder() {
+        val previous = reconnectJob
+        reconnectJob = viewModelScope.launch {
+            previous?.cancelAndJoin()
+            runLadder()
+        }
+    }
+
+    private suspend fun runLadder() {
+        val emulator = terminal ?: return
+        var attempt = 0
+        while (true) {
+            when (val decision = reconnect.decide(attempt)) {
+                ReconnectController.Decision.GiveUp -> return fail(GAVE_UP_MESSAGE)
+
+                is ReconnectController.Decision.RetryAfter -> {
+                    awaitRetryWindow(decision.attempt, decision.delayMs, emulator)
+                    when (val outcome = attachOnce()) {
+                        AttachOutcome.Attached -> return
+                        is AttachOutcome.Refused -> return fail(outcome.message)
+                        is AttachOutcome.Unreachable -> attempt = decision.attempt + 1
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Waits out one rung, publishing the countdown as it goes, and returns only
+     * with the app in the foreground.
+     *
+     * The foreground check is the FIRST thing each turn and the last thing
+     * before returning, so neither the countdown nor the dial that follows it
+     * can happen behind the launcher (D21). A backgrounded app therefore parks
+     * here for as long as it takes, showing the reconnect banner it will still
+     * be showing when the user comes back.
+     */
+    private suspend fun awaitRetryWindow(attempt: Int, delayMs: Long, emulator: TerminalSession) {
+        var remaining = delayMs
+        while (true) {
+            foreground.awaitForeground()
+            _uiState.value = SessionUiState.Reconnecting(attempt, remaining, emulator)
+            if (remaining <= 0) return
+            val step = minOf(remaining, COUNTDOWN_TICK_MS)
+            delay(step)
+            remaining -= step
+        }
+    }
+
+    /**
+     * Retires the spent channel and its pumps WITHOUT closing the vendored
+     * terminal's byte queues — the whole reason [TerminalPtyBridge.detach]
+     * exists. `ByteQueue.close()` is one-way, so stopping the bridge the normal
+     * way would make this screen's [TerminalSession] permanently unwritable and
+     * force the reattach to build a fresh, empty one: a cleared screen.
+     */
+    private fun releaseChannel() {
+        watchJob?.cancel()
+        watchJob = null
+        bridge?.detach()
+        bridge = null
+        val spent = channel
+        channel = null
+        if (spent != null) {
+            pumpScope.launch(NonCancellable) { runCatching { spent.close() } }
+        }
     }
 
     private fun fail(message: String) {
@@ -311,8 +566,15 @@ class SessionViewModel @Inject constructor(
          * How long the end-of-session message waits for the remote's exit
          * status. Short: the two events are effectively simultaneous, and this
          * is only a ceiling on how long a server that sends no status at all
-         * can delay the message.
+         * can delay the decision to reconnect.
          */
         const val EXIT_STATUS_GRACE_MS = 2_000L
+
+        /** How often the reconnect countdown is republished. */
+        const val COUNTDOWN_TICK_MS = 1_000L
+
+        /** Shown when the ladder is exhausted. Names the way out, which is Retry. */
+        const val GAVE_UP_MESSAGE =
+            "Could not reconnect to the session. Tap Retry to try again."
     }
 }

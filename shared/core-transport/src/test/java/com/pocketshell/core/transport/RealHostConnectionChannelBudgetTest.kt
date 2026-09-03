@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.connection.channel.OpenFailException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -384,6 +385,187 @@ class RealHostConnectionChannelBudgetTest {
             maxObservedOpen.get() <= serverCapacity,
         )
     }
+
+    // ---- host-side refusals the budget cannot see coming (PR #2480) ------
+
+    /**
+     * The exact refusal OpenSSH sends when `MaxSessions` is full: reason
+     * `SSH2_OPEN_CONNECT_FAILED` (code 2), message `open failed`.
+     *
+     * This is the non-happy-host fixture the first cut of the fix lacked. It was
+     * written against the reason the incident *looked* like it should carry
+     * (`ADMINISTRATIVELY_PROHIBITED`) and shipped a retry that never fired,
+     * because the reason a real sshd actually sends is `CONNECT_FAILED` — a
+     * value that means something entirely different on a forwarded channel.
+     * Verified on `tests/docker/Dockerfile.ssh`, where sshd's own "no more
+     * sessions" log-line count matched the client-visible refusal count exactly.
+     */
+    private fun maxSessionsRefusal(): OpenFailException =
+        OpenFailException(SESSION_CHANNEL_TYPE, /* reasonCode = */ 2, "open failed")
+
+    @Test
+    fun `an sshd MaxSessions refusal on a session channel is classified as retryable`() {
+        val translated = runCatching { sessionRefusalAware { throw maxSessionsRefusal() } }
+            .exceptionOrNull()
+
+        assertTrue(
+            "OpenSSH's MaxSessions answer (CONNECT_FAILED / \"open failed\") must become a " +
+                "retryable ChannelRefusedException, got $translated",
+            translated is ChannelRefusedException,
+        )
+        assertEquals(SESSION_CHANNEL_TYPE, (translated as ChannelRefusedException).channelType)
+        assertTrue("the raw refusal must be kept as the cause", translated.cause is OpenFailException)
+    }
+
+    @Test
+    fun `every scarcity reason on a session channel is retryable, an unsupported type is not`() {
+        // Whole class, not just the one reason a real sshd happened to send:
+        // other servers answer the same condition with other codes, and the fix
+        // must not depend on guessing which.
+        val retryable = listOf(
+            OpenFailException.Reason.UNKNOWN,
+            OpenFailException.Reason.ADMINISTRATIVELY_PROHIBITED,
+            OpenFailException.Reason.CONNECT_FAILED,
+            OpenFailException.Reason.RESOURCE_SHORTAGE,
+        )
+        retryable.forEach { reason ->
+            val translated = runCatching {
+                sessionRefusalAware {
+                    throw OpenFailException(SESSION_CHANNEL_TYPE, reason.code, "open failed")
+                }
+            }.exceptionOrNull()
+            assertTrue(
+                "$reason on a session channel must be retryable, got $translated",
+                translated is ChannelRefusedException,
+            )
+        }
+
+        // Permanent: the server does not implement session channels at all.
+        val permanent = runCatching {
+            sessionRefusalAware {
+                throw OpenFailException(
+                    SESSION_CHANNEL_TYPE,
+                    OpenFailException.Reason.UNKNOWN_CHANNEL_TYPE.code,
+                    "unknown channel type",
+                )
+            }
+        }.exceptionOrNull()
+        assertTrue(
+            "an unsupported channel type must NOT be retried, got $permanent",
+            permanent is OpenFailException,
+        )
+
+        // Anything that is not a channel-open failure is none of this helper's business.
+        val unrelated = runCatching {
+            sessionRefusalAware { throw IOException("socket closed") }
+        }.exceptionOrNull()
+        assertTrue("unrelated failures pass through", unrelated !is ChannelRefusedException)
+    }
+
+    @Test
+    fun `exec absorbs a transient host refusal instead of surfacing it`() = runBlocking {
+        // The server retires a session slot only on its own garbage-collection
+        // pass, AFTER it has processed our CHANNEL_CLOSE — so a caller holding a
+        // perfectly valid permit can still be refused. Reproduced here as a host
+        // that refuses twice and then has room.
+        val refusalsLeft = AtomicInteger(2)
+        val channels = FakeHostChannels(
+            execOpener = {
+                if (refusalsLeft.getAndDecrement() > 0) {
+                    throw ChannelRefusedException(SESSION_CHANNEL_TYPE, maxSessionsRefusal())
+                }
+                ControllableExecChannel(CountDownLatch(0))
+            },
+        )
+        val budget = fastRetryBudget(capacity = 2)
+        val connection = newConnection(channels, budget)
+
+        val result = connection.exec("echo hi", timeoutMs = 5_000)
+
+        assertEquals(0, result.exitCode)
+        assertEquals("the refused opens must have been retried", 3, channels.execOpenCount.get())
+        assertEquals("the permit must still come back", 2, budget.available)
+    }
+
+    @Test
+    fun `openPty absorbs a transient host refusal instead of surfacing it`() = runBlocking {
+        // Same class of bug on the path #2120 actually reported dying:
+        // session-create.
+        val refusalsLeft = AtomicInteger(2)
+        val stub = FakePtyChannelStub()
+        val channels = FakeHostChannels(
+            ptyOpener = { _, _, _, _ ->
+                if (refusalsLeft.getAndDecrement() > 0) {
+                    throw ChannelRefusedException(SESSION_CHANNEL_TYPE, maxSessionsRefusal())
+                }
+                stub
+            },
+        )
+        val budget = fastRetryBudget(capacity = 2)
+        val connection = newConnection(channels, budget)
+
+        val pty = connection.openPty("bash", 80, 24, "xterm-256color")
+
+        assertEquals("the refused opens must have been retried", 3, channels.ptyOpenCount.get())
+        assertEquals("the permit is held by the live PTY", 1, budget.available)
+        pty.close()
+        assertEquals(2, budget.available)
+    }
+
+    @Test
+    fun `a host that keeps refusing surfaces the typed limit error, never the raw refusal`() =
+        runBlocking {
+            val channels = FakeHostChannels(
+                execOpener = {
+                    throw ChannelRefusedException(SESSION_CHANNEL_TYPE, maxSessionsRefusal())
+                },
+            )
+            val budget = fastRetryBudget(capacity = 2)
+            val connection = newConnection(channels, budget)
+
+            val thrown = runCatching { connection.exec("echo hi") }.exceptionOrNull()
+
+            assertTrue(
+                "a genuinely full host must surface the typed error, got $thrown",
+                thrown is HostChannelLimitException,
+            )
+            assertEquals("exec", (thrown as HostChannelLimitException).operation)
+            assertTrue(
+                "the message must not be sshj's bare `open failed`",
+                thrown.message!!.contains("at its own limit for concurrent SSH channels"),
+            )
+            assertTrue("the raw refusal is kept as the cause", thrown.cause is ChannelRefusedException)
+            assertTrue(
+                "it must have actually retried, not given up on the first refusal",
+                channels.execOpenCount.get() > 1,
+            )
+            assertEquals("a spent retry must still return its permit", 2, budget.available)
+        }
+
+    @Test
+    fun `a permanent open failure is not retried`() = runBlocking {
+        // Only ChannelRefusedException means "not right now". Anything else must
+        // fail on the first attempt — retrying a real error would just make the
+        // user wait longer for the same answer.
+        val channels = FakeHostChannels(execOpener = { throw IOException("no such command") })
+        val budget = fastRetryBudget(capacity = 2)
+        val connection = newConnection(channels, budget)
+
+        val thrown = runCatching { connection.exec("echo hi") }.exceptionOrNull()
+
+        assertEquals("no such command", thrown?.message)
+        assertEquals("a permanent failure must be attempted exactly once", 1, channels.execOpenCount.get())
+        assertEquals(2, budget.available)
+    }
+
+    /** Budget with the production shape but millisecond retry knobs. */
+    private fun fastRetryBudget(capacity: Int) = ChannelBudget(
+        capacity = capacity,
+        waitTimeoutMs = 1_000,
+        openRetryWindowMs = 200,
+        openRetryInitialDelayMs = 1,
+        openRetryMaxDelayMs = 5,
+    )
 
     // ---- openPty --------------------------------------------------------
 

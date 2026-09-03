@@ -54,6 +54,13 @@ class RealHostConnectionIntegrationTest {
         private const val CONTAINER_SSH_PORT = 22
         private const val TEST_USER = "testuser"
 
+        /**
+         * Concurrent-exec bursts run by
+         * [manyConcurrentExecsOnOneConnectionNeverSurfaceARawServerRefusal].
+         * See that test for why one burst is not a gate.
+         */
+        private const val BURST_ROUNDS = 12
+
         private val projectRoot: Path by lazy { findProjectRoot() }
 
         private val sshImage: ImageFromDockerfile by lazy {
@@ -340,31 +347,51 @@ class RealHostConnectionIntegrationTest {
         // scenario (many concurrent execs sharing one SSH connection) driven
         // over a real sshd, not a fake. `MaxSessions` is unset in
         // tests/docker/sshd_config, so it is OpenSSH's default of 10 — the
-        // same value the incident's diagnosis was built on. The production
-        // #2120 fix sizes RealHostConnection's channel budget to 8 (under 10),
-        // so 16 concurrent execs — comfortably more than the server would
-        // ever grant at once — must all complete without any raw sshj
-        // "open failed" reaching a caller.
+        // same value the incident's diagnosis was built on. 16 concurrent
+        // execs — comfortably more than the server would ever grant at once —
+        // must all complete without any raw sshj "open failed" reaching a
+        // caller.
+        //
+        // ## Why this runs BURST_ROUNDS times (PR #2480)
+        //
+        // A single burst was a ~1-in-3 coin toss and got merged green by luck:
+        // it then failed two consecutive CI runs while still passing for two
+        // implementers locally, which read as "a CI environment quirk" when it
+        // was in fact the product defect. It reproduces on any machine — the
+        // client's budget bounds how many channels WE hold, but the server
+        // retires a session slot only during its own garbage-collection pass,
+        // after processing our CHANNEL_CLOSE, so a generation of just-finished
+        // channels can still occupy slots while the next generation opens. On
+        // this fixture, 60 single bursts produced 45 refusals before the fix.
+        //
+        // Repeating the burst turns that coin toss into a gate: at the measured
+        // ~1-in-3 per-round rate, BURST_ROUNDS rounds catch a regression with
+        // probability >0.99, and each round is only as slow as one 0.3s sleep.
         val connection = connectTrusted(newFactory(), targetFor(container!!), InMemoryTrustStore())
         try {
-            // Each command sleeps briefly so the channels are genuinely open
-            // concurrently on the wire — an instant echo could finish (and
-            // free its budget permit) before the next one even asks, which
-            // would hide the exhaustion this test exists to rule out.
-            val jobs = List(16) { i ->
-                async(Dispatchers.Default) {
-                    runCatching { connection.exec("sleep 0.3 && echo done-$i") }
+            repeat(BURST_ROUNDS) { round ->
+                // Each command sleeps briefly so the channels are genuinely open
+                // concurrently on the wire — an instant echo could finish (and
+                // free its budget permit) before the next one even asks, which
+                // would hide the exhaustion this test exists to rule out.
+                val jobs = List(16) { i ->
+                    async(Dispatchers.Default) {
+                        runCatching { connection.exec("sleep 0.3 && echo done-$i") }
+                    }
                 }
-            }
-            val outcomes = jobs.awaitAll()
+                val outcomes = jobs.awaitAll()
 
-            outcomes.forEachIndexed { i, outcome ->
-                val result = outcome.getOrElse {
-                    fail("exec #$i must not throw under the production channel budget: $it") as Nothing
+                outcomes.forEachIndexed { i, outcome ->
+                    val result = outcome.getOrElse {
+                        fail(
+                            "round $round exec #$i must not throw under the production " +
+                                "channel budget: $it",
+                        ) as Nothing
+                    }
+                    assertFalse("round $round exec #$i must not time out", result.timedOut)
+                    assertEquals("round $round exec #$i", 0, result.exitCode)
+                    assertEquals("done-$i", result.stdout.trim())
                 }
-                assertFalse("exec #$i must not time out", result.timedOut)
-                assertEquals("exec #$i", 0, result.exitCode)
-                assertEquals("done-$i", result.stdout.trim())
             }
         } finally {
             connection.close()

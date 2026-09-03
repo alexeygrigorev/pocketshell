@@ -104,8 +104,13 @@ internal class RealHostConnection(
     private suspend fun execOnChannel(command: String, timeoutMs: Long): ExecResult =
         withContext(ioDispatcher) {
             // One session channel per call. sshj's SessionChannel implements
-            // both Session and Command over the same channel.
-            val channel = channels.openExec(command)
+            // both Session and Command over the same channel. The open is
+            // retried while the HOST refuses it: our permit says we are within
+            // our own budget, but the server can still be holding slots for
+            // channels we already finished with (see [ChannelBudget]).
+            val channel = budget.openRetryingHostRefusal("exec") {
+                channels.openExec(command)
+            }
             try {
                 val stdout = ByteArrayOutputStream()
                 val stderr = ByteArrayOutputStream()
@@ -177,7 +182,12 @@ internal class RealHostConnection(
         // for the same span — released by BudgetedPtyChannel.
         val permit = budget.acquire("openPty")
         val opened = try {
-            channels.openPty(command, cols, rows, term)
+            // Same host-refusal retry as exec: session-create is exactly the
+            // action #2120 reported dying on, so it must not be the one that
+            // surfaces a raw refusal.
+            budget.openRetryingHostRefusal("openPty") {
+                channels.openPty(command, cols, rows, term)
+            }
         } catch (failure: Throwable) {
             permit.release()
             throw failure

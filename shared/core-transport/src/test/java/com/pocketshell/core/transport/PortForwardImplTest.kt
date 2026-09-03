@@ -111,6 +111,81 @@ class PortForwardImplTest {
             }
         }
 
+    /**
+     * Regression for the CI-only failure of the test above (PR #2480): `close()`
+     * returned while the local port was STILL bound and still completing TCP
+     * handshakes, so the "a new client cannot connect" probe occasionally
+     * connected.
+     *
+     * The cause is not this class's own bookkeeping but the JDK's: since the NIO
+     * socket rewrite, [ServerSocket.close] is DEFERRED whenever another thread is
+     * parked inside [ServerSocket.accept] — it flips the Java-level `closed` flag
+     * and unparks the acceptor, but the listening file descriptor is only really
+     * released when that acceptor unwinds out of `accept()`
+     * (`NioSocketImpl.endAccept` → `tryFinishClose`). Until it is scheduled, the
+     * kernel keeps the socket in its listen table and keeps accepting
+     * connections. Measured standalone on this JDK (21.0.12): a probe connect
+     * straight after `close()` succeeded 4/200 times with an acceptor parked in
+     * `accept()`, and 0/200 with none — the deferral, not port reuse.
+     *
+     * That is a product defect, not a test artifact: `PortForward.close()`
+     * promises the forward is gone, and callers act on it. Re-opening a forward
+     * on the same local port right after closing it (a reconnect, or a user
+     * toggling a forward off and on) races a listener that is still bound and
+     * fails with "Address already in use", and a local client can still connect
+     * to — and then hang on — a forward that was closed.
+     *
+     * Two oracles, so the fix is pinned by mechanism and by symptom:
+     * - the accept thread must be dead when `close()` returns (that unwind IS
+     *   the fd release, so joining it is what makes the release ordered);
+     * - the port must be immediately re-bindable, which is the user-visible
+     *   promise and fails hard with [java.net.BindException] if the descriptor
+     *   is still around.
+     *
+     * Repeated, because the un-fixed defect is a scheduling race: one round is a
+     * coin toss, [REBIND_ROUNDS] rounds make the un-fixed code fail essentially
+     * every run while the fixed code is deterministic (each round is bounded and
+     * blocking-free once close() joins).
+     */
+    @Test
+    fun `close releases the local listener before it returns`() = runBlocking {
+        repeat(REBIND_ROUNDS) { round ->
+            val channel = PipedTestChannel()
+            val forward = newForward(opener = { _, _ -> channel })
+            val localPort = forward.localPort
+            Socket().use { client ->
+                client.connect(java.net.InetSocketAddress("127.0.0.1", localPort), 2_000)
+                client.getOutputStream().write("x".toByteArray())
+                client.getOutputStream().flush()
+                assertTrue(waitUntil { channel.receivedText() == "x" })
+                // The acceptor must be parked in accept() when close lands —
+                // that is the only state in which the JDK defers the close.
+                assertTrue(
+                    "round $round: the accept thread must be running before close is meaningful",
+                    acceptThreads(localPort).isNotEmpty(),
+                )
+
+                forward.close()
+            }
+
+            assertEquals(
+                "round $round: close() must not return while its accept thread " +
+                    "still owns the listening descriptor",
+                emptyList<String>(),
+                acceptThreads(localPort).map { it.name },
+            )
+            // The descriptor is really gone: rebinding the same port succeeds.
+            val rebound = runCatching {
+                ServerSocket(localPort, 1, InetAddress.getByName("127.0.0.1")).close()
+            }
+            assertTrue(
+                "round $round: local port $localPort must be free once close() " +
+                    "returned, rebinding failed with ${rebound.exceptionOrNull()}",
+                rebound.isSuccess,
+            )
+        }
+    }
+
     @Test
     fun `concurrent close calls are idempotent and all return`() = runBlocking {
         val channel = PipedTestChannel()
@@ -233,16 +308,20 @@ class PortForwardImplTest {
     private fun freeLocalPort(): Int =
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
 
-    private fun liveForwardThreads(localPort: Int): List<Thread> {
+    private fun liveForwardThreads(localPort: Int): List<Thread> =
+        liveThreadsNamed(
+            "portfwd-l2r-$localPort",
+            "portfwd-r2l-$localPort",
+        )
+
+    private fun acceptThreads(localPort: Int): List<Thread> =
+        liveThreadsNamed("portfwd-accept-$localPort")
+
+    private fun liveThreadsNamed(vararg prefixes: String): List<Thread> {
         val all = arrayOfNulls<Thread>(Thread.activeCount() * 2 + 16)
         val n = Thread.enumerate(all)
         return (0 until n).mapNotNull { all[it] }
-            .filter {
-                it.isAlive && (
-                    it.name.startsWith("portfwd-l2r-$localPort") ||
-                        it.name.startsWith("portfwd-r2l-$localPort")
-                    )
-            }
+            .filter { thread -> thread.isAlive && prefixes.any { thread.name.startsWith(it) } }
     }
 
     private fun waitUntil(timeoutMs: Long = 5_000, predicate: () -> Boolean): Boolean {
@@ -304,5 +383,17 @@ class PortForwardImplTest {
         override fun close() {
             closed.set(true)
         }
+    }
+
+    private companion object {
+        /**
+         * Open/close rounds in `close releases the local listener before it
+         * returns`. The un-fixed deferred-close race measured ~2% per round on
+         * this JDK, so 200 rounds reddens it with probability ~0.98 — high
+         * enough that the regression cannot slip through a CI run, while the
+         * fixed code passes deterministically (every round is a bounded,
+         * non-sleeping open/close cycle, ~2s for the whole test).
+         */
+        const val REBIND_ROUNDS = 200
     }
 }

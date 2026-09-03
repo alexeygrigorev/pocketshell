@@ -105,6 +105,12 @@ sealed interface SessionUiState {
  * distinction is the transport's own: sshj carries `exit-status` on the channel
  * close, and a dropped socket has none to carry.
  *
+ * A third case (issue #2477) also ends with no status: [HostConnection.close]
+ * called on the connection this screen is watching — deliberately, by
+ * something other than a network failure. That is NOT a drop either, even
+ * though the channel dies the same way a dropped socket's does; see
+ * [isDeliberateClose].
+ *
  * ## Nothing runs while the app is away
  *
  * Every rung of the ladder — the countdown as well as the dial — is gated on
@@ -161,6 +167,18 @@ class SessionViewModel @Inject constructor(
     private var watchJob: Job? = null
     private var bridge: TerminalPtyBridge? = null
     private var channel: PtyChannel? = null
+
+    /**
+     * The connection [channel] is currently attached through (issue #2477).
+     *
+     * Kept only so a channel that ends with NO exit status can be told apart
+     * from a genuine network drop: [HostConnection.close] tears the PTY down
+     * the same way a dead socket does (no clean exit-status), but it also
+     * flips THIS field's state to [TransportState.Closed] rather than
+     * [TransportState.Lost] — the one signal that distinguishes "someone
+     * closed this on purpose" from "the link went away". See [isDeliberateClose].
+     */
+    private var connection: HostConnection? = null
 
     /**
      * The ONE emulator front end for this screen's whole life.
@@ -244,7 +262,7 @@ class SessionViewModel @Inject constructor(
                 // ended the screen while a drop noticed by the output pump
                 // reconnected.
                 val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { target.exit.await() }
-                settleEnd(target, status)
+                settleEnd(target, status, deliberateClose = status == null && isDeliberateClose())
             }
         }
     }
@@ -305,6 +323,7 @@ class SessionViewModel @Inject constructor(
         watchJob = null
         bridge?.stop()
         bridge = null
+        connection = null
         val open = channel
         channel = null
         if (open != null) {
@@ -387,6 +406,7 @@ class SessionViewModel @Inject constructor(
         )
         channel = pty
         bridge = pump
+        this.connection = connection
         pump.start()
         _uiState.value = SessionUiState.Live(emulator)
 
@@ -398,7 +418,10 @@ class SessionViewModel @Inject constructor(
         // [settleEnd] is first-wins on the channel identity, so whichever fires
         // decides and the others are no-ops.
         watchJob = viewModelScope.launch {
-            launch { settleEnd(pty, pty.exit.await()) }
+            launch {
+                val status = pty.exit.await()
+                settleEnd(pty, status, deliberateClose = status == null && isDeliberateClose())
+            }
             launch {
                 connection.state.first { it is TransportState.Lost }
                 settleEnd(pty, status = null)
@@ -406,6 +429,27 @@ class SessionViewModel @Inject constructor(
         }
         return AttachOutcome.Attached
     }
+
+    /**
+     * True when [connection] ended up [TransportState.Closed] rather than
+     * [TransportState.Lost] (issue #2477).
+     *
+     * A PTY that ends with no exit status ordinarily means the link dropped —
+     * worth a reconnect. But [HostConnection.close] tears the channel down the
+     * exact same way (no clean exit-status) when something OTHER than a
+     * network failure closed the connection deliberately: nothing in
+     * production calls that today, but a test's own end-of-test hygiene
+     * (`ConnectionsRegistry.closeAll()`, run while this screen's watcher is
+     * still alive) does, and so would a future "disconnect" action. Redialling
+     * in that case does not reconnect anything the user asked for — it opens a
+     * BRAND NEW connection nobody is watching, orphaned in the registry until
+     * the next background/grace cycle finds it "live" and holds it open for a
+     * session that no longer has a screen (exactly what stranded J06's
+     * `backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification` on a shared
+     * full-suite run — a PREVIOUS test's deliberate close redialled and left
+     * this orphan behind).
+     */
+    private fun isDeliberateClose(): Boolean = connection?.state?.value is TransportState.Closed
 
     private suspend fun openPty(connection: HostConnection, command: String): PtyChannel =
         withContext(dispatcher) {
@@ -426,22 +470,35 @@ class SessionViewModel @Inject constructor(
         if (channel !== ended) return
         viewModelScope.launch {
             val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { ended.exit.await() }
-            settleEnd(ended, status)
+            settleEnd(ended, status, deliberateClose = status == null && isDeliberateClose())
         }
     }
 
     /**
      * The channel [ended] is over. [status] is the remote's exit status, or
      * null when there was none — which is the whole discriminator between an
-     * ended session and a dropped link (see the class doc).
+     * ended session and a dropped link (see the class doc). [deliberateClose]
+     * (issue #2477, see [isDeliberateClose]) is the finer discriminator WITHIN
+     * "no status": a connection closed on purpose is reported as ended, the
+     * same as a clean remote exit, rather than redialled.
      */
-    private fun settleEnd(ended: PtyChannel, status: Int?) {
+    private fun settleEnd(ended: PtyChannel, status: Int?, deliberateClose: Boolean = false) {
         if (channel !== ended) return
-        if (status != null) {
+        if (status != null || deliberateClose) {
+            // Both watchers of `attachOnce`'s watchJob have now been overtaken
+            // by events: the one that just fired settled us here, and the
+            // sibling watching `connection.state` for Lost must stop too — a
+            // deliberately CLOSED connection's state is terminal and sticky
+            // (never becomes Lost), so leaving that watcher running would park
+            // it forever. Pre-existing for a clean remote exit too (status !=
+            // null): once the screen has failed there is nothing left for
+            // either watcher to report.
+            watchJob?.cancel()
+            watchJob = null
             bridge?.stop()
             bridge = null
             channel = null
-            fail(endedMessage(status))
+            fail(if (deliberateClose) closedMessage() else endedMessage(status))
             return
         }
         beginReconnect()
@@ -556,6 +613,16 @@ class SessionViewModel @Inject constructor(
             exitCode == null || exitCode == 0 -> "$subject ended."
             else -> "$subject ended (exit $exitCode)."
         }
+    }
+
+    /**
+     * What the user reads when THIS screen's connection was closed on purpose
+     * rather than lost (issue #2477, [isDeliberateClose]).
+     */
+    private fun closedMessage(): String {
+        val name = sessionLabel
+        val subject = if (name == null) "The session" else "Session \"$name\""
+        return "$subject ended: the connection was closed."
     }
 
     private fun describe(failure: Throwable): String =

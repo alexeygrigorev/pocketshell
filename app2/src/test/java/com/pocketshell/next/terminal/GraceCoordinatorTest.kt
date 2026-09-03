@@ -1,5 +1,6 @@
 package com.pocketshell.next.terminal
 
+import android.app.Activity
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -24,6 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -271,6 +273,87 @@ class GraceCoordinatorTest {
 
         assertEquals("enterBackground is idempotent", 1, service.startCount)
         assertEquals(1, connection.graceHandles.size)
+    }
+
+    /**
+     * Regression for issue #2477.
+     *
+     * Hilt's Android test harness builds a FRESH `@Singleton` component — and
+     * therefore a fresh [GraceCoordinator] — for every `@HiltAndroidTest`
+     * method, on top of the SAME real, process-wide [android.app.Application]
+     * underneath every one of them (`am instrument` never restarts the
+     * process between test methods; a real production process never rebuilds
+     * its Hilt component either, which is why nothing before #2477 had to
+     * account for a SECOND instance existing at all).
+     *
+     * Before the fix, [GraceCoordinator.register] never unregistered a
+     * previous instance, so the FIRST coordinator stayed a live
+     * `ActivityLifecycleCallbacks` forever: it kept reacting to every LATER
+     * activity's stop/start, capable of independently arming the shared,
+     * OS-level grace notification for a connection nothing else could reach
+     * or clean up — exactly what stranded
+     * `J06BackgroundGraceReturnJourney.backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification`
+     * on a full, unfiltered suite run (a leftover `J05` coordinator, still
+     * registered, rearmed for `J05`'s own never-closed connection while
+     * `J06`'s own test had opened none).
+     *
+     * This drives ONE real activity's stop through Robolectric after BOTH
+     * coordinators have registered, and asserts only the SECOND (the one
+     * that "won" the registration) reacts — the first must see NEITHER its
+     * own hold flip nor its own service start.
+     */
+    @Test
+    fun `registering a second coordinator unregisters the first from the process`() = runTest {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+
+        val (registryOne, _) = registryWithOneLiveConnection()
+        val serviceOne = FakeGraceServiceControl()
+        val coordinatorOne = GraceCoordinator(
+            connections = registryOne,
+            service = serviceOne,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorOne.register(application)
+
+        val (registryTwo, _) = registryWithOneLiveConnection()
+        val serviceTwo = FakeGraceServiceControl()
+        val coordinatorTwo = GraceCoordinator(
+            connections = registryTwo,
+            service = serviceTwo,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        // Simulates a later test method's fresh Hilt component handing a NEW
+        // MainActivity a NEW GraceCoordinator, on the same real process.
+        coordinatorTwo.register(application)
+
+        // The ONE real activity lifecycle transition an actual process ever
+        // delivers: started+resumed, then paused+stopped (a real background,
+        // not a config change).
+        val controller = Robolectric.buildActivity(Activity::class.java)
+        controller.create().start().resume()
+        runCurrent()
+        controller.pause().stop()
+        runCurrent()
+
+        assertFalse(
+            "the SUPERSEDED coordinator must never react again — it is no longer registered",
+            coordinatorOne.isHolding,
+        )
+        assertEquals(
+            "the superseded coordinator's own service must never be told to start",
+            0,
+            serviceOne.startCount,
+        )
+        assertTrue(
+            "the CURRENT coordinator must be the one that reacts to the real activity",
+            coordinatorTwo.isHolding,
+        )
+        assertEquals(1, serviceTwo.startCount)
     }
 
     private companion object {

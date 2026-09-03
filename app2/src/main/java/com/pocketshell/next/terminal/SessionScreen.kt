@@ -21,12 +21,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.next.composer.ComposerBar
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.composer.ComposerViewModel
 import com.pocketshell.next.composer.MessageHistorySheet
 import com.pocketshell.next.composer.SentMessage
 import com.pocketshell.next.composer.SessionSink
+import com.pocketshell.next.usage.UsageGlancePill
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.UsageGlanceViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -95,14 +100,21 @@ fun SessionRoute(
     hostId: Long,
     sessionName: String,
     onBack: () -> Unit,
+    onOpenUsage: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionViewModel = hiltViewModel(),
     composerViewModel: ComposerViewModel = hiltViewModel(),
+    usageGlanceViewModel: UsageGlanceViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
     val composerState by composerViewModel.state.collectAsState()
+    val usagePillState by usageGlanceViewModel.state.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
+    // The pill does its own foreground-only fetch (task P-5): no scheduler, no
+    // cache shared with the usage panel — a session open is itself a "view",
+    // same as opening the panel is.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { usageGlanceViewModel.refresh() }
 
     val sink = remember(viewModel) {
         object : SessionSink {
@@ -126,6 +138,8 @@ fun SessionRoute(
         composerState = composerState,
         sessionName = sessionName,
         onBack = onBack,
+        usagePillState = usagePillState,
+        onOpenUsage = onOpenUsage,
         onResized = viewModel::onResized,
         onRetry = viewModel::retryNow,
         onKeyBarSend = viewModel::sendBytes,
@@ -198,6 +212,10 @@ fun SessionRoute(
  * @param onKeyBarSend raw bytes for the remote: key bar taps, and Ctrl+key
  *   combinations the key bar armed and the keyboard completed. Bypasses the
  *   composer entirely — these are not composed messages.
+ * @param usagePillState the top bar's usage glance pill (task P-5), or null
+ *   before its first foreground fetch has landed — the pill is simply absent
+ *   until then, never a placeholder.
+ * @param onOpenUsage navigates to the usage panel; the pill's tap target.
  * @param cellMetrics the rendered face's cell metrics, used only for the
  *   pre-attach estimate. A seam with the production default, like
  *   [com.pocketshell.next.AppNavHost]'s screens: Robolectric's `Paint` reports
@@ -211,6 +229,8 @@ fun SessionScreen(
     sessionName: String,
     onBack: () -> Unit,
     onResized: (cols: Int, rows: Int) -> Unit,
+    usagePillState: UsageGlancePillState? = null,
+    onOpenUsage: () -> Unit = {},
     onRetry: () -> Unit,
     onKeyBarSend: (ByteArray) -> Unit,
     onDraftChange: (String) -> Unit,
@@ -251,6 +271,12 @@ fun SessionScreen(
                     compact = true,
                     modifier = Modifier.testTag(SESSION_BACK_TAG),
                 )
+            },
+            // The usage glance pill (task P-5) rides the top bar next to the
+            // session title, always visible once a reading exists — hidden
+            // (not a placeholder) until the first foreground fetch lands.
+            trailing = usagePillState?.let { pillState ->
+                { UsageGlancePill(state = pillState, onClick = onOpenUsage) }
             },
         )
 

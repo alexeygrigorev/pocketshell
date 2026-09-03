@@ -14,6 +14,7 @@ import com.pocketshell.core.transport.AuthSecretResolver
 import com.pocketshell.core.transport.HostConnectionFactory
 import com.pocketshell.core.transport.RealHostConnectionFactory
 import com.pocketshell.core.transport.TrustStore
+import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.SpeechRecognitionProvider
@@ -219,6 +220,18 @@ object AppModule {
     @Singleton
     fun provideHostCliClientFactory(): HostCliClientFactory =
         HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) }
+
+    /**
+     * `PocketshellUsageJsonParser` (task P-5) has a plain no-arg constructor
+     * with no `@Inject` of its own — `core-usage` is a UI-framework-free
+     * shared module and stays that way. Provided here, stateless, rather than
+     * as a default constructor argument on [com.pocketshell.next.usage.UsageFetcher]:
+     * a default-valued `@Inject` constructor generates a second constructor at
+     * the bytecode level that Hilt refuses to bind (the same trap the
+     * pre-rewrite client's `UsageRemoteSource` hit).
+     */
+    @Provides
+    fun providePocketshellUsageJsonParser(): PocketshellUsageJsonParser = PocketshellUsageJsonParser()
 
     // -------------------------------------------------------------------------
     // Reconnect (task U-7).

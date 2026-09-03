@@ -148,7 +148,7 @@ class AppNavHostTest {
                 // dials a host. The stand-in echoes both route arguments, which
                 // is what this suite is pinning — that a session name with a
                 // space and a `:` survives the encode/decode round trip.
-                sessionScreen = { hostId, sessionName, _ ->
+                sessionScreen = { hostId, sessionName, _, _ ->
                     Text("Session(hostId=$hostId, name=$sessionName)")
                 },
                 // Same rationale again: the P-4 port-forward route resolves its
@@ -164,6 +164,9 @@ class AppNavHostTest {
                 // suite pins.
                 filesScreen = { hostId, path, _, _ -> Text("Files(hostId=$hostId, path=$path)") },
                 viewerScreen = { hostId, path, _ -> Text("Viewer(hostId=$hostId, path=$path)") },
+                // Task P-5: the real usage panel resolves `UsageViewModel`
+                // through `hiltViewModel()`, same rationale as the others.
+                usageScreen = { Text("Usage") },
             )
         }
         composeRule.waitForIdle()

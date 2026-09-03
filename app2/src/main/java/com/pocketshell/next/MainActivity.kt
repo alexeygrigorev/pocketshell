@@ -37,6 +37,7 @@ import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
 import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
+import com.pocketshell.next.usage.UsageRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -129,10 +130,19 @@ fun AppNavHost(
     ) -> Unit = { _, onOpenSession, onOpenFiles ->
         SessionTreeRoute(onOpenSession = onOpenSession, onOpenFiles = onOpenFiles)
     },
-    sessionScreen: @Composable (hostId: Long, sessionName: String, onBack: () -> Unit) -> Unit =
-        { hostId, sessionName, onBack ->
-            SessionRoute(hostId = hostId, sessionName = sessionName, onBack = onBack)
-        },
+    sessionScreen: @Composable (
+        hostId: Long,
+        sessionName: String,
+        onBack: () -> Unit,
+        onOpenUsage: () -> Unit,
+    ) -> Unit = { hostId, sessionName, onBack, onOpenUsage ->
+        SessionRoute(
+            hostId = hostId,
+            sessionName = sessionName,
+            onBack = onBack,
+            onOpenUsage = onOpenUsage,
+        )
+    },
     portsScreen: @Composable () -> Unit = { PortForwardRoute() },
     filesScreen: @Composable (
         hostId: Long,
@@ -156,6 +166,9 @@ fun AppNavHost(
     },
     qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
+    usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        UsageRoute(onBack = onBack)
+    },
 ) {
     NavHost(
         navController = navController,
@@ -256,7 +269,13 @@ fun AppNavHost(
             // resolves against (plan §B.0).
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
             val name = entry.arguments?.getString(Destination.ARG_SESSION_NAME).orEmpty()
-            sessionScreen(hostId, name) { navController.popBackStack() }
+            sessionScreen(
+                hostId,
+                name,
+                { navController.popBackStack() },
+                // Task P-5: the top bar's usage glance pill navigates here.
+                { navController.navigate(Destination.Usage.route()) },
+            )
         }
         composable(
             route = Destination.Files.pattern,
@@ -307,7 +326,8 @@ fun AppNavHost(
             RoutePlaceholder("Settings")
         }
         composable(Destination.Usage.pattern) {
-            RoutePlaceholder("Usage")
+            // Task P-5: the real usage/quota panel.
+            usageScreen { navController.popBackStack() }
         }
     }
 }

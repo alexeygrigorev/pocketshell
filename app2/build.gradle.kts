@@ -205,6 +205,10 @@ dependencies {
     // supervisor). It hands back `core-transport` types, so it is an `api`
     // dependency there and arrives on this classpath with core-transport.
     implementation(project(":shared:core-portfwd"))
+    // Task P-5: the usage/quota panel's provider-record model + strict NDJSON
+    // parser. Reused as-is (plan: "shared/core-usage is UNCHANGED") — this is
+    // its first app2 consumer.
+    implementation(project(":shared:core-usage"))
 
     // Task P-6: QR host import/export. `zxing-core` is the encoder/decoder used
     // to render a host QR and to read one out of a still image;

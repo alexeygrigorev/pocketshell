@@ -1405,6 +1405,17 @@ needed it.
   `*Outbound*` or `*Queue*`.
 - Non-goals: voice (P-2); offline-queued delivery (the voice offline
   transcription queue in P-2 is a DIFFERENT, kept feature).
+- **Added 2026-09-03 (maintainer request, small scope, NOT a queue)**: a
+  local, per-session sent-message history — modeled on pocketshell-desktop's
+  prompt history, and on a plain shell's command history, not on any
+  delivery mechanism. Every message that leaves the composer (delivered or
+  not) gets appended to a small persisted list (Room, or even a bounded
+  in-memory ring if per-session is enough — implementer's call); the
+  composer exposes a way to browse it and tap an entry to refill the draft
+  for re-sending. This solves the actual frustration ("a failed send
+  shouldn't mean retyping it") without any of the retry/offline-delivery
+  logic the outbound-queue cut removed — it's just "don't make me remember
+  what I typed," a read-only log, not an active resend mechanism.
 
 ---
 

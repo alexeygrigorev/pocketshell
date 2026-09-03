@@ -7,6 +7,7 @@ import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.ComposerDraftStore
+import com.pocketshell.next.terminal.GraceCoordinator
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -42,6 +43,13 @@ interface AppGraph {
 
     /** The durable draft slot, so a journey can start from a known-empty composer. */
     fun composerDraftStore(): ComposerDraftStore
+
+    /**
+     * Task U-8. The app's single background-grace policy singleton, so a
+     * journey can assert [GraceCoordinator.isHolding] directly rather than
+     * inferring the D21 window's state from the notification tray alone.
+     */
+    fun graceCoordinator(): GraceCoordinator
 }
 
 /** The app-under-test's Hilt graph. */

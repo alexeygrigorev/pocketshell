@@ -35,10 +35,12 @@ import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
+import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 /**
  * The single Activity of app2 (plan §A.1). Everything is Compose; there are no
@@ -52,8 +54,20 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    /**
+     * Task U-8. The background-grace policy has no other consumer, so something
+     * has to create the singleton and wire it to the process/activity
+     * lifecycles; this Activity is the moment the app first has a UI, and it is
+     * launched identically in production and under instrumentation (where
+     * `App` is replaced by `HiltTestApplication` and its `onCreate` never runs).
+     * [GraceCoordinator.register] is idempotent, so a recreate is free.
+     */
+    @Inject
+    lateinit var grace: GraceCoordinator
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        grace.register(application)
         setContent {
             PocketShellTheme {
                 Surface(

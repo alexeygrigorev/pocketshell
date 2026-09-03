@@ -32,6 +32,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!--
+        Task U-8: the background grace window (D21). The CPU must stay awake for
+        the bounded 90 s hold, or the phone dozes, the SSH transport dies
+        underneath the session the grace exists to preserve, and the foreground
+        return becomes the full redial grace was supposed to avoid. The lock is
+        PARTIAL (screen off is fine) and is acquired with a platform timeout of
+        the remaining window, so it cannot outlive the hold even if teardown
+        never runs — see GraceService.
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:name=".App"
         android:allowBackup="false"
@@ -105,6 +116,26 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled forwarding on." />
+        </service>
+
+        <!--
+            Task U-8: the background-grace foreground service (D21).
+
+            `foregroundServiceType="specialUse"` for the same reason
+            ForwardService uses it: holding a user-initiated SSH transport open
+            across a short app-switch matches none of the predefined types — it
+            is not scheduled `dataSync`, and there is no `connectedDevice`.
+
+            `exported="false"`: only PocketShell's own GraceCoordinator may start
+            or stop it.
+        -->
+        <service
+            android:name=".terminal.GraceService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds the user's already-connected SSH session open for a bounded 90-second window while the app is backgrounded, so returning to it does not require a reconnect. Shows a live count-down and stops itself when the window ends." />
         </service>
     </application>
 

@@ -141,6 +141,19 @@ class ConnectionsRegistry(
     fun current(hostId: Long): HostConnection? =
         connections[hostId]?.takeIf { it.state.value.isLive() }
 
+    /**
+     * Every connection that is still usable, in no particular order. Does not
+     * dial (task U-8: [com.pocketshell.next.terminal.GraceCoordinator] arms one
+     * bounded delayed close per entry when the app is backgrounded).
+     *
+     * "Usable" is [TransportState.Connecting] or [TransportState.Connected] —
+     * the same liveness [current] uses — rather than `Connected` alone: a dial
+     * still in flight when the user leaves the app would otherwise have no grace
+     * armed at all, and would then be held open with no bound once it landed.
+     */
+    fun liveConnections(): List<HostConnection> =
+        connections.values.filter { it.state.value.isLive() }
+
     /** Closes every connection and empties the table. Safe to call twice. */
     suspend fun closeAll() = mutex.withLock {
         withContext(dispatcher) {

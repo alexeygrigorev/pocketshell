@@ -209,6 +209,10 @@ dependencies {
     // catalogue and encrypted API-key storage — reused unchanged from the old
     // client's `:shared:core-voice`.
     implementation(project(":shared:core-voice"))
+    // Task P-5: the usage/quota panel's provider-record model + strict NDJSON
+    // parser. Reused as-is (plan: "shared/core-usage is UNCHANGED") — this is
+    // its first app2 consumer.
+    implementation(project(":shared:core-usage"))
 
     // Task P-6: QR host import/export. `zxing-core` is the encoder/decoder used
     // to render a host QR and to read one out of a still image;

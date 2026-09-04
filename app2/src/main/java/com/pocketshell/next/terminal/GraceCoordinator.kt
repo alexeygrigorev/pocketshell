@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -116,6 +117,13 @@ class GraceCoordinator(
 
     private val registered = AtomicBoolean(false)
 
+    /**
+     * Set once this instance has been retired by a later [register] call. A
+     * retired coordinator is inert: it owns no window, drives no service and
+     * can never arm another one — see [supersede] (issue #2483).
+     */
+    private val retired = AtomicBoolean(false)
+
     /** For tests and diagnostics: is a background window open right now? */
     val isHolding: Boolean get() = synchronized(lock) { armed }
 
@@ -128,18 +136,23 @@ class GraceCoordinator(
      * main-thread-only and a `@Singleton` is created on whichever thread first
      * injects it (the same reason [ProcessForegroundSignal] posts).
      *
-     * Also unregisters whichever OTHER [GraceCoordinator] instance was
-     * previously the process's active one — see [activeInstance] for why that
-     * is load-bearing rather than defensive ceremony (issue #2477).
+     * Also RETIRES whichever OTHER [GraceCoordinator] instance was previously
+     * the process's active one — see [activeInstance] for why that is
+     * load-bearing rather than defensive ceremony (issue #2477), and
+     * [supersede] for why unregistering it is not enough on its own (issue
+     * #2483).
      */
     fun register(application: Application) {
         if (!registered.compareAndSet(false, true)) return
         val wire = Runnable {
-            val previous = activeInstance.getAndSet(this)
-            if (previous != null && previous !== this) {
-                ProcessLifecycleOwner.get().lifecycle.removeObserver(previous)
-                application.unregisterActivityLifecycleCallbacks(previous)
-            }
+            // Retire the outgoing instance BEFORE this one becomes the active
+            // one, so its own hand-over stop is still the stop of the hold it
+            // opened, and so it has provably finished touching the shared
+            // service before this instance can ever start it.
+            activeInstance.get()
+                ?.takeIf { it !== this }
+                ?.supersede(application)
+            activeInstance.set(this)
             ProcessLifecycleOwner.get().lifecycle.addObserver(this)
             application.registerActivityLifecycleCallbacks(this)
         }
@@ -148,6 +161,39 @@ class GraceCoordinator(
         } else {
             Handler(Looper.getMainLooper()).post(wire)
         }
+    }
+
+    /**
+     * Retires this instance in favour of the one now registering (issue #2483).
+     *
+     * Unregistering the observers — all #2477 did — stops a superseded
+     * coordinator REACTING to anything new, but leaves everything it had
+     * ALREADY armed running: its `armed` flag, its pending [GraceHandle]s and,
+     * worst, its [expiry] job. That job still fires up to [graceMs] later and
+     * calls `service.stop()`. There is exactly ONE [GraceService] in a process,
+     * so that late stop takes down whichever hold the CURRENT coordinator has
+     * open by then — leaving [isHolding] true with no foreground service, no
+     * notification and no wake lock behind it, which is the precise state the
+     * grace notification exists to make impossible. In the `app2` journey lane
+     * that is a [graceMs]-long landmine planted by every test class whose
+     * teardown backgrounds a live connection, and it detonated inside
+     * `J06BackgroundGraceReturnJourney` (CI run 33888824496).
+     *
+     * So the hand-over is completed HERE, synchronously, on the main thread
+     * that is doing the registering: unregister, close the window (which
+     * cancels the pending closes and takes the service down — the app is coming
+     * back to the foreground, which is exactly what [enterForeground] means),
+     * then make the instance inert so nothing can re-arm it. Every one of those
+     * steps happens strictly before the incoming coordinator becomes active, so
+     * "old stop" and "new start" can never be reordered.
+     */
+    private fun supersede(application: Application) {
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
+        application.unregisterActivityLifecycleCallbacks(this)
+        enterForeground()
+        retired.set(true)
+        // Belt and braces: no job this instance ever launched may still run.
+        scope.cancel()
     }
 
     // --- the two transitions -------------------------------------------------
@@ -159,6 +205,11 @@ class GraceCoordinator(
      * Idempotent — see the class doc for why it is called from two places.
      */
     fun enterBackground(): Unit = synchronized(lock) {
+        // A retired instance must never start the ONE shared service for a
+        // graph that no longer owns it, however it is reached — the lifecycle
+        // callbacks are gone, but a direct call is still possible from anything
+        // still holding the old singleton (issue #2483).
+        if (retired.get()) return
         if (armed) return
         val live = connections.liveConnections()
         // Nothing to hold: no service, no notification, no wake lock.
@@ -269,10 +320,17 @@ class GraceCoordinator(
          * on a full, unfiltered suite run: J05's own leftover coordinator,
          * still alive and still registered, rearmed the shared notification
          * for J05's own never-closed connection while J06's test had opened
-         * none of its own. [register] now unregisters whichever instance this
-         * one is replacing, so at most one [GraceCoordinator] can ever answer
-         * a lifecycle callback — true by construction, not by assuming a
-         * component-recreation environment never happens.
+         * none of its own. [register] now RETIRES whichever instance this one
+         * is replacing ([supersede]), so at most one [GraceCoordinator] can
+         * ever answer a lifecycle callback OR still own a window — true by
+         * construction, not by assuming a component-recreation environment
+         * never happens.
+         *
+         * Unregistering alone was not enough (issue #2483): it left the
+         * superseded instance's already-armed window — and its expiry timer —
+         * running, so a stop meant for a window that ended minutes ago landed
+         * on the CURRENT coordinator's hold. [supersede] closes the window as
+         * part of the hand-over.
          */
         private val activeInstance = AtomicReference<GraceCoordinator?>(null)
 

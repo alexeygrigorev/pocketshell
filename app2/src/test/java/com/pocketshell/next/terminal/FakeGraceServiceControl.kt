@@ -19,14 +19,27 @@ class FakeGraceServiceControl : GraceServiceControl {
 
     val startCount: Int get() = startedDeadlines.size
 
-    /** True between the most recent unmatched [start] and the next [stop]. */
-    val isRunning: Boolean get() = startCount > stopCount
+    /**
+     * Is the (ONE, process-global) service up right now?
+     *
+     * Modelled as a flip-flop rather than `startCount > stopCount` because that
+     * is what the OS does: `Context.stopService()` takes [GraceService] down
+     * unconditionally, however many `startForegroundService()` calls preceded
+     * it. A counter-derived "running" cannot see the failure this fake exists
+     * to expose (issue #2483) — a STALE owner's stop landing on top of a
+     * LIVE hold reads as "still running" to a counter and as "gone" to the
+     * notification tray.
+     */
+    var isRunning: Boolean = false
+        private set
 
     override fun start(deadlineMs: Long) {
         startedDeadlines += deadlineMs
+        isRunning = true
     }
 
     override fun stop() {
         stopCount += 1
+        isRunning = false
     }
 }

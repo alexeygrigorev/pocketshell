@@ -174,6 +174,255 @@ class ComposerViewModelTest {
         assertEquals("half-written thought", second.state.value.draft)
     }
 
+    // ------------------------------------------------- rebinding across sessions
+
+    /*
+     * Nothing in the app rebinds ONE ComposerViewModel across two sessions
+     * today: `SessionRoute` resolves it with `hiltViewModel()` inside the
+     * `session/{hostId}/{sessionName}` destination, so the ViewModel's store
+     * owner is that route's `NavBackStackEntry` and opening another session
+     * builds a new entry — and a new composer. These tests construct the
+     * rebind synthetically (call `bind` twice on one instance, which is exactly
+     * what a quick-switch sheet reusing one entry would do) and pin the
+     * behaviour the composer must have on its own, without leaning on the
+     * navigation graph to prevent the situation.
+     */
+
+    @Test
+    fun `a rebind to another session never shows the previous session's draft`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("the thing I typed in session A")
+            advanceUntilIdle()
+
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+
+            // Synchronously, in the same frame as the bind: the load for the
+            // new session is asynchronous, and a draft that is merely "about to
+            // be replaced" is one the user can read and send.
+            assertEquals("", viewModel.state.value.draft)
+            assertTrue(viewModel.state.value.attachments.isEmpty())
+
+            // And it does not come back when the in-flight work settles.
+            advanceUntilIdle()
+            assertEquals("", viewModel.state.value.draft)
+            assertTrue(viewModel.state.value.attachments.isEmpty())
+        }
+
+    @Test
+    fun `a rebind to another session clears the attachments, the chip and the history`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.attach(listOf(pick("a-only.txt", "a")))
+            advanceUntilIdle()
+            sink.isLive = false
+            viewModel.onDraftChange("undelivered in A")
+            advanceUntilIdle()
+            viewModel.send()
+            advanceUntilIdle()
+            viewModel.toggleHistory()
+            assertEquals(1, viewModel.state.value.attachments.size)
+            assertEquals(1, viewModel.state.value.history.size)
+
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+
+            assertTrue(viewModel.state.value.attachments.isEmpty())
+            assertNull(viewModel.state.value.notice)
+            assertTrue("session A's sent messages are not session B's", viewModel.state.value.history.isEmpty())
+            assertFalse(viewModel.state.value.historyOpen)
+
+            advanceUntilIdle()
+            assertTrue(viewModel.state.value.attachments.isEmpty())
+            assertTrue(viewModel.state.value.history.isEmpty())
+        }
+
+    /**
+     * The debounced write is the other direction of the same leak: [writeDraft]
+     * reads `sessionKey` when it RUNS, so a keystroke still inside the debounce
+     * window at the moment of the switch would be persisted under the NEW
+     * session's key — and would clobber whatever that session had stored.
+     */
+    @Test
+    fun `a rebind persists the outgoing draft under its own key, not the new one`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("half a thought")
+            // Deliberately not `advanceUntilIdle()`: the write is still inside
+            // its debounce, which is the window a session switch lands in.
+            runCurrent()
+
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+            advanceUntilIdle()
+
+            assertEquals("half a thought", stack.drafts.load(SESSION_KEY).text)
+            assertEquals(
+                "session A's text must never be stored as session B's draft",
+                "",
+                stack.drafts.load("$hostId/$OTHER_SESSION").text,
+            )
+        }
+
+    /** Clearing the screen is not throwing the draft away: A → B → A finds it. */
+    @Test
+    fun `the draft left behind by a rebind is still there when the session is reopened`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("half a thought")
+            runCurrent()
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+            advanceUntilIdle()
+
+            val reopened = stack.viewModel()
+            reopened.bind(hostId, SESSION, sink)
+            advanceUntilIdle()
+
+            assertEquals("half a thought", reopened.state.value.draft)
+        }
+
+    /**
+     * The stored-draft load is asynchronous, so a switch can outrun it. If the
+     * load for the session being left resolves after the switch, it finds an
+     * empty composer and would paint the old session's draft into the new one.
+     */
+    @Test
+    fun `a draft load in flight for the previous session cannot resolve into the new one`() =
+        runTest(dispatcher) {
+            hostId = stack.seedHost()
+            stack.drafts.save(SESSION_KEY, ComposerDraft("stored for session A"))
+            val viewModel = stack.viewModel()
+
+            viewModel.bind(hostId, SESSION, sink)
+            // No advance: session A's load is queued and has not resolved.
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+            advanceUntilIdle()
+
+            assertEquals("", viewModel.state.value.draft)
+        }
+
+    /**
+     * The other half of the same window, and the one that costs the user
+     * something: the hand-off must not WRITE either.
+     *
+     * `_state` is only the outgoing session's draft once its load has landed.
+     * Switch away before that and the composer is empty because nothing has
+     * been read yet — not because the session has no draft — so persisting that
+     * emptiness takes the `clear` branch and deletes a real, unsent draft from
+     * the mirror and the preferences file alike. Nothing can recover it.
+     */
+    @Test
+    fun `a rebind before the outgoing draft has loaded leaves it stored`() = runTest(dispatcher) {
+        hostId = stack.seedHost()
+        stack.drafts.save(SESSION_KEY, ComposerDraft("important unsent text"))
+        val viewModel = stack.viewModel()
+
+        viewModel.bind(hostId, SESSION, sink)
+        // No advance: session A's load is queued and has NOT resolved, so the
+        // empty composer says nothing about what A has stored.
+        viewModel.bind(hostId, OTHER_SESSION, sink)
+        advanceUntilIdle()
+
+        assertEquals(
+            "a switch that outran the load must not delete the draft it never read",
+            "important unsent text",
+            stack.drafts.load(SESSION_KEY).text,
+        )
+    }
+
+    /** And the user gets it back: A → B → A, with the switch inside A's load. */
+    @Test
+    fun `a session switched away from mid-load still shows its draft on the way back`() =
+        runTest(dispatcher) {
+            hostId = stack.seedHost()
+            stack.drafts.save(SESSION_KEY, ComposerDraft("important unsent text"))
+            val viewModel = stack.viewModel()
+
+            viewModel.bind(hostId, SESSION, sink)
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+            advanceUntilIdle()
+            assertEquals("session B starts empty", "", viewModel.state.value.draft)
+
+            viewModel.bind(hostId, SESSION, sink)
+            advanceUntilIdle()
+
+            assertEquals("important unsent text", viewModel.state.value.draft)
+        }
+
+    /**
+     * The same rule on the ordinary persistence path, not just the hand-off:
+     * [ComposerViewModel.writeDraft] runs on a debounce and from every "must
+     * not wait" moment, so it too can fire while the stored draft is still on
+     * its way back from disk.
+     *
+     * Reached here the way a user would: open a session and immediately attach
+     * a file that fails to upload. The failure persists an empty composer —
+     * empty only because the load has not landed — which is a `clear` of a
+     * draft the user never saw and never touched.
+     *
+     * The load is genuinely parked (a gated dispatcher inside a store with a
+     * cold mirror), not merely queued behind the test scheduler, because the
+     * production window is a real disk hop that other work overtakes.
+     */
+    @Test
+    fun `a failed upload before the draft has loaded cannot delete it`() = runTest(dispatcher) {
+        hostId = stack.seedHost()
+        // Seeded through another store instance so the one under test has to
+        // read the preferences file rather than answer from its own mirror.
+        stack.drafts.save(SESSION_KEY, ComposerDraft("important unsent text"))
+        val gate = GatedDispatcher().apply { hold() }
+        val slowDrafts = ComposerDraftStore(stack.context, gate)
+        val viewModel = ComposerViewModel(
+            registry = stack.registry,
+            drafts = slowDrafts,
+            history = stack.db.sentMessageDao(),
+            stager = stack.stager,
+            queuedDictations = stack.queuedDictations,
+            speech = stack.speech,
+        )
+
+        viewModel.bind(hostId, SESSION, sink)
+        viewModel.attach(listOf(Uri.fromFile(File(temporaryFolder.root, "not-there.txt"))))
+        advanceUntilIdle()
+        assertTrue(
+            "the upload must really have failed for this to be the right window",
+            viewModel.state.value.notice is ComposerNotice.Problem,
+        )
+        assertTrue(viewModel.state.value.attachments.isEmpty())
+
+        gate.release()
+        advanceUntilIdle()
+
+        assertEquals(
+            "the stored draft must survive a persist that ran before it was read",
+            "important unsent text",
+            ComposerDraftStore(stack.context, Dispatchers.Unconfined).load(SESSION_KEY).text,
+        )
+        assertEquals(
+            "and it lands in the composer once the load finally resolves",
+            "important unsent text",
+            viewModel.state.value.draft,
+        )
+    }
+
+    /** A recording belongs to the session it was started in, transcript included. */
+    @Test
+    fun `a dictation in flight cannot type into the session it was not started in`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onMicTap()
+            stack.speech.partial("words meant for session A")
+            advanceUntilIdle()
+            assertEquals(RecordingState.Recording, viewModel.state.value.recording)
+
+            viewModel.bind(hostId, OTHER_SESSION, sink)
+            // A recognizer callback can land after the switch; the service call
+            // is asynchronous and nothing on the device stops mid-sentence.
+            stack.speech.partial("words meant for session A, continued")
+            advanceUntilIdle()
+
+            assertEquals("", viewModel.state.value.draft)
+            assertEquals(RecordingState.Idle, viewModel.state.value.recording)
+        }
+
     // -------------------------------------------------------------- history
 
     @Test
@@ -545,5 +794,8 @@ class ComposerViewModelTest {
 
     private companion object {
         const val SESSION = "devbox"
+
+        /** A second session on the same host, for the rebind tests. */
+        const val OTHER_SESSION = "laptop"
     }
 }

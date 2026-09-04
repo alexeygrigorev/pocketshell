@@ -79,7 +79,29 @@ class ComposerViewModel @Inject constructor(
     private var sink: SessionSink? = null
     private var homeDir: String? = null
 
+    /**
+     * Whether what is in [_state] is really [sessionKey]'s draft — i.e. whether
+     * it may be written back to [drafts].
+     *
+     * False from the moment [bind] points the composer at a session until
+     * either its stored draft has been read back ([loadJob] resolving) or the
+     * user has put something in the composer themselves. In that window an
+     * empty [_state] means "not read yet", NOT "this session has no draft", and
+     * persisting it would DELETE a draft the user is still expecting to find —
+     * [ComposerDraftStore.clear] wipes the mirror and the preferences file
+     * alike, so there is nothing to recover it from.
+     *
+     * The asymmetry is the whole point: writing a stale-empty draft as a `save`
+     * is recoverable noise, writing it as a `clear` is data loss. So an
+     * unauthoritative state writes NEITHER — it leaves the stored draft exactly
+     * as it was and lets the load, or the next keystroke, decide. The window is
+     * widest exactly where it matters: the load hops to disk, and the first
+     * `getSharedPreferences` on the file parses it synchronously.
+     */
+    private var draftKnown = false
+
     private var persistJob: Job? = null
+    private var loadJob: Job? = null
     private var stageJob: Job? = null
     private var historyJob: Job? = null
     private var deliveryJob: Job? = null
@@ -92,16 +114,31 @@ class ComposerViewModel @Inject constructor(
      * builds a new one over the same ViewModel) but the draft is loaded and the
      * history subscribed only once, because re-loading would overwrite whatever
      * the user has typed since.
+     *
+     * A bind with a DIFFERENT session key hands the old session off first
+     * ([handOff]), so nothing of it can be seen or written under the new one.
+     * Today the navigation graph makes that path unreachable — the screen
+     * resolves this ViewModel with `hiltViewModel()` inside the
+     * `session/{hostId}/{sessionName}` destination, so its store owner is that
+     * route's `NavBackStackEntry` and every session opens a fresh instance. The
+     * hand-off is what keeps that an implementation detail of the navigation
+     * graph rather than a load-bearing assumption of the composer: a
+     * quick-switch sheet that reuses one entry across sessions would otherwise
+     * flash session A's unsent draft in session B's composer.
      */
     fun bind(hostId: Long, sessionName: String, sink: SessionSink) {
         this.sink = sink
         _state.update { it.copy(micAvailable = dictation.isAvailable()) }
         val key = ComposerText.sessionKey(hostId, sessionName)
         if (sessionKey == key) return
+        handOff()
         this.hostId = hostId
         this.sessionKey = key
         this.homeDir = null
-        viewModelScope.launch {
+        // Nothing is known about the new session's draft until its load lands
+        // (or the user types), so nothing may be written under its key yet.
+        draftKnown = false
+        loadJob = viewModelScope.launch {
             val stored = drafts.load(key)
             // Only adopt the stored draft if nothing has been typed in the
             // meantime: the load is asynchronous and the user can beat it.
@@ -112,6 +149,9 @@ class ComposerViewModel @Inject constructor(
                     current.copy(draft = stored.text, attachments = stored.attachments)
                 }
             }
+            // Either branch leaves _state holding this session's real draft:
+            // the stored one, or the newer text the user typed over it.
+            draftKnown = true
         }
         historyJob?.cancel()
         historyJob = viewModelScope.launch {
@@ -121,9 +161,69 @@ class ComposerViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Lets go of the session this composer was pointed at, on the way to
+     * another one.
+     *
+     * Everything on screen belongs to the session being left, so all of it goes
+     * SYNCHRONOUSLY, in the same frame as the [bind] that caused the switch —
+     * the load for the new session is asynchronous, and a state that is merely
+     * "about to be replaced" is a state the user can see and send from.
+     *
+     * The four things that would otherwise cross the boundary:
+     *
+     *  - the outgoing draft's own pending writes. The debounce means the last
+     *    keystrokes may not have been persisted yet, and [writeDraft] reads
+     *    `sessionKey` when it RUNS — so a pending write would land under the new
+     *    session's key. It is cancelled and re-issued against the key it was
+     *    typed under, on its own coroutine rather than [persistJob], because the
+     *    first keystroke in the new session cancels that one. That re-issue is
+     *    subject to [draftKnown]: a switch that happens before the outgoing
+     *    session's own load resolved has NOTHING authoritative to write, and
+     *    writing the empty state would delete that session's stored draft.
+     *  - the draft load for the old key, which would resolve into the cleared
+     *    state and repaint the old session's draft as the new one's.
+     *  - an attachment upload, whose remote path is scoped to the old session.
+     *    Cancelling it drops any tile that had not landed yet, so a file already
+     *    copied to the host is orphaned out of the persisted draft — retention
+     *    prunes it, and the alternative (staging into the new session) is worse.
+     *  - a live dictation. [AndroidSpeechRecognitionDelegate.release] is the
+     *    silent stop: the recognizer is cancelled and its late partials can no
+     *    longer type the old session's speech into the new session's draft.
+     */
+    private fun handOff() {
+        val leaving = sessionKey
+        loadJob?.cancel()
+        stageJob?.cancel()
+        persistJob?.cancel()
+        persistJob = null
+        dictation.release()
+        val outgoing = _state.value
+        if (leaving != null && draftKnown) {
+            val draft = ComposerDraft(outgoing.draft, outgoing.attachments)
+            viewModelScope.launch {
+                if (draft.isEmpty) drafts.clear(leaving) else drafts.save(leaving, draft)
+            }
+        }
+        _state.update {
+            it.copy(
+                draft = "",
+                attachments = emptyList(),
+                recording = RecordingState.Idle,
+                staging = null,
+                notice = null,
+                previewing = false,
+                historyOpen = false,
+                history = emptyList(),
+            )
+        }
+    }
+
     // ---------------------------------------------------------------- editing
 
     fun onDraftChange(text: String) {
+        // What the user typed IS this session's draft, load resolved or not.
+        draftKnown = true
         _state.update {
             // Typing is the acknowledgement of an undelivered chip: the user has
             // seen it and moved on. A failure the user cannot dismiss by acting
@@ -186,6 +286,7 @@ class ComposerViewModel @Inject constructor(
      * Attachment references travel with the text, because they are text.
      */
     fun useHistoryEntry(message: SentMessage) {
+        draftKnown = true
         _state.update { it.copy(draft = message.body, historyOpen = false, notice = null) }
         persist()
     }
@@ -213,6 +314,10 @@ class ComposerViewModel @Inject constructor(
             }.getOrElse { failure ->
                 AttachmentStageResult(emptyList(), "Attachment upload failed: ${describe(failure)}")
             }
+            // A tile the user can see is content this session owns; a batch that
+            // uploaded nothing leaves the draft as unknown as it was, so the
+            // persist below cannot mistake it for "this session is empty".
+            if (result.uploaded.isNotEmpty()) draftKnown = true
             _state.update { current ->
                 current.copy(
                     attachments = merge(current.attachments, result.uploaded),
@@ -263,6 +368,7 @@ class ComposerViewModel @Inject constructor(
         deliveryJob = viewModelScope.launch {
             val recovered = runCatching { queuedDictations.deliverQueued() }.getOrDefault(emptyList())
             if (recovered.isEmpty()) return@launch
+            draftKnown = true
             _state.update { current ->
                 val merged = recovered.fold(current.draft, ComposerText::appendDictated)
                 current.copy(draft = merged, notice = ComposerNotice.Info(deliveredMessage(recovered.size)))
@@ -355,6 +461,11 @@ class ComposerViewModel @Inject constructor(
 
     private suspend fun writeDraft() {
         val key = sessionKey ?: return
+        // Same rule as the hand-off, for the same reason: an empty composer that
+        // has not read its stored draft yet is not evidence that the session has
+        // none, and `clear` is not undoable. A failed attachment upload landing
+        // inside that window is the ordinary way to reach this line.
+        if (!draftKnown) return
         val current = _state.value
         val draft = ComposerDraft(current.draft, current.attachments)
         if (draft.isEmpty) drafts.clear(key) else drafts.save(key, draft)

@@ -169,8 +169,14 @@ class ForwardService : Service() {
 
         /**
          * Starts (or re-triggers) the service so every host with the durable
-         * `enabled` intent is forwarding. Safe to call repeatedly — the controller
-         * treats an already-running host as a no-op.
+         * `enabled` intent is forwarding.
+         *
+         * Safe to call repeatedly, but NOT a no-op for an already-mounted host:
+         * [ForwardingController.resumeEnabled] asks it to retry now, which is the
+         * un-park for a host parked in the terminal needs-attention state (#2491)
+         * — returning to the app is the only place its host key can be confirmed.
+         * For a healthy host that changes nothing, and for one in backoff it just
+         * brings the next attempt forward.
          */
         fun resume(context: Context) {
             context.startForegroundService(

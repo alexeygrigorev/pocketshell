@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -64,9 +65,13 @@ fun portRowTag(remotePort: Int): String = "port-row-$remotePort"
  *
  * The one thing that cannot live in the ViewModel is starting the foreground
  * service, which needs a `Context`. Doing it here — keyed on the enabled flag —
- * keeps the ViewModel Android-free and testable, and re-triggering `resume` on
- * every recomposition of an already-enabled host is harmless (the controller
- * treats an already-mounted host as a no-op).
+ * keeps the ViewModel Android-free and testable.
+ *
+ * Re-triggering `resume` for an already-enabled host is deliberate, not merely
+ * harmless: the controller asks an already-mounted supervisor to retry now, and
+ * arriving on this screen is exactly the recovery path for a host parked in the
+ * terminal needs-attention state after its key was confirmed from the host list
+ * (#2491). For a healthy host it changes nothing.
  */
 @Composable
 fun PortForwardRoute(
@@ -137,7 +142,7 @@ fun PortForwardScreen(
             )
 
             state.connection == ConnectionState.Lost -> CenteredMessage(
-                text = "Could not reach this host. Retrying…",
+                text = pausedMessage(state.attention),
                 modifier = Modifier.weight(1f),
             )
 
@@ -202,6 +207,17 @@ internal fun showAllPortsLabel(checked: Boolean, hiddenCount: Int): String =
 
 internal fun hiddenPortsMessage(hiddenCount: Int): String =
     if (hiddenCount == 1) "1 noisy port hidden." else "$hiddenCount noisy ports hidden."
+
+/**
+ * What a host in the TERMINAL [ConnectionState.Lost] state says (#2491).
+ *
+ * It must never claim a retry is coming: the supervisor has parked, and the
+ * whole point of the state is that nothing will change until the user acts.
+ * [attention] carries what to actually do when the dial site knew (an
+ * unconfirmed host key, a deleted host row).
+ */
+internal fun pausedMessage(attention: String?): String =
+    "Forwarding paused. " + (attention ?: "This host could not be reached.")
 
 internal fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
@@ -338,8 +354,20 @@ private fun PortForwardRow(tunnel: TunnelInfo, onToggle: () -> Unit) {
 
 @Composable
 private fun CenteredMessage(text: String, modifier: Modifier) {
-    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Text(text, color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+    Box(
+        modifier
+            .fillMaxWidth()
+            // The terminal "why forwarding stopped" copy is a sentence, not a
+            // label, so it wraps — without a gutter it ran edge to edge (#2491).
+            .padding(horizontal = PocketShellSpacing.lg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
@@ -357,7 +385,9 @@ private val ConnectionState.label: String
         ConnectionState.Connecting -> "Connecting"
         ConnectionState.Connected -> "Connected"
         ConnectionState.Reconnecting -> "Reconnecting"
-        ConnectionState.Lost -> "Unreachable"
+        // Terminal, not "still trying": the supervisor has stopped dialling and
+        // only the user can change the outcome (#2491).
+        ConnectionState.Lost -> "Needs attention"
     }
 
 private val TunnelInfo.Status.label: String

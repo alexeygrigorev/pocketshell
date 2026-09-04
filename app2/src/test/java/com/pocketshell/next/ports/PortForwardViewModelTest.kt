@@ -2,12 +2,14 @@ package com.pocketshell.next.ports
 
 import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.core.portfwd.AutoForwarderSupervisor.ConnectionState
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -15,6 +17,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -162,6 +165,53 @@ class PortForwardViewModelTest {
         assertEquals(listOf(7_431), reopened.state.value.rows.map { it.remotePort })
     }
 
+    @Test
+    fun `a host parked on an unconfirmed key surfaces the terminal state to the screen`() =
+        vmTest(presentedFingerprint = "SHA256:rotated-key-nobody-confirmed") { stack ->
+        // #2491: the screen has to be able to TELL the user what happened, so the
+        // terminal state and its reason both have to reach the UI state — an
+        // endlessly "scanning" screen was the symptom.
+        val hostId = stack.seedHost()
+        val viewModel = viewModel(stack, hostId)
+
+        viewModel.setEnabled(true)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertEquals(ConnectionState.Lost, state.connection)
+        assertEquals(ForwardingController.NEEDS_TRUST_ATTENTION, state.attention)
+        assertFalse("a parked host is not scanning", state.scanning)
+    }
+
+    @Test
+    fun `a blip after the key is confirmed drops the terminal reason from the screen`() =
+        vmTest(presentedFingerprint = "SHA256:rotated-key-nobody-confirmed") { stack ->
+        // #2491 review finding: the reason belongs to the TERMINAL state. Once
+        // the host un-parks, the screen must show the retry it is really doing —
+        // the same gate the notification uses, so the two surfaces cannot
+        // disagree about one snapshot.
+        val hostId = stack.seedHost()
+        val viewModel = viewModel(stack, hostId)
+        viewModel.setEnabled(true)
+        runCurrent()
+        assertEquals(ConnectionState.Lost, viewModel.state.value.connection)
+
+        stack.trustHostKey(hostId, "SHA256:rotated-key-nobody-confirmed")
+        stack.factory.failWith = "network is unreachable"
+        stack.controller.resumeEnabled()
+        runCurrent()
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertNotEquals("a blip is transient", ConnectionState.Lost, state.connection)
+        assertEquals(
+            "the confirmed key must stop being the screen's explanation",
+            null,
+            state.attention,
+        )
+    }
+
     /**
      * Builds the ViewModel and lets its `init` run: the host row and the persisted
      * checkbox are read on `viewModelScope`, which is Main, which is this test's
@@ -187,10 +237,13 @@ class PortForwardViewModelTest {
      * forever. [ForwardingController.stopAll] is the production teardown and
      * cancels every supervisor, so the scheduler really does go idle.
      */
-    private fun vmTest(body: suspend TestScope.(TestForwardingStack) -> Unit) = runTest {
+    private fun vmTest(
+        presentedFingerprint: String? = null,
+        body: suspend TestScope.(TestForwardingStack) -> Unit,
+    ) = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
-        val stack = TestForwardingStack(dispatcher)
+        val stack = TestForwardingStack(dispatcher, presentedFingerprint)
         this@PortForwardViewModelTest.stack = stack
         try {
             body(stack)

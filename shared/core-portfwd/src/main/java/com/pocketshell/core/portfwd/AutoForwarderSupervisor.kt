@@ -32,6 +32,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  *  - On disconnect or factory failure, applies exponential backoff and
  *    reconnects, up to [maxReconnectAttempts] (after which the supervisor
  *    surfaces `ConnectionLost`)
+ *  - On a [PermanentConnectionFailure] from the factory, stops retrying
+ *    immediately and surfaces `ConnectionLost` — a dial that can only succeed
+ *    after the user acts elsewhere must not be repeated on a timer forever
+ *    (issue #2491)
  *  - On a network-recovery hint via [reconnectNow], cancels the current
  *    backoff and reconnects immediately
  *
@@ -99,10 +103,15 @@ public class AutoForwarderSupervisor(
      * can choose to call [reconnectNow] to reset the counter and try
      * again, e.g. on user action or a network-availability callback.
      *
-     * `null` means "keep retrying forever" (matches the upstream JSch
-     * client's default behaviour). A finite cap is safer for the
-     * foreground-service case so a permanently-misconfigured host
-     * eventually clears the persistent notification instead of looping.
+     * `null` means "keep retrying a TRANSIENT failure forever" (matches the
+     * upstream JSch client's default behaviour), which is what the
+     * foreground-service caller wants: a phone that loses its network in a
+     * tunnel has to self-heal without anyone tapping anything, and no cap
+     * survives a ten-minute outage. The permanently-misconfigured host that a
+     * finite cap used to be the only answer for is handled directly instead —
+     * the factory throws [PermanentConnectionFailure] and the supervisor goes
+     * terminal on the first one (issue #2491) rather than waiting out N
+     * pointless handshakes.
      */
     private val maxReconnectAttempts: Int? = null,
     /**
@@ -125,9 +134,12 @@ public class AutoForwarderSupervisor(
         public data class Disconnected(val reason: String) : Event()
         public data class Error(val message: String) : Event()
         /**
-         * Surfaced after [maxReconnectAttempts] consecutive failures. The
-         * supervisor stops trying until the caller invokes [reconnectNow]
-         * or [stop] + restart with a new supervisor.
+         * Surfaced after [maxReconnectAttempts] consecutive failures, or
+         * immediately when the factory reports a [PermanentConnectionFailure].
+         * The supervisor stops trying until the caller invokes [reconnectNow]
+         * or [stop] + restart with a new supervisor. [lastError] is the reason
+         * to show the user — it is the only place the "why" survives, so a UI
+         * can distinguish "needs attention" from "reconnecting".
          */
         public data class ConnectionLost(val lastError: String) : Event()
     }
@@ -373,6 +385,9 @@ public class AutoForwarderSupervisor(
         var consecutiveFailures = 0
 
         while (!stopped) {
+            // Reset per iteration: only the failure this iteration produced may
+            // send the loop terminal, never a since-recovered older one.
+            var permanentError: String? = null
             try {
                 val nextState =
                     if (attemptCount == 0) ConnectionState.Connecting else ConnectionState.Reconnecting
@@ -449,6 +464,10 @@ public class AutoForwarderSupervisor(
                 if (!stopped) {
                     consecutiveFailures += 1
                     val msg = t.message ?: t.javaClass.simpleName
+                    // A dial that cannot succeed until the user acts elsewhere
+                    // goes terminal now instead of burning a handshake every
+                    // backoff window forever (issue #2491).
+                    if (t is PermanentConnectionFailure) permanentError = msg
                     emitEventIfRunning(Event.Error(msg))
                     markTunnelsStopped()
                 }
@@ -465,9 +484,13 @@ public class AutoForwarderSupervisor(
                 continue
             }
 
-            if (maxReconnectAttempts != null && consecutiveFailures >= maxReconnectAttempts) {
+            val attemptsExhausted =
+                maxReconnectAttempts != null && consecutiveFailures >= maxReconnectAttempts
+            if (permanentError != null || attemptsExhausted) {
                 if (!setConnectionStateIfRunning(ConnectionState.Lost)) break
-                emitEventIfRunning(Event.ConnectionLost("max reconnect attempts reached"))
+                emitEventIfRunning(
+                    Event.ConnectionLost(permanentError ?: "max reconnect attempts reached"),
+                )
                 // Park until reconnectNow() (which completes the waiter)
                 // or stop() (which cancels the supervisor job entirely).
                 val waiter = CompletableDeferred<Unit>()

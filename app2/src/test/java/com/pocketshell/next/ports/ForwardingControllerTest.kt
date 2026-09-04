@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -228,6 +229,181 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `a host whose key needs confirming stops dialling and asks for attention`() =
+        forwardingTest(presentedFingerprint = ROTATED_KEY) { stack ->
+        // #2491: the host key is unconfirmed, so every dial comes back
+        // NeedsTrust. Forwarding deliberately never answers a host-key question,
+        // so the dial can NEVER succeed on its own — before the fix the
+        // supervisor re-ran the whole SSH handshake every 5-60 s forever, holding
+        // the foreground service and its notification alive with the row stuck on
+        // "Reconnecting" and no terminal state.
+        val hostId = stack.seedHost(name = "rmthz")
+
+        stack.controller.start(hostId)
+        runCurrent()
+        assertEquals("the first dial still happens", 1, stack.factory.dialCount)
+
+        // An hour of production backoff windows.
+        advanceTimeBy(60 * 60 * 1_000L)
+        runCurrent()
+
+        assertEquals(
+            "a host key that only the host list can confirm must not be re-dialled forever",
+            1,
+            stack.factory.dialCount,
+        )
+        val row = stack.controller.snapshot.value.single()
+        assertEquals(
+            "the row must reach a terminal state, not sit on Reconnecting",
+            ConnectionState.Lost,
+            row.connection,
+        )
+        assertEquals(
+            "the row must say what the user has to do",
+            ForwardingController.NEEDS_TRUST_ATTENTION,
+            row.attention,
+        )
+    }
+
+    @Test
+    fun `confirming the key and returning to the app un-parks the host`() =
+        forwardingTest(presentedFingerprint = ROTATED_KEY) { stack ->
+        // The terminal state must be recoverable: the host list is where the key
+        // is confirmed, and coming back to the port-forward screen re-triggers
+        // ForwardService.resume -> resumeEnabled, which is the un-park.
+        stack.listenOn(7_431 to "vite")
+        val hostId = stack.seedHost(name = "rmthz")
+        stack.controller.start(hostId)
+        runCurrent()
+        advanceTimeBy(60_000L)
+        runCurrent()
+        assertEquals(ConnectionState.Lost, stack.controller.snapshot.value.single().connection)
+
+        stack.trustHostKey(hostId, ROTATED_KEY)
+        stack.controller.resumeEnabled()
+        runCurrent()
+
+        assertEquals("the un-park must actually re-dial", 2, stack.factory.dialCount)
+        val row = stack.controller.snapshot.value.single()
+        assertEquals(ConnectionState.Connected, row.connection)
+        assertEquals("a recovered host must not still ask for attention", null, row.attention)
+        assertTrue(
+            "forwards must come up once the key is confirmed, got ${row.tunnels}",
+            row.tunnels.any { it.status == TunnelInfo.Status.FORWARDING },
+        )
+    }
+
+    @Test
+    fun `a fixed host that hits a network blip stops asking for the old attention`() =
+        forwardingTest(presentedFingerprint = ROTATED_KEY) { stack ->
+        // #2491 review finding, the stale-cache class: `attention` is the reason
+        // the host PARKED, and only a successful dial used to clear it. So
+        //   park on an unconfirmed key -> user confirms it -> un-park -> an
+        //   ordinary network blip
+        // left the notification still telling the user to go confirm a key that
+        // is already confirmed, for the whole outage, while the screen (which
+        // gates the reason on ConnectionState.Lost) correctly said it was
+        // retrying. The two surfaces have to agree on the same snapshot.
+        stack.listenOn(7_431 to "vite")
+        val hostId = stack.seedHost(name = "rmthz")
+        stack.controller.start(hostId)
+        runCurrent()
+        advanceTimeBy(60_000L)
+        runCurrent()
+        assertEquals(ConnectionState.Lost, stack.controller.snapshot.value.single().connection)
+        assertEquals(
+            ForwardingController.NEEDS_TRUST_ATTENTION,
+            stack.controller.snapshot.value.single().attention,
+        )
+
+        // The user confirms the key from the host list; the network drops on the
+        // way back. Transient — nothing left for the user to fix.
+        stack.trustHostKey(hostId, ROTATED_KEY)
+        stack.factory.failWith = "network is unreachable"
+        stack.controller.resumeEnabled()
+        runCurrent()
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        val snapshot = stack.controller.snapshot.value
+        val row = snapshot.single()
+        assertNotEquals(
+            "a network blip is transient, so the host must not be parked",
+            ConnectionState.Lost,
+            row.connection,
+        )
+        assertEquals(
+            "the reason the host parked with must not outlive the park",
+            null,
+            row.attention,
+        )
+        val body = ForwardNotificationText.body(snapshot)
+        assertFalse(
+            "the notification must not still ask for an already-confirmed key: $body",
+            body.contains(ForwardingController.NEEDS_TRUST_ATTENTION),
+        )
+        assertTrue(
+            "and must describe the retry the supervisor is actually doing: $body",
+            body == "rmthz: reconnecting" || body == "rmthz: connecting",
+        )
+    }
+
+    @Test
+    fun `a host row deleted under a live forward parks instead of re-dialling forever`() =
+        forwardingTest { stack ->
+        // Class coverage for #2491's second never-clears failure: the row the
+        // dial needs is gone, and Room never reissues the id, so retrying is
+        // just as pointless as retrying an unconfirmed key.
+        stack.listenOn(7_431 to "vite")
+        val hostId = stack.seedHost()
+        stack.controller.start(hostId)
+        runCurrent()
+        assertEquals(1, stack.factory.dialCount)
+
+        stack.deleteHost(hostId)
+        // Kill the transport so the supervisor re-dials and discovers the row is
+        // gone — the drop is what a real network blip would do anyway.
+        stack.factory.connections.last().close()
+        advanceTimeBy(60 * 60 * 1_000L)
+        runCurrent()
+
+        assertEquals(
+            "a dial for a row that no longer exists never reaches the transport again",
+            1,
+            stack.factory.dialCount,
+        )
+        val row = stack.controller.snapshot.value.single()
+        assertEquals(ConnectionState.Lost, row.connection)
+        assertEquals(ForwardingController.MISSING_HOST_ATTENTION, row.attention)
+    }
+
+    @Test
+    fun `a transient dial failure keeps retrying instead of going terminal`() = forwardingTest { stack ->
+        // #2491's non-goal, asserted: only a permanently-broken dial is terminal.
+        // A phone that loses its network has to self-heal on the uncapped
+        // backoff, so an unreachable host must keep trying and must NOT park.
+        stack.factory.failWith = "connection refused"
+        val hostId = stack.seedHost()
+
+        stack.controller.start(hostId)
+        runCurrent()
+        advanceTimeBy(10 * 60 * 1_000L)
+        runCurrent()
+
+        assertTrue(
+            "a transient failure must keep retrying, got ${stack.factory.dialCount} dials",
+            stack.factory.dialCount > 5,
+        )
+        val row = stack.controller.snapshot.value.single()
+        assertNotEquals(
+            "a transient failure must not reach the terminal state",
+            ConnectionState.Lost,
+            row.connection,
+        )
+        assertEquals("and must not claim the user has to fix something", null, row.attention)
+    }
+
+    @Test
     fun `forwarding dials its own connection instead of reusing the interactive one`() =
         forwardingTest { stack ->
         // D21's forwarding carve-out, asserted rather than assumed: if forwards
@@ -272,9 +448,10 @@ class ForwardingControllerTest {
      * does go idle.
      */
     private fun forwardingTest(
+        presentedFingerprint: String? = null,
         body: suspend TestScope.(TestForwardingStack) -> Unit,
     ) = runTest {
-        val stack = TestForwardingStack(StandardTestDispatcher(testScheduler))
+        val stack = TestForwardingStack(StandardTestDispatcher(testScheduler), presentedFingerprint)
         this@ForwardingControllerTest.stack = stack
         try {
             body(stack)
@@ -282,5 +459,10 @@ class ForwardingControllerTest {
             stack.controller.stopAll()
             runCurrent()
         }
+    }
+
+    private companion object {
+        /** The key the fixture host presents but has never had confirmed. */
+        const val ROTATED_KEY = "SHA256:rotated-key-nobody-confirmed"
     }
 }

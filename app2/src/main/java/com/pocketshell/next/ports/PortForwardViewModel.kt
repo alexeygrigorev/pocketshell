@@ -28,6 +28,15 @@ data class PortForwardUiState(
     /** The durable `hosts.enabled` intent, as last read/written. */
     val enabled: Boolean = false,
     val connection: ConnectionState = ConnectionState.Idle,
+    /**
+     * What the user has to DO when [connection] is terminal
+     * ([ConnectionState.Lost]) — an unconfirmed host key, a deleted host row.
+     * Null when the controller has no better explanation than "could not
+     * connect", and null whenever [connection] is NOT terminal: this is
+     * [ForwardingController.HostForwarding.terminalAttention], the same gated
+     * reason the notification renders (#2491).
+     */
+    val attention: String? = null,
     val rows: List<TunnelInfo> = emptyList(),
     val showAllPorts: Boolean = false,
     /** Rows the default filter is hiding right now. */
@@ -91,7 +100,14 @@ class PortForwardViewModel @Inject constructor(
                 val host = snapshot.firstOrNull { it.hostId == hostId }
                 allTunnels = host?.tunnels.orEmpty()
                 _state.value = _state.value
-                    .copy(connection = host?.connection ?: ConnectionState.Idle)
+                    .copy(
+                        connection = host?.connection ?: ConnectionState.Idle,
+                        // The gated reason, so the screen cannot paint a reason
+                        // that belongs to a state the host has already left
+                        // (#2491) — and cannot disagree with the notification,
+                        // which reads the very same accessor.
+                        attention = host?.terminalAttention,
+                    )
                     .reFiltered()
             }
         }

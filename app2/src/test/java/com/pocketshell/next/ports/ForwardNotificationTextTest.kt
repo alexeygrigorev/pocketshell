@@ -99,15 +99,95 @@ class ForwardNotificationTextTest {
         }
     }
 
+    @Test
+    fun `a host that stopped retrying says what to do about it`() {
+        // #2491: the notification is the only surface a backgrounded user sees.
+        // A host parked in the terminal state must not read like the transient
+        // "reconnecting" one, and must carry the fix rather than a dead label.
+        val snapshot = listOf(
+            host(
+                "rmthz",
+                ConnectionState.Lost,
+                attention = ForwardingController.NEEDS_TRUST_ATTENTION,
+            ),
+        )
+
+        val body = ForwardNotificationText.body(snapshot)
+        assertEquals("rmthz: ${ForwardingController.NEEDS_TRUST_ATTENTION}", body)
+        assertFalse("a parked host must not read as reconnecting", body.contains("reconnecting"))
+    }
+
+    @Test
+    fun `a terminal host with no known reason still reads as terminal`() {
+        val snapshot = listOf(host("rmthz", ConnectionState.Lost))
+
+        assertEquals("rmthz: needs attention", ForwardNotificationText.body(snapshot))
+    }
+
+    @Test
+    fun `a reason left over from an earlier park never survives into a live retry`() {
+        // #2491 review finding: `attention` describes the TERMINAL state, and the
+        // screen only reads it inside its `connection == Lost` branch. The
+        // notification read it unconditionally, so a host that parked on an
+        // unconfirmed key, was fixed, un-parked and then hit an ordinary network
+        // blip kept telling a backgrounded user to go confirm a key that is
+        // already confirmed — while the screen correctly said "Reconnecting".
+        // Both surfaces must gate the reason on the same state.
+        ConnectionState.entries
+            .filter { it != ConnectionState.Lost }
+            .forEach { live ->
+                val snapshot = listOf(
+                    host("rmthz", live, attention = ForwardingController.NEEDS_TRUST_ATTENTION),
+                )
+                val body = ForwardNotificationText.body(snapshot)
+
+                assertEquals(
+                    "a $live host must describe the state it is IN",
+                    "rmthz: ${expectedLabel(live)}",
+                    body,
+                )
+                assertFalse(
+                    "a stale terminal reason must not leak into $live: $body",
+                    body.contains(ForwardingController.NEEDS_TRUST_ATTENTION),
+                )
+            }
+    }
+
+    @Test
+    fun `a host still forwarding ports never shows a leftover reason`() {
+        // The other stale-cache shape: the host recovered and is forwarding, but
+        // the row still carries the reason it parked with. The port list wins.
+        val snapshot = listOf(
+            host(
+                "rmthz",
+                ConnectionState.Connected,
+                forwarding(remotePort = 3_000, localPort = 3_000),
+                attention = ForwardingController.NEEDS_TRUST_ATTENTION,
+            ),
+        )
+
+        assertEquals("rmthz: 3000", ForwardNotificationText.body(snapshot))
+    }
+
+    private fun expectedLabel(state: ConnectionState): String = when (state) {
+        ConnectionState.Idle -> "idle"
+        ConnectionState.Connecting -> "connecting"
+        ConnectionState.Connected -> "scanning"
+        ConnectionState.Reconnecting -> "reconnecting"
+        ConnectionState.Lost -> "needs attention"
+    }
+
     private fun host(
         name: String,
         state: ConnectionState,
         vararg tunnels: TunnelInfo,
+        attention: String? = null,
     ) = ForwardingController.HostForwarding(
         hostId = name.hashCode().toLong(),
         hostName = name,
         connection = state,
         tunnels = tunnels.toList(),
+        attention = attention,
     )
 
     private fun forwarding(remotePort: Int, localPort: Int) = TunnelInfo(

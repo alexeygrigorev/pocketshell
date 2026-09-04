@@ -63,6 +63,49 @@ run_guard() {  # against the sandbox root + the real list
   POCKETSHELL_JOURNEY_QUARANTINE_ROOT="$SANDBOX/root" bash "$GUARD" 2>&1
 }
 
+# The class the untracked-@Ignore cases plant their fixture annotation into. It
+# must be a real journey class (so the guard's registry accepts it) that the
+# shipped list does NOT quarantine, so a planted annotation is genuinely
+# untracked.
+FIXTURE_CLASS="com.pocketshell.next.usage.J12UsagePanelJourney"
+
+# Plants `@Ignore("silently parked")` on the first @Test method of
+# $FIXTURE_CLASS in the SANDBOX copy and echoes the method name it annotated.
+#
+# Every case that needs "a live @Ignore the list does not account for" builds it
+# HERE rather than relying on one happening to exist in the shipped tree. That
+# incidental dependency is a real trap: it made case (d) pass only for as long
+# as some unrelated journey happened to be quarantined, and turned the very
+# first empty-list tree (issue #2478 removing the last two annotations) into a
+# spurious red. Callers must reset_root first.
+plant_untracked_ignore() {
+  local src="$SANDBOX/root/java/${FIXTURE_CLASS//./\/}.kt"
+  if [[ ! -f "$src" ]]; then
+    echo "fixture source not found: $src" >&2
+    return 1
+  fi
+  if grep -qF "$FIXTURE_CLASS" "$QUARANTINE_LIST"; then
+    echo "fixture assumption broken: $FIXTURE_CLASS is itself quarantined" >&2
+    return 1
+  fi
+  python3 - "$src" <<'PY'
+import re, sys
+path = sys.argv[1]
+src = open(path).read()
+needle = "    @Test\n"
+i = src.index(needle)
+rest = src[i + len(needle):]
+m = re.search(r'\bfun[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(', rest)
+if not m:
+    sys.exit("no @Test method found to annotate")
+src = src[:i] + "    @Test\n    @Ignore(\"silently parked\")\n" + rest
+if "import org.junit.Ignore" not in src:
+    src = src.replace("import org.junit.Test", "import org.junit.Ignore\nimport org.junit.Test", 1)
+open(path, 'w').write(src)
+print(m.group(1))
+PY
+}
+
 # ---------------------------------------------------------------------------
 # (a) GREEN CONTROL — the shipped tree reconciles. Without this, every red
 #     below could be a red the tree already had.
@@ -84,7 +127,6 @@ fi
 first_row="$(grep -vE '^[[:space:]]*(#|$)' "$QUARANTINE_LIST" | head -1 | cut -f1)"
 if [[ -z "$first_row" ]]; then
   pass "(b) skipped: the quarantine list is empty, so there is no row to strip"
-  pass "(c) skipped: the quarantine list is empty"
 else
   q_class="${first_row%%#*}"
   q_method="${first_row#*#}"
@@ -109,54 +151,47 @@ $out"
     fail "(b) the guard reddened for the wrong reason:
 $out"
   pass "(b) a registered row whose method lost its @Ignore reddens, naming the method"
-
-  # -------------------------------------------------------------------------
-  # (c) SIBLINGS STILL BLOCK. Quarantine is per METHOD; a sibling @Test in the
-  #     same class must not inherit the exemption. Assert the guard treats an
-  #     @Ignore on an unregistered sibling as untracked.
-  # -------------------------------------------------------------------------
-  reset_root
-  sibling_class="com.pocketshell.next.usage.J12UsagePanelJourney"
-  sibling_src="$SANDBOX/root/java/${sibling_class//./\/}.kt"
-  [[ -f "$sibling_src" ]] || fail "(c) sibling fixture source not found: $sibling_src"
-  grep -qF "$sibling_class" "$QUARANTINE_LIST" &&
-    fail "(c) fixture assumption broken: $sibling_class is itself quarantined"
-  python3 - "$sibling_src" <<'PY'
-import sys
-path = sys.argv[1]
-src = open(path).read()
-needle = "    @Test\n"
-i = src.index(needle)
-src = src[:i] + "    @Test\n    @Ignore(\"silently parked\")\n" + src[i + len(needle):]
-if "import org.junit.Ignore" not in src:
-    src = src.replace("import org.junit.Test", "import org.junit.Ignore\nimport org.junit.Test", 1)
-open(path, 'w').write(src)
-PY
-  [[ $? -eq 0 ]] || fail "(c) MUTATION DID NOT APPLY"
-  out="$(run_guard)" && fail "(c) an @Ignore on an unregistered journey method did NOT redden the guard — a test can be parked forever with no issue and no expiry:
-$out"
-  grep -q 'NO row in' <<<"$out" ||
-    fail "(c) the guard reddened for the wrong reason:
-$out"
-  pass "(c) an @Ignore with no registry row reddens (quarantine is a queue, not a graveyard)"
 fi
+
+# ---------------------------------------------------------------------------
+# (c) AN @Ignore WITH NO ROW STILL BLOCKS THE BUILD. Quarantine is per METHOD
+#     and per registry row; annotating a method nobody triaged must not be a
+#     silent exemption. The fixture annotation is PLANTED here, so this case
+#     proves the property whether or not the shipped list currently has rows.
+# ---------------------------------------------------------------------------
+reset_root
+c_method="$(plant_untracked_ignore 2>&1)" || fail "(c) MUTATION DID NOT APPLY: $c_method"
+out="$(run_guard)" && fail "(c) an @Ignore on an unregistered journey method did NOT redden the guard — a test can be parked forever with no issue and no expiry:
+$out"
+grep -qF "$FIXTURE_CLASS#$c_method: @Ignore on a journey @Test with NO row in" <<<"$out" ||
+  fail "(c) the guard reddened for the wrong reason (expected the planted $FIXTURE_CLASS#$c_method to be reported untracked):
+$out"
+pass "(c) an @Ignore with no registry row reddens (quarantine is a queue, not a graveyard)"
 
 # ---------------------------------------------------------------------------
 # (d) FAIL-SAFE: a malformed list must not legitimise the annotations it fails
 #     to parse. A broken list means NOTHING is tracked, so every live @Ignore
 #     becomes untracked and the guard reddens — never the other way round.
+#
+#     The @Ignore this case needs is PLANTED, not borrowed from whatever the
+#     shipped tree happens to contain. Borrowing made the case unprovable in
+#     the steady state the policy is aiming for — an empty list and no live
+#     annotations — where it reported a spurious red (issue #2478's PR) even
+#     though the guard behaved correctly.
 # ---------------------------------------------------------------------------
 reset_root
+d_method="$(plant_untracked_ignore 2>&1)" || fail "(d) MUTATION DID NOT APPLY: $d_method"
 broken="$SANDBOX/broken-list.txt"
 printf 'this-row-has-no-tabs-at-all\n' > "$broken"
 out="$(POCKETSHELL_JOURNEY_QUARANTINE_ROOT="$SANDBOX/root" \
        POCKETSHELL_JOURNEY_QUARANTINE_FILE="$broken" bash "$GUARD" 2>&1)" && \
   fail "(d) a malformed quarantine list was treated as clean:
 $out"
-if grep -q 'parse error' <<<"$out" && grep -q 'NO row in' <<<"$out"; then
+if grep -q 'parse error' <<<"$out" &&
+   grep -qF "$FIXTURE_CLASS#$d_method: @Ignore on a journey @Test with NO row in" <<<"$out"; then
   pass "(d) a malformed list fails closed: it is a parse error AND its annotations become untracked"
 else
-  fail "(d) a malformed list did not fail closed in both ways:
+  fail "(d) a malformed list did not fail closed in both ways (expected a parse error AND the planted $FIXTURE_CLASS#$d_method reported untracked):
 $out"
 fi
 

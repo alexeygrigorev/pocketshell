@@ -34,99 +34,135 @@ pass() {
   printf '  ok: %s\n' "$1"
 }
 
-PROOF_BASE="$ROOT_DIR/app/src/androidTest/java/com/pocketshell/app/proof/NetworkFaultProofBase.kt"
-TOXICONTROL="$ROOT_DIR/app/src/debug/java/com/pocketshell/app/proof/ToxiproxyControl.kt"
-PORTS_KT="$ROOT_DIR/app/src/debug/java/com/pocketshell/app/proof/NetworkFaultPorts.kt"
-PORTS_TEST="$ROOT_DIR/app/src/testDebug/java/com/pocketshell/app/proof/NetworkFaultPortsTest.kt"
+# REPOINTED BY THE REWRITE (D22, no shim). The old app module owned four files
+# this harness read — NetworkFaultProofBase.kt, a src/debug NetworkFaultPorts.kt,
+# its src/testDebug NetworkFaultPortsTest.kt, and two journeys that kept their
+# own `= 2228` copies. All five are gone with the module. app2 keeps the SAME
+# property in ONE place instead: ToxiproxyControl's companion derives both the
+# fault SSH port and the Toxiproxy API port from the lane's agents port. So the
+# Kotlin-side checks below read that file, and the checks whose subject has no
+# app2 successor are deleted rather than repointed at a stand-in.
+TOXICONTROL="$ROOT_DIR/app2/src/androidTest/java/com/pocketshell/next/connect/ToxiproxyControl.kt"
+APP2_ANDROID_TEST="$ROOT_DIR/app2/src/androidTest"
 COMPOSE="$ROOT_DIR/tests/docker/docker-compose.yml"
 AGENTS_LIB="$ROOT_DIR/scripts/lib/agents-pool.sh"
 CONNECTED="$ROOT_DIR/scripts/connected-test.sh"
 TESTING_MD="$ROOT_DIR/docs/testing.md"
-OUTBOUND="$ROOT_DIR/app/src/androidTest/java/com/pocketshell/app/proof/OutboundAttachmentOffsetResumeJourneyE2eTest.kt"
-CONV_RTT="$ROOT_DIR/app/src/androidTest/java/com/pocketshell/app/tmux/ConversationOpenLatencyRttDockerTest.kt"
+# The Gradle task app2's journey lane runs, unfiltered, per issue #2474. It is
+# read from the suite that actually runs it so this harness cannot drift from it.
+JOURNEY_SUITE="$ROOT_DIR/scripts/ci-app2-journey-suite.sh"
 
 # --------------------------------------------------------------------------
-# 1. THE BUG (red on base): NetworkFaultProofBase must not pin 2228/2229/8474
-#    as compile-time constants. A const 2228 is what made --pool a lie for
-#    every fault-class lane: agentsPort=2243 was honoured for the unproxied
-#    seed and then thrown away when the app attached through hardcoded 2228.
+# 1. THE BUG (red on base): the host ports the APP dials must be DERIVED from
+#    the lane's agents port, never pinned as compile-time constants. A const
+#    2228 is what made --pool a lie for every fault-class lane: agentsPort=2243
+#    was honoured for the unproxied seed and then thrown away when the app
+#    attached through hardcoded 2228.
+#
+#    In app2 this lives in ToxiproxyControl's companion (faultSshPort /
+#    defaultApiPort). The single-lane 2228/8474 identity is allowed to appear
+#    there — --no-pool and the nightly must not move — but ONLY inside the
+#    `agentsPort == SINGLE_LANE_AGENTS_PORT` branch. A literal reachable from
+#    any other agents port is the pin coming back.
 # --------------------------------------------------------------------------
-network_fault_base_must_not_hardcode_shared_ports() {
-  local pin
-  pin="$(grep -n 'const val NETWORK_FAULT_SSH_PORT: Int = 2228' "$PROOF_BASE" || true)"
-  if [[ -n "$pin" ]]; then
-    fail "NetworkFaultProofBase hardcodes NETWORK_FAULT_SSH_PORT=2228, so a --pool lane stays pinned to the shared toxiproxy fixture regardless of the allocated agents port (issue #2128): $pin"
+fault_ports_must_derive_from_the_agents_port() {
+  if [[ ! -f "$TOXICONTROL" ]]; then
+    fail "ToxiproxyControl.kt is missing at $TOXICONTROL; the host-port derivation has no home and a pool lane could only be on the shared 2228/8474 singleton (issue #2128)"
     return 1
   fi
-  pin="$(grep -n 'const val PACKET_LOSS_SSH_PORT: Int = 2229' "$PROOF_BASE" || true)"
-  if [[ -n "$pin" ]]; then
-    fail "NetworkFaultProofBase hardcodes PACKET_LOSS_SSH_PORT=2229 (same class of pin as 2228): $pin"
-    return 1
-  fi
-  pin="$(grep -n 'const val TOXIPROXY_API_PORT: Int = 8474' "$PROOF_BASE" || true)"
-  if [[ -n "$pin" ]]; then
-    fail "NetworkFaultProofBase hardcodes TOXIPROXY_API_PORT=8474 (same class of pin as 2228): $pin"
-    return 1
-  fi
-  # The runtime ports must come from the shared resolver, not a leftover local
-  # literal. A getter that still returns 2228 for every agentsPort is the same
-  # bug wearing a different hat — pinned by the formula checks below.
-  if ! grep -q 'NetworkFaultPorts' "$PROOF_BASE"; then
-    fail "NetworkFaultProofBase does not consult NetworkFaultPorts, so even without a const 2228 it cannot honour a pool-allocated agents port (issue #2128)"
-    return 1
-  fi
-  pass "NetworkFaultProofBase does not hardcode 2228/2229/8474; runtime ports go through NetworkFaultPorts"
-}
-
-# --------------------------------------------------------------------------
-# 2. Independent copies of the same pin. OutboundAttachmentOffsetResume and
-#    ConversationOpenLatencyRtt keep their own `= 2228` constants; fixing only
-#    the base leaves those fault-class lanes on the shared fixture.
-# --------------------------------------------------------------------------
-independent_fault_classes_must_not_keep_their_own_pin() {
-  local file pin
-  for file in "$OUTBOUND" "$CONV_RTT"; do
-    pin="$(grep -n 'NETWORK_FAULT_SSH_PORT.*= 2228' "$file" || true)"
-    if [[ -n "$pin" ]]; then
-      fail "$(basename "$file") keeps its own NETWORK_FAULT_SSH_PORT=2228 pin, so a --pool run of that class still hits the shared fixture (issue #2128): $pin"
-      return 1
-    fi
-    pin="$(grep -n 'TOXIPROXY_API_PORT.*= 8474' "$file" || true)"
-    if [[ -n "$pin" ]]; then
-      fail "$(basename "$file") keeps its own TOXIPROXY_API_PORT=8474 pin (issue #2128): $pin"
+  local fn
+  for fn in faultSshPort defaultApiPort; do
+    if ! grep -qE "fun $fn\\(agentsPort: Int = AgentsFixture\\.port\\)" "$TOXICONTROL"; then
+      fail "ToxiproxyControl.$fn does not take the lane's agentsPort (defaulting to AgentsFixture.port), so it cannot honour a --pool allocation (issue #2128)"
       return 1
     fi
   done
-  pass "independent fault-class copies no longer hardcode 2228/8474"
+  # Every occurrence of a shared-fixture literal must be a `const val` naming it
+  # SINGLE_LANE_*, or a reference to one of those names. A bare 2228/8474 in an
+  # expression is the pin.
+  local stray
+  stray="$(grep -nE '(^|[^A-Za-z0-9_])(2228|2229|8474)([^0-9]|$)' "$TOXICONTROL" \
+    | grep -v 'SINGLE_LANE_' \
+    | grep -v 'CONTAINER_LISTEN' \
+    | grep -vE '^[0-9]+: *(\*|//)' \
+    || true)"
+  if [[ -n "$stray" ]]; then
+    fail "ToxiproxyControl carries a shared-fixture port literal outside a SINGLE_LANE_ constant, so a pool lane can still land on the shared proxy (issue #2128):
+$stray"
+    return 1
+  fi
+  # ...and the single-lane constants must only be REACHED through the
+  # agentsPort == SINGLE_LANE_AGENTS_PORT test.
+  local uses guarded
+  uses="$(grep -c 'SINGLE_LANE_FAULT_SSH_PORT\|SINGLE_LANE_API_PORT' "$TOXICONTROL" || true)"
+  guarded="$(grep -c 'agentsPort == SINGLE_LANE_AGENTS_PORT' "$TOXICONTROL" || true)"
+  if (( uses < 2 || guarded < 2 )); then
+    fail "the single-lane 2228/8474 identity is not gated on 'agentsPort == SINGLE_LANE_AGENTS_PORT' in both derivations (uses=$uses guarded=$guarded); a pool lane would inherit the shared fixture (issue #2128)"
+    return 1
+  fi
+  pass "ToxiproxyControl derives fault SSH/API ports from the lane's agents port; 2228/8474 only behind the single-lane branch"
 }
 
 # --------------------------------------------------------------------------
-# 3. ToxiproxyControl.createProxy must take listen/upstream from parameters,
-#    not a single hardcoded POST body. Per-lane toxiproxy still uses
-#    agents:22 *inside its own compose project*, but the control object must
-#    not be the thing that re-pins a pool lane onto the shared proxy.
+# 2. Hard-cut (D22): no "use 2228 if unset" leftover that reintroduces the pin
+#    as the default. A `?: 2228` / `?: 8474` on the instrumentation-argument
+#    path is the same bug wearing a different hat — the override must fall back
+#    to the DERIVATION, not to the shared literal.
+# --------------------------------------------------------------------------
+no_unset_fallback_reintroduces_the_shared_pin() {
+  [[ -f "$TOXICONTROL" ]] || { fail "ToxiproxyControl.kt is missing; cannot check the unset-fallback path"; return 1; }
+  local hits
+  hits="$(grep -nE '\?:[[:space:]]*(2228|2229|8474)|else[[:space:]]+(2228|8474)' "$TOXICONTROL" \
+    | grep -v ':[[:space:]]*//' \
+    | grep -v ':[[:space:]]*\*' \
+    || true)"
+  if [[ -n "$hits" ]]; then
+    fail "a 'use 2228/8474 if unset' fallback is still on the fault path; a --pool lane that only sets agentsPort would silently re-pin (issue #2128 / D22): $hits"
+    return 1
+  fi
+  # The instrumentation overrides must fall back to the derivation by NAME.
+  local arg
+  for arg in 'faultSshPortArg(): Int = instrumentationPort("faultSshPort") ?: faultSshPort()' \
+             'apiPortArg(): Int = instrumentationPort("toxiproxyApiPort") ?: defaultApiPort()'; do
+    grep -Fq "$arg" "$TOXICONTROL" \
+      || { fail "ToxiproxyControl lost the derivation fallback '$arg'; an unset instrumentation argument must resolve through the formula, not a literal (issue #2128)"; return 1; }
+  done
+  pass "no unset-fallback reintroduces 2228/8474; overrides fall back to the derivation"
+}
+
+# --------------------------------------------------------------------------
+# 3. ToxiproxyControl's proxy creation must take listen/upstream from
+#    parameters, not a single hardcoded POST body. Per-lane toxiproxy still
+#    uses `agents:22` *inside its own compose project* (which is why the
+#    CONTAINER_* defaults keep those literals), but the control object must not
+#    be the thing that re-pins a pool lane onto the shared proxy.
 # --------------------------------------------------------------------------
 toxiproxy_control_must_parameterise_listen_and_upstream() {
-  if [[ ! -f "$PORTS_KT" ]]; then
-    fail "NetworkFaultPorts.kt is missing; ToxiproxyControl has no place to take listen/upstream from besides the hardcoded 0.0.0.0:2228 / agents:22 POST (issue #2128)"
+  [[ -f "$TOXICONTROL" ]] || { fail "ToxiproxyControl.kt is missing; cannot check listen/upstream parameterisation"; return 1; }
+  if ! grep -qE 'private val listen: String = CONTAINER_LISTEN' "$TOXICONTROL" ||
+     ! grep -qE 'private val upstream: String = CONTAINER_UPSTREAM' "$TOXICONTROL"; then
+    fail "ToxiproxyControl does not expose listen/upstream as constructor parameters (issue #2128)"
     return 1
   fi
-  if ! grep -q 'listen' "$TOXICONTROL" || ! grep -q 'upstream' "$TOXICONTROL"; then
-    fail "ToxiproxyControl does not expose listen/upstream parameters (issue #2128)"
+  # The POST body must interpolate, not embed the fixture literals as the only
+  # path. A leftover """...0.0.0.0:2228...agents:22...""" in reset() is the pin.
+  local body
+  body="$(sed -n '/fun reset()/,/^    }$/p' "$TOXICONTROL")"
+  if [[ -z "$body" ]]; then
+    fail "could not read ToxiproxyControl.reset(); the POST-body check would pass vacuously (issue #2128)"
     return 1
   fi
-  # The POST body must interpolate, not embed the shared-fixture literals as
-  # the only path. A leftover """...0.0.0.0:2228...agents:22...""" in
-  # createProxy is the pin.
-  if grep -n 'createProxy' -A 20 "$TOXICONTROL" | grep -q '0.0.0.0:2228'; then
-    fail "ToxiproxyControl.createProxy still embeds listen 0.0.0.0:2228 in the POST body, so a pool lane cannot claim its own proxy (issue #2128)"
+  if grep -q '0.0.0.0:2228' <<<"$body"; then
+    fail "ToxiproxyControl.reset() still embeds listen 0.0.0.0:2228 in the POST body, so a pool lane cannot claim its own proxy (issue #2128)"
     return 1
   fi
-  if grep -n 'createProxy' -A 20 "$TOXICONTROL" | grep -q 'agents:22'; then
-    fail "ToxiproxyControl.createProxy still embeds upstream agents:22 in the POST body (issue #2128)"
+  if grep -q 'agents:22' <<<"$body"; then
+    fail "ToxiproxyControl.reset() still embeds upstream agents:22 in the POST body (issue #2128)"
     return 1
   fi
-  pass "ToxiproxyControl.createProxy parameterises listen and upstream"
+  grep -q '"listen":"\$listen"' <<<"$body" && grep -q '"upstream":"\$upstream"' <<<"$body" \
+    || { fail "ToxiproxyControl.reset() does not interpolate the listen/upstream parameters into the POST body (issue #2128)"; return 1; }
+  pass "ToxiproxyControl.reset() parameterises listen and upstream"
 }
 
 # --------------------------------------------------------------------------
@@ -210,28 +246,6 @@ two_pool_lanes_get_disjoint_fault_ports() {
     esac
   done
   pass "pool lanes 2243 and 2244 get disjoint fault ports ($a_fault/$a_loss/$a_api vs $b_fault/$b_loss/$b_api)"
-}
-
-# --------------------------------------------------------------------------
-# 5. Hard-cut (D22): no "use 2228 if unset" leftover that reintroduces the
-#    pin as the default for a pool lane. The Kotlin resolver must derive from
-#    agentsPort; a `?: 2228` / `?: 8474` on the fault path is the bug.
-# --------------------------------------------------------------------------
-no_unset_fallback_reintroduces_the_shared_pin() {
-  if [[ ! -f "$PORTS_KT" ]]; then
-    fail "NetworkFaultPorts.kt is missing, so the only runtime ports are the hardcoded 2228/8474 defaults (issue #2128)"
-    return 1
-  fi
-  local hits
-  hits="$(grep -n -E '\?:[[:space:]]*2228|\?:[[:space:]]*2229|\?:[[:space:]]*8474|else[[:space:]]+2228|else[[:space:]]+8474' "$PORTS_KT" "$PROOF_BASE" \
-    | grep -v ':[[:space:]]*//' \
-    | grep -v ':[[:space:]]*\*' \
-    || true)"
-  if [[ -n "$hits" ]]; then
-    fail "a 'use 2228/8474 if unset' fallback is still on the fault path; a --pool lane that only sets agentsPort would silently re-pin (issue #2128 / D22): $hits"
-    return 1
-  fi
-  pass "no unset-fallback reintroduces 2228/8474 as the pool-lane default"
 }
 
 # --------------------------------------------------------------------------
@@ -342,75 +356,77 @@ DOCKER_STUB
 #    drift are how the next pin lands.
 # --------------------------------------------------------------------------
 kotlin_and_bash_formulas_agree() {
-  if [[ ! -f "$PORTS_KT" ]]; then
-    fail "NetworkFaultPorts.kt is missing; there is no Kotlin formula to agree with bash (issue #2128)"
-    return 1
-  fi
+  [[ -f "$TOXICONTROL" ]] || { fail "ToxiproxyControl.kt is missing; there is no Kotlin formula to agree with bash (issue #2128)"; return 1; }
   if ! grep -q 'pocketshell_network_fault_ssh_port' "$AGENTS_LIB"; then
     fail "bash derivation is missing; cannot prove it matches Kotlin"
     return 1
   fi
-  local k_fault k_loss k_api
-  k_fault="$(sed -n 's/.*POOL_FAULT_SSH_OFFSET[^0-9]*\([0-9]\+\).*/\1/p' "$PORTS_KT" | head -n1)"
-  k_loss="$(sed -n 's/.*POOL_PACKET_LOSS_OFFSET[^0-9]*\([0-9]\+\).*/\1/p' "$PORTS_KT" | head -n1)"
-  k_api="$(sed -n 's/.*SINGLE_LANE_TOXIPROXY_API_PORT[^0-9]*\([0-9]\+\).*/\1/p' "$PORTS_KT" | head -n1)"
-  local b_fault b_loss
+  # Kotlin: `else agentsPort + <offset>` inside faultSshPort.
+  local k_fault k_single_api b_fault
+  k_fault="$(sed -n '/fun faultSshPort(/,/^$/p' "$TOXICONTROL" \
+    | sed -n 's/.*else agentsPort + \([0-9]\+\).*/\1/p' | head -n1)"
+  k_single_api="$(sed -n 's/.*SINGLE_LANE_API_PORT: Int = \([0-9]\+\).*/\1/p' "$TOXICONTROL" | head -n1)"
   b_fault="$(sed -n 's/.*FAULT_SSH_OFFSET=\([0-9]\+\).*/\1/p' "$AGENTS_LIB" | head -n1)"
-  b_loss="$(sed -n 's/.*PACKET_LOSS_OFFSET=\([0-9]\+\).*/\1/p' "$AGENTS_LIB" | head -n1)"
   if [[ -z "$k_fault" || -z "$b_fault" || "$k_fault" != "$b_fault" ]]; then
     fail "fault-SSH offset disagrees (Kotlin='$k_fault' bash='$b_fault'); the two formulas would send the APK and the compose publish to different ports"
     return 1
   fi
-  if [[ -z "$k_loss" || -z "$b_loss" || "$k_loss" != "$b_loss" ]]; then
-    fail "packet-loss offset disagrees (Kotlin='$k_loss' bash='$b_loss')"
+  if [[ "$k_single_api" != "8474" ]]; then
+    fail "Kotlin SINGLE_LANE_API_PORT is '$k_single_api', expected 8474"
     return 1
   fi
-  if [[ "$k_api" != "8474" ]]; then
-    fail "Kotlin SINGLE_LANE_TOXIPROXY_API_PORT is '$k_api', expected 8474"
+  # The API offset: Kotlin adds (agentsPort - SINGLE_LANE_AGENTS_PORT) to 8474;
+  # bash must land on the same number for a real pool port.
+  source_pool_lib
+  local agents=2243 k_api b_api
+  k_api=$(( 8474 + (agents - 2222) ))
+  b_api="$(pocketshell_toxiproxy_api_port "$agents")"
+  if [[ "$k_api" != "$b_api" ]]; then
+    fail "toxiproxy API port disagrees for agents=$agents (Kotlin=$k_api bash=$b_api); the APK would talk to a different control API than compose published"
     return 1
   fi
-  pass "Kotlin and bash fault-port offsets agree (fault +$k_fault, packet-loss +$k_loss)"
+  # Same for the fault SSH port the app actually dials.
+  local k_ssh b_ssh
+  k_ssh=$(( agents + k_fault ))
+  b_ssh="$(pocketshell_network_fault_ssh_port "$agents")"
+  if [[ "$k_ssh" != "$b_ssh" ]]; then
+    fail "fault SSH port disagrees for agents=$agents (Kotlin=$k_ssh bash=$b_ssh)"
+    return 1
+  fi
+  # The bash side ALSO publishes a packet-loss port that Kotlin has no consumer
+  # for yet; it must still exist, or the compose publish loses a port.
+  grep -q 'PACKET_LOSS_OFFSET=' "$AGENTS_LIB" \
+    || { fail "scripts/lib/agents-pool.sh lost PACKET_LOSS_OFFSET; the compose packet-loss publish has no derivation"; return 1; }
+  pass "Kotlin and bash agree for agents=$agents (fault +$k_fault -> $k_ssh, API -> $k_api)"
 }
 
 # --------------------------------------------------------------------------
-# 10. The JVM unit test that pins the formula must exist and be wired into
-#     the debug unit suite (it lives next to ToxiproxyControlTest).
+# 10. THE DETECTOR MUST FIRE FOR THE LANE THAT ACTUALLY RUNS THE FAULT
+#     JOURNEY. connected-test.sh brings the per-lane proxy up only when it
+#     classifies the run as fault-class. It used to do that by matching the old
+#     app module's per-class names; issue #2474 made app2's suite run UNFILTERED
+#     in one process, so the whole-suite Gradle task is the thing to match, and
+#     the class-name globs could never fire again.
+#
+#     Non-vacuous by construction: it first proves app2's instrumented set
+#     really does drive Toxiproxy (>= 1 consumer), then requires the task that
+#     runs that set to be classified fault-class.
 # --------------------------------------------------------------------------
-jvm_formula_test_exists() {
-  if [[ ! -f "$PORTS_TEST" ]]; then
-    fail "NetworkFaultPortsTest.kt is missing; the 2243-must-not-be-2228 property has no JVM gate (issue #2128)"
+the_app2_journey_lane_is_detected_by_connected_test() {
+  local consumers task
+  consumers="$(grep -Rl 'ToxiproxyControl' "$APP2_ANDROID_TEST" --include='*.kt' 2>/dev/null | wc -l)"
+  if (( consumers < 1 )); then
+    fail "no app2 androidTest source drives ToxiproxyControl, so this detector check would pass vacuously — if the fault journey really is gone, delete this harness (D22) rather than leaving it green over nothing (issue #2128)"
     return 1
   fi
-  if ! grep -q '2243' "$PORTS_TEST" || ! grep -q '2228' "$PORTS_TEST"; then
-    fail "NetworkFaultPortsTest.kt does not assert that agentsPort=2243 must not resolve to 2228 (issue #2128)"
-    return 1
-  fi
-  pass "NetworkFaultPortsTest.kt pins the pool-lane-is-not-2228 property"
-}
-
-# --------------------------------------------------------------------------
-# 11. Every NetworkFaultProofBase subclass (and the two independent
-#     Toxiproxy journeys that now use NetworkFaultPorts) must be matched
-#     by connected-test.sh's NETWORK_FAULT_RUN detector. A missed class
-#     under --pool would derive 2253/8495 and find no proxy — a new hole
-#     introduced by removing the 2228 pin.
-# --------------------------------------------------------------------------
-every_fault_class_is_detected_by_connected_test() {
-  local classes missing="" name pat matched
-  mapfile -t classes < <(
-    grep -Rlh ': NetworkFaultProofBase(' \
-      "$ROOT_DIR/app/src/androidTest" --include='*Test.kt' \
-      | while IFS= read -r f; do basename "$f" .kt; done
-    printf '%s\n' \
-      OutboundAttachmentOffsetResumeJourneyE2eTest \
-      ConversationOpenLatencyRttDockerTest
-  )
-  if (( ${#classes[@]} < 10 )); then
-    fail "expected to discover NetworkFaultProofBase subclasses; found ${#classes[@]} — detector scan would pass vacuously"
+  [[ -f "$JOURNEY_SUITE" ]] || { fail "journey suite not found at $JOURNEY_SUITE; cannot read the task the lane runs"; return 1; }
+  task="$(sed -nE 's/^JOURNEY_TASK="([^"]+)".*/\1/p' "$JOURNEY_SUITE" | head -n1)"
+  if [[ -z "$task" ]]; then
+    fail "$JOURNEY_SUITE has no JOURNEY_TASK assignment; the detector cannot be checked against the task that actually runs"
     return 1
   fi
 
-  local patterns=()
+  local patterns=() pat matched=0
   mapfile -t patterns < <(
     awk '/case "\$gradle_args_str" in/,/esac/' "$CONNECTED" \
       | grep -v 'case ' | grep -v 'esac' | grep -v 'NETWORK_FAULT' \
@@ -420,25 +436,16 @@ every_fault_class_is_detected_by_connected_test() {
     fail "could not extract NETWORK_FAULT_RUN globs from connected-test.sh"
     return 1
   fi
-
-  for name in "${classes[@]}"; do
-    [[ -n "$name" ]] || continue
-    matched=0
-    for pat in "${patterns[@]}"; do
-      case "$name" in
-        $pat) matched=1; break ;;
-      esac
-    done
-    if (( matched == 0 )); then
-      missing+="  $name"$'\n'
-    fi
+  for pat in "${patterns[@]}"; do
+    case "$task" in
+      $pat) matched=1; break ;;
+    esac
   done
-  if [[ -n "$missing" ]]; then
-    fail "connected-test.sh NETWORK_FAULT_RUN does not match these fault-class names, so a --pool run would derive isolated ports and never bring up the per-lane proxy (issue #2128):
-$missing"
+  if (( matched == 0 )); then
+    fail "connected-test.sh NETWORK_FAULT_RUN does not classify '$task' as a fault-class run, so a --pool run of app2's suite would derive isolated ports and never bring up the per-lane proxy — the reconnect journey would fail as if the product were broken (issue #2128 / #2474)"
     return 1
   fi
-  pass "every fault-class name is matched by connected-test.sh NETWORK_FAULT_RUN (${#classes[@]} classes, ${#patterns[@]} globs)"
+  pass "connected-test.sh classifies '$task' as fault-class ($consumers Toxiproxy consumer(s) in app2's instrumented set, ${#patterns[@]} globs)"
 }
 
 # --------------------------------------------------------------------------
@@ -456,19 +463,17 @@ docs_state_the_fault_pool_behaviour() {
 
 main() {
   printf 'network-fault pool isolation harness (issue #2128)\n'
-  network_fault_base_must_not_hardcode_shared_ports || true
-  independent_fault_classes_must_not_keep_their_own_pin || true
+  fault_ports_must_derive_from_the_agents_port || true
+  no_unset_fallback_reintroduces_the_shared_pin || true
   toxiproxy_control_must_parameterise_listen_and_upstream || true
   pool_lane_must_not_resolve_to_the_shared_fault_ports || true
   single_lane_keeps_the_historical_fault_identity || true
   two_pool_lanes_get_disjoint_fault_ports || true
-  no_unset_fallback_reintroduces_the_shared_pin || true
   compose_fault_proxy_is_parameterised || true
   connected_test_isolates_pool_fault_classes || true
   a_disturbed_fault_fixture_is_not_an_empty_session_list || true
   kotlin_and_bash_formulas_agree || true
-  jvm_formula_test_exists || true
-  every_fault_class_is_detected_by_connected_test || true
+  the_app2_journey_lane_is_detected_by_connected_test || true
   docs_state_the_fault_pool_behaviour || true
 
   if (( FAILURES > 0 )); then

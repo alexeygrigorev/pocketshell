@@ -16,7 +16,7 @@ fail() {
 }
 
 cmd="$("$SCRIPT" --abi all --print-command)"
-printf '%s\n' "$cmd" | grep -Fq ':app:assembleDebug' || \
+printf '%s\n' "$cmd" | grep -Fq ':app2:assembleDebug' || \
   fail "command must assemble the debug APK; got: $cmd"
 printf '%s\n' "$cmd" | grep -Fq -- '--no-daemon' && \
   fail "local assemble must keep the Gradle daemon; got: $cmd"
@@ -34,7 +34,7 @@ printf '%s\n' "$cmd" | grep -Fq -- 'pocketshellAbiFilters' && \
   fail "--abi all must compile every ABI; got: $cmd"
 
 cmd="$("$SCRIPT" --android-test --print-command)"
-printf '%s\n' "$cmd" | grep -Fq ':app:assembleDebugAndroidTest' || \
+printf '%s\n' "$cmd" | grep -Fq ':app2:assembleDebugAndroidTest' || \
   fail "--android-test must add the androidTest APK; got: $cmd"
 
 cmd="$("$SCRIPT" --abi arm64-v8a --print-command)"

@@ -113,12 +113,28 @@ jobs:
       # guard below can see which test tasks actually EXECUTED vs came back
       # UP-TO-DATE / FROM-CACHE / NO-SOURCE. pipefail keeps Gradle's exit code
       # authoritative through the tee.
+      #
+      # `:shared:core-hostapi:test` is named EXPLICITLY alongside the shard task
+      # because that module is the repo's first plain `kotlin("jvm")` module
+      # (deliberately: it holds the host-CLI wire contract and must stay free of
+      # the Android SDK). Gradle therefore gives it one variant-less `test` task,
+      # which is NEITHER `testDebugUnitTest` NOR `testReleaseUnitTest` — so
+      # before this line neither shard ran it, its seven test classes were
+      # "selected but absent" in both shards' #2082 attendance reports, and the
+      # #2069 partition check in scripts/check-executed-test-counts.sh was
+      # correctly red. Naming it here is that guard's own recommended remedy
+      # ("re-shard the Unit lane so this task is owned by a shard"), and the
+      # guard now DERIVES this extra ownership from this very command rather
+      # than carrying an allowlist. It runs in BOTH shards on purpose: it has no
+      # variant split to divide, both shards' attendance selectors include its
+      # `src/test` classes, and the whole task costs ~2 s.
       - name: Run JVM unit tests
         id: unit_tests
         timeout-minutes: 35
         run: |
           set -o pipefail
           ./gradlew "test${{ matrix.variant }}UnitTest" \
+            :shared:core-hostapi:test \
             --rerun-tasks --no-build-cache \
             --no-daemon --stacktrace --console=plain \
             --max-workers=4 \
@@ -291,16 +307,22 @@ jobs:
       - name: "Nightly exact-method guard self-test (issue #1678/#1751)"
         run: bash scripts/run-nightly-guard-selftests.sh
 
-      # Issue #1355: MainDispatcherRule owns the global Dispatchers.Main reset.
-      # Any standalone TmuxSessionViewModel test that leaves an unregistered VM
-      # can race that reset from a still-unwinding coroutine and fail an
-      # unrelated next class at TestMainDispatcher.kt:72. Keep constructor
-      # registration structural and prove the guard itself goes red.
-      - name: Main-dispatcher VM teardown guard (issue #1355)
-        run: |
-          chmod +x scripts/check-main-dispatcher-vm-teardown.sh
-          scripts/check-main-dispatcher-vm-teardown.sh
-          scripts/check-main-dispatcher-vm-teardown.sh --self-test
+      # The #1355/#1765 main-dispatcher VM-teardown guard was DELETED with its
+      # subject (D22), for the same reason and by the same reasoning as the
+      # #1047/#1324 connection-VM ratchet below. All three of its seams were
+      # app-module names — `TmuxSessionViewModel`, `MainDispatcherRule
+      # .tmuxSessionViewModelTeardown()` and `StandaloneTmuxVmFixture` — and its
+      # scan root was the literal `app/src/test/java`, so after the hard cut it
+      # walked a directory that does not exist and printed OK over ZERO files
+      # every push while its fixture-root self-test kept passing.
+      #
+      # app2 does not reproduce the shape: its ViewModel tests inject a
+      # dispatcher through `runTest` rather than swapping the process-global
+      # Main behind a shared rule (see the comment at the top of
+      # app2/src/test/java/com/pocketshell/next/crash/CrashReportsViewModelTest.kt),
+      # so there is no registration seam to check. If app2 later grows a shared
+      # Main-swapping rule, its teardown guard is a fresh design call, not a
+      # repoint of this one.
 
       # The #848 CI journey-harness guard was DELETED with the per-class journey
       # registry it validated (scripts/ci-journey-suite.sh). It answered "is this
@@ -483,18 +505,24 @@ jobs:
       # #771 EMULATOR INFRA UNAVAILABLE branch — so a cut-short load-bearing class
       # can never again be masked. No emulator, no JVM, no Gradle.
       #
-      # Issue #2060 — COST CORRECTION. "Cheap (< 15 s)" had long been untrue: it
-      # is ~286 s on CI, the priciest step in the old serial Unit job after the
-      # dex assemble. NOT scan bloat to optimise away — it proves TIMEOUT
-      # behaviour, and the only host-throughput-independent way to fire a timeout
-      # is a kernel timer, so its ~20 `sleep`s ARE the proof. Structural fix: it
-      # now overlaps the Gradle graph in parallel.
-      - name: Two-phase Android process-restart harness guard (issue #2264)
-        run: |
-          chmod +x scripts/two-phase-android-instrumentation.sh \
-            scripts/test-two-phase-android-instrumentation.sh \
-            scripts/two-phase-android-mutation.sh
-          scripts/test-two-phase-android-instrumentation.sh
+      # The #2264/#1715 two-phase Android process-restart harness guard was
+      # DELETED with everything it drove (D22, no shim). The harness built and
+      # installed a suffixed `com.pocketshell.app.<suffix>` APK pair from
+      # `:app:assembleDebug`, ran two methods of
+      # `com.pocketshell.app.proof.LastSessionProcessRestartProofTest` through
+      # separate `am instrument` calls, and asserted that
+      # `app/src/main/java/com/pocketshell/app/session/LastSessionStore.kt`
+      # survived an external force-stop. The module, the proof class and
+      # LastSessionStore are all gone, so its self-test failed at its first line
+      # ("missing proof source"). Not repointed: app2 has no last-session store
+      # and no `proof` source set, so there is nothing to prove, and inventing a
+      # stand-in target would be coverage theatre. Deleted with it:
+      # scripts/two-phase-android-{instrumentation,mutation,durability-mutation}.sh,
+      # scripts/test-two-phase-android-instrumentation.sh and the two issue
+      # wrappers (issue-2239-process-restart.sh, issue1715-external-process-restart.sh).
+      # scripts/instrumentation-log-to-junit-xml.sh SURVIVES — it is a generic
+      # transcript converter and scripts/release-emulator-validation.sh still
+      # uses it.
 
       # Issue #1876 round 2: GitHub checks the committed Docker test key out as
       # 0644, and OpenSSH rejects it before the mobile-RTT journey can start.
@@ -578,10 +606,15 @@ jobs:
           bash scripts/test-release-validation-provenance.sh --self-test
           bash scripts/test-release-validation-provenance.sh
 
-      # #2237's full mutation is review evidence; its cheap anchor/test-name
-      # validation belongs in the live harness lane so it cannot silently rot.
-      - name: Stale-dismiss mutation structural guard (issue #2237)
-        run: bash scripts/check-issue2237-stale-dismiss-mutation.sh --check
+      # The #2237 stale-dismiss mutation guard was DELETED with its subject
+      # (D22). It pinned a unique four-line anchor inside
+      # app/src/main/java/com/pocketshell/app/MainActivity.kt's
+      # `staleSessionDismissCallback`, plus three test names in
+      # app/src/test/.../MainActivityStaleSessionRecreateTest.kt. The module,
+      # the callback and the test are gone, and app2 has no stale-session
+      # dismiss routing to repoint at (grep: no `staleSessionDismissCallback`
+      # anywhere under app2/). scripts/check-issue2237-stale-dismiss-mutation.sh
+      # deleted rather than left uncalled.
 
       # Issues #1800/#1919: the failure-SIGNATURE classifier that types the CI
       # swiftshader "real system input-method window never became visible"

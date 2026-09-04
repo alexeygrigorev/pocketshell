@@ -90,37 +90,44 @@ class J11ShareUploadJourney {
     private var otherHostId: Long = 0
 
     @Before
-    fun seed() = runBlocking {
-        relaxFileUriPolicy()
+    // VOID BLOCK BODY, not `fun seed() = runBlocking { … }` (V1,
+    // scripts/check-test-validity.sh). An expression-body @Before/@Test is one
+    // refactor away from returning a non-Unit value, and JUnit rejects the WHOLE
+    // class at load with InvalidTestClassError when it does — silently, so the
+    // journey simply never runs.
+    fun seed() {
+        runBlocking {
+            relaxFileUriPolicy()
 
-        val graph = appGraph()
-        graph.connectionsRegistry().closeAll()
-        graph.hostDao().getAll().first().forEach { graph.hostDao().deleteById(it.id) }
-        graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
+            val graph = appGraph()
+            graph.connectionsRegistry().closeAll()
+            graph.hostDao().getAll().first().forEach { graph.hostDao().deleteById(it.id) }
+            graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
-        val fingerprint = AgentsFixture.probeHostKeyFingerprint()
-        println("J11_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
+            val fingerprint = AgentsFixture.probeHostKeyFingerprint()
+            println("J11_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        // Removed, not just created: a rerun that found the previous run's file
-        // would pass its "the host holds the bytes" assertion without uploading.
-        AgentsFixture.exec("rm -rf \"\$HOME/inbox/pocketshell\"")
+            // Removed, not just created: a rerun that found the previous run's file
+            // would pass its "the host holds the bytes" assertion without uploading.
+            AgentsFixture.exec("rm -rf \"\$HOME/inbox/pocketshell\"")
 
-        val keyPath = AgentsFixture.installPrivateKey(fileName = "j11_fixture_key")
-        val keyId = graph.sshKeyDao().insert(
-            SshKeyEntity(name = "j11-key", privateKeyPath = keyPath),
-        )
-        fixtureHostId = graph.hostDao().insert(
-            HostEntity(
-                name = "docker-fixture",
-                hostname = AgentsFixture.host,
-                port = AgentsFixture.port,
-                username = AgentsFixture.USER,
-                keyId = keyId,
-                trustedHostKeyAlgorithm = "SHA256",
-                trustedHostKeySha256 = fingerprint,
-            ),
-        )
-        otherHostId = 0
+            val keyPath = AgentsFixture.installPrivateKey(fileName = "j11_fixture_key")
+            val keyId = graph.sshKeyDao().insert(
+                SshKeyEntity(name = "j11-key", privateKeyPath = keyPath),
+            )
+            fixtureHostId = graph.hostDao().insert(
+                HostEntity(
+                    name = "docker-fixture",
+                    hostname = AgentsFixture.host,
+                    port = AgentsFixture.port,
+                    username = AgentsFixture.USER,
+                    keyId = keyId,
+                    trustedHostKeyAlgorithm = "SHA256",
+                    trustedHostKeySha256 = fingerprint,
+                ),
+            )
+            otherHostId = 0
+        }
     }
 
     /**

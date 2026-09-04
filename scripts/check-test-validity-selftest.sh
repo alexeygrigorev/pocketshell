@@ -30,15 +30,22 @@ GUARD="scripts/check-test-validity.sh"
 # fixtures sit under the directories the guard's `find` already walks, so they
 # are scanned unchanged.
 FIX_TAG="selftest_$$"
-TEST_FIX_DIR="app/src/test/java/com/pocketshell/app/$FIX_TAG"
-ANDROID_FIX_DIR="app/src/androidTest/java/com/pocketshell/app/$FIX_TAG"
-SRC_FIX_DIR="app/src/main/java/com/pocketshell/app/$FIX_TAG"
+TEST_FIX_DIR="app2/src/test/java/com/pocketshell/next/$FIX_TAG"
+ANDROID_FIX_DIR="app2/src/androidTest/java/com/pocketshell/next/$FIX_TAG"
+SRC_FIX_DIR="app2/src/main/java/com/pocketshell/next/$FIX_TAG"
+# J1 asks "is this journey-shaped androidTest class OUTSIDE the wholesale
+# journey root?", and since the rewrite that root IS app2/src/androidTest — so
+# a fixture planted in ANDROID_FIX_DIR is by definition wired and J1 correctly
+# stays silent. The J1 fixtures therefore need a scanned androidTest root that
+# is NOT the journey root; shared/ui-kit/src/androidTest is one
+# (collect_android_test_files walks every shared/*/src/androidTest).
+J1_OUTSIDE_FIX_DIR="shared/ui-kit/src/androidTest/java/com/pocketshell/uikit/$FIX_TAG"
 # TIMING1's original runTest fixture lives under app/tmux. Its #2026
 # plain-JUnit deadline-pump fixtures live under the two exact new roots so the
 # self-test proves real scan reachability rather than merely branch presence.
-TIMING_FIX_DIR="app/src/test/java/com/pocketshell/app/tmux/$FIX_TAG"
-TIMING_PORTFWD_FIX_DIR="app/src/test/java/com/pocketshell/app/portfwd/$FIX_TAG"
-TIMING_PREFS_FIX_DIR="app/src/test/java/com/pocketshell/app/prefs/$FIX_TAG"
+TIMING_FIX_DIR="app2/src/test/java/com/pocketshell/next/terminal/$FIX_TAG"
+TIMING_PORTFWD_FIX_DIR="app2/src/test/java/com/pocketshell/next/ports/$FIX_TAG"
+TIMING_PREFS_FIX_DIR="app2/src/test/java/com/pocketshell/next/settings/$FIX_TAG"
 TMP_REG=""
 CLEANUP_SIBLING_TAG=""
 MUTATED_GUARD=""
@@ -50,6 +57,7 @@ cleanup() {
   rm -rf \
     "$TEST_FIX_DIR" \
     "$ANDROID_FIX_DIR" \
+    "$J1_OUTSIDE_FIX_DIR" \
     "$SRC_FIX_DIR" \
     "$TIMING_FIX_DIR" \
     "$TIMING_PORTFWD_FIX_DIR" \
@@ -58,12 +66,13 @@ cleanup() {
   [[ -z "${MUTATED_GUARD:-}" ]] || rm -f -- "$MUTATED_GUARD"
   if [[ -n "${CLEANUP_SIBLING_TAG:-}" ]]; then
     rm -rf \
-      "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-      "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-      "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-      "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
-      "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
-      "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
+      "app2/src/test/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+      "app2/src/androidTest/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+      "app2/src/main/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+      "shared/ui-kit/src/androidTest/java/com/pocketshell/uikit/$CLEANUP_SIBLING_TAG" \
+      "app2/src/test/java/com/pocketshell/next/terminal/$CLEANUP_SIBLING_TAG" \
+      "app2/src/test/java/com/pocketshell/next/ports/$CLEANUP_SIBLING_TAG" \
+      "app2/src/test/java/com/pocketshell/next/settings/$CLEANUP_SIBLING_TAG"
   fi
 }
 exit_from_signal() {
@@ -79,6 +88,7 @@ cleanup
 mkdir -p \
   "$TEST_FIX_DIR" \
   "$ANDROID_FIX_DIR" \
+  "$J1_OUTSIDE_FIX_DIR" \
   "$SRC_FIX_DIR" \
   "$TIMING_FIX_DIR" \
   "$TIMING_PORTFWD_FIX_DIR" \
@@ -106,24 +116,25 @@ run_sigterm_cleanup_regression() {
   local probe_tag
   CLEANUP_SIBLING_TAG="selftest_9$$"
   mkdir -p \
-    "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
+    "app2/src/test/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "app2/src/androidTest/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "app2/src/main/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "shared/ui-kit/src/androidTest/java/com/pocketshell/uikit/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/terminal/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/ports/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/settings/$CLEANUP_SIBLING_TAG"
 
   "$REPO_ROOT/scripts/check-test-validity-selftest.sh" --sigterm-cleanup-probe &
   probe_pid=$!
   probe_tag="selftest_$probe_pid"
 
   for attempt in {1..100}; do
-    if [[ -d "app/src/test/java/com/pocketshell/app/$probe_tag" &&
-          -d "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
-          -d "app/src/main/java/com/pocketshell/app/$probe_tag" &&
-          -d "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" &&
-          -d "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" &&
-          -d "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" ]]; then
+    if [[ -d "app2/src/test/java/com/pocketshell/next/$probe_tag" &&
+          -d "app2/src/androidTest/java/com/pocketshell/next/$probe_tag" &&
+          -d "app2/src/main/java/com/pocketshell/next/$probe_tag" &&
+          -d "app2/src/test/java/com/pocketshell/next/terminal/$probe_tag" &&
+          -d "app2/src/test/java/com/pocketshell/next/ports/$probe_tag" &&
+          -d "app2/src/test/java/com/pocketshell/next/settings/$probe_tag" ]]; then
       probe_ready=1
       break
     fi
@@ -136,20 +147,20 @@ run_sigterm_cleanup_regression() {
 
   if [[ "$probe_ready" -eq 1 &&
         "$probe_rc" -eq 143 &&
-        ! -e "app/src/test/java/com/pocketshell/app/$probe_tag" &&
-        ! -e "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
-        ! -e "app/src/main/java/com/pocketshell/app/$probe_tag" &&
-        ! -e "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" &&
-        ! -e "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" &&
-        ! -e "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" ]]; then
+        ! -e "app2/src/test/java/com/pocketshell/next/$probe_tag" &&
+        ! -e "app2/src/androidTest/java/com/pocketshell/next/$probe_tag" &&
+        ! -e "app2/src/main/java/com/pocketshell/next/$probe_tag" &&
+        ! -e "app2/src/test/java/com/pocketshell/next/terminal/$probe_tag" &&
+        ! -e "app2/src/test/java/com/pocketshell/next/ports/$probe_tag" &&
+        ! -e "app2/src/test/java/com/pocketshell/next/settings/$probe_tag" ]]; then
     own_removed=1
   fi
-  if [[ -d "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-      -d "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-      -d "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-      -d "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" &&
-      -d "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" &&
-      -d "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG" ]]; then
+  if [[ -d "app2/src/test/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" &&
+      -d "app2/src/androidTest/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" &&
+      -d "app2/src/main/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" &&
+      -d "app2/src/test/java/com/pocketshell/next/terminal/$CLEANUP_SIBLING_TAG" &&
+      -d "app2/src/test/java/com/pocketshell/next/ports/$CLEANUP_SIBLING_TAG" &&
+      -d "app2/src/test/java/com/pocketshell/next/settings/$CLEANUP_SIBLING_TAG" ]]; then
     sibling_preserved=1
   fi
 
@@ -165,18 +176,19 @@ run_sigterm_cleanup_regression() {
   fi
 
   rm -rf \
-    "app/src/test/java/com/pocketshell/app/$probe_tag" \
-    "app/src/androidTest/java/com/pocketshell/app/$probe_tag" \
-    "app/src/main/java/com/pocketshell/app/$probe_tag" \
-    "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" \
-    "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" \
-    "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" \
-    "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
+    "app2/src/test/java/com/pocketshell/next/$probe_tag" \
+    "app2/src/androidTest/java/com/pocketshell/next/$probe_tag" \
+    "app2/src/main/java/com/pocketshell/next/$probe_tag" \
+    "app2/src/test/java/com/pocketshell/next/terminal/$probe_tag" \
+    "app2/src/test/java/com/pocketshell/next/ports/$probe_tag" \
+    "app2/src/test/java/com/pocketshell/next/settings/$probe_tag" \
+    "app2/src/test/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "app2/src/androidTest/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "app2/src/main/java/com/pocketshell/next/$CLEANUP_SIBLING_TAG" \
+    "shared/ui-kit/src/androidTest/java/com/pocketshell/uikit/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/terminal/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/ports/$CLEANUP_SIBLING_TAG" \
+    "app2/src/test/java/com/pocketshell/next/settings/$CLEANUP_SIBLING_TAG"
   CLEANUP_SIBLING_TAG=""
 }
 
@@ -211,6 +223,7 @@ _fixture_signature() {
     find \
       "$TEST_FIX_DIR" \
       "$ANDROID_FIX_DIR" \
+      "$J1_OUTSIDE_FIX_DIR" \
       "$SRC_FIX_DIR" \
       "$TIMING_FIX_DIR" \
       "$TIMING_PORTFWD_FIX_DIR" \
@@ -385,7 +398,7 @@ echo "[C1] load-bearing assumeFalse(isRunningOnCi()) self-skip"
 
 # BAD: an unjustified CI self-skip on a journey assertion (no fixture reason).
 cat > "$ANDROID_FIX_DIR/C1BadJourneyTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeFalse
 class C1BadJourneyTest {
     fun journey() {
@@ -398,7 +411,7 @@ KT
 
 # GOOD: the same skip but justified as an opt-in Docker fault fixture.
 cat > "$ANDROID_FIX_DIR/C1GoodFaultFixtureTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeFalse
 class C1GoodFaultFixtureTest {
     fun journey() {
@@ -411,7 +424,7 @@ KT
 
 # GOOD2: justified via an inline // JUSTIFIED: opt-out.
 cat > "$ANDROID_FIX_DIR/C1GoodJustifiedTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeFalse
 class C1GoodJustifiedTest {
     fun journey() {
@@ -437,7 +450,7 @@ rm -f "$ANDROID_FIX_DIR/C1BadJourneyTest.kt"
 # after its stopgap was deleted.
 echo "[C1] stale baseline row (listed file has no remaining smell)"
 cat > "$ANDROID_FIX_DIR/C1StaleBaselineTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class C1StaleBaselineTest {
     fun journey() { }
 }
@@ -479,8 +492,8 @@ echo "[J1] unwired androidTest journey class"
 
 # BAD: a new journey-shaped androidTest class that is not wired into
 # the wholesale journey root and has no local reason for staying out.
-cat > "$ANDROID_FIX_DIR/J1BadUnwiredE2eTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+cat > "$J1_OUTSIDE_FIX_DIR/J1BadUnwiredE2eTest.kt" <<'KT'
+package com.pocketshell.uikit.validityselftest
 class J1BadUnwiredE2eTest {
     fun journey() {
         // Load-bearing connected journey proof, but outside the journey root.
@@ -489,8 +502,8 @@ class J1BadUnwiredE2eTest {
 KT
 
 # GOOD: the same unwired shape with a local source-level justification.
-cat > "$ANDROID_FIX_DIR/J1GoodJustifiedDockerTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+cat > "$J1_OUTSIDE_FIX_DIR/J1GoodJustifiedDockerTest.kt" <<'KT'
+package com.pocketshell.uikit.validityselftest
 // CI_JOURNEY_SUITE_JUSTIFIED: opt-in Docker fixture runs only in nightly.
 class J1GoodJustifiedDockerTest {
     fun journey() {
@@ -505,7 +518,7 @@ assert_exit 1 "J1 unwired androidTest journey hard-fails the guard"
 
 # Remove the BAD J1 so advisory checks can still prove guard-mode exit 0 when
 # no hard-fail smells remain.
-rm -f "$ANDROID_FIX_DIR/J1BadUnwiredE2eTest.kt"
+rm -f "$J1_OUTSIDE_FIX_DIR/J1BadUnwiredE2eTest.kt"
 
 # --------------------------------------------------------------------------
 # FAKE1 — connect-path RPC test with an always-answering fake (no fault case).
@@ -516,7 +529,7 @@ echo "[FAKE1] always-answering connect-path fake"
 # BAD: a FakeSshSession that routes `tree get` ALWAYS through exit 0, asserts a
 # Loading->Ready resolution, with NO fault/error/timeout case.
 cat > "$TEST_FIX_DIR/Fake1BadTreeHydrateTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Fake1BadTreeHydrateTest {
     private class FakeTreeSshSession {
         fun exec(command: String): ExecResult {
@@ -531,7 +544,7 @@ KT
 # GOOD: the same connect-path fake but WITH a fault case (non-zero exit injected
 # for the verb under test + an assertThrows on cancellation).
 cat > "$TEST_FIX_DIR/Fake1GoodTreeHydrateTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Fake1GoodTreeHydrateTest {
     private class FakeTreeSshSession(private val exitCode: Int) {
         fun exec(command: String): ExecResult {
@@ -561,7 +574,7 @@ echo "[AWAIT1] unbounded connect-path RPC await"
 # BAD: a *RemoteSource seam that execs the warm session for `tree get` with NO
 # withTimeout anywhere -> a non-returning exec pins the coroutine forever.
 cat > "$SRC_FIX_DIR/Await1BadRemoteSource.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Await1BadRemoteSource {
     suspend fun getTree(session: FakeSession, host: String): String {
         // cold-start hydrate — UNBOUNDED warm-session exec (no withTimeout)
@@ -574,7 +587,7 @@ KT
 
 # GOOD: the same seam but the warm-session exec is bounded with withTimeout.
 cat > "$SRC_FIX_DIR/Await1GoodRemoteSource.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import kotlinx.coroutines.withTimeout
 class Await1GoodRemoteSource {
     suspend fun getTree(session: FakeSession, host: String): String {
@@ -596,7 +609,7 @@ echo
 echo "[A5] assumeTrue self-skip (IME heuristic + topic-independent literal false)"
 
 cat > "$ANDROID_FIX_DIR/A5BadImeTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeTrue
 class A5BadImeTest {
     fun imeGeometry() {
@@ -608,7 +621,7 @@ class A5BadImeTest {
 KT
 
 cat > "$TEST_FIX_DIR/A5LBadGenericLiteralFalseTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeTrue
 class A5LBadGenericLiteralFalseTest {
     fun loadBearingAssertion() {
@@ -619,7 +632,7 @@ class A5LBadGenericLiteralFalseTest {
 KT
 
 cat > "$TEST_FIX_DIR/A5LBadParenAwareLiteralTrueTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume
 class A5LBadParenAwareLiteralTrueTest {
     fun loadBearingAssertion() {
@@ -634,7 +647,7 @@ class A5LBadParenAwareLiteralTrueTest {
 KT
 
 cat > "$TEST_FIX_DIR/A5LBadBlockCommentCalleeTriviaTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeTrue
 class A5LBadBlockCommentCalleeTriviaTest {
     fun loadBearingAssertion() {
@@ -645,7 +658,7 @@ class A5LBadBlockCommentCalleeTriviaTest {
 KT
 
 cat > "$TEST_FIX_DIR/A5LBadNewlineCommentCalleeTriviaTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume
 class A5LBadNewlineCommentCalleeTriviaTest {
     fun loadBearingAssertion() {
@@ -660,7 +673,7 @@ class A5LBadNewlineCommentCalleeTriviaTest {
 KT
 
 cat > "$TEST_FIX_DIR/A5LGoodDynamicAndDecoyTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import org.junit.Assume.assumeTrue
 class A5LGoodDynamicAndDecoyTest {
     fun loadBearingAssertion() {
@@ -673,7 +686,7 @@ class A5LGoodDynamicAndDecoyTest {
 KT
 
 cat > "$ANDROID_FIX_DIR/A5GoodSdkGuardTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 import android.os.Build
 import org.junit.Assume.assumeTrue
 class A5GoodSdkGuardTest {
@@ -711,7 +724,7 @@ echo "[TIMING1] runTest over a real dispatcher/thread (connection/terminal roots
 # BAD (HARD-FAIL): a runTest test with a bare Thread.sleep(N) immediately before
 # its load-bearing assert and NO bounded-deadline loop (the banned shape).
 cat > "$TIMING_FIX_DIR/Timing1BadSleepBeforeAssertTest.kt" <<'KT'
-package com.pocketshell.app.tmux.validityselftest
+package com.pocketshell.next.terminal.validityselftest
 import kotlinx.coroutines.test.runTest
 class Timing1BadSleepBeforeAssertTest {
     fun reattachWritesMarker() = runTest {
@@ -728,7 +741,7 @@ KT
 # GOOD-A (Shape A: pinnable seam): runTest + Dispatchers.IO but injects a
 # StandardTestDispatcher seam for its owned scope -> spared.
 cat > "$TIMING_FIX_DIR/Timing1GoodSeamTest.kt" <<'KT'
-package com.pocketshell.app.tmux.validityselftest
+package com.pocketshell.next.terminal.validityselftest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -744,7 +757,7 @@ KT
 # GOOD-B (Shape B: bounded pump): runTest + Thread.sleep inside a bounded
 # idleFor()+currentTimeMillis() deadline loop -> spared.
 cat > "$TIMING_FIX_DIR/Timing1GoodBoundedPumpTest.kt" <<'KT'
-package com.pocketshell.app.tmux.validityselftest
+package com.pocketshell.next.terminal.validityselftest
 import kotlinx.coroutines.test.runTest
 class Timing1GoodBoundedPumpTest {
     fun pumpUntilMarker() = runTest {
@@ -765,7 +778,7 @@ KT
 
 # GOOD-C (// JUSTIFIED:): runTest + Thread.sleep but opted out inline.
 cat > "$TIMING_FIX_DIR/Timing1GoodJustifiedTest.kt" <<'KT'
-package com.pocketshell.app.tmux.validityselftest
+package com.pocketshell.next.terminal.validityselftest
 import kotlinx.coroutines.test.runTest
 class Timing1GoodJustifiedTest {
     fun deliberateWallClock() = runTest {
@@ -779,7 +792,7 @@ KT
 # ADVISORY (non-hard): runTest + a real-IO owned scope, no sleep-before-assert,
 # no seam, no pump -> advisory NEW finding (must NOT hard-fail).
 cat > "$TIMING_FIX_DIR/Timing1AdvisoryRealScopeTest.kt" <<'KT'
-package com.pocketshell.app.tmux.validityselftest
+package com.pocketshell.next.terminal.validityselftest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -797,7 +810,7 @@ KT
 # (no runTest), computes a local 5 s currentTimeMillis deadline, then sleeps and
 # rereads the notification inside the while pump.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdLegacyPumpTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 class Timing1BadPortfwdLegacyPumpTest {
     private fun awaitForwardingNotificationText(expected: String): String? {
         val deadline = System.currentTimeMillis() + SETTLE_TIMEOUT_MS
@@ -820,7 +833,7 @@ KT
 # DeferredPrefsCorruptPrefsTest. It uses nanoTime plus the ordered latch/BLOCKED
 # observations and likewise has no runTest branch for the detector to lean on.
 cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsLegacyPumpTest.kt" <<'KT'
-package com.pocketshell.app.prefs.validityselftest
+package com.pocketshell.next.settings.validityselftest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 class Timing1BadPrefsLegacyPumpTest {
@@ -840,7 +853,7 @@ KT
 # with an ordinary wrapped deadline declaration and while condition. Formatting
 # cannot turn local wall-clock loop ownership into a clean result.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdMultilinePumpTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 class Timing1BadPortfwdMultilinePumpTest {
     private fun awaitForwardingNotificationText(expected: String): String? {
         val deadline =
@@ -863,7 +876,7 @@ KT
 # ordered latch/BLOCKED observations while both its typed deadline declaration
 # and loop comparison use normal multiline Kotlin formatting.
 cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsMultilinePumpTest.kt" <<'KT'
-package com.pocketshell.app.prefs.validityselftest
+package com.pocketshell.next.settings.validityselftest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 class Timing1BadPrefsMultilinePumpTest {
@@ -887,7 +900,7 @@ KT
 # BAD lexical control: comments are allowed between executable tokens. The
 # sanitizer must erase them without erasing the real multiline deadline pump.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadCommentInterleavedPumpTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 class Timing1BadCommentInterleavedPumpTest {
     fun awaitCondition(): Boolean {
         val deadline =
@@ -906,7 +919,7 @@ KT
 # leaves whitespace exactly where a contiguous `currentTimeMillis()` matcher
 # used to false-green the forbidden portfwd pump.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdInsideCallTriviaPumpTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 class Timing1BadPortfwdInsideCallTriviaPumpTest {
     fun awaitCondition(): Boolean {
         val deadline =
@@ -926,7 +939,7 @@ KT
 # BAD lexical control (#2026 round 4): nanoTime has the same legal inside-call
 # trivia in the prefs predecessor, including its ordered latch/BLOCKED drain.
 cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsInsideCallTriviaPumpTest.kt" <<'KT'
-package com.pocketshell.app.prefs.validityselftest
+package com.pocketshell.next.settings.validityselftest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 class Timing1BadPrefsInsideCallTriviaPumpTest {
@@ -949,7 +962,7 @@ KT
 # GOOD lexical control: semantically complete pump text that exists only in
 # ordinary/raw strings and comments must not manufacture a TIMING1 finding.
 cat > "$TIMING_PREFS_FIX_DIR/Timing1GoodDeadlinePumpTextTest.kt" <<'KT'
-package com.pocketshell.app.prefs.validityselftest
+package com.pocketshell.next.settings.validityselftest
 class Timing1GoodDeadlinePumpTextTest {
     val ordinary = "val deadline = System.nanoTime() + 5_000L; while (System.nanoTime() < deadline)"
     val raw = """
@@ -969,7 +982,7 @@ KT
 # injected verbatim through onTick, while only drainMainLooperUntil owns the
 # deadline and loop.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1GoodPortfwdSharedPumpTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 class Timing1GoodPortfwdSharedPumpTest {
     private fun awaitForwardingNotificationText(expected: String): String? {
         var text = forwardingNotificationText()
@@ -997,7 +1010,7 @@ KT
 # GOOD-PLAIN-PREFS: candidate shape. The ordered latch/BLOCKED observations are
 # preserved through onTick and the shared helper remains the sole loop owner.
 cat > "$TIMING_PREFS_FIX_DIR/Timing1GoodPrefsSharedPumpTest.kt" <<'KT'
-package com.pocketshell.app.prefs.validityselftest
+package com.pocketshell.next.settings.validityselftest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 class Timing1GoodPrefsSharedPumpTest {
@@ -1030,7 +1043,7 @@ KT
 # not a hand-rolled polling loop. This protects TIMING1 from broadening into a
 # ban on every legitimate timeout under the two roots.
 cat > "$TIMING_PORTFWD_FIX_DIR/Timing1GoodBoundedLatchTest.kt" <<'KT'
-package com.pocketshell.app.portfwd.validityselftest
+package com.pocketshell.next.ports.validityselftest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 class Timing1GoodBoundedLatchTest {
@@ -1119,7 +1132,7 @@ echo "[SEAM1] connected test driving an assertion from an unvetted state-injecti
 # src/main so the guard resolves the call to a real production seam (a
 # test-double helper of the same name must be IGNORED — proven separately below).
 cat > "$SRC_FIX_DIR/Seam1ProdSeam.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1ProdSeam {
     // A production state-injection seam of the #1158 alt-buffer shape: it forces
     // a runtime flag the real seed path never sets on its own.
@@ -1146,7 +1159,7 @@ KT
 # BAD: a connected test that forces the unreachable state, then asserts on it —
 # the exact #1158 cheat. The seam is production-defined but NOT registry-vetted.
 cat > "$ANDROID_FIX_DIR/Seam1BadAltBufferCheatTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadAltBufferCheatTest {
     fun conversationTabAppearsForLiveAgent() {
         vm.forceActivePaneAltBufferForTest(true)   // injects a production-unreachable state
@@ -1161,7 +1174,7 @@ KT
 # GOOD-1 (vetted): forceTreeStaleForTest IS a real production seam AND is listed
 # in scripts/vetted-test-state-setters.txt with a real-path-reachability reason.
 cat > "$ANDROID_FIX_DIR/Seam1GoodVettedTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodVettedTest {
     fun treeGoesStale() {
         vm.forceTreeStaleForTest()   // registry-vetted: wraps the exact production markReconcileDue call
@@ -1173,7 +1186,7 @@ KT
 
 # GOOD-2 (justified): the same unvetted production seam but opted out inline.
 cat > "$ANDROID_FIX_DIR/Seam1GoodJustifiedTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodJustifiedTest {
     fun oneOff() {
         vm.forceActivePaneAltBufferForTest(true) // SEAM_JUSTIFIED: selftest one-off; injected state is reachable here
@@ -1186,7 +1199,7 @@ KT
 # locally in the test (NOT a production seam) must be IGNORED — the cheat class is
 # specifically a production seam.
 cat > "$ANDROID_FIX_DIR/Seam1GoodLocalHelperTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodLocalHelperTest {
     fun usesLocalHelper() {
         forceLocalOnlyHelperForTest(true)  // a test-double helper, never a production seam
@@ -1197,7 +1210,7 @@ KT
 
 # BAD property assignment: production-defined, injection-shaped, and unvetted.
 cat > "$ANDROID_FIX_DIR/Seam1BadPropertyAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadPropertyAssignmentTest {
     fun transportLooksAlive() {
         seam.forceSyntheticTransportAliveForTest = true
@@ -1212,7 +1225,7 @@ KT
 # GOOD-4 (vetted property): this production property is registry-listed with
 # real-path reasons for both of its production owners.
 cat > "$ANDROID_FIX_DIR/Seam1GoodVettedPropertyAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodVettedPropertyAssignmentTest {
     fun transportRideThrough() {
         controller.forceTransportProvenAliveForTest = true
@@ -1225,7 +1238,7 @@ KT
 # GOOD-5 (inline-justified property): assignment-line opt-out semantics are the
 # same as call-line semantics.
 cat > "$ANDROID_FIX_DIR/Seam1GoodJustifiedPropertyAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodJustifiedPropertyAssignmentTest {
     fun oneOffPropertyPin() {
         seam.forceSyntheticTransportAliveForTest = true // SEAM_JUSTIFIED: selftest one-off reachable state
@@ -1237,7 +1250,7 @@ KT
 # GOOD-6 (test-local property): injection-shaped assignment with no production
 # definition must remain outside SEAM1.
 cat > "$ANDROID_FIX_DIR/Seam1GoodLocalPropertyAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodLocalPropertyAssignmentTest {
     fun usesLocalProperty() {
         forceLocalOnlyPropertyForTest = true
@@ -1249,7 +1262,7 @@ KT
 # GOOD-7 (non-injection property): production ForTest configuration knobs stay
 # outside the deliberately narrow force*/Override*/set*Active* shape.
 cat > "$ANDROID_FIX_DIR/Seam1GoodNonInjectionPropertyAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodNonInjectionPropertyAssignmentTest {
     fun shortensTimeout() {
         seam.passiveTimeoutForTest = 10L
@@ -1261,7 +1274,7 @@ KT
 # GOOD-8 (property read/comparison): a high-signal property name by itself is
 # not an assignment; in particular, `==` must not trip the assignment matcher.
 cat > "$ANDROID_FIX_DIR/Seam1GoodPropertyComparisonTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodPropertyComparisonTest {
     fun readsInjectedState() {
         assertTrue(seam.forceSyntheticTransportAliveForTest == true)
@@ -1274,7 +1287,7 @@ KT
 # GOOD-9 (named arguments): a production property name used as an inline or
 # multiline Kotlin named argument is not a write to that property.
 cat > "$ANDROID_FIX_DIR/Seam1GoodNamedArgumentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodNamedArgumentTest {
     fun configuresFake() {
         configure(forceSyntheticTransportAliveForTest = true)
@@ -1293,7 +1306,7 @@ KT
 # GOOD-10 (non-code assignment text): strings, raw strings, line comments, and
 # trailing comments must not be classified as property writes.
 cat > "$ANDROID_FIX_DIR/Seam1GoodNonCodeAssignmentTextTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodNonCodeAssignmentTextTest {
     fun documentsTheSeam() {
         val ordinary = "forceSyntheticTransportAliveForTest = true"
@@ -1317,7 +1330,7 @@ KT
 # only to `var ...ForTest` text inside a production string/comment, never to a
 # real production property, so the production-defined filter must ignore them.
 cat > "$ANDROID_FIX_DIR/Seam1GoodFakeProductionDefinitionTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodFakeProductionDefinitionTest {
     fun usesTestDoubleProperties() {
         fake.forceStringDefinitionOnlyForTest = true
@@ -1335,7 +1348,7 @@ KT
 # make assignment syntax a property seam, and a production property is not
 # enough to make call syntax a function seam.
 cat > "$ANDROID_FIX_DIR/Seam1GoodDefinitionKindSeparationTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodDefinitionKindSeparationTest {
     fun mismatchedSyntaxStaysOutOfScope() {
         fake.forceFunctionKindOnlyForTest = true
@@ -1352,7 +1365,7 @@ KT
 # GOOD-13 (real preceding comment): an actual source comment directly above an
 # occurrence remains a valid opt-out.
 cat > "$ANDROID_FIX_DIR/Seam1GoodPrecedingCommentJustificationTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1GoodPrecedingCommentJustificationTest {
     fun oneOffPropertyPin() {
         // SEAM_JUSTIFIED: selftest real preceding source comment
@@ -1365,7 +1378,7 @@ KT
 # BAD: a block comment between the property name and `=` is legal Kotlin and
 # must not hide a real production assignment.
 cat > "$ANDROID_FIX_DIR/Seam1BadBlockCommentAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadBlockCommentAssignmentTest {
     fun transportLooksAlive() {
         seam.forceSyntheticTransportAliveForTest /* deterministic input */ = true
@@ -1377,7 +1390,7 @@ KT
 # BAD: preserve detection when the assignment line ends at `=` and the RHS is
 # on the next line.
 cat > "$ANDROID_FIX_DIR/Seam1BadMultilineRhsAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadMultilineRhsAssignmentTest {
     fun transportLooksAlive() {
         seam.forceSyntheticTransportAliveForTest =
@@ -1390,7 +1403,7 @@ KT
 # BAD: marker text in ordinary and raw strings is not a source-comment opt-out,
 # whether it is on the occurrence line or directly above it.
 cat > "$ANDROID_FIX_DIR/Seam1BadInlineStringJustificationTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadInlineStringJustificationTest {
     fun transportLooksAlive() {
         val reason = "SEAM_JUSTIFIED: not a comment"; seam.forceSyntheticTransportAliveForTest = true
@@ -1401,7 +1414,7 @@ class Seam1BadInlineStringJustificationTest {
 KT
 
 cat > "$ANDROID_FIX_DIR/Seam1BadPrecedingStringJustificationTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadPrecedingStringJustificationTest {
     fun transportLooksAlive() {
         val reason = """SEAM_JUSTIFIED: still not a comment"""
@@ -1413,7 +1426,7 @@ class Seam1BadPrecedingStringJustificationTest {
 KT
 
 cat > "$ANDROID_FIX_DIR/Seam1BadOrdinaryTemplateAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadOrdinaryTemplateAssignmentTest {
     fun executesAssignment() {
         val result = "${run { seam.forceSyntheticTransportAliveForTest = true; Unit }}"
@@ -1424,7 +1437,7 @@ class Seam1BadOrdinaryTemplateAssignmentTest {
 KT
 
 cat > "$ANDROID_FIX_DIR/Seam1BadRawTemplateAssignmentTest.kt" <<'KT'
-package com.pocketshell.app.validityselftest
+package com.pocketshell.next.validityselftest
 class Seam1BadRawTemplateAssignmentTest {
     fun executesAssignment() {
         val result = """${run { seam.forceSyntheticTransportAliveForTest = false; Unit }}"""

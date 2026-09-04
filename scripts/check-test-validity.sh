@@ -183,15 +183,21 @@ cd "$REPO_ROOT" || exit 1
 # modules — including the FolderListViewModelTreeDurabilityTest seam class that
 # hid #847 — were invisible to it.
 # --------------------------------------------------------------------------
-TEST_ROOTS=(app/src/androidTest app/src/test)
+# REPOINTED AT app2 (D22). These were `app/src/androidTest app/src/test`, both
+# deleted by the rewrite's hard cut — so `collect_test_files` returned ONLY the
+# shared/*/src/test files and EVERY detector below (A5, A5L, C1, J1, TIMING1,
+# SEAM1) saw zero files from the application module. The guard passed each push
+# over an app it was not looking at: the single largest vacuous green this
+# repointing sweep found.
+TEST_ROOTS=(app2/src/androidTest app2/src/test)
 while IFS= read -r d; do
   [[ -d "$d" ]] && TEST_ROOTS+=("$d")
 done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/test' 2>/dev/null | sort)
 
 # Connect-path production RPC sources (#850 AWAIT1). These are the warm-session
 # RPC seams consumed on the connect / cold-start path.
-RPC_SOURCE_ROOT="app/src/main/java/com/pocketshell/app"
-ANDROID_TEST_ROOT="app/src/androidTest/java"
+RPC_SOURCE_ROOT="app2/src/main/java/com/pocketshell/next"
+ANDROID_TEST_ROOT="app2/src/androidTest/java"
 CI_JOURNEY_SUITE="scripts/ci-app2-journey-suite.sh"
 # #1430: the vetted state-injection seam registry (SEAM1). Overridable via the
 # VETTED_SEAM_REGISTRY env var so the self-test can point at a temp registry.
@@ -199,7 +205,7 @@ VETTED_SEAM_REGISTRY="${VETTED_SEAM_REGISTRY:-scripts/vetted-test-state-setters.
 # Production source roots where a matching `fun ...ForTest(` / `var ...ForTest`
 # DEFINITION makes a seam a genuine production seam (vs a test-double helper or
 # property of the same name).
-PROD_SRC_ROOTS=(app/src/main)
+PROD_SRC_ROOTS=(app2/src/main)
 while IFS= read -r d; do
   [[ -d "$d" ]] && PROD_SRC_ROOTS+=("$d")
 done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/main' 2>/dev/null | sort)
@@ -225,7 +231,7 @@ mapfile -t ALL_TEST_FILES < <(collect_test_files)
 # methods — so V1 does NOT scan src/test.
 # --------------------------------------------------------------------------
 collect_android_test_files() {
-  [[ -d app/src/androidTest ]] && find app/src/androidTest -type f -name '*.kt'
+  [[ -d app2/src/androidTest ]] && find app2/src/androidTest -type f -name '*.kt'
   find shared -maxdepth 4 -type d -path 'shared/*/src/androidTest' 2>/dev/null \
     | while IFS= read -r d; do find "$d" -type f -name '*.kt'; done
 }
@@ -323,40 +329,55 @@ TIMING1_BASELINE=(
 
 # Connection/terminal plus #2026 portfwd/prefs test roots TIMING1 is scoped to
 # (path-prefix match).
+# REPOINTED AT app2 BY THE REWRITE (D22, no shim). Every branch below used to
+# name a deleted root — shared/core-ssh, shared/core-tmux, shared/core-connection
+# and eleven app/src/... package prefixes — so `timing1_in_scope` returned 1 for
+# EVERY file in the tree and the whole TIMING1 detector had gone silent while its
+# `--self-test` still went green (the self-test plants its fixtures into paths it
+# creates, so it never noticed the real roots were gone). The mapping keeps the
+# ORIGINAL intent — connection/terminal, plus the JVM-only roots #2026/#2339
+# widened it to — on app2's package layout:
+#   shared/core-ssh + core-tmux + core-connection -> shared/core-transport
+#   app/.../tmux, app/.../connectivity            -> app2/.../terminal, .../connect
+#   app/.../portfwd                               -> app2/.../ports
+#   app/.../prefs                                 -> app2/.../settings
+#   app/.../projects, app/.../fileviewer          -> app2/.../files, .../tree
+#   app/.../composer, app/.../hosts               -> app2/.../composer, .../hosts
 timing1_in_scope() {
   case "$1" in
-    shared/core-ssh/src/test/*) return 0 ;;
-    shared/core-tmux/src/test/*) return 0 ;;
-    shared/core-connection/src/test/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/tmux/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/tmux/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/connectivity/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/connectivity/*) return 0 ;;
+    # The connection core. core-ssh/core-tmux/core-connection all collapsed into
+    # this one module in the rewrite.
+    shared/core-transport/src/test/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/terminal/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/terminal/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/connect/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/connect/*) return 0 ;;
     # Issue #2026: two hand-rolled 5 s Shape-B pumps survived in these JVM
     # roots because the original connection/terminal sweep could not see them.
-    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
+    # `ports` is app2's port-forwarding UI; `settings` absorbed the old prefs.
+    app2/src/test/java/com/pocketshell/next/ports/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/settings/*) return 0 ;;
     # Issue #1048: widened to the areas that actually flaked this class —
     # composer (#1102, sidecar-store real-IO drain) and hosts (#1110, real
-    # off-main close) — plus projects, the sibling source-binding area, so a
-    # future virtual-clock-vs-real-dispatcher timing flake there gets linted.
-    app/src/test/java/com/pocketshell/app/composer/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/composer/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/hosts/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/hosts/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/projects/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/projects/*) return 0 ;;
+    # off-main close) — plus the session tree, the sibling source-binding area,
+    # so a future virtual-clock-vs-real-dispatcher timing flake there gets linted.
+    app2/src/test/java/com/pocketshell/next/composer/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/composer/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/hosts/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/tree/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/tree/*) return 0 ;;
     # Issue #2339: five JVM fileviewer classes drove a ViewModel whose blocking
     # SSH hop ran on a real Dispatchers.IO pool from hand-rolled 10 s / 5 s
     # `System.currentTimeMillis()` pumps. That is the exact #708/#882/#1048
     # virtual-clock-vs-real-dispatcher shape, and it reddened the required Unit
     # check on `main` with a DIFFERENT member failing on each run of the same
     # tree — but the guard was blind to the whole root, so nothing caught it.
-    # Deliberately JVM-only, like portfwd/prefs above: the sibling
-    # app/src/androidTest/.../fileviewer classes are emulator+Docker journeys
-    # with no virtual clock at all, so their wall-clock deadlines are the
-    # legitimate real-device wait, not this smell.
-    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
+    # app2's `files` package is that root's successor. Deliberately JVM-only,
+    # like ports/settings above: the sibling
+    # app2/src/androidTest/.../files classes are emulator+Docker journeys with
+    # no virtual clock at all, so their wall-clock deadlines are the legitimate
+    # real-device wait, not this smell.
+    app2/src/test/java/com/pocketshell/next/files/*) return 0 ;;
   esac
   return 1
 }
@@ -375,15 +396,15 @@ declare -a TIMING1_SCOPE_ERRORS=()
 validate_timing1_scope_contract() {
   local probe
   for probe in \
-    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
+    "app2/src/test/java/com/pocketshell/next/ports/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/settings/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/files/Timing1ScopeProbeTest.kt"; do
     timing1_in_scope "$probe" || TIMING1_SCOPE_ERRORS+=("$probe -> required root is not scanned")
   done
   for probe in \
-    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
+    "app2/src/test/java/com/pocketshell/next/ports/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/settings/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/files/Timing1ScopeProbeTest.kt"; do
     timing1_uses_shared_pump_only_scope "$probe" ||
       TIMING1_SCOPE_ERRORS+=("$probe -> required root is not hand-rolled-pump enforced")
   done
@@ -411,9 +432,26 @@ android_class_file_for() {
   printf '%s/%s.kt\n' "$ANDROID_TEST_ROOT" "$rel"
 }
 
+# Derive an FQCN from ANY scanned androidTest file, not just one under
+# $ANDROID_TEST_ROOT. Since issue #2474 "wired" means "lives under the wholesale
+# journey root", so J1 has to look at the androidTest roots OUTSIDE that root
+# too — a scan confined to the journey root can only ever find wired classes and
+# the detector becomes a no-op (which is exactly what it silently was after the
+# rewrite repointed $ANDROID_TEST_ROOT at app2). Strip the longest matching
+# `<...>/src/androidTest/java|kotlin/` prefix so a shared-module class yields its
+# real package.
 android_test_fqcn_for_file() {
   local file="$1"
   local rel="${file#"$ANDROID_TEST_ROOT"/}"
+  if [[ "$rel" == "$file" ]]; then
+    rel="${file##*/src/androidTest/java/}"
+    if [[ "$rel" == "$file" ]]; then
+      rel="${file##*/src/androidTest/kotlin/}"
+    fi
+    if [[ "$rel" == "$file" ]]; then
+      rel="${file##*/src/androidTest/}"
+    fi
+  fi
   rel="${rel%.kt}"
   printf '%s\n' "${rel//\//.}"
 }
@@ -979,9 +1017,11 @@ scan_j1() {
       J1_NEW+=("$fqcn")
     fi
   done < <(
-    find "$ANDROID_TEST_ROOT" -type f \
-      \( -name '*E2eTest.kt' -o -name '*DockerTest.kt' \) \
-      2>/dev/null | sort
+    # EVERY scanned androidTest root (app2 + every shared/*/src/androidTest),
+    # not just $ANDROID_TEST_ROOT — see android_test_fqcn_for_file above.
+    printf '%s\n' "${ANDROID_TEST_FILES[@]:-}" \
+      | grep -E '(E2eTest|DockerTest)\.kt$' \
+      | sort || true
   )
 
   for fqcn in "${J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]}"; do
@@ -1065,9 +1105,9 @@ timing1_has_code_smell() {
 # `runCurrent()`, so a reintroduced deadline pump here is a hard fail.
 timing1_uses_shared_pump_only_scope() {
   case "$1" in
-    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/ports/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/settings/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/files/*) return 0 ;;
   esac
   return 1
 }

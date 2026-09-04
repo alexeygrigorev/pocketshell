@@ -44,15 +44,21 @@ and neither switches its branch.
    loop as any other issue — you may act as implementer for small, obvious
    release-blocking fixes, but anything non-trivial still goes through a
    dispatched implementer + reviewer round, same as backlog work.
-5. Fast-forward the validated candidate SHA to `main` from the root checkout
+5. Once green, dispatch the independent model review (docs/release.md §
+   "Independent model review before tagging") against the diff between the
+   last shipped tag and the candidate SHA. Triage findings: a real
+   regression goes back through the implementer/reviewer loop (or a direct
+   trivial fix, same allowance as step 4) before tagging; anything else
+   becomes a backlog issue and does not hold up the release.
+6. Fast-forward the validated candidate SHA to `main` from the root checkout
    and push `main`. If it cannot fast-forward, re-stabilize the resulting SHA;
    never publish the candidate directly.
-6. Tag the pushed `origin/main` head with `scripts/push-release-tag.sh` from
+7. Tag the pushed `origin/main` head with `scripts/push-release-tag.sh` from
    the root checkout. Watch Build and confirm the GitHub Release has an APK,
    then remove the candidate worktree.
-7. Post a status comment summarizing: the tagged version, the commit SHA,
-   links to the validation summary/artifacts, and confirmation the merge
-   landed on `main`.
+8. Post a status comment summarizing: the tagged version, the commit SHA,
+   links to the validation summary/artifacts, the independent review's
+   findings and disposition, and confirmation the merge landed on `main`.
 
 ## Hard rules
 

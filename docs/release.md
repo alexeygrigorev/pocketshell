@@ -72,6 +72,40 @@ not in a new escape hatch.
 guard starts honouring them again (C2/C3), or if a fabricated verdict can be
 injected through the environment or a test-only flag in the release path (C4).
 
+## Independent model review before tagging
+
+Once the automated gate is green — a fresh `validated-rc` (fast path) or a
+stabilized candidate that passed `release-emulator-validation.sh` (fallback)
+— but before running `scripts/push-release-tag.sh`, dispatch an independent
+model to read the diff between the last shipped tag and the release SHA and
+flag bugs, regressions, or missed edge cases the automated suite doesn't
+catch: logic that's syntactically fine but behaviorally wrong, a silent
+behavior change, a new code path with no test, a UX regression a green
+assertion wouldn't notice.
+
+"Independent" means a model that did not write most of the code under
+review, ideally from a different family than whatever did most of the
+implementation work this cycle — same-family review tends to share blind
+spots:
+
+- In-house diversity: `Agent({model: "fable"})` (or `"opus"`) with a
+  self-contained prompt scoped to `git diff <last-tag>..<release-sha>`, the
+  acceptance criteria of the issues in that range, and this doc's
+  release-gate context.
+- Cross-vendor diversity (stronger signal, costs more): the
+  `external-model-agents` skill to run Codex or Grok non-interactively
+  against the same diff — there's no Gemini launch command configured on
+  this box (see AGENTS.md's agent launch commands).
+
+This is a confidence check, not a gate: D37 already locks the nightly fault
+verdict as the only thing that can block a tag, and this step must not
+become a second bypassable or fabricatable gate. Findings are triaged like
+any other bug report — a real regression goes back through the normal
+implementer/reviewer loop (or, if trivial and release-blocking, the
+release-owner fixes it directly per the existing "small, obvious
+release-blocking fixes" allowance) before the SHA is tagged; anything else
+gets filed as a backlog issue and does not hold up the release.
+
 ## Fast path: tag the nightly validated-RC (preferred, check this first)
 
 Issue #2356 (Phase 4 of epic #2350) added a nightly marker: a green
@@ -99,7 +133,9 @@ what you need released: fast-forward the root checkout's `main` to that SHA
 if it isn't already there, download the matching
 `release-emulator-validation` run's summary artifact from Actions (or
 re-run `scripts/release-emulator-validation.sh --ref validated-rc` locally
-if you want your own copy), then skip straight to
+if you want your own copy), then run the
+[independent model review](#independent-model-review-before-tagging) above
+against `git diff <last-tag>..validated-rc`, then skip straight to
 [Tag the release](#tag-the-release) below. There is no candidate branch to
 create, stabilize, or merge back — the validated SHA already is `main`.
 
@@ -202,6 +238,10 @@ exact bytes, unfiltered in a single instrumentation process (issue #2474).
 
 Don't fake a PASS. Don't treat a cancelled or in-progress Tests run as green.
 Don't look for a way around the nightly fault gate — there isn't one.
+
+Once green, run the
+[independent model review](#independent-model-review-before-tagging) above
+against `git diff <last-tag>..<candidate-sha>` before moving to step 4.
 
 ### 4. Merge the candidate back to `main`
 

@@ -96,7 +96,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { nowMs },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -133,7 +133,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -156,7 +156,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -198,7 +198,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -219,7 +219,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -262,7 +262,7 @@ class GraceCoordinatorTest {
             connections = registry,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
 
@@ -313,7 +313,7 @@ class GraceCoordinatorTest {
             connections = registryOne,
             service = serviceOne,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorOne.register(application)
@@ -324,7 +324,7 @@ class GraceCoordinatorTest {
             connections = registryTwo,
             service = serviceTwo,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         // Simulates a later test method's fresh Hilt component handing a NEW
@@ -393,7 +393,7 @@ class GraceCoordinatorTest {
             connections = registryOne,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorOne.register(application)
@@ -414,7 +414,7 @@ class GraceCoordinatorTest {
             connections = registryTwo,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorTwo.register(application)
@@ -477,7 +477,7 @@ class GraceCoordinatorTest {
             connections = registryOne,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorOne.register(application)
@@ -490,7 +490,7 @@ class GraceCoordinatorTest {
             connections = registryTwo,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorTwo.register(application)
@@ -533,7 +533,7 @@ class GraceCoordinatorTest {
             connections = registryOne,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorOne.register(application)
@@ -542,7 +542,7 @@ class GraceCoordinatorTest {
             connections = registryTwo,
             service = service,
             clock = { 0L },
-            graceMs = GRACE_MS,
+            graceMs = { GRACE_MS },
             dispatcher = dispatcher,
         )
         coordinatorTwo.register(application)

@@ -48,11 +48,17 @@ import kotlinx.coroutines.flow.asStateFlow
  * [AppSettings.voiceLanguage] is written here and read by nothing yet: app2's
  * dictation calls the recognizer with no language hint until task P-2 lands the
  * voice stack, which owns that call site. [AppSettings.usageWarnThresholdPercent]
- * is likewise the usage panel's (task P-5) to read.
- * [AppSettings.backgroundGraceMillis] is task U-8's. Each is a settings-surface
+ * is likewise the usage panel's (task P-5) to read. Each is a settings-surface
  * value its owning task consumes; the alternative — landing the screen without
  * them and editing it three more times — is worse. They are called out here so
  * "nothing reads this" is a known state, not a discovery.
+ *
+ * [AppSettings.backgroundGraceMillis] WAS on that list and no longer is: issue
+ * #2488 is what "a known state" turns into when nobody comes back for it — the
+ * row shipped, `AppModule.provideGraceCoordinator` never passed it, and the
+ * picker changed nothing for a user who moved it. It is now read per armed
+ * background window straight off [settings], so a change takes effect on the
+ * next background rather than the next process.
  */
 @Singleton
 class SettingsRepository @Inject constructor(

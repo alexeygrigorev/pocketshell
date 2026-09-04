@@ -25,6 +25,7 @@ import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.hosts.HostImporter
 import com.pocketshell.next.hosts.SshKeyStore
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.terminal.AndroidGraceServiceControl
 import com.pocketshell.next.terminal.ForegroundSignal
 import com.pocketshell.next.terminal.GraceCoordinator
@@ -270,16 +271,41 @@ object AppModule {
      * close on every connection and cancel only its own.
      *
      * Provided rather than `@Inject`-annotated so the class keeps the plan's
-     * §C.4 constructor — a clock and a grace default a test can substitute
+     * §C.4 constructor — a clock and a grace window a test can substitute
      * without a graph. [com.pocketshell.next.MainActivity] is what calls
      * `register()`; nothing here starts anything eagerly.
+     *
+     * ## The window comes from Settings (task P-6, issue #2488)
+     *
+     * [com.pocketshell.next.settings.AppSettings.backgroundGraceMillis] is a
+     * user-facing Settings row. This provider used to build the coordinator
+     * with no window argument at all, so the row was inert: every window was
+     * the class default no matter which option was picked.
+     *
+     * It is passed as a SUPPLIER over [SettingsRepository]'s hot snapshot, not
+     * as the value read here, because BOTH of these are process-lifetime
+     * `@Singleton`s: a value read at graph-construction time is read once per
+     * process, so changing the setting would only take effect after the process
+     * died — an inert setting with extra steps. The supplier is called once per
+     * armed window (see [GraceCoordinator.graceMs]), which is the moment the
+     * value is actually needed and the only moment it can be fresh.
+     *
+     * Reading `settings.value` costs nothing here: [SettingsRepository] holds
+     * the snapshot in memory and its one lazy disk read has already happened —
+     * `MainActivity` collects the same flow to seed `LocalAppSettings`, and
+     * there is no window to arm before a UI existed to open a connection from.
      */
     @Provides
     @Singleton
     fun provideGraceCoordinator(
         connections: ConnectionsRegistry,
         service: GraceServiceControl,
-    ): GraceCoordinator = GraceCoordinator(connections = connections, service = service)
+        settings: SettingsRepository,
+    ): GraceCoordinator = GraceCoordinator(
+        connections = connections,
+        service = service,
+        graceMs = { settings.settings.value.backgroundGraceMillis },
+    )
 
     // -------------------------------------------------------------------------
     // Diagnostics (task P-10): generic bounded event-log recorder. `crash/`

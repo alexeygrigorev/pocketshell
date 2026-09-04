@@ -246,6 +246,7 @@ full   shared/test-support/*         the ONE audited settle pump; every runTest 
 # hard cut (D22): the same blast radii exist, in the module that now holds
 # them. `app/src/proofTest/*` has no app2 successor and is simply gone.
 full   app2/src/main/java/com/pocketshell/next/di/*           the Hilt/DI graph wires every area together
+full   app2/src/test/java/com/pocketshell/next/di/*           tests of the Hilt/DI graph verify real cross-area wiring (#2488)
 full   app2/src/main/java/com/pocketshell/next/nav/*          the navigation graph reaches every screen
 full   app2/src/main/java/com/pocketshell/next/App.kt         application object: lifecycle fan-out to every surface
 full   app2/src/main/java/com/pocketshell/next/MainActivity.kt  single activity host for every destination
@@ -367,12 +368,17 @@ test   tools/pocketshell/tests/*     host-cli             full
 # ---------------------------------------------------------------------------
 # PER-CLASS OVERRIDES
 #
-# EMPTY since the rewrite's hard cut (D22). The only overrides this file ever
-# carried were the six conversation-source classes that lived in the old
+# The six conversation-source classes that lived in the old
 # com.pocketshell.app.tmux package while belonging to the conversation-agents
-# area; both the package and the area are gone. app2 has no class whose
-# regression class differs from its package's area — add a row here (and say
-# why) the first time one appears.
+# area are gone with that package and area (D22 hard cut).
+#
+# GraceWindowSettingWiringTest lives in com.pocketshell.next.di (the DI graph
+# package, `full` — no package-level area of its own to inherit), but its own
+# regression class is the grace window: it proves AppModule.provideGraceCoordinator
+# actually carries AppSettings.backgroundGraceMillis into GraceCoordinator
+# (#2488). GraceCoordinator is the tmux-session area's own subject, so that is
+# this class's area even though SettingsRepository is its secondary dependency.
+class  com.pocketshell.next.di.GraceWindowSettingWiringTest  tmux-session
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

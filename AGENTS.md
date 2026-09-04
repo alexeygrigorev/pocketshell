@@ -8,9 +8,9 @@ PocketShell is in active development and daily use as the maintainer's primary w
 
 - [docs/README.md](docs/README.md) - full doc index
 - [docs/documentation-guide.md](docs/documentation-guide.md) - read before restructuring, adding, or pruning docs; has the situation-to-doc lazy-load map
-- [docs/architecture.md](docs/architecture.md) - modules, sshj, tmux `-CC`, per-pane rendering
+- [docs/architecture.md](docs/architecture.md) - post-rewrite module map, core-transport/sshj, host-CLI attach, grace/reconnect
 - [docs/roadmap.md](docs/roadmap.md) - phased build and sizing
-- [docs/rewrite-implementation-plan.md](docs/rewrite-implementation-plan.md) - the app2 rewrite in progress on the `stable` branch: live task list, current scope decisions, lean-core release target
+- [docs/rewrite-implementation-plan.md](docs/rewrite-implementation-plan.md) - the app2 rewrite, merged to `main` in `4eca85a75`: remaining task list (X-1/X-3/X-4), scope decisions, lean-core release target
 - [docs/decisions.md](docs/decisions.md) - locked decisions, open questions, rejected alternatives
 - [docs/input-methods.md](docs/input-methods.md) - voice, key bar, snippets
 - [docs/agent-awareness.md](docs/agent-awareness.md) - agent detection, parsers, conversation view

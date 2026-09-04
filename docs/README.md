@@ -6,7 +6,7 @@ context; the README and current feature docs track released behavior.
 | File | What it covers |
 |---|---|
 | [vision.md](vision.md) | Original product brief — the why and the desired UX |
-| [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
+| [architecture.md](architecture.md) | Post-rewrite module map, tech stack, three load-bearing decisions, connect/session/terminal/grace design |
 | [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, OpenCode, and Grok Build in a tmux pane and showing a clean conversation view |

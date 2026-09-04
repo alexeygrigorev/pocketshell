@@ -274,17 +274,24 @@ class J03AttachAndTypeJourney {
      * keyboard (which must take rows and leave columns alone) and rotating
      * (which swaps them). Both must also come BACK — a resize path that only
      * ever shrinks leaves the session unusable after the keyboard closes.
+     *
+     * Then the awkward one: a viewport change that lands in the MIDDLE of a
+     * measurement. Each of those gestures is a stream of sizes (an IME inset
+     * animation reports a new one per frame), and the app must end up telling
+     * the remote the size it settled at — not one from the middle of the
+     * animation, which leaves the pane wrapping at a width the screen does not
+     * have and no further layout change to correct it.
      */
     @Test
     fun theRemoteTerminalSizeTracksTheKeyboardAndRotation() {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
-        val closed = remoteSize("keyboard down")
+        val closed = remoteSize("keyboard down", keyboardUp = false)
         JourneyScreenshots.capture("04-keyboard-down", JOURNEY)
 
         showKeyboard()
-        val opened = remoteSize("keyboard up")
+        val opened = remoteSize("keyboard up", keyboardUp = true)
         JourneyScreenshots.capture("05-keyboard-up", JOURNEY)
         assertTrue(
             "the keyboard must cost the remote rows: closed=$closed opened=$opened",
@@ -297,7 +304,7 @@ class J03AttachAndTypeJourney {
         )
 
         hideKeyboard()
-        val reclosed = remoteSize("keyboard down again")
+        val reclosed = remoteSize("keyboard down again", keyboardUp = false)
         assertEquals(
             "closing the keyboard must give the rows back: was $closed, now $reclosed",
             closed,
@@ -305,7 +312,7 @@ class J03AttachAndTypeJourney {
         )
 
         rotate(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
-        val landscape = remoteSize("landscape")
+        val landscape = remoteSize("landscape", keyboardUp = false)
         JourneyScreenshots.capture("06-landscape", JOURNEY)
         assertTrue(
             "landscape must widen the remote terminal: portrait=$closed landscape=$landscape",
@@ -317,11 +324,29 @@ class J03AttachAndTypeJourney {
         )
 
         rotate(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
-        val backToPortrait = remoteSize("portrait again")
+        val backToPortrait = remoteSize("portrait again", keyboardUp = false)
         assertEquals(
             "rotating back must restore the size: was $closed, now $backToPortrait",
             closed,
             backToPortrait,
+        )
+
+        // A viewport change can land in the MIDDLE of a command, and on a
+        // device with no hardware keyboard the framework raises the IME by
+        // itself when the terminal takes focus — so this is not a contrived
+        // race, it is the one that left the CI run of this journey waiting a
+        // full minute for a `stty size` reply describing a size the remote no
+        // longer had. Both ends must converge afterwards, on the size the
+        // layout settled at.
+        val afterMidFlightKeyboard =
+            remoteSize("a keyboard arriving mid-measurement", keyboardUp = false) {
+                showKeyboard()
+            }
+        assertEquals(
+            "a viewport change during a measurement must still leave both ends " +
+                "agreeing: was $closed, now $afterMidFlightKeyboard",
+            closed,
+            afterMidFlightKeyboard,
         )
     }
 
@@ -447,9 +472,11 @@ class J03AttachAndTypeJourney {
     /**
      * The same poll over the RAW transcript, newlines intact.
      *
-     * `stty size` prints `rows cols` on a line of its own, so the U-5 resize
-     * assertions have to see line boundaries — squashing them would turn
-     * `64 90` followed by the next prompt into one run of digits and letters.
+     * Line boundaries matter to anything reading `stty size`, which prints
+     * `rows cols` on a line of its own: squashing them would turn `64 90`
+     * followed by the next prompt into one run of digits and letters. The U-5
+     * resize measurements read the same raw text through [sizeLines], on their
+     * own retry loop ([remoteSize]).
      */
     private fun awaitRenderedTranscript(what: String, predicate: (String) -> Boolean): String {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
@@ -605,17 +632,113 @@ class J03AttachAndTypeJourney {
      * flake generator. Then `stty size` is typed INTO the session and required
      * to report that exact size: the pane geometry proves the resize reached
      * tmux, and `stty` proves it reached the process that actually wraps text.
+     *
+     * ## Why the whole thing is a RETRY loop, and why it pins the keyboard
+     *
+     * Both readings describe a live phone, and a phone's viewport moves on its
+     * own. Two things do it here: the framework raises the IME by itself when
+     * a text-editor view takes focus on a device with no hardware keyboard
+     * (which `typeLine` triggers), and an inset animation is still settling
+     * for a few frames after the test thinks it is done. A measurement that
+     * read the host once and then waited for the shell to confirm THAT number
+     * can never recover from either — the remote has legitimately moved on,
+     * and the reply describing the new size is not the one being waited for.
+     * (That is exactly how this journey failed in CI: a 60 s wait for
+     * `49 63` from a session that had already been resized to 24 rows.)
+     *
+     * So each attempt re-asserts the keyboard state it is measuring under,
+     * re-reads the host, and asks again; an attempt whose host size moves
+     * underneath it is abandoned early rather than waited out. What is being
+     * asserted is unchanged and no weaker: both ends must agree on one size,
+     * measured with the keyboard where the caller says it is.
+     *
+     * @param keyboardUp the IME state this measurement is about. Re-asserted
+     *   (not assumed) on every attempt, because the framework can raise the
+     *   keyboard between two of them.
+     * @param viewportMoves runs after the host has been read and before the
+     *   command is typed — the seam a real mid-measurement viewport change
+     *   arrives through, and the only way to pin that the loop survives one.
      */
-    private fun remoteSize(what: String): RemoteSize {
-        val host = settledHostPaneSize(what)
-        typeLine("stty size")
-        awaitRenderedTranscript("$what: stty size to report ${host.rows} ${host.cols}") {
-            sizeLines(it).lastOrNull() == "${host.rows} ${host.cols}"
+    private fun remoteSize(
+        what: String,
+        keyboardUp: Boolean,
+        viewportMoves: () -> Unit = {},
+    ): RemoteSize {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var host: RemoteSize? = null
+        // Once, on the first attempt: it stands for a one-off event (the IME
+        // arriving), and re-running it every time would be a viewport that
+        // never stops moving, which is a different — and unmeasurable — thing.
+        var pendingMove = viewportMoves
+        while (SystemClock.elapsedRealtime() < deadline) {
+            ensureKeyboard(visible = keyboardUp)
+            val current = settledHostPaneSize(what)
+            host = current
+            pendingMove()
+            pendingMove = {}
+            // Counted BEFORE typing so the assertion needs a FRESH reply: two
+            // consecutive measurements can legitimately expect the same
+            // numbers (closing the keyboard restores the size it opened on),
+            // and matching the previous measurement's line would be a green
+            // assertion for a command that never ran.
+            val repliesBefore = sizeLines(renderedTranscript()).size
+            typeLine("stty size")
+            if (awaitSizeReply(current, repliesBefore)) {
+                // Printed so a run's own log carries the evidence: a green
+                // assertion that both ends agree says nothing about whether the
+                // number CHANGED.
+                println("J03_REMOTE_SIZE $what stty=${current.rows} ${current.cols} pane=$current")
+                return current
+            }
         }
-        // Printed so a run's own log carries the evidence: a green assertion
-        // that both ends agree says nothing about whether the number CHANGED.
-        println("J03_REMOTE_SIZE $what stty=${host.rows} ${host.cols} pane=$host")
-        return host
+        val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
+        throw AssertionError(
+            "$what: the phone and the host never agreed on a terminal size within " +
+                "${TIMEOUT_MS}ms (last host pane=$host).\n" +
+                "Screen state: ${screenDiagnosis()}\n" +
+                "Rendered viewport was:\n" + renderedTranscript() + "\n" +
+                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "Screenshot: ${shot.absolutePath}",
+        )
+    }
+
+    /**
+     * Waits for a FRESH `stty size` reply — one beyond the [repliesBefore]
+     * already on screen — to say [host], giving up as soon as the host's own
+     * pane size stops being [host].
+     *
+     * The early give-up is the point: once the pane has moved, no reply to the
+     * command just typed can ever match, so waiting out the clock only turns a
+     * recoverable situation into a timeout.
+     */
+    private fun awaitSizeReply(host: RemoteSize, repliesBefore: Int): Boolean {
+        val expected = "${host.rows} ${host.cols}"
+        val deadline = SystemClock.elapsedRealtime() + SIZE_REPLY_TIMEOUT_MS
+        var nextHostCheck = SystemClock.elapsedRealtime() + SIZE_SETTLE_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            val replies = sizeLines(renderedTranscript())
+            if (replies.size > repliesBefore && replies.last() == expected) return true
+            if (SystemClock.elapsedRealtime() >= nextHostCheck) {
+                if (hostPaneSize() != host) return false
+                nextHostCheck = SystemClock.elapsedRealtime() + SIZE_SETTLE_MS
+            }
+            SystemClock.sleep(POLL_MS)
+        }
+        return false
+    }
+
+    /**
+     * Puts the keyboard where a measurement says it is, and does nothing when
+     * it is already there.
+     *
+     * Cheap on purpose: [showKeyboard]/[hideKeyboard] each wait out an inset
+     * animation, which is the right price for a state CHANGE and the wrong one
+     * for the common case of "still where we left it".
+     */
+    private fun ensureKeyboard(visible: Boolean) {
+        if (imeInsetBottom() > 0 == visible) return
+        if (visible) showKeyboard() else hideKeyboard()
     }
 
     /**
@@ -691,17 +814,22 @@ class J03AttachAndTypeJourney {
      * change for the terminal to shrink. If it never does, the test says so
      * instead of quietly asserting a resize that had no cause.
      */
+    /** The framework's own IME inset, in pixels. 0 when the keyboard is down. */
+    private fun imeInsetBottom(): Int {
+        compose.waitForIdle()
+        return compose.runOnUiThread {
+            ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
+                ?.getInsets(WindowInsetsCompat.Type.ime())
+                ?.bottom
+                ?: 0
+        }
+    }
+
     private fun awaitImeInset(visible: Boolean) {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var bottom = -1
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
-            bottom = compose.runOnUiThread {
-                ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
-                    ?.getInsets(WindowInsetsCompat.Type.ime())
-                    ?.bottom
-                    ?: 0
-            }
+            bottom = imeInsetBottom()
             if ((bottom > 0) == visible) {
                 // Let the inset animation finish before anything measures.
                 SystemClock.sleep(IME_SETTLE_MS)
@@ -828,6 +956,17 @@ class J03AttachAndTypeJourney {
 
         /** Gap between the two agreeing reads that count as a settled size. */
         const val SIZE_SETTLE_MS = 500L
+
+        /**
+         * How long ONE `stty size` attempt waits for its reply before the
+         * measurement re-reads the host and asks again.
+         *
+         * Generous next to the round trip it covers (typing to rendered reply
+         * is well under a second against the Docker fixture) but far short of
+         * [TIMEOUT_MS], so a viewport that moved mid-measurement costs one
+         * retry rather than the whole budget.
+         */
+        const val SIZE_REPLY_TIMEOUT_MS = 10_000L
 
         const val JOURNEY = "j03-attach-type"
 

@@ -70,13 +70,21 @@ class GraceService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val deadlineMs = intent?.getLongExtra(EXTRA_DEADLINE_MS, 0L) ?: 0L
+        // start() already called startForegroundService(), which promises the OS
+        // a startForeground() call on EVERY path through here, including one
+        // that immediately stops again — skipping it is what crashes the whole
+        // process with ForegroundServiceDidNotStartInTimeException rather than
+        // just failing this one grace window (a slow-dispatch onStartCommand
+        // under CPU contention can let a deadline computed in the future at
+        // call time have already passed by the time this runs).
+        startInForeground(buildNotification(deadlineMs))
         if (deadlineMs <= System.currentTimeMillis()) {
             // A restart delivery with no extras, or a deadline that has already
-            // passed: there is nothing to hold and nothing truthful to show.
+            // passed: there is nothing left to hold.
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        startInForeground(buildNotification(deadlineMs))
         acquireWakeLock(deadlineMs)
         // The service holds an already-live in-process transport. A recreated
         // process has no session to keep alive, so Android must not restart it.

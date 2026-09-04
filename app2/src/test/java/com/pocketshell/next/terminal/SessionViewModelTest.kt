@@ -628,6 +628,96 @@ class SessionViewModelTest {
         clear()
     }
 
+    /**
+     * Task U-5, and the defect the J03 resize journey caught: ONE keyboard
+     * toggle is a STREAM of sizes, and the remote must be told once, at the
+     * size the layout settled on.
+     *
+     * The sizes below are the ones a Pixel-class AVD really reported for a
+     * single IME inset animation (captured off `SessionScreen`'s
+     * `onSizeChanged` while J03 ran): ten of them, 13–30 ms apart. Sending a
+     * `window-change` per frame is not merely wasteful — `window-change`
+     * carries no reply by protocol, so a burst whose requests are applied out
+     * of order, or whose last one is coalesced away by a busy remote, leaves
+     * the remote at an INTERMEDIATE size that this ViewModel then believes is
+     * the settled one and never corrects. Observed on a device as a 63x45
+     * terminal whose remote was left at 63x41 after the keyboard closed.
+     */
+    @Test
+    fun `an animation's worth of resizes is one window-change at the settled size`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            livePty()
+            val viewModel = viewModel()
+
+            viewModel.open(hostId, SESSION)
+            settle()
+
+            listOf(44, 39, 35, 33, 31, 29, 27, 26, 25, 24).forEach { rows ->
+                viewModel.onResized(63, rows)
+                // One animation frame apart — faster than the settle window, so
+                // none of these is the size the layout ends at.
+                advanceTimeBy(ANIMATION_FRAME_MS)
+                runCurrent()
+            }
+            settle()
+
+            // Read and TEAR DOWN before asserting: the bridge's input pump is a
+            // `delay` loop with no terminal condition, so a failed assertion
+            // that skipped `clear()` would leave `runTest`'s own end-of-test
+            // `advanceUntilIdle` spinning — a red test that hangs instead of
+            // reporting.
+            val resizes = pty().resizes.toList()
+            val emulator = (viewModel.uiState.value as SessionUiState.Live).terminal.emulator
+            val grid = emulator.mColumns to emulator.mRows
+            clear()
+
+            // The invariant, said twice on purpose. First the one that matters
+            // to a user: whatever crossed the wire, the LAST thing the remote
+            // was told is the size the layout settled on.
+            assertEquals(
+                "the remote must end up at the size the animation settled on",
+                63 to 24,
+                resizes.lastOrNull(),
+            )
+            // Then the one that makes the first robust: it settled there
+            // because ONE request was sent, not because ten happened to arrive
+            // in order. `window-change` carries no reply, so a burst of ten is
+            // ten chances for the remote to end up somewhere else with the app
+            // none the wiser.
+            assertEquals(
+                "one window-change per settled layout, not one per animation frame",
+                listOf(63 to 24),
+                resizes,
+            )
+            assertEquals(63 to 24, grid)
+        }
+
+    /**
+     * ...and the coalescing never swallows a size: the next gesture is sent in
+     * its turn, in the order the viewport moved.
+     */
+    @Test
+    fun `a size reported after the settled resize still reaches the remote`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            livePty()
+            val viewModel = viewModel()
+
+            viewModel.open(hostId, SESSION)
+            settle()
+
+            viewModel.onResized(63, 45)
+            settle()
+            viewModel.onResized(63, 20)
+            settle()
+
+            val resizes = pty().resizes.toList()
+            clear()
+
+            assertEquals(listOf(63 to 45, 63 to 20), resizes)
+        }
+
     /** A resize that arrives before the attach lands still opens at that size. */
     @Test
     fun `a resize before the attach opens the PTY at the reported size`() = runTest(dispatcher) {
@@ -795,5 +885,13 @@ class SessionViewModelTest {
          */
         const val SETTLE_STEP_MS = 100L
         const val SETTLE_ROUNDS = 4
+
+        /**
+         * One frame of an IME inset animation, as measured on a Pixel-class
+         * AVD (13–30 ms between reported sizes). Deliberately well under the
+         * ViewModel's own settle window, because the property under test is
+         * what happens to sizes that arrive faster than the layout settles.
+         */
+        const val ANIMATION_FRAME_MS = 20L
     }
 }

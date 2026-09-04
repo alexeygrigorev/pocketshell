@@ -54,7 +54,6 @@ COPY tests/docker/agent-bin-old-cli/pocketshell /usr/local/bin/pocketshell
 
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
-COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts
 
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \

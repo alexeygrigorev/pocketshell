@@ -876,7 +876,7 @@ class AutoForwarderSupervisorTest {
         /** True while the transport has not settled into Lost/Closed. */
         val isConnected: Boolean
             get() = when (delegate.state.value) {
-                is TransportState.Lost, TransportState.Closed -> false
+                is TransportState.Lost, is TransportState.Closed -> false
                 else -> true
             }
 

@@ -2,6 +2,7 @@ package com.pocketshell.next.terminal
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.core.transport.CloseReason
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.core.transport.PtyChannel
@@ -106,11 +107,15 @@ sealed interface SessionUiState {
  * distinction is the transport's own: sshj carries `exit-status` on the channel
  * close, and a dropped socket has none to carry.
  *
- * A third case (issue #2477) also ends with no status: [HostConnection.close]
- * called on the connection this screen is watching — deliberately, by
- * something other than a network failure. That is NOT a drop either, even
- * though the channel dies the same way a dropped socket's does; see
- * [isDeliberateClose].
+ * A third case (issue #2477) also ends with no status: the connection this
+ * screen is watching being closed deliberately, by something other than a
+ * network failure. The channel dies the same way a dropped socket's does, so
+ * the discriminator has to come from the transport's own
+ * [TransportState.Closed] — and, since issue #2487, from the [CloseReason] it
+ * carries, because "closed on purpose" is two opposite cases: a close someone
+ * ASKED for ends this screen, while the D21 grace window expiring is the app
+ * letting go of a link whose remote session is still alive, and is a reconnect
+ * exactly like a dropped one. See [isFinalClose].
  *
  * ## Nothing runs while the app is away
  *
@@ -174,11 +179,11 @@ class SessionViewModel @Inject constructor(
      * The connection [channel] is currently attached through (issue #2477).
      *
      * Kept only so a channel that ends with NO exit status can be told apart
-     * from a genuine network drop: [HostConnection.close] tears the PTY down
-     * the same way a dead socket does (no clean exit-status), but it also
-     * flips THIS field's state to [TransportState.Closed] rather than
-     * [TransportState.Lost] — the one signal that distinguishes "someone
-     * closed this on purpose" from "the link went away". See [isDeliberateClose].
+     * from a genuine network drop: a deliberate close tears the PTY down the
+     * same way a dead socket does (no clean exit-status), but it also flips
+     * THIS field's state to [TransportState.Closed] rather than
+     * [TransportState.Lost], carrying the [CloseReason] that says which kind of
+     * deliberate it was. See [isFinalClose].
      */
     private var connection: HostConnection? = null
 
@@ -293,7 +298,7 @@ class SessionViewModel @Inject constructor(
                 // ended the screen while a drop noticed by the output pump
                 // reconnected.
                 val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { target.exit.await() }
-                settleEnd(target, status, deliberateClose = status == null && isDeliberateClose())
+                settleEnd(target, status, finalClose = status == null && isFinalClose())
             }
         }
     }
@@ -482,36 +487,64 @@ class SessionViewModel @Inject constructor(
         watchJob = viewModelScope.launch {
             launch {
                 val status = pty.exit.await()
-                settleEnd(pty, status, deliberateClose = status == null && isDeliberateClose())
+                settleEnd(pty, status, finalClose = status == null && isFinalClose())
             }
             launch {
-                connection.state.first { it is TransportState.Lost }
-                settleEnd(pty, status = null)
+                // EVERY terminal transport state, not just [TransportState.Lost]
+                // (issue #2487): a connection dropped by the D21 grace window
+                // settles to [TransportState.Closed], and a watcher that only
+                // ever woke for `Lost` would sit here until the PTY's own exit
+                // happened to resolve — or forever, if it never did. What the
+                // state MEANS is then the same question everywhere else asks.
+                val ended = connection.state.first {
+                    it is TransportState.Lost || it is TransportState.Closed
+                }
+                settleEnd(pty, status = null, finalClose = ended.endsTheSession())
             }
         }
         return AttachOutcome.Attached
     }
 
     /**
-     * True when [connection] ended up [TransportState.Closed] rather than
-     * [TransportState.Lost] (issue #2477).
+     * True when [connection] was closed because someone ASKED for it to end
+     * (issues #2477 and #2487) — the one close that means this screen is over.
      *
      * A PTY that ends with no exit status ordinarily means the link dropped —
-     * worth a reconnect. But [HostConnection.close] tears the channel down the
-     * exact same way (no clean exit-status) when something OTHER than a
-     * network failure closed the connection deliberately: nothing in
-     * production calls that today, but a test's own end-of-test hygiene
-     * (`ConnectionsRegistry.closeAll()`, run while this screen's watcher is
-     * still alive) does, and so would a future "disconnect" action. Redialling
-     * in that case does not reconnect anything the user asked for — it opens a
-     * BRAND NEW connection nobody is watching, orphaned in the registry until
-     * the next background/grace cycle finds it "live" and holds it open for a
-     * session that no longer has a screen (exactly what stranded J06's
-     * `backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification` on a shared
-     * full-suite run — a PREVIOUS test's deliberate close redialled and left
-     * this orphan behind).
+     * worth a reconnect. A deliberate close tears the channel down the exact
+     * same way (no clean exit-status), so [TransportState] is the only place
+     * the difference survives. But "deliberate" is not one thing:
+     *
+     * - [CloseReason.Requested] — a test's own end-of-test hygiene
+     *   (`ConnectionsRegistry.closeAll()`, run while this screen's watcher is
+     *   still alive), and so would a future "disconnect" action. Redialling
+     *   here does not reconnect anything the user asked for; it opens a BRAND
+     *   NEW connection nobody is watching, orphaned in the registry until the
+     *   next background/grace cycle finds it "live" and holds it open for a
+     *   session that no longer has a screen (exactly what stranded J06's
+     *   `backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification` on a shared
+     *   full-suite run — issue #2477). So: the screen ends.
+     *
+     * - [CloseReason.GraceExpired] — the D21 background window elapsing, which
+     *   is the app deliberately dropping the LINK, with the remote session
+     *   still running on the host. Issue #2477's version of this check read
+     *   `Closed` alone and swept this case up with the one above, on the stated
+     *   (and wrong) assumption that "nothing in production calls close today":
+     *   every 90-second background does, through
+     *   [HostConnection.scheduleGraceClose]. That turned the single most common
+     *   daily journey — pocket the phone, come back later — into a false
+     *   "the connection was closed" error over a live session (issue #2487).
+     *   So: reconnect, exactly like a dropped link.
      */
-    private fun isDeliberateClose(): Boolean = connection?.state?.value is TransportState.Closed
+    private fun isFinalClose(): Boolean = connection?.state?.value?.endsTheSession() == true
+
+    /**
+     * Whether a terminal [TransportState] means the SESSION is over, rather
+     * than just this attach. Only a [CloseReason.Requested] close does;
+     * [TransportState.Lost] and a [CloseReason.GraceExpired] close are both
+     * "the link went away under a session that is still there".
+     */
+    private fun TransportState.endsTheSession(): Boolean =
+        this is TransportState.Closed && reason == CloseReason.Requested
 
     private suspend fun openPty(connection: HostConnection, command: String): PtyChannel =
         withContext(dispatcher) {
@@ -532,35 +565,38 @@ class SessionViewModel @Inject constructor(
         if (channel !== ended) return
         viewModelScope.launch {
             val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { ended.exit.await() }
-            settleEnd(ended, status, deliberateClose = status == null && isDeliberateClose())
+            settleEnd(ended, status, finalClose = status == null && isFinalClose())
         }
     }
 
     /**
      * The channel [ended] is over. [status] is the remote's exit status, or
      * null when there was none — which is the whole discriminator between an
-     * ended session and a dropped link (see the class doc). [deliberateClose]
-     * (issue #2477, see [isDeliberateClose]) is the finer discriminator WITHIN
-     * "no status": a connection closed on purpose is reported as ended, the
-     * same as a clean remote exit, rather than redialled.
+     * ended session and a dropped link (see the class doc). [finalClose]
+     * (issues #2477/#2487, see [isFinalClose]) is the finer discriminator
+     * WITHIN "no status": a connection someone ASKED to close is reported as
+     * ended, the same as a clean remote exit, rather than redialled.
+     *
+     * The spent channel is retired the SAME way in both outcomes, through
+     * [releaseChannel]. That is not tidiness: "the screen has failed" is not
+     * "this ViewModel is dead" — a [SessionUiState.Failed] screen still offers
+     * [retryNow], which reattaches onto THIS terminal. Ending the bridge with
+     * [TerminalPtyBridge.stop] here (as this did before issue #2487) closed the
+     * vendored session's byte queues one-way, so that Retry attached
+     * successfully onto a permanently unwritable emulator: `Live` on screen, a
+     * frozen last frame, and every keystroke and output frame dropped. Only
+     * [onCleared] — where the ViewModel really is over — stops the bridge.
      */
-    private fun settleEnd(ended: PtyChannel, status: Int?, deliberateClose: Boolean = false) {
+    private fun settleEnd(ended: PtyChannel, status: Int?, finalClose: Boolean = false) {
         if (channel !== ended) return
-        if (status != null || deliberateClose) {
-            // Both watchers of `attachOnce`'s watchJob have now been overtaken
-            // by events: the one that just fired settled us here, and the
-            // sibling watching `connection.state` for Lost must stop too — a
-            // deliberately CLOSED connection's state is terminal and sticky
-            // (never becomes Lost), so leaving that watcher running would park
-            // it forever. Pre-existing for a clean remote exit too (status !=
-            // null): once the screen has failed there is nothing left for
-            // either watcher to report.
-            watchJob?.cancel()
-            watchJob = null
-            bridge?.stop()
-            bridge = null
-            channel = null
-            fail(if (deliberateClose) closedMessage() else endedMessage(status))
+        // Both watchers of `attachOnce`'s watchJob have now been overtaken by
+        // events: the one that just fired settled us here, and its sibling has
+        // nothing left to report either. [releaseChannel] cancels them — a
+        // CLOSED connection's state is terminal and sticky, so a watcher left
+        // waiting on it would park forever.
+        releaseChannel()
+        if (status != null || finalClose) {
+            fail(if (finalClose) closedMessage() else endedMessage(status))
             return
         }
         beginReconnect()
@@ -570,11 +606,11 @@ class SessionViewModel @Inject constructor(
 
     /**
      * The link went away under a live session: keep the last frame, say so, and
-     * start the ladder.
+     * start the ladder. The spent channel has already been retired by
+     * [settleEnd], this ladder's only caller.
      */
     private fun beginReconnect() {
         val emulator = terminal ?: return fail(endedMessage(null))
-        releaseChannel()
         // Said immediately, before the first rung, so a user coming back to the
         // screen never sees a stale "attached" over a dead session.
         _uiState.value = SessionUiState.Reconnecting(attempt = 0, retryInMs = 0, terminal = emulator)
@@ -643,6 +679,12 @@ class SessionViewModel @Inject constructor(
      * exists. `ByteQueue.close()` is one-way, so stopping the bridge the normal
      * way would make this screen's [TerminalSession] permanently unwritable and
      * force the reattach to build a fresh, empty one: a cleared screen.
+     *
+     * The single retire path for EVERY way an attach can end (issue #2487):
+     * a drop, a clean remote exit and a requested close all leave a screen that
+     * can still be reattached from — by the ladder or by [retryNow] — so none
+     * of them may take the emulator's queues down with them. Only [onCleared],
+     * where the ViewModel itself is over, stops the bridge.
      */
     private fun releaseChannel() {
         watchJob?.cancel()
@@ -678,8 +720,9 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * What the user reads when THIS screen's connection was closed on purpose
-     * rather than lost (issue #2477, [isDeliberateClose]).
+     * What the user reads when THIS screen's connection was closed because
+     * someone asked for it to end, rather than lost or handed back by the grace
+     * window (issues #2477/#2487, [isFinalClose]).
      */
     private fun closedMessage(): String {
         val name = sessionLabel

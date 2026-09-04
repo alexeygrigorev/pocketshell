@@ -166,7 +166,10 @@ class ConnectionsRegistry(
     private companion object {
         fun TransportState.isLive(): Boolean = when (this) {
             TransportState.Connecting, TransportState.Connected -> true
-            is TransportState.Lost, TransportState.Closed -> false
+            // Both terminal states are spent, whatever the close's reason: a
+            // grace-expired connection is as unusable as a requested-close one
+            // (issue #2487), and the caller gets a fresh dial either way.
+            is TransportState.Lost, is TransportState.Closed -> false
         }
 
         /**

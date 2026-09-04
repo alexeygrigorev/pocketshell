@@ -169,7 +169,7 @@ class RealHostConnectionGraceIntegrationTest {
             assertEquals("still-alive", connection.exec("echo still-alive").stdout.trim())
 
             val closed = withTimeoutOrNull(30_000) {
-                connection.state.first { it == TransportState.Closed }
+                connection.state.first { it is TransportState.Closed }
             }
             assertNotNull(
                 "grace close should have fired; state is still ${connection.state.value}",
@@ -245,7 +245,7 @@ class RealHostConnectionGraceIntegrationTest {
             )
 
             val closed = withTimeoutOrNull(30_000) {
-                connection.state.first { it == TransportState.Closed }
+                connection.state.first { it is TransportState.Closed }
             }
             assertNotNull(
                 "the replacement close should fire; state is still ${connection.state.value}",
@@ -254,7 +254,10 @@ class RealHostConnectionGraceIntegrationTest {
             // Cancelling the superseded handle after the fact is a no-op, and
             // the connection stays closed (nothing resurrects it).
             longWindow.cancel()
-            assertEquals(TransportState.Closed, connection.state.value)
+            assertEquals(
+                TransportState.Closed(CloseReason.GraceExpired),
+                connection.state.value,
+            )
         } finally {
             connection.close()
         }
@@ -270,13 +273,26 @@ class RealHostConnectionGraceIntegrationTest {
         val connection = connect()
         val closed = withTimeoutOrNull(30_000) {
             connection.scheduleGraceClose(GRACE_MS)
-            connection.state.first { it is TransportState.Lost || it == TransportState.Closed }
+            connection.state.first { it is TransportState.Lost || it is TransportState.Closed }
         }
-        assertEquals("a grace close is deliberate: Closed, never Lost", TransportState.Closed, closed)
+        // ...and it says WHY it is closed: `GraceExpired`, never `Requested`.
+        // The two are opposite instructions to a session screen — a requested
+        // close ends it, an expired grace window reattaches on return (issue
+        // #2487) — so this is the load-bearing half of the assertion, not a
+        // decoration on it.
+        assertEquals(
+            "a grace close is deliberate: Closed(GraceExpired), never Lost",
+            TransportState.Closed(CloseReason.GraceExpired),
+            closed,
+        )
 
-        // An explicit close afterwards is a harmless no-op.
+        // An explicit close afterwards is a harmless no-op — and must NOT
+        // rewrite the reason under a screen that already read it.
         connection.close()
-        assertEquals(TransportState.Closed, connection.state.value)
+        assertEquals(
+            TransportState.Closed(CloseReason.GraceExpired),
+            connection.state.value,
+        )
 
         // SFTP/PTY are separate tasks; exec is the channel type this task can
         // assert on, and it must not hang.
@@ -287,7 +303,7 @@ class RealHostConnectionGraceIntegrationTest {
         assertTrue("expected an IOException, got $failure", failure is IOException)
         assertNull(
             "no further state change should follow",
-            withTimeoutOrNull(1_000) { connection.state.first { it != TransportState.Closed } },
+            withTimeoutOrNull(1_000) { connection.state.first { it !is TransportState.Closed } },
         )
     }
 }

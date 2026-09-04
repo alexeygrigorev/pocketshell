@@ -19,7 +19,7 @@ import net.schmizz.sshj.transport.DisconnectListener
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The sshj-backed [HostConnection] (rewrite task T-2).
@@ -32,8 +32,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   and a non-zero remote exit that is a normal result, never an exception.
  * - [state]: flips to [TransportState.Lost] from sshj's disconnect listener the
  *   moment the transport drops (network failure or a far-end close), and to
- *   [TransportState.Closed] on a deliberate [close]. Both are terminal — a
- *   spent instance is replaced by dialling a new one via the factory.
+ *   [TransportState.Closed] — carrying WHICH deliberate path closed it, see
+ *   [CloseReason] — on [close] or on the grace scheduler's deadline. Both are
+ *   terminal: a spent instance is replaced by dialling a new one via the
+ *   factory.
  *
  * [openPty] delegates to [PtyChannelImpl] (T-3), [sftp] to a cached
  * [SftpChannelImpl] (T-4), and [scheduleGraceClose] to [GraceCloseScheduler]
@@ -67,8 +69,19 @@ internal class RealHostConnection(
     private val _state = MutableStateFlow<TransportState>(TransportState.Connected)
     override val state: StateFlow<TransportState> = _state.asStateFlow()
 
-    /** True once [close] started; makes the disconnect listener report Closed, not Lost. */
-    private val closing = AtomicBoolean(false)
+    /**
+     * Non-null once [closeWith] started, holding WHY — which both makes the
+     * close one-shot (the CAS from null is the whole idempotence gate) and
+     * lets the disconnect listener report `Closed(thatReason)` rather than
+     * `Lost`.
+     *
+     * One atomic rather than a boolean plus a separate field because the
+     * listener can fire from sshj's own thread at any instant: a two-step
+     * "flag, then reason" would leave a window where a deliberate close is
+     * seen with the wrong (default) reason and settles the sticky terminal
+     * state to it forever.
+     */
+    private val closeReason = AtomicReference<CloseReason?>(null)
 
     init {
         // Installed after connect+auth (the factory hands over a live client),
@@ -76,14 +89,14 @@ internal class RealHostConnection(
         // isConnected re-check below rather than silently missed. sshj fires
         // this listener from BOTH TransportImpl.die(...) (network failure /
         // far-end close / reader EOF) and an explicit local disconnect —
-        // the `closing` flag disambiguates the deliberate path.
+        // `closeReason` disambiguates the deliberate path, and says which
+        // deliberate path it was (issue #2487).
         client.transport.setDisconnectListener(
             DisconnectListener { reason, message ->
                 settle(
-                    if (closing.get()) {
-                        TransportState.Closed
-                    } else {
-                        TransportState.Lost(describeDisconnect(reason?.toString(), message))
+                    when (val deliberate = closeReason.get()) {
+                        null -> TransportState.Lost(describeDisconnect(reason?.toString(), message))
+                        else -> TransportState.Closed(deliberate)
                     },
                 )
             },
@@ -261,15 +274,24 @@ internal class RealHostConnection(
      * in [GraceCloseScheduler]; it runs on this connection's [ioDispatcher], so
      * a test that injects a virtual-time dispatcher controls the grace timer.
      */
-    private val grace = GraceCloseScheduler(ioDispatcher) { close() }
+    private val grace = GraceCloseScheduler(ioDispatcher) { closeWith(CloseReason.GraceExpired) }
 
     override fun scheduleGraceClose(graceMs: Long): GraceHandle = grace.schedule(graceMs)
 
-    override suspend fun close() {
-        // Idempotent: only the first call touches the transport. Set `closing`
-        // BEFORE disconnecting so the disconnect listener classifies the drop
-        // as deliberate.
-        if (!closing.compareAndSet(false, true)) return
+    /**
+     * Closes because someone ASKED for this connection to end. The grace
+     * scheduler above is the other caller of [closeWith], and the difference
+     * between the two is exactly what [CloseReason] exists to record — see it
+     * for why a consumer must not treat them alike (issue #2487).
+     */
+    override suspend fun close() = closeWith(CloseReason.Requested)
+
+    private suspend fun closeWith(reason: CloseReason) {
+        // Idempotent: only the first call touches the transport. Recording the
+        // reason IS the gate, and it happens BEFORE disconnecting so the
+        // disconnect listener classifies the drop as deliberate — and as the
+        // right KIND of deliberate.
+        if (!closeReason.compareAndSet(null, reason)) return
         // Issue #2477: settle [state] to Closed BEFORE disconnecting, not
         // after. `client.disconnect()` cascades into closing every open
         // channel (sshj tears each one down as part of the same transport
@@ -286,7 +308,7 @@ internal class RealHostConnection(
         // #2477 reports). Setting the terminal state FIRST, before any
         // teardown that could resolve a channel's exit even begins, makes that
         // observation impossible by construction rather than by timing.
-        settle(TransportState.Closed)
+        settle(TransportState.Closed(reason))
         withContext(ioDispatcher) {
             runCatching { client.disconnect() }
         }
@@ -343,7 +365,7 @@ internal class RealHostConnection(
     private fun settle(terminal: TransportState) {
         _state.update { current ->
             when (current) {
-                is TransportState.Lost, TransportState.Closed -> current
+                is TransportState.Lost, is TransportState.Closed -> current
                 else -> terminal
             }
         }
@@ -353,8 +375,8 @@ internal class RealHostConnection(
         when (val current = _state.value) {
             is TransportState.Lost ->
                 throw IOException("$operation: connection lost (${current.cause})")
-            TransportState.Closed ->
-                throw IOException("$operation: connection closed")
+            is TransportState.Closed ->
+                throw IOException("$operation: connection closed (${current.reason})")
             else -> Unit
         }
     }

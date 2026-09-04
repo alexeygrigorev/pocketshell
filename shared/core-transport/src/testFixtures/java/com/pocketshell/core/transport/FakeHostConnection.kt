@@ -40,7 +40,8 @@ import java.io.IOException
  *   same way a real dead transport does.
  * - No timer ever runs: [scheduleGraceClose] only records a deadline (computed
  *   from the injected [nowMs] clock). Tests fire it explicitly with
- *   [fireGraceClose].
+ *   [fireGraceClose], which closes with [CloseReason.GraceExpired] the way the
+ *   real grace scheduler does — [close] uses [CloseReason.Requested].
  *
  * Not thread-safe against concurrent *scripting*; concurrent calls from the
  * code under test are guarded by an internal lock.
@@ -200,7 +201,10 @@ class FakeHostConnection(
     val scriptedExecRules: List<String>
         get() = synchronized(lock) { execRules.map { it.description } }
 
-    val isClosed: Boolean get() = _state.value == TransportState.Closed
+    val isClosed: Boolean get() = _state.value is TransportState.Closed
+
+    /** Why this connection was closed, or null while it is not closed. */
+    val closeReason: CloseReason? get() = (_state.value as? TransportState.Closed)?.reason
 
     // ------------------------------------------------------ HostConnection impl
 
@@ -274,31 +278,44 @@ class FakeHostConnection(
      * Simulates the pending grace timer elapsing. Does nothing when there is no
      * pending close or when it was cancelled/replaced — that "nothing happens"
      * is the D21 assertion consumers want to make.
+     *
+     * Closes with [CloseReason.GraceExpired], exactly as [RealHostConnection]'s
+     * own `GraceCloseScheduler` deadline does, so a consumer test can tell an
+     * expired background window apart from a real disconnect the same way
+     * production code has to (issue #2487).
      */
     suspend fun fireGraceClose() {
         val handle = synchronized(lock) { pendingGraceHandle }
         if (handle != null && handle.isLive) {
-            close()
+            closeWith(CloseReason.GraceExpired)
         }
     }
 
-    override suspend fun close() {
+    override suspend fun close() = closeWith(CloseReason.Requested)
+
+    private suspend fun closeWith(reason: CloseReason) {
         val channels = synchronized(lock) {
             pendingGraceHandle = null
             openedPtyChannels.toList()
         }
         val forwards = synchronized(lock) { openedPortForwardHandles.toList() }
+        // Terminal state FIRST, before any teardown that resolves a channel's
+        // exit — the same ordering [RealHostConnection.close] documents for
+        // issue #2477. A consumer that reacts to a channel ending by asking the
+        // connection why must never be able to observe a still-`Connected`
+        // state here when it could not on a real transport.
+        _state.value = TransportState.Closed(reason)
         channels.forEach { it.close() }
         // A real transport takes its forwards down with it; a fake that left them
         // "active" would let a test assert a forward survived a dead connection.
         forwards.forEach { it.close() }
-        _state.value = TransportState.Closed
     }
 
     private fun requireUsable(operation: String) {
         when (val current = _state.value) {
             is TransportState.Lost -> throw IOException("$operation: connection lost (${current.cause})")
-            TransportState.Closed -> throw IOException("$operation: connection closed")
+            is TransportState.Closed ->
+                throw IOException("$operation: connection closed (${current.reason})")
             else -> Unit
         }
     }

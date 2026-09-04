@@ -197,20 +197,21 @@ link are documented in [docs/ssh-qr-import.md](docs/ssh-qr-import.md).
 
 ```text
 Android phone                 SSH (sshj)              Dev box
-PocketShell UI   tmux -CC control mode ----------->   tmux server
-Compose + VT     tail JSONL / SQLite -------------->   agent logs
-foreground app   pocketshell commands ------------>   pocketshell helper
-                 (tree, usage, send, qr-share, …)     host-side registry
+PocketShell UI   PTY: sessions attach ----------->   tmux / aplexer session
+Compose + VT     exec: sessions list --json ----->   pocketshell helper
+foreground app   exec: usage, engines, … -------->   host-side registry
 ```
 
-Load-bearing choices: `tmux -CC` control mode instead of screen-scraping; one
-visible pane at a time instead of tiled tmux; a host-side session tree so
-ordering and folders survive reconnect and reinstall; server-side helpers so no
-provider credentials live on the phone; and a foreground-first model — the app
-does not schedule background phone work, it reconnects when you bring it
-forward (the active connection has a short app-switch grace window so quick
-app swaps don't tear it down). The scoped exception is port forwarding, which
-uses a foreground service while tunnels are active.
+Load-bearing choices: the client attaches through a host-side helper
+(`pocketshell sessions attach`) instead of speaking tmux's control protocol
+itself, so one code path covers both tmux and aplexer sessions; a host-side
+session tree so ordering and folders survive reconnect and reinstall;
+server-side helpers so no provider credentials live on the phone; and a
+foreground-first model — the app does not schedule background phone work, it
+reconnects when you bring it forward (the active connection has a short
+app-switch grace window so quick app swaps don't tear it down). The scoped
+exception is port forwarding, which uses a foreground service while tunnels are
+active.
 
 See [docs/architecture.md](docs/architecture.md) and
 [docs/decisions.md](docs/decisions.md) for the full rationale.

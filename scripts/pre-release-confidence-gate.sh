@@ -1843,7 +1843,7 @@ max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_tra
 while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   '$ADB' logcat -c || true
   set +e
-  output=\$('$ADB' shell am instrument -w -r com.pocketshell.next.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
+  output=\$('$ADB' shell am instrument -w -r com.pocketshell.next.test/com.pocketshell.next.HiltNextTestRunner 2>&1)
   instrument_status=\$?
   set -e
   if [ "\$instrument_status" -ne 0 ]; then

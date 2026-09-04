@@ -252,6 +252,7 @@ full   app2/src/main/java/com/pocketshell/next/MainActivity.kt  single activity 
 full   app2/src/main/res/*           theme tokens, strings and drawables reach every screen (#453/#641 class)
 full   app2/src/main/AndroidManifest.xml        components, permissions and exported surfaces
 full   app2/src/debug/*              debug-variant instrumentation seams (Hilt test application) every journey builds against
+full   app2/src/release/*            release-variant manifest overrides (e.g. the Robolectric host-activity declaration) every screen's testReleaseUnitTest run builds against
 
 # ---------------------------------------------------------------------------
 # NOOP — provably cannot affect any test.

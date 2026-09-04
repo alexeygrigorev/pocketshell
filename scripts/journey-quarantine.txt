@@ -25,5 +25,3 @@
 # fixed or removed) or by RE-TRIAGING it (a fresh `added`/`expires` in both
 # places, and a reason that says why it is still broken) — never let a row sit
 # expired.
-com.pocketshell.next.tree.J04CreateSessionJourney#creatingASessionFromTheTreeLandsOnItAndItAppearsOnTheTree	#2478	2026-09-04	2026-10-04	create-session lands on the wrong destination; pre-existing product bug found during the app2 journey bring-up, needs real investigation not a test fix, hence the 30-day window rather than the 2-week default
-com.pocketshell.next.tree.J04CreateSessionJourney#creatingTheSameNameTwiceOpensTheExistingSessionWithoutAnError	#2478	2026-09-04	2026-10-04	same-name create surfaces an error instead of reopening the existing session; same pre-existing bug as the sibling row, same 30-day investigation window

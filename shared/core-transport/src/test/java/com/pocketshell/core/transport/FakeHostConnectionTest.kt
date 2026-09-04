@@ -233,7 +233,11 @@ class FakeHostConnectionTest {
 
         host.close()
 
-        assertEquals(TransportState.Closed, host.state.value)
+        // `close()` is the "someone asked for this to end" path, so the fake
+        // must report the same reason a real transport does (issue #2487) —
+        // consumers branch on it.
+        assertEquals(TransportState.Closed(CloseReason.Requested), host.state.value)
+        assertEquals(CloseReason.Requested, host.closeReason)
         assertTrue(host.isClosed)
         assertTrue(pty.isEnded)
         assertNull(pty.exit.await())
@@ -279,7 +283,11 @@ class FakeHostConnectionTest {
 
         host.fireGraceClose()
 
-        assertEquals(TransportState.Closed, host.state.value)
+        // ...as `GraceExpired`, never `Requested`: the remote session is still
+        // alive, so a consumer must be able to tell this from a disconnect and
+        // reattach instead of reporting the session over (issue #2487).
+        assertEquals(TransportState.Closed(CloseReason.GraceExpired), host.state.value)
+        assertEquals(CloseReason.GraceExpired, host.closeReason)
         assertNull(host.pendingGrace)
     }
 

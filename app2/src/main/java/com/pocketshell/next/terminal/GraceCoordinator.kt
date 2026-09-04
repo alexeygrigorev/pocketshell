@@ -246,6 +246,14 @@ class GraceCoordinator(
      * The window elapsed. The transport closes itself (task T-5 owns that
      * timer); all that is left here is releasing the wake lock and the
      * notification, so an expired grace leaves NOTHING alive.
+     *
+     * What the user sees on their return is NOT this class's business, but it
+     * is worth saying where it is decided: the transport's own close carries
+     * [com.pocketshell.core.transport.CloseReason.GraceExpired], which is how
+     * [SessionViewModel] knows an expired window is a link to reattach rather
+     * than a session that ended. Reading that close as a disconnect is what
+     * put a false "the connection was closed" error on screen after every
+     * background longer than [DEFAULT_GRACE_MS] (issue #2487).
      */
     private fun onGraceExpired(): Unit = synchronized(lock) {
         if (!armed) return

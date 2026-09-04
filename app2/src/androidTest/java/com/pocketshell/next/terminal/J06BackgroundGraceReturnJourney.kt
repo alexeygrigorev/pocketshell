@@ -443,7 +443,142 @@ class J06BackgroundGraceReturnJourney {
         awaitTag(hostRowTag(hostId))
     }
 
+    /**
+     * Regression for issue #2487, on the real device path — the OTHER half of
+     * this journey's question, and the one a user hits far more often than the
+     * within-grace case above: come back after the window has ELAPSED.
+     *
+     * ## What broke
+     *
+     * D21 lets the app drop the transport once the background window ends;
+     * `RealHostConnection`'s grace scheduler does that by calling the
+     * connection's own `close()`. [SessionViewModel] read any deliberate close
+     * as "somebody ended this session on purpose" (issue #2477's discriminator,
+     * whose own comment claimed "nothing in production calls that today" —
+     * every 90-second background does) and put a `Failed` banner reading "the
+     * connection was closed" on screen, with no reconnect, over a tmux session
+     * that was still running on the host. Tapping Retry from that banner then
+     * reattached onto an emulator whose byte queues `settleEnd` had already
+     * closed one-way: `Live` on screen, frozen, swallowing every keystroke.
+     *
+     * ## Why it is driven this way
+     *
+     * The production window is [GraceCoordinator.DEFAULT_GRACE_MS] (90 s), so
+     * observing an expiry inside a journey means building a coordinator with a
+     * short one and letting it take over the process — the same technique the
+     * sibling issue-#2483 scenario uses, and [GraceCoordinator.register]'s
+     * documented hand-over is exactly what makes it legitimate. Everything else
+     * is real and unmocked: the real registry, a real SSH connection to the
+     * Docker fixture, the real transport-owned grace close, the real Activity
+     * stop/start boundary, and the real terminal the user types into.
+     *
+     * The oracle is deliberately not "the state says Live": it is that no error
+     * banner is on screen, that the pane is the SAME session (`capture-pane` on
+     * the host agrees), and that typing after the return reaches the HOST.
+     */
+    @Test
+    fun returningAfterTheGraceWindowExpiresReattachesInsteadOfReportingTheSessionEnded() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+        JourneyScreenshots.capture("09-attached-before-expiry", JOURNEY)
+        compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val application =
+            instrumentation.targetContext.applicationContext as android.app.Application
+        val registry = appGraph().connectionsRegistry()
+
+        // A coordinator with a window short enough to elapse inside a test.
+        // It takes over the process from the app's own singleton exactly the
+        // way a later Hilt component's would.
+        val shortWindow = GraceCoordinator(
+            connections = registry,
+            service = AndroidGraceServiceControl(application),
+            graceMs = EXPIRING_GRACE_MS,
+        )
+        instrumentation.runOnMainSync { shortWindow.register(application) }
+
+        // 1. Pocket the phone. The real Activity stop boundary arms the window
+        //    over the real live connection this journey dialled.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        awaitHoldingOn(shortWindow, expected = true, what = "after backgrounding")
+        assertTrue(
+            "the window must be armed over a REAL live connection, or the expiry " +
+                "below closes nothing and this test proves nothing",
+            registry.liveConnections().isNotEmpty(),
+        )
+
+        // 2. Stay away past the window. The transport closes ITSELF — that is
+        //    the close #2487 is about.
+        val deadline = SystemClock.elapsedRealtime() + EXPIRING_GRACE_MS + EXPIRY_MARGIN_MS
+        while (SystemClock.elapsedRealtime() < deadline &&
+            registry.liveConnections().isNotEmpty()
+        ) {
+            SystemClock.sleep(POLL_MS)
+        }
+        assertTrue(
+            "the expired grace window must really have dropped the transport (D21), " +
+                "or there is nothing to come back to",
+            registry.liveConnections().isEmpty(),
+        )
+
+        // 3. Take the phone back out.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // 4. The session comes BACK. No "session ended" error, ever — the tmux
+        //    session was alive on the host the whole time.
+        val afterReturn = awaitTranscript("the fixture's banner line again") {
+            it.contains(BANNER)
+        }
+        JourneyScreenshots.capture("10-returned-after-expiry", JOURNEY)
+        compose.onNodeWithTag(SESSION_TERMINAL_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+        assertTrue(
+            "the SAME pane must be back on screen after a return past the grace " +
+                "window, got:\n$afterReturn",
+            squashed(afterReturn).contains(BANNER),
+        )
+        awaitNoGraceNotification("after returning past the window")
+
+        // 5. And it is genuinely usable, not a frozen last frame: typing has to
+        //    reach the HOST's own pane. This is the assertion bug 2 fails —
+        //    a bridge stopped rather than detached leaves a terminal that is
+        //    `Live` and completely deaf.
+        typeLine("echo $EXPIRED_MARKER")
+        val afterTyping = awaitTranscript("the echoed marker twice") {
+            squashed(it).split(EXPIRED_MARKER).size >= 3
+        }
+        assertTrue(
+            "the reattached viewport must show the command's output, got:\n$afterTyping",
+            squashed(afterTyping).contains(EXPIRED_MARKER),
+        )
+        val pane = capturePane()
+        assertTrue(
+            "the host's pane must show the command typed after the return, got:\n$pane",
+            squashed(pane).contains("echo$EXPIRED_MARKER"),
+        )
+        JourneyScreenshots.capture("11-usable-after-expiry", JOURNEY)
+
+        // Same reason as the sibling tests: leave no live connection behind for
+        // the Activity teardown to arm a real window over.
+        runBlocking { registry.closeAll() }
+    }
+
     // --- helpers ------------------------------------------------------------
+
+    /**
+     * [awaitGraceHolding] against a coordinator the test built itself, rather
+     * than the app's Hilt singleton — issue #2487's scenario needs a window
+     * short enough to elapse, which the singleton's 90 s is not.
+     */
+    private fun awaitHoldingOn(coordinator: GraceCoordinator, expected: Boolean, what: String) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (coordinator.isHolding == expected) return
+            SystemClock.sleep(POLL_MS)
+        }
+        throw AssertionError("the coordinator's isHolding never became $expected $what")
+    }
 
     private fun openTree() {
         awaitTag(hostRowTag(hostId))
@@ -628,10 +763,26 @@ class J06BackgroundGraceReturnJourney {
         /** Head-room past the retired window, so the zombie has provably had its chance. */
         const val ZOMBIE_MARGIN_MS = 5_000L
 
+        const val EXPIRED_MARKER = "j06-back-after-expiry"
+
+        /**
+         * Issue #2487's window has to actually ELAPSE inside a test, so it is
+         * seconds rather than [GraceCoordinator.DEFAULT_GRACE_MS]. Long enough
+         * that arming it over the real connection finishes first — the test
+         * asserts the connection was still live when it armed, rather than
+         * assuming it.
+         */
+        const val EXPIRING_GRACE_MS = 8_000L
+
+        /** Head-room past the window, so the transport has provably had its chance to close. */
+        const val EXPIRY_MARGIN_MS = 20_000L
+
         val HOST_IDS: Map<String, Long> = mapOf(
             "returningWithinGraceKeepsTheSessionAliveWithNoReconnectBanner" to 9_601L,
             "backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification" to 9_602L,
             "aRetiredCoordinatorsExpiryCannotTakeDownTheLiveHold" to 9_603L,
+            "returningAfterTheGraceWindowExpiresReattachesInsteadOfReportingTheSessionEnded"
+                to 9_604L,
         )
     }
 }

@@ -403,11 +403,14 @@ class RealHostConnectionIntegrationTest {
         val connection = connectTrusted(newFactory(), targetFor(container!!), InMemoryTrustStore())
 
         connection.close()
-        assertEquals(TransportState.Closed, connection.state.value)
+        // `Requested`, because a caller asked: that is what tells a session
+        // screen the session is over rather than merely handed back for the
+        // background window (issue #2487).
+        assertEquals(TransportState.Closed(CloseReason.Requested), connection.state.value)
 
         // Idempotent: a second close neither throws nor changes the state.
         connection.close()
-        assertEquals(TransportState.Closed, connection.state.value)
+        assertEquals(TransportState.Closed(CloseReason.Requested), connection.state.value)
 
         try {
             connection.exec("echo nope")

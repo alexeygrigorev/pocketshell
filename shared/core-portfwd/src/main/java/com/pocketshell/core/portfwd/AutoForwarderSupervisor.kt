@@ -706,8 +706,13 @@ public class AutoForwarderSupervisor(
         // socket can't pin the teardown worker.
         private const val CONNECTION_CLOSE_TIMEOUT_MS = 5_000L
 
-        /** Spent: the instance can never come back, so the supervisor must re-dial. */
+        /**
+         * Spent: the instance can never come back, so the supervisor must
+         * re-dial. Every [TransportState.Closed] reason counts (issue #2487) —
+         * forwarding dials its OWN connection precisely so a grace close never
+         * reaches it, but a closed one is spent whichever way it got there.
+         */
         private fun TransportState.isTerminal(): Boolean =
-            this is TransportState.Lost || this == TransportState.Closed
+            this is TransportState.Lost || this is TransportState.Closed
     }
 }

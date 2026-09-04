@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.HostCliClient
+import com.pocketshell.core.transport.CloseReason
 import com.pocketshell.core.transport.FakeHostConnection
 import com.pocketshell.core.transport.FakePtyChannel
 import com.pocketshell.next.connect.TestConnectStack
@@ -402,6 +403,19 @@ class SessionViewModelTest {
      * or [SessionUiState.Live]), must not dial again, and must leave the
      * registry with nothing live for this host — the orphan-connection class
      * this whole regression is about.
+     *
+     * ## Which close this is, and which it is NOT (issue #2487)
+     *
+     * This test's close is `closeAll()`: a
+     * [com.pocketshell.core.transport.CloseReason.Requested] one, someone
+     * asking for the connection to END. Issue #2477's original fix keyed off
+     * [com.pocketshell.core.transport.TransportState.Closed] alone, which also
+     * swept up the D21 grace window expiring — a close that means the exact
+     * opposite (see `a grace-expiry close reattaches on return instead of
+     * ending the session`, the #2487 sibling of this test). The reason is
+     * asserted explicitly below so the two can never quietly merge again: it is
+     * what makes this test's "ends the session" claim true, rather than an
+     * accident of both closes looking alike.
      */
     @Test
     fun `a connection closed on purpose ends the session instead of redialling`() =
@@ -417,6 +431,7 @@ class SessionViewModelTest {
                 viewModel.uiState.value is SessionUiState.Live,
             )
             assertEquals(1, stack.factory.dialCount)
+            val closed = connection()
 
             // The exact call J06BackgroundGraceReturnJourney's own test body
             // makes on a real device, while this screen (this ViewModel) is
@@ -427,8 +442,15 @@ class SessionViewModelTest {
             settleFor(2_000)
 
             val state = viewModel.uiState.value
+            assertEquals(
+                "this scenario's close must be a REQUESTED one — if it ever became a " +
+                    "grace-expiry close the assertions below would be testing the " +
+                    "opposite contract (issue #2487)",
+                CloseReason.Requested,
+                closed.closeReason,
+            )
             assertTrue(
-                "a DELIBERATE close must end the session, not start a reconnect " +
+                "a REQUESTED close must end the session, not start a reconnect " +
                     "ladder — got $state",
                 state is SessionUiState.Failed,
             )
@@ -450,6 +472,169 @@ class SessionViewModelTest {
             // for the same reason every other `livePty()` test above calls it,
             // and load-bearing here specifically because THIS test is the one
             // that used to leave a connection nothing was watching.
+            clear()
+        }
+
+    /**
+     * Regression for issue #2487, bug 1 — the single most common daily journey:
+     * pocket the phone for more than the grace window, take it back out.
+     *
+     * D21 lets the app drop the transport once the background window elapses;
+     * [com.pocketshell.core.transport.HostConnection.scheduleGraceClose] is the
+     * whole mechanism, and its deadline calls the connection's own `close()`.
+     * That is a DELIBERATE close as far as the transport is concerned — but it
+     * is emphatically not the session ending: the tmux session is untouched on
+     * the host, and the rewrite plan's foreground-return contract says coming
+     * back reattaches to it.
+     *
+     * Before the fix, [SessionViewModel] read any [TransportState.Closed] as
+     * "somebody ended this on purpose" (issue #2477's discriminator) and put a
+     * `Failed` "the connection was closed" banner on screen with no reconnect —
+     * a false end-of-session error over a session that was still alive.
+     *
+     * Driven backgrounded, the way it happens on a phone, so the D21 half is
+     * asserted in the same breath: no dial may fire behind the launcher, and
+     * the return is what reattaches.
+     */
+    @Test
+    fun `a grace-expiry close reattaches on return instead of ending the session`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            livePty()
+            val viewModel = viewModel()
+
+            viewModel.open(hostId, SESSION)
+            settle()
+            val attached = terminalOf(viewModel)
+            assertEquals(1, stack.factory.dialCount)
+
+            // The phone goes in a pocket: GraceCoordinator arms exactly one
+            // bounded delayed close per live connection.
+            val held = connection()
+            foreground.background()
+            held.scheduleGraceClose(GraceCoordinator.DEFAULT_GRACE_MS)
+            settle()
+
+            // 90 seconds later the transport closes ITSELF — the T-5 grace
+            // scheduler's deadline calling `close()`, which is what a real
+            // RealHostConnection does.
+            held.fireGraceClose()
+            // Far longer than the whole reconnect ladder, so a dial that was
+            // going to happen behind the launcher has had every chance.
+            settleFor(60_000)
+
+            assertTrue(
+                "the grace close must really have spent the connection",
+                held.isClosed,
+            )
+            assertEquals(
+                "no dial may happen behind the launcher (D21)",
+                1,
+                stack.factory.dialCount,
+            )
+            val backgrounded = viewModel.uiState.value
+            assertTrue(
+                "a grace-expiry close is the app letting go of the transport, not the " +
+                    "session ending — the screen must be waiting to reattach, got $backgrounded",
+                backgrounded is SessionUiState.Reconnecting,
+            )
+
+            // Taking the phone back out is what reattaches, at once.
+            foreground.foreground()
+            settleFor(2_000)
+
+            val state = viewModel.uiState.value
+            assertTrue("expected Live after returning, got $state", state is SessionUiState.Live)
+            assertSame("the reattach must reuse the same terminal", attached, terminalOf(viewModel))
+            assertEquals(
+                "a FRESH connection, never the closed one",
+                2,
+                stack.factory.dialCount,
+            )
+
+            // And it is genuinely usable, not merely green.
+            terminalOf(viewModel).write("echo back-from-grace\r")
+            settle()
+            assertEquals(
+                "keystrokes must reach the reattached channel",
+                "echo back-from-grace\r",
+                latestPty().writtenText,
+            )
+
+            clear()
+        }
+
+    /**
+     * Regression for issue #2487, bug 2 — Retry from a `Failed` screen must
+     * produce a terminal that is genuinely alive, not merely one the state says
+     * is `Live`.
+     *
+     * `settleEnd`'s ended path used to call [TerminalPtyBridge.stop], which
+     * CLOSES the vendored session's two byte queues, and `ByteQueue.close()` is
+     * one-way. It never nulled `terminal` either, so [SessionViewModel.retryNow]
+     * reattached onto that same permanently-unwritable session: SSH attached,
+     * the state flipped to `Live`, and then every output frame was rejected by
+     * the closed queue and the input pump's first read returned -1 and retired.
+     * A frozen last frame that swallows every keystroke — recoverable only by
+     * leaving the screen.
+     *
+     * Reachable on its own (type `exit` in the remote shell, then Retry) and
+     * compounded with bug 1 into "background two minutes → false error → Retry
+     * → dead terminal", which is why both directions of I/O are asserted here
+     * rather than the UI state alone.
+     */
+    @Test
+    fun `retrying an ended session comes back to a terminal that still carries IO`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            livePty()
+            val viewModel = viewModel()
+
+            viewModel.open(hostId, SESSION)
+            settle()
+            val attached = terminalOf(viewModel)
+            val ended = pty()
+
+            // The remote shell exits: a real, clean end of session, which is
+            // the one thing that is genuinely `Failed` rather than a drop.
+            ended.finish(0)
+            settle()
+            assertTrue(
+                "expected Failed after a clean remote exit, got ${viewModel.uiState.value}",
+                viewModel.uiState.value is SessionUiState.Failed,
+            )
+
+            // The user taps Retry — the session is back on the host, so the
+            // reattach lands.
+            viewModel.retryNow()
+            settleFor(2_000)
+
+            val state = viewModel.uiState.value
+            assertTrue("expected Live after Retry, got $state", state is SessionUiState.Live)
+            assertSame(
+                "Retry must reattach onto the same emulator, not a cleared one",
+                attached,
+                terminalOf(viewModel),
+            )
+
+            // `Live` is not the assertion — bytes are. Keystrokes out...
+            terminalOf(viewModel).write("echo retry-alive\r")
+            settle()
+            assertEquals(
+                "keystrokes typed after Retry must reach the reattached channel",
+                "echo retry-alive\r",
+                latestPty().writtenText,
+            )
+
+            // ...and remote output back in.
+            latestPty().emitText("retry-output-marker\r\n")
+            settle()
+            assertTrue(
+                "remote output after Retry must reach the emulator's screen buffer, got: " +
+                    transcriptOf(viewModel),
+                transcriptOf(viewModel).contains("retry-output-marker"),
+            )
+
             clear()
         }
 

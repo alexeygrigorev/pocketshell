@@ -356,6 +356,213 @@ class GraceCoordinatorTest {
         assertEquals(1, serviceTwo.startCount)
     }
 
+    /**
+     * Regression for issue #2483 — the half of the #2477 story that fix did
+     * not cover.
+     *
+     * #2477 stopped a superseded [GraceCoordinator] from REACTING to later
+     * lifecycle callbacks, but left everything it had already armed running:
+     * its `armed` flag, its pending [com.pocketshell.core.transport.GraceHandle]s
+     * and — the one that bites — its expiry [kotlinx.coroutines.Job], which
+     * still fires up to [GraceCoordinator.DEFAULT_GRACE_MS] later and calls
+     * `stop()` on a service it no longer owns. There is only ONE [GraceService]
+     * in a process, so that late stop takes down whichever hold the CURRENT
+     * coordinator has open — leaving `isHolding == true` with no foreground
+     * service, no notification and no wake lock behind it. In the `app2`
+     * journey lane that is a 90-second landmine planted by every test class
+     * whose teardown backgrounds a live connection, and it detonated inside
+     * `J06BackgroundGraceReturnJourney` (CI run 33888824496).
+     *
+     * The single [FakeGraceServiceControl] shared by both coordinators is the
+     * point: production has one service, and the two Hilt components a test
+     * process builds both drive it.
+     */
+    @Test
+    fun `a superseded coordinator's expiry can no longer take down the current hold`() = runTest {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val service = FakeGraceServiceControl()
+
+        // BOTH dials happen before anything is armed: `runTest` advances the
+        // virtual clock freely whenever the test body suspends, so a dial made
+        // after a window is open would silently skip past its expiry.
+        val (registryOne, connectionOne) = registryWithOneLiveConnection()
+        val (registryTwo, _) = registryWithOneLiveConnection()
+
+        val coordinatorOne = GraceCoordinator(
+            connections = registryOne,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorOne.register(application)
+
+        // A previous test method's Activity is destroyed while its connection
+        // is still live: a REAL background, arming a REAL window.
+        val first = Robolectric.buildActivity(Activity::class.java)
+        first.create().start().resume()
+        runCurrent()
+        first.pause().stop()
+        runCurrent()
+        assertTrue("the first coordinator must own a real window", coordinatorOne.isHolding)
+        assertTrue(service.isRunning)
+
+        // The next test method's fresh Hilt component builds a new coordinator
+        // over the same process and the same service.
+        val coordinatorTwo = GraceCoordinator(
+            connections = registryTwo,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorTwo.register(application)
+        runCurrent()
+
+        // Deliberately NOT asserting the old window is already closed here —
+        // that is the sibling test below. This one has to reach the moment the
+        // zombie expiry actually fires, so it asserts nothing until then.
+
+        // Two thirds into the superseded coordinator's original window, the
+        // CURRENT coordinator opens one of its own.
+        advanceTimeBy(GRACE_MS * 2 / 3)
+        runCurrent()
+        val second = Robolectric.buildActivity(Activity::class.java)
+        second.create().start().resume()
+        runCurrent()
+        second.pause().stop()
+        runCurrent()
+        assertTrue("the current coordinator must own the new window", coordinatorTwo.isHolding)
+        assertTrue(service.isRunning)
+
+        // Past the superseded coordinator's deadline, still well inside the
+        // current one's. This is the instant the zombie expiry used to fire.
+        advanceTimeBy(GRACE_MS / 2)
+        runCurrent()
+
+        assertTrue(
+            "the current coordinator's window must still be open",
+            coordinatorTwo.isHolding,
+        )
+        assertTrue(
+            "issue #2483: a superseded coordinator's expiry must never take down the " +
+                "process-global grace service the CURRENT coordinator is holding — that " +
+                "leaves isHolding==true with no notification and no wake lock behind it",
+            service.isRunning,
+        )
+        assertTrue(
+            "and the superseded coordinator's own armed close must have been cancelled " +
+                "when it was retired, not left to close a connection minutes later",
+            connectionOne.graceHandles.single().isCancelled,
+        )
+    }
+
+    /**
+     * Regression for issue #2483: being superseded must END the retired
+     * instance's window then and there, on the thread that retired it — so the
+     * hand-over is ordered with respect to whatever the NEW coordinator does
+     * next, rather than leaving a stop pending on a timer.
+     */
+    @Test
+    fun `superseding a coordinator ends its window immediately`() = runTest {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val service = FakeGraceServiceControl()
+
+        val (registryOne, connectionOne) = registryWithOneLiveConnection()
+        val (registryTwo, _) = registryWithOneLiveConnection()
+
+        val coordinatorOne = GraceCoordinator(
+            connections = registryOne,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorOne.register(application)
+        coordinatorOne.enterBackground()
+        runCurrent()
+        assertTrue(coordinatorOne.isHolding)
+        assertTrue(service.isRunning)
+
+        val coordinatorTwo = GraceCoordinator(
+            connections = registryTwo,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorTwo.register(application)
+        runCurrent()
+
+        assertFalse(
+            "a superseded coordinator must not still be holding a window",
+            coordinatorOne.isHolding,
+        )
+        assertTrue(
+            "a superseded coordinator's armed close must be cancelled, not left to fire",
+            connectionOne.graceHandles.single().isCancelled,
+        )
+        assertEquals(
+            "the hand-over must take the shared service down exactly once, synchronously",
+            1,
+            service.stopCount,
+        )
+        assertFalse(service.isRunning)
+    }
+
+    /**
+     * Regression for issue #2483: being superseded also has to stop the
+     * instance from ever driving the shared service again, not merely stop it
+     * reacting to lifecycle callbacks — a direct call (the app2 journeys make
+     * them, and so does anything holding a reference to the old singleton)
+     * must not be able to start a foreground service for a graph that no
+     * longer owns one.
+     */
+    @Test
+    fun `a superseded coordinator can no longer arm a window at all`() = runTest {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val service = FakeGraceServiceControl()
+
+        val (registryOne, _) = registryWithOneLiveConnection()
+        val (registryTwo, _) = registryWithOneLiveConnection()
+
+        val coordinatorOne = GraceCoordinator(
+            connections = registryOne,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorOne.register(application)
+
+        val coordinatorTwo = GraceCoordinator(
+            connections = registryTwo,
+            service = service,
+            clock = { 0L },
+            graceMs = GRACE_MS,
+            dispatcher = dispatcher,
+        )
+        coordinatorTwo.register(application)
+        runCurrent()
+
+        coordinatorOne.enterBackground()
+        runCurrent()
+
+        assertFalse(
+            "a retired coordinator must not arm a window",
+            coordinatorOne.isHolding,
+        )
+        assertEquals(
+            "a retired coordinator must never start the shared service",
+            0,
+            service.startCount,
+        )
+        assertFalse(service.isRunning)
+    }
+
     private companion object {
         const val GRACE_MS = GraceCoordinator.DEFAULT_GRACE_MS
     }

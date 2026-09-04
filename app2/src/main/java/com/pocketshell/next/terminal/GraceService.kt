@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.next.MainActivity
 import com.pocketshell.next.R
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Keeps the process (and with it the SSH transport) alive for the bounded grace
@@ -214,13 +215,41 @@ class GraceService : Service() {
         internal const val BODY = "Disconnecting in"
 
         /**
-         * Brings the service up with a count-down to [deadlineMs].
+         * The token of no hold at all. [stop] with this is always a no-op.
+         */
+        internal const val NO_HOLD: Long = 0L
+
+        /**
+         * Which hold the service is up for right now (issue #2483).
+         *
+         * There is exactly ONE [GraceService] per process, so "stop the grace
+         * service" is inherently ambiguous the moment more than one caller can
+         * issue it — and `Context.stopService()` is unconditional: it takes the
+         * service down however many `startForegroundService()` calls preceded
+         * it, so a stop meant for a window that already ended silently cancels
+         * whichever window is open NOW. Every [start] therefore mints a token,
+         * and [stop] only acts when its token is still the newest — a caller
+         * may only take down the hold it opened, never a later one.
+         *
+         * Static/companion-scoped for the same reason
+         * [GraceCoordinator.activeInstance] is: the environments where a second
+         * owner exists (Hilt's Android test harness rebuilds the whole
+         * `SingletonComponent`, and with it [AndroidGraceServiceControl], per
+         * test method) are exactly the ones where per-instance state would not
+         * see the collision.
+         */
+        private val holdGeneration = AtomicLong(NO_HOLD)
+
+        /**
+         * Brings the service up with a count-down to [deadlineMs], and returns
+         * the token identifying THIS hold — hand it back to [stop].
          *
          * MUST be called while the app is still foreground-eligible — see
          * [GraceCoordinator]'s class doc for why that is the activity-stopped
          * boundary and not `ProcessLifecycleOwner`'s debounced `ON_STOP`.
          */
-        fun start(context: Context, deadlineMs: Long) {
+        fun start(context: Context, deadlineMs: Long): Long {
+            val token = holdGeneration.incrementAndGet()
             val intent = Intent(context, GraceService::class.java)
                 .putExtra(EXTRA_DEADLINE_MS, deadlineMs)
             runCatching { ContextCompat.startForegroundService(context, intent) }
@@ -230,10 +259,19 @@ class GraceService : Service() {
                     // and the reconnect ladder covers the return.
                     Log.w(TAG, "grace foreground service start was rejected", it)
                 }
+            return token
         }
 
-        /** Takes the service down. Safe when it is not running. */
-        fun stop(context: Context) {
+        /**
+         * Takes down the hold [token] opened. Safe when it is not running, and
+         * a NO-OP when a later hold has since replaced [token]'s — see
+         * [holdGeneration].
+         */
+        fun stop(context: Context, token: Long) {
+            if (token == NO_HOLD || holdGeneration.get() != token) {
+                Log.d(TAG, "ignoring a stop for a superseded grace hold ($token)")
+                return
+            }
             runCatching { context.stopService(Intent(context, GraceService::class.java)) }
                 .onFailure { Log.w(TAG, "grace foreground service stop was rejected", it) }
         }
@@ -243,10 +281,20 @@ class GraceService : Service() {
 /**
  * The production [GraceServiceControl]: [GraceService], started and stopped
  * against the application context.
+ *
+ * Remembers the token of the hold IT opened, so its [stop] can only ever take
+ * down that hold and never a later owner's (issue #2483 — see
+ * [GraceService.holdGeneration]).
  */
 class AndroidGraceServiceControl(private val context: Context) : GraceServiceControl {
 
-    override fun start(deadlineMs: Long) = GraceService.start(context, deadlineMs)
+    private val token = AtomicLong(GraceService.NO_HOLD)
 
-    override fun stop() = GraceService.stop(context)
+    override fun start(deadlineMs: Long) {
+        token.set(GraceService.start(context, deadlineMs))
+    }
+
+    override fun stop() {
+        GraceService.stop(context, token.getAndSet(GraceService.NO_HOLD))
+    }
 }

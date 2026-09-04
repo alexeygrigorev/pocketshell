@@ -32,6 +32,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -284,6 +285,139 @@ class J06BackgroundGraceReturnJourney {
     }
 
     /**
+     * Regression for issue #2483, on the real device path.
+     *
+     * ## What broke
+     *
+     * A process can end up with more than one [GraceCoordinator] — Hilt's
+     * Android test harness rebuilds the whole `SingletonComponent` per
+     * `@HiltAndroidTest` method on top of ONE real `Application`, which is why
+     * [GraceCoordinator.register] hands over between instances at all (#2477).
+     * That hand-over used to only UNREGISTER the outgoing instance, leaving its
+     * already-armed window — and its expiry timer — running. Up to
+     * [GraceCoordinator.DEFAULT_GRACE_MS] later that zombie timer called
+     * `stop()` on the ONE process-global [GraceService], taking down whichever
+     * hold the CURRENT coordinator had open by then. The observable result is
+     * the exact failure the `app2` journey lane hit (CI run 33888824496):
+     * `isHolding == true` with NO notification, no foreground service and no
+     * wake lock — a session held with nothing keeping it alive and nothing to
+     * tell the user about it.
+     *
+     * ## Why it is driven this way
+     *
+     * The landmine's fuse is a full 90 s in production, and it is planted by a
+     * SUPERSEDED coordinator, so the only way to observe it inside a journey is
+     * to build the retired instance explicitly with a short window. Everything
+     * else here is real: the real [ConnectionsRegistry] with a real SSH session
+     * on the Docker fixture, the real [AndroidGraceServiceControl], the real
+     * foreground service, the real notification tray, and the real Activity
+     * stop/start boundary that arms the surviving coordinator's window.
+     */
+    @Test
+    fun aRetiredCoordinatorsExpiryCannotTakeDownTheLiveHold() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+        assertNoReconnectBanner("before the retired-coordinator scenario")
+
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val application =
+            instrumentation.targetContext.applicationContext as android.app.Application
+        val registry = appGraph().connectionsRegistry()
+
+        // The coordinator that is about to be retired, with a window short
+        // enough to observe. It opens a REAL hold over the REAL live
+        // connection this journey just dialled.
+        val retired = GraceCoordinator(
+            connections = registry,
+            service = AndroidGraceServiceControl(application),
+            graceMs = RETIRED_GRACE_MS,
+        )
+        instrumentation.runOnMainSync {
+            retired.register(application)
+            retired.enterBackground()
+        }
+        val retiredArmedAt = SystemClock.elapsedRealtime()
+        assertTrue(
+            "the retired-to-be coordinator must really open a window",
+            retired.isHolding,
+        )
+        awaitGraceNotification("for the soon-to-be-retired coordinator's own hold")
+
+        // A later Hilt component's coordinator takes over — the hand-over that
+        // has to leave NOTHING of the previous instance pending.
+        val current = GraceCoordinator(
+            connections = registry,
+            service = AndroidGraceServiceControl(application),
+        )
+        instrumentation.runOnMainSync { current.register(application) }
+
+        // The surviving coordinator opens its own window off the REAL activity
+        // stop boundary, exactly as a user switching apps would.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        awaitHolding(current, "after backgrounding under the current coordinator")
+        awaitGraceNotification("after backgrounding under the current coordinator")
+        JourneyScreenshots.capture("06-current-hold-armed", JOURNEY)
+
+        // Anti-vacuous guard: if the retired coordinator's window had already
+        // elapsed by now there would be no zombie left to fire and this test
+        // would pass without testing anything.
+        val elapsed = SystemClock.elapsedRealtime() - retiredArmedAt
+        assertTrue(
+            "the current hold must be open BEFORE the retired window elapses, " +
+                "or this test proves nothing (took ${elapsed}ms of ${RETIRED_GRACE_MS}ms)",
+            elapsed < RETIRED_GRACE_MS,
+        )
+
+        // Sleep past the retired coordinator's deadline — the instant its
+        // zombie expiry used to stop the shared service out from under the
+        // current hold.
+        val wakeAt = retiredArmedAt + RETIRED_GRACE_MS + ZOMBIE_MARGIN_MS
+        while (SystemClock.elapsedRealtime() < wakeAt) {
+            SystemClock.sleep(POLL_MS)
+        }
+
+        assertTrue(
+            "the current coordinator's window must still be open",
+            current.isHolding,
+        )
+        assertNotNull(
+            "issue #2483: a retired coordinator's expiry must never take down the " +
+                "grace notification the CURRENT coordinator is holding — that leaves " +
+                "the session held with nothing user-visible and nothing keeping it alive",
+            graceNotification(),
+        )
+        assertTrue(
+            "and the retired coordinator's armed close must have been cancelled when it " +
+                "was retired, not left to close the live session minutes later",
+            registry.liveConnections().isNotEmpty(),
+        )
+        JourneyScreenshots.capture("07-hold-survived-retired-expiry", JOURNEY)
+
+        // Coming back must still be free: same session, no reconnect, no
+        // leftover notification.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        awaitHolding(current, "after returning", expected = false)
+        awaitNoGraceNotification("after returning")
+        assertNoReconnectBanner("after returning from the retired-coordinator scenario")
+        compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+
+        typeLine("echo $RETIRED_MARKER")
+        awaitTranscript("the echoed marker twice") {
+            squashed(it).split(RETIRED_MARKER).size >= 3
+        }
+        val pane = capturePane()
+        assertTrue(
+            "the host's pane must show the command typed after the retired window elapsed, got:\n$pane",
+            squashed(pane).contains("echo$RETIRED_MARKER"),
+        )
+        JourneyScreenshots.capture("08-retired-scenario-session-still-usable", JOURNEY)
+
+        // Same reason as the sibling test: leave no live connection behind for
+        // the Activity teardown to arm a real window over.
+        runBlocking { registry.closeAll() }
+    }
+
+    /**
      * A user who never opened a host and only backgrounds the app must not
      * find PocketShell holding a notification in their tray.
      */
@@ -326,6 +460,23 @@ class J06BackgroundGraceReturnJourney {
 
     /** [GraceCoordinator.isHolding], read from the app's real Hilt singleton. */
     private fun graceHolding(): Boolean = appGraph().graceCoordinator().isHolding
+
+    /**
+     * [awaitGraceHolding] against a coordinator the test built itself, rather
+     * than the app's Hilt singleton (issue #2483's scenario retires that one).
+     */
+    private fun awaitHolding(
+        coordinator: GraceCoordinator,
+        what: String,
+        expected: Boolean = true,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (coordinator.isHolding == expected) return
+            SystemClock.sleep(POLL_MS)
+        }
+        throw AssertionError("the coordinator's isHolding never became $expected $what")
+    }
 
     private fun awaitGraceHolding(expected: Boolean, what: String) {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
@@ -463,10 +614,24 @@ class J06BackgroundGraceReturnJourney {
         const val PROMPT = "J06READY\$"
         const val BANNER = "J06-FIXTURE-PANE"
         const val MARKER = "j06-still-alive"
+        const val RETIRED_MARKER = "j06-retired-coordinator-ok"
+
+        /**
+         * Issue #2483's retired coordinator gets a SHORT window so its zombie
+         * expiry lands inside the test rather than 90 s later. Long enough that
+         * the hand-over and the current coordinator's own backgrounding
+         * comfortably finish first — and the test asserts they did, rather than
+         * assuming it.
+         */
+        const val RETIRED_GRACE_MS = 12_000L
+
+        /** Head-room past the retired window, so the zombie has provably had its chance. */
+        const val ZOMBIE_MARGIN_MS = 5_000L
 
         val HOST_IDS: Map<String, Long> = mapOf(
             "returningWithinGraceKeepsTheSessionAliveWithNoReconnectBanner" to 9_601L,
             "backgroundingWithNoOpenSessionShowsNoHoldAndNoNotification" to 9_602L,
+            "aRetiredCoordinatorsExpiryCannotTakeDownTheLiveHold" to 9_603L,
         )
     }
 }

@@ -20,9 +20,12 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
 import com.pocketshell.next.connect.AgentsFixture
+import com.pocketshell.next.connect.BoundedWait
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
+import com.pocketshell.next.connect.idleWedgeNote
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
@@ -93,6 +96,16 @@ class J03AttachAndTypeJourney {
         .around(compose)
 
     private var hostId: Long = 0
+
+    /**
+     * The bound around the FAILURE path's own Compose reads (#2479).
+     *
+     * [screenDiagnosis] reads the semantics tree, and every semantics read
+     * waits for Compose to be idle first — so the diagnosis gathered for a
+     * timeout caused by Compose never going idle would park forever and take
+     * the whole job down anyway, one line after the deadline finally fired.
+     */
+    private val diagnosisWait = BoundedWait("j03-diagnosis")
 
     /**
      * Puts the device back the way it was found.
@@ -378,7 +391,7 @@ class J03AttachAndTypeJourney {
         // and no Ctrl.
         compose.onNodeWithText(KEY_LABEL_CTRL).assertIsDisplayed()
         compose.onNodeWithText(KEY_LABEL_CTRL).performClick()
-        compose.waitForIdle()
+        compose.awaitIdle("after the Ctrl key-bar tap")
         typeCharacter('c')
 
         awaitHostSleep(running = false)
@@ -482,7 +495,7 @@ class J03AttachAndTypeJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("transcript poll: $what")
             last = renderedTranscript()
             if (predicate(last)) return last
             SystemClock.sleep(POLL_MS)
@@ -490,10 +503,10 @@ class J03AttachAndTypeJourney {
         val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
         throw AssertionError(
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
-                "Screen state: ${screenDiagnosis()}\n" +
+                "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n$last\n" +
                 "The host's own capture-pane says:\n" + capturePane() + "\n" +
-                "Screenshot: ${shot.absolutePath}",
+                "Screenshot: ${shot.absolutePath}" + compose.idleWedgeNote(),
         )
     }
 
@@ -507,6 +520,26 @@ class J03AttachAndTypeJourney {
      * hierarchy — and each failed run would cost another round trip to tell
      * them apart.
      */
+    /**
+     * [screenDiagnosis] with a deadline, for use from a failing assertion.
+     *
+     * See [diagnosisWait]: a diagnosis that hangs is worse than no diagnosis,
+     * because it costs the run every other test's results.
+     */
+    private fun safeScreenDiagnosis(): String {
+        var text = ""
+        val read = diagnosisWait.run("screenDiagnosis", DIAGNOSIS_BUDGET_MS) {
+            text = screenDiagnosis()
+        }
+        return if (read) {
+            text
+        } else {
+            "UNAVAILABLE — reading the semantics tree did not return within " +
+                "${DIAGNOSIS_BUDGET_MS}ms, which means Compose is not going idle " +
+                "(see issue #2479)"
+        }
+    }
+
     private fun screenDiagnosis(): String {
         fun present(tag: String) =
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
@@ -607,7 +640,7 @@ class J03AttachAndTypeJourney {
      */
     private fun focusTerminal() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        compose.waitForIdle()
+        compose.awaitIdle("before taking terminal focus")
         instrumentation.runOnMainSync {
             val view = terminalView()
             checkNotNull(view) { "no TerminalView on screen to type into" }
@@ -695,7 +728,7 @@ class J03AttachAndTypeJourney {
         throw AssertionError(
             "$what: the phone and the host never agreed on a terminal size within " +
                 "${TIMEOUT_MS}ms (last host pane=$host).\n" +
-                "Screen state: ${screenDiagnosis()}\n" +
+                "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n" + renderedTranscript() + "\n" +
                 "The host's own capture-pane says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
@@ -716,7 +749,7 @@ class J03AttachAndTypeJourney {
         val deadline = SystemClock.elapsedRealtime() + SIZE_REPLY_TIMEOUT_MS
         var nextHostCheck = SystemClock.elapsedRealtime() + SIZE_SETTLE_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("stty reply poll")
             val replies = sizeLines(renderedTranscript())
             if (replies.size > repliesBefore && replies.last() == expected) return true
             if (SystemClock.elapsedRealtime() >= nextHostCheck) {
@@ -752,13 +785,16 @@ class J03AttachAndTypeJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var previous: RemoteSize? = null
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("host pane-size poll: $what")
             val current = hostPaneSize()
             if (current != null && current == previous) return current
             previous = current
             SystemClock.sleep(SIZE_SETTLE_MS)
         }
-        throw AssertionError("$what: the host's pane size never settled (last=$previous)")
+        throw AssertionError(
+            "$what: the host's pane size never settled (last=$previous)" +
+                compose.idleWedgeNote(),
+        )
     }
 
     /** `tmux display-message`, over the fixture's own connection, never the app's. */
@@ -816,7 +852,7 @@ class J03AttachAndTypeJourney {
      */
     /** The framework's own IME inset, in pixels. 0 when the keyboard is down. */
     private fun imeInsetBottom(): Int {
-        compose.waitForIdle()
+        compose.awaitIdle("before reading the IME inset")
         return compose.runOnUiThread {
             ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
                 ?.getInsets(WindowInsetsCompat.Type.ime())
@@ -840,7 +876,8 @@ class J03AttachAndTypeJourney {
         val shot = JourneyScreenshots.capture("failure-ime-${visible}", JOURNEY)
         throw AssertionError(
             "the keyboard never became ${if (visible) "visible" else "hidden"} " +
-                "(ime inset bottom=$bottom). Screenshot: ${shot.absolutePath}",
+                "(ime inset bottom=$bottom). Screenshot: ${shot.absolutePath}" +
+                compose.idleWedgeNote(),
         )
     }
 
@@ -850,6 +887,24 @@ class J03AttachAndTypeJourney {
      * The Activity is recreated, so the vendored view is rebuilt and re-attached
      * to the SAME `TerminalSession` the ViewModel still owns — which is the U-4
      * design this exercises for the first time.
+     *
+     * ## The wait inside the loop is BOUNDED, and that is the point (#2479)
+     *
+     * This loop used to call `compose.waitForIdle()`, which has no timeout of
+     * its own — so when Compose refused to call the recreated Activity idle
+     * (twice on CI, repeatedly locally, always on the second rotation back to
+     * portrait) the FIRST iteration parked forever and the 60-second deadline
+     * below was unreachable. The instrumentation process then outlived the
+     * job's 45-minute step timeout, Gradle was killed before writing any
+     * `TEST-*.xml`, and the fifteen journeys that had already passed lost their
+     * evidence along with this one.
+     *
+     * [awaitIdle] gives that sync a budget and returns instead of parking, so a
+     * recurrence costs this one test, at the time it promised, with a
+     * screenshot and [idleWedgeNote]'s explanation of what actually stalled.
+     * The oracle is unaffected: the loop's real question — has the view been
+     * laid out the new way — is read on the main thread either way, and the
+     * idle sync only ever made that read cheaper to trust.
      */
     private fun rotate(orientation: Int) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -859,10 +914,11 @@ class J03AttachAndTypeJourney {
         instrumentation.waitForIdleSync()
 
         val wantWide = orientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        val want = if (wantWide) "landscape" else "portrait"
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var seen = "none"
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("rotation to $want")
             var laidOut = false
             instrumentation.runOnMainSync {
                 val view = terminalView()
@@ -877,9 +933,12 @@ class J03AttachAndTypeJourney {
             }
             SystemClock.sleep(POLL_MS)
         }
+        val shot = JourneyScreenshots.capture("failure-rotate-$want", JOURNEY)
         throw AssertionError(
-            "the terminal never laid out ${if (wantWide) "landscape" else "portrait"} " +
-                "(last seen $seen)",
+            "the terminal never laid out $want within ${TIMEOUT_MS}ms " +
+                "(last seen $seen).\n" +
+                "Screen state: ${safeScreenDiagnosis()}\n" +
+                "Screenshot: ${shot.absolutePath}" + compose.idleWedgeNote(),
         )
     }
 
@@ -901,7 +960,7 @@ class J03AttachAndTypeJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var count = -1
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("host sleep poll")
             count = AgentsFixture.exec(
                 "ps -eo args= | grep -c '^sleep $SLEEP_SECONDS\$' || true",
             ).trim().toIntOrNull() ?: -1
@@ -913,7 +972,7 @@ class J03AttachAndTypeJourney {
             "the host never reported `sleep $SLEEP_SECONDS` as " +
                 "${if (running) "running" else "gone"} (count=$count).\n" +
                 "The rendered viewport was:\n" + renderedTranscript() + "\n" +
-                "Screenshot: ${shot.absolutePath}",
+                "Screenshot: ${shot.absolutePath}" + compose.idleWedgeNote(),
         )
     }
 
@@ -967,6 +1026,14 @@ class J03AttachAndTypeJourney {
          * retry rather than the whole budget.
          */
         const val SIZE_REPLY_TIMEOUT_MS = 10_000L
+
+        /**
+         * How long the FAILURE path may spend gathering a screen diagnosis
+         * before giving up on it (#2479). Short on purpose: by the time this
+         * runs the test has already failed, and the only thing left to protect
+         * is the rest of the suite's results.
+         */
+        const val DIAGNOSIS_BUDGET_MS = 10_000L
 
         const val JOURNEY = "j03-attach-type"
 

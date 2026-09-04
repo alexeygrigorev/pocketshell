@@ -22,6 +22,7 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.ToxiproxyControl
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
@@ -313,7 +314,7 @@ class J05ReconnectAfterDropJourney {
      * vacuous pass had the check been `contains` rather than a full match.
      */
     private fun bannerText(): String {
-        compose.waitForIdle()
+        compose.awaitIdle("before reading the reconnect banner")
         val node = compose.onNodeWithTag(SESSION_RECONNECT_BANNER_TAG).fetchSemanticsNode()
         return collectText(node).trim()
     }
@@ -338,7 +339,7 @@ class J05ReconnectAfterDropJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("transcript poll: $what")
             last = renderedTranscript()
             if (predicate(squashed(last))) return last
             SystemClock.sleep(POLL_MS)
@@ -410,7 +411,7 @@ class J05ReconnectAfterDropJourney {
      */
     private fun typeLine(line: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        compose.waitForIdle()
+        compose.awaitIdle("before typing a line")
         instrumentation.runOnMainSync {
             val view = terminalView()
             checkNotNull(view) { "no TerminalView on screen to type into" }

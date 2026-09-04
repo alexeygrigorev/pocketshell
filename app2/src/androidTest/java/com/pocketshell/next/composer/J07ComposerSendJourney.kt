@@ -23,6 +23,7 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_ERROR_BANNER_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
@@ -156,7 +157,7 @@ class J07ComposerSendJourney {
 
         compose.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("echo $MARKER")
-        compose.waitForIdle()
+        compose.awaitIdle("after composing the draft")
         JourneyScreenshots.capture("01-composed", JOURNEY)
 
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
@@ -180,7 +181,7 @@ class J07ComposerSendJourney {
         )
 
         // A delivered send clears the composer — and leaves no chip.
-        compose.waitForIdle()
+        compose.awaitIdle("after the send")
         compose.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertDoesNotExist()
         compose.onNode(hasText(COMPOSER_PLACEHOLDER)).assertIsDisplayed()
     }
@@ -210,7 +211,7 @@ class J07ComposerSendJourney {
         awaitTag(SESSION_ERROR_BANNER_TAG, "the session-ended banner")
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(UNDELIVERED_TEXT)
-        compose.waitForIdle()
+        compose.awaitIdle("after composing the undelivered draft")
         // Prove the editor took the text and Send is live BEFORE asserting on
         // what Send does with it: a timeout on the chip alone cannot tell
         // "the send did the wrong thing" from "the tap never reached a send".
@@ -243,7 +244,7 @@ class J07ComposerSendJourney {
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(HISTORY_TEXT)
-        compose.waitForIdle()
+        compose.awaitIdle("after composing the history draft")
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
         awaitTranscript("the sent history line") { it.contains(squashed(HISTORY_TEXT)) }
 
@@ -252,7 +253,7 @@ class J07ComposerSendJourney {
         JourneyScreenshots.capture("04-history", JOURNEY)
 
         compose.onNode(hasText(HISTORY_TEXT)).performClick()
-        compose.waitForIdle()
+        compose.awaitIdle("after refilling the draft from history")
         JourneyScreenshots.capture("05-refilled", JOURNEY)
 
         // The composer holds the message again, ready to send a second time.
@@ -333,7 +334,7 @@ class J07ComposerSendJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("transcript poll: $what")
             last = renderedTranscript()
             if (predicate(squashed(last))) return last
             SystemClock.sleep(POLL_MS)
@@ -393,7 +394,7 @@ class J07ComposerSendJourney {
     private fun awaitTag(tag: String, what: String = tag) {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("tag poll: $what")
             if (compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()) return
             SystemClock.sleep(POLL_MS)
         }

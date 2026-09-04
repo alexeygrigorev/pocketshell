@@ -18,6 +18,7 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.tree.SESSION_TREE_TAG
@@ -178,7 +179,7 @@ class J12UsagePanelJourney {
     private fun awaitTag(tag: String, what: String = tag) {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("tag poll: $what")
             if (compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()) return
             SystemClock.sleep(POLL_MS)
         }

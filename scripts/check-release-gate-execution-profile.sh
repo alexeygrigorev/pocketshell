@@ -96,12 +96,16 @@ as_hosted() { (export CI=true && "$@"); }
 # Scripts in the release-validation chain. All of them must be wired to the
 # shared profile; the ones that build must additionally dominate their build
 # lines with a scope apply.
+# Issue #2481: phone-walkthrough.sh, parallel-setup-detection.sh and
+# terminal-workbench.sh were DELETED with the `app` module androidTest classes
+# they drove, so they leave this list rather than being commented out (D22) — a
+# name here for a file that does not exist turns a wiring guard into a permanent
+# red. capture-walkthrough-screenshots.sh stays: it still assembles app2's APK
+# pair, so it still has a build line that must be heap-bounded, even though it
+# is now a standalone visual pass rather than a chain stage.
 RELEASE_CHAIN_SCRIPTS=(
   scripts/pre-release-confidence-gate.sh
-  scripts/phone-walkthrough.sh
   scripts/capture-walkthrough-screenshots.sh
-  scripts/parallel-setup-detection.sh
-  scripts/terminal-workbench.sh
   scripts/android-upgrade-preservation-gate.sh
   scripts/release-emulator-validation.sh
 )
@@ -1515,18 +1519,12 @@ self_test() {
     fi
   }
 
-  expect_help_ok "phone-walkthrough.sh terminal-lab --help" \
-    "$ROOT_DIR/scripts/phone-walkthrough.sh" terminal-lab --help
-  expect_help_ok "phone-walkthrough.sh dispatch-only" \
-    env PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY=1 "$ROOT_DIR/scripts/phone-walkthrough.sh" all
   expect_help_ok "pre-release-confidence-gate.sh --help" \
     "$ROOT_DIR/scripts/pre-release-confidence-gate.sh" --help
   expect_help_ok "release-emulator-validation.sh --help" \
     "$ROOT_DIR/scripts/release-emulator-validation.sh" --help
   expect_help_ok "capture-walkthrough-screenshots.sh --help" \
     "$ROOT_DIR/scripts/capture-walkthrough-screenshots.sh" --help
-  expect_help_ok "parallel-setup-detection.sh --help" \
-    "$ROOT_DIR/scripts/parallel-setup-detection.sh" --help
   expect_help_ok "android-upgrade-preservation-gate.sh --help" \
     "$ROOT_DIR/scripts/android-upgrade-preservation-gate.sh" --help
 
@@ -1687,22 +1685,21 @@ self_test() {
     rm -rf "$mutant"
   }
 
-  mutate_and_expect_red \
-    "the phone walkthrough's APK build lost its resource args" \
-    scripts/phone-walkthrough.sh \
-    's| "\${POCKETSHELL_GRADLE_RESOURCE_ARGS\[@\]}" :app:assembleDebug| :app:assembleDebug|'
+  # Issue #2481: the phone-walkthrough / terminal-workbench /
+  # parallel-setup-detection mutation cases went with their scripts, and the
+  # surviving anchors moved to `:app2:`. A `sed` anchor against a deleted file
+  # (or a stale task name) silently becomes a no-op mutation, and
+  # `mutate_and_expect_red` then reports the guard ACCEPTING a "mutant" that was
+  # never mutated — which `mutate_awk_and_expect` explicitly hard-fails on and
+  # this helper would otherwise mask.
   mutate_and_expect_red \
     "the visual-audit APK build lost its resource args" \
     scripts/capture-walkthrough-screenshots.sh \
-    's| "\${POCKETSHELL_GRADLE_RESOURCE_ARGS\[@\]}" :app:assembleDebug| :app:assembleDebug|'
+    's| "\${POCKETSHELL_GRADLE_RESOURCE_ARGS\[@\]}" :app2:assembleDebug| :app2:assembleDebug|'
   mutate_and_expect_red \
-    "the terminal workbench APK build lost its resource args" \
-    scripts/terminal-workbench.sh \
-    's| "\${POCKETSHELL_GRADLE_RESOURCE_ARGS\[@\]}" :app:assembleDebug| :app:assembleDebug|'
-  mutate_and_expect_red \
-    "the parallel setup-detection APK build lost its resource args" \
-    scripts/parallel-setup-detection.sh \
-    's| "\${POCKETSHELL_GRADLE_RESOURCE_ARGS\[@\]}" \\| \\|'
+    "the upgrade gate's APK build lost its resource args" \
+    scripts/android-upgrade-preservation-gate.sh \
+    's|^    ./gradlew \$GRADLE_FLAGS :app2:assembleDebug$|    ./gradlew :app2:assembleDebug|'
   mutate_and_expect_red \
     "the confidence gate went back to its stale private flag string" \
     scripts/pre-release-confidence-gate.sh \
@@ -1712,8 +1709,8 @@ self_test() {
     scripts/pre-release-confidence-gate.sh \
     's|^  export LOG_ROOT RUN_ID GRADLE_USER_HOME GRADLE_FLAGS POCKETSHELL_TEST_MEM$|  export LOG_ROOT RUN_ID GRADLE_USER_HOME GRADLE_FLAGS|'
   mutate_and_expect_red \
-    "the phone walkthrough dropped its fail-fast profile assertion" \
-    scripts/phone-walkthrough.sh \
+    "the visual pass dropped its fail-fast profile assertion" \
+    scripts/capture-walkthrough-screenshots.sh \
     's|^pocketshell_assert_gradle_execution_profile|: assertion_removed_by_mutation|'
   mutate_and_expect_red \
     "the shared Kotlin daemon heap flag was deleted from the profile lib" \
@@ -1755,16 +1752,16 @@ self_test() {
 
   # (b) Commenting a call out leaves the substring. Placement, not presence.
   mutate_and_expect_red \
-    "the phone walkthrough's point-of-use scope apply was COMMENTED OUT" \
-    scripts/phone-walkthrough.sh \
+    "the visual pass's point-of-use scope apply was COMMENTED OUT" \
+    scripts/capture-walkthrough-screenshots.sh \
     's|^\([[:space:]]*\)pocketshell_apply_release_gate_scope_memory|\1# pocketshell_apply_release_gate_scope_memory|'
   mutate_and_expect_red \
     "the visual-audit profile assertion was COMMENTED OUT" \
     scripts/capture-walkthrough-screenshots.sh \
     's|^pocketshell_assert_gradle_execution_profile|# pocketshell_assert_gradle_execution_profile|'
   mutate_and_expect_red \
-    "the terminal workbench stopped sourcing the profile lib (line COMMENTED OUT)" \
-    scripts/terminal-workbench.sh \
+    "the release validation stopped sourcing the profile lib (line COMMENTED OUT)" \
+    scripts/release-emulator-validation.sh \
     's|^source "\$ROOT_DIR/scripts/lib/gradle-profile.sh"$|# source "$ROOT_DIR/scripts/lib/gradle-profile.sh"|'
   # Dominance specifically: the upgrade gate keeps its SECOND apply, so the
   # presence checks all stay green and only the placement rule can catch this.
@@ -1883,8 +1880,8 @@ self_test() {
     { print }'
 
   mutate_awk_and_expect red \
-    "the phone walkthrough point-of-use apply was WRAPPED IN A CONDITIONAL that can be false" \
-    scripts/phone-walkthrough.sh "$WRAP_CONDITIONAL"
+    "the confidence gate point-of-use apply was WRAPPED IN A CONDITIONAL that can be false" \
+    scripts/pre-release-confidence-gate.sh "$WRAP_CONDITIONAL"
   mutate_awk_and_expect red \
     "the visual-audit apply was WRAPPED IN A CONDITIONAL in a second script, at different indents, so this is not an indentation coincidence" \
     scripts/capture-walkthrough-screenshots.sh "$WRAP_CONDITIONAL"
@@ -1898,15 +1895,15 @@ self_test() {
     "the upgrade gate SECOND apply was deleted, leaving only the one inside if BUILD_NEW_APK == 1 to cover a BUILD_NEW_APK=0 old-worktree assemble" \
     scripts/android-upgrade-preservation-gate.sh "$DROP_SECOND_APPLY"
   mutate_awk_and_expect red \
-    "the phone walkthrough apply moved into the SIBLING else branch of the build own if" \
-    scripts/phone-walkthrough.sh "$MOVE_TO_ELSE"
+    "the visual pass apply moved into the SIBLING else branch of the build own if" \
+    scripts/capture-walkthrough-screenshots.sh "$MOVE_TO_ELSE"
   mutate_awk_and_expect red \
     "a release-chain script's block structure stopped balancing, so reachability could not be decided" \
-    scripts/phone-walkthrough.sh "$BREAK_BLOCK_STRUCTURE"
+    scripts/capture-walkthrough-screenshots.sh "$BREAK_BLOCK_STRUCTURE"
 
   mutate_awk_and_expect green \
-    "the phone walkthrough apply was hoisted to the block ENCLOSING the build, so it still reaches it" \
-    scripts/phone-walkthrough.sh "$HOIST_TO_ENCLOSING"
+    "the visual pass apply was hoisted to the block ENCLOSING the build, so it still reaches it" \
+    scripts/capture-walkthrough-screenshots.sh "$HOIST_TO_ENCLOSING"
   mutate_awk_and_expect green \
     "the visual-audit build was nested one block DEEPER after the apply, so it is still reached by it" \
     scripts/capture-walkthrough-screenshots.sh "$NEST_BUILD_DEEPER"

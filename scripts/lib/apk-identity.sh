@@ -11,7 +11,7 @@
 # file as `release-emulator-validation/<run>/app-debug.apk` — the artifact the
 # release notes tell a human to download.
 #
-# But every downstream stage (`phone-walkthrough.sh` terminal-lab /
+# But every downstream stage (the deleted `phone-walkthrough.sh` terminal-lab /
 # tmux-existing-session / setup-detection, and `capture-walkthrough-
 # screenshots.sh`) used to `rm -rf app/build` and rebuild its own pair from the
 # same source. Same source is NOT the same binary: those are byte-different
@@ -44,7 +44,7 @@
 #     failure, not a skip;
 #   * with NO expected sha exported at all the verifier is a deliberate no-op,
 #     because that is the standalone developer invocation
-#     (`scripts/phone-walkthrough.sh terminal-lab` on a dev box) which builds
+#     (a standalone `scripts/capture-walkthrough-screenshots.sh` on a dev box) which builds
 #     its own APKs and has nothing to compare against. The release chain always
 #     exports them, and `--verify-apk-identity` mode REQUIRES them.
 # ---------------------------------------------------------------------------

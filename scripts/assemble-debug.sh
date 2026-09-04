@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fast local debug APK. This is NOT the release/visual-audit profile.
 #
-# The gate wrappers (`capture-walkthrough-screenshots.sh`, phone-walkthrough,
-# pre-release confidence) use --no-daemon --no-build-cache --max-workers=1 so a
+# The gate wrappers (`capture-walkthrough-screenshots.sh`, the pre-release
+# confidence gate) use --no-daemon --no-build-cache --max-workers=1 so a
 # release APK is reproducible and cannot OOM the box. That profile is the wrong
 # default for "put this build on the phone": it throws away the Gradle daemon
 # and the build cache, serialises every module, and compiles all four native

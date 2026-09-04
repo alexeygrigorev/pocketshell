@@ -9,8 +9,24 @@ source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
 
-# Issue #2064: see scripts/phone-walkthrough.sh — same contract, same
-# device-free verification mode, same reason it must not queue on the AVD lock.
+# Issue #2064: the release-chain APK identity contract — a device-free
+# verification mode that must not queue on the AVD lock (it touches no device).
+#
+# Issue #2481 repointed this whole script at app2. It used to drive three
+# `app` module screenshot classes (WalkthroughVisualScreenshotTest,
+# WalkthroughConversationScreenshotTest, PromptComposerVisualScreenshotTest)
+# that the rewrite's hard cut deleted, and it asserted nine hardcoded PNG names
+# one of which was the conversation view — a CUT feature
+# (docs/rewrite-implementation-plan.md, "Scope amendment").
+#
+# app2's screenshot surface is `JourneyScreenshots.capture`, called from its
+# instrumented journeys, which write into the app's EXTERNAL FILES dir under a
+# per-journey subdirectory. So the visual pass is now: install the pair, run
+# app2's whole instrumented set UNFILTERED in one process (the shape issue #2474
+# fixed for the journey lane — a per-class filter hides cross-journey state
+# leaks), pull that directory, and require every journey to have rendered at
+# least one frame. That last part is what keeps this non-vacuous: a suite that
+# silently stopped running a journey pulls no PNG for it and reddens here.
 POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=0
 if [[ "${1:-}" == "--verify-apk-identity" ]]; then
   POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=1
@@ -37,25 +53,28 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/walkthrough-visual-pass}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
-DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
-DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
-MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
-CONVERSATION_TEST_CLASS="com.pocketshell.app.proof.WalkthroughConversationScreenshotTest"
-COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
-MAIN_SCREENSHOTS=(
-  "01-host-list.png"
-  "02-host-setup-folder-list.png"
-  "03-terminal-session-input-controls.png"
-  "04-snippets.png"
-  "05-settings.png"
-)
-CONVERSATION_SCREENSHOTS=(
-  "06-conversation-view.png"
-)
-COMPOSER_SCREENSHOTS=(
-  "05b-composer-idle-draft.png"
-  "06-composer-recording.png"
-  "07-composer-transcribing.png"
+APP_PACKAGE="com.pocketshell.next"
+TEST_PACKAGE="$APP_PACKAGE.test"
+# JourneyScreenshots writes to getExternalFilesDir(null)/<journey>/<name>.png.
+DEVICE_OUTPUT_DIR="/sdcard/Android/data/$APP_PACKAGE/files"
+DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR"
+# Every journey directory app2's instrumented set is expected to produce. Read
+# off the `const val JOURNEY` declarations in app2/src/androidTest (J01's
+# capture calls use JourneyScreenshots' default, "j01-connect-trust"). A journey
+# that stops running renders no frame and its directory stays absent, which is
+# exactly the vacuous-pass shape this list exists to catch.
+EXPECTED_JOURNEY_DIRS=(
+  "j01-connect-trust"
+  "j02-session-tree"
+  "j03-attach-type"
+  "j04-create-session"
+  "j05-reconnect"
+  "j06-background-grace-return"
+  "j07-composer-send"
+  "j08-voice-dictation"
+  "j10-files"
+  "j11-share-upload"
+  "j12-usage-panel"
 )
 INSTRUMENTATION_ATTEMPTS="${INSTRUMENTATION_ATTEMPTS:-3}"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
@@ -65,8 +84,8 @@ SSH_USER="${SSH_USER:-testuser}"
 # Issue #2064: the release chain hands this stage the pair the pre-release
 # confidence gate built, validated and publishes, so the visual-audit
 # screenshots are of the SHIPPED binary rather than of a byte-different rebuild.
-APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
-TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+APP_APK="${APP_APK:-$ROOT_DIR/app2/build/outputs/apk/debug/app2-debug.apk}"
+TEST_APK="${TEST_APK:-$ROOT_DIR/app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk}"
 # 1 keeps the historical standalone behaviour (build the pair here). The release
 # chain exports 0 together with the expected digests.
 VISUAL_AUDIT_BUILD_APKS="${VISUAL_AUDIT_BUILD_APKS:-1}"
@@ -84,8 +103,9 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/capture-walkthrough-screenshots.sh
 
-Captures emulator screenshots for the main PocketShell walkthrough visual pass.
-Defaults use explicit Android SDK paths:
+Runs app2's whole instrumented journey set on the local emulator and collects
+the screenshots its journeys render (JourneyScreenshots.capture), for the
+release visual pass. Defaults use explicit Android SDK paths:
 
   adb      /home/alexey/Android/Sdk/platform-tools/adb
   emulator /home/alexey/Android/Sdk/emulator/emulator
@@ -227,13 +247,13 @@ wait_for_instrumentation() {
   for attempt in $(seq 1 30); do
     {
       printf '[%s] attempt %s\n' "$(date -Is)" "$attempt"
-      "$ADB" shell pm list packages com.pocketshell.app
-      "$ADB" shell pm list packages com.pocketshell.app.test
+      "$ADB" shell pm list packages "$APP_PACKAGE"
+      "$ADB" shell pm list packages "$TEST_PACKAGE"
       "$ADB" shell pm list instrumentation
     } >> "$log_file" 2>&1
-    if grep -q '^package:com.pocketshell.app$' "$log_file" &&
-      grep -q '^package:com.pocketshell.app.test$' "$log_file" &&
-      grep -q '^instrumentation:com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner' "$log_file"; then
+    if grep -qx "package:$APP_PACKAGE" "$log_file" &&
+      grep -qx "package:$TEST_PACKAGE" "$log_file" &&
+      grep -q "^instrumentation:$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" "$log_file"; then
       printf '\n[%s-instrumentation-ready]\nLog: %s\nPASS: Android test instrumentation registered\n' "$step_name" "$log_file"
       return 0
     fi
@@ -246,8 +266,11 @@ wait_for_instrumentation() {
 
 visual_audit_instrumentation_log_has_success() {
   local log_file="$1"
+  # Issue #2481 / G3: `OK (` alone also matches `OK (0 tests)`. An unfiltered
+  # run has no selector that can go stale, so "executed nothing" is exactly how
+  # it lies; require a positive test count.
   grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
-    grep -q "OK (" "$log_file" &&
+    grep -Eq '^OK \([1-9][0-9]* tests?\)' "$log_file" &&
     ! grep -q "FAILURES!!!" "$log_file"
 }
 
@@ -258,7 +281,7 @@ visual_audit_instrumentation_log_has_failure_markers() {
 
 visual_audit_logcat_has_app_or_test_failure_markers() {
   local logcat_file="$1"
-  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
+  grep -Eq 'Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|FATAL SIGNAL.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
 }
 
 visual_audit_instrumentation_log_has_transport_drop_markers() {
@@ -283,21 +306,22 @@ visual_audit_should_retry_interrupted_instrumentation() {
     visual_audit_logcat_has_transport_drop_markers "$logcat_file"
 }
 
-run_instrumentation_class() {
+# Issue #2481: no `-e class` filter. One process, the whole app2 instrumented
+# set, matching scripts/ci-app2-journey-suite.sh (issue #2474). The label is
+# only used for artifact names and messages.
+run_instrumentation_suite() {
   local step_name="$1"
   local test_class="$2"
   local attempt instrumentation_status attempt_logcat
   for attempt in $(seq 1 "$INSTRUMENTATION_ATTEMPTS"); do
     local attempt_step="$step_name-attempt-$attempt"
     run_logged "$attempt_step-pre-force-stop" bash -lc \
-      "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; sleep 5"
+      "'$ADB' shell am force-stop '$APP_PACKAGE' >/dev/null 2>&1 || true; '$ADB' shell am force-stop '$TEST_PACKAGE' >/dev/null 2>&1 || true; sleep 5"
     "$ADB" logcat -c >/dev/null 2>&1 || true
     instrumentation_status=0
     run_logged "$attempt_step" \
       "$ADB" shell am instrument -w -r \
-      -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-      -e class "$test_class" \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+      "$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" ||
       instrumentation_status=$?
     cp "$RUN_DIR/$attempt_step.log" "$RUN_DIR/$step_name.log"
     attempt_logcat="$RUN_DIR/$attempt_step-logcat.txt"
@@ -327,19 +351,29 @@ pull_device_screenshots() {
   run_logged "$step_name" "$ADB" pull "$DEVICE_SCREENSHOT_DIR" "$RUN_DIR/screenshots/"
 }
 
-assert_screenshots_exist() {
+# Issue #2481: assert per JOURNEY, not per hardcoded filename. Individual frame
+# names belong to app2's journeys and legitimately change as a journey grows a
+# step; a journey that stops running at all does not, and that is the regression
+# worth reddening on. Requires a non-empty PNG in every expected journey dir.
+assert_journey_screenshots_exist() {
   local step_name="$1"
-  shift
-  local screenshot_dir="$RUN_DIR/screenshots/walkthrough-visual-pass"
+  local screenshot_dir="$RUN_DIR/screenshots/files"
   local missing=()
-  local file_name
-  for file_name in "$@"; do
-    [[ -s "$screenshot_dir/$file_name" ]] || missing+=("$file_name")
+  local journey png_count
+  [[ -d "$screenshot_dir" ]] ||
+    fail "no screenshot directory was pulled from the device for $step_name (expected $screenshot_dir)"
+  for journey in "${EXPECTED_JOURNEY_DIRS[@]}"; do
+    png_count="$(find "$screenshot_dir/$journey" -maxdepth 1 -type f -name '*.png' -size +0 2>/dev/null | wc -l)"
+    [[ "$png_count" -ge 1 ]] || missing+=("$journey")
   done
   if [[ "${#missing[@]}" -ne 0 ]]; then
-    printf '%s\n' "Missing screenshots after $step_name:" "${missing[@]}" >&2
-    fail "Expected walkthrough screenshots were not pulled"
+    printf '%s\n' "Journeys that rendered no screenshot during $step_name:" "${missing[@]}" >&2
+    printf 'Pulled tree:\n' >&2
+    find "$screenshot_dir" -type f -name '*.png' | sort >&2 || true
+    fail "app2 journey screenshots are missing for ${#missing[@]} journey(s)"
   fi
+  printf 'All %s expected app2 journey directories rendered at least one screenshot.\n' \
+    "${#EXPECTED_JOURNEY_DIRS[@]}"
 }
 
 printf 'PocketShell walkthrough visual screenshot pass\n'
@@ -367,17 +401,24 @@ source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
 export_agents_fixture_version_for_run "$VISUAL_AUDIT_BUILD_APKS" "$APP_APK"
 run_logged "03-docker-agents-recreate" docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate agents
 wait_for_host_ssh_fixture
+# Issue #2481: the unfiltered set includes J05ReconnectAfterDropJourney, which
+# dials the fixture THROUGH Toxiproxy. Without this service that journey fails
+# as if the product were broken (issue #2128's exact symptom). Readiness is an
+# API poll, not wait_for_container_healthy: the toxiproxy image declares no
+# compose healthcheck. Same shape as .github/workflows/app2.yml's journey job.
+run_logged "03b-docker-network-fault-proxy" bash -lc \
+  "docker compose -f '$COMPOSE_FILE' up -d --no-deps network-fault-proxy && for i in \$(seq 1 30); do if curl --fail --silent --show-error http://127.0.0.1:8474/version; then exit 0; fi; sleep 1; done; docker compose -f '$COMPOSE_FILE' logs --no-color network-fault-proxy; exit 1"
 run_logged "05-emulator-readiness" bash -lc \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"
 
 run_logged "06-cold-reset-emulator-app-state" bash -lc \
   'adb="$1"
   printf "COLD-RESET: uninstalling app/test packages for deterministic visual screenshots\n"
-  "$adb" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-  "$adb" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-  "$adb" uninstall com.pocketshell.app >/dev/null 2>&1 || true
-  "$adb" uninstall com.pocketshell.app.test >/dev/null 2>&1 || true' \
-  _ "$ADB"
+  "$adb" shell am force-stop "$2" >/dev/null 2>&1 || true
+  "$adb" shell am force-stop "$3" >/dev/null 2>&1 || true
+  "$adb" uninstall "$2" >/dev/null 2>&1 || true
+  "$adb" uninstall "$3" >/dev/null 2>&1 || true' \
+  _ "$ADB" "$APP_PACKAGE" "$TEST_PACKAGE"
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR"
 # Issue #2064: when the release chain supplies the pair the pre-release gate
@@ -419,19 +460,11 @@ pocketshell_apply_release_gate_scope_memory "visual-audit APK build"
 run_logged "10-build-walkthrough-visual-apks" \
   "${VISUAL_AUDIT_BUILD_PREFIX[@]}" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
-  ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app2:assembleDebug :app2:assembleDebugAndroidTest --stacktrace
 install_apks "11-install-walkthrough-visual-apks"
-run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAIN_TEST_CLASS"
-pull_device_screenshots "13-collect-main-device-screenshots"
-assert_screenshots_exist "main walkthrough visual pass" "${MAIN_SCREENSHOTS[@]}"
+run_instrumentation_suite "12-run-app2-instrumented-suite" "app2 instrumented set (unfiltered)"
+pull_device_screenshots "13-collect-app2-journey-screenshots"
+assert_journey_screenshots_exist "app2 journey visual pass"
 
-run_instrumentation_class "14-run-conversation-visual-instrumentation" "$CONVERSATION_TEST_CLASS"
-pull_device_screenshots "15-collect-conversation-device-screenshots"
-assert_screenshots_exist "conversation visual pass" "${MAIN_SCREENSHOTS[@]}" "${CONVERSATION_SCREENSHOTS[@]}"
-
-run_instrumentation_class "16-run-composer-visual-instrumentation" "$COMPOSER_TEST_CLASS"
-pull_device_screenshots "17-collect-composer-device-screenshots"
-assert_screenshots_exist "composer visual pass" "${MAIN_SCREENSHOTS[@]}" "${CONVERSATION_SCREENSHOTS[@]}" "${COMPOSER_SCREENSHOTS[@]}"
-
-printf '\nPASS: walkthrough visual screenshots captured\n'
-printf 'Screenshots: %s/screenshots/walkthrough-visual-pass\n' "$RUN_DIR"
+printf '\nPASS: app2 journey screenshots captured\n'
+printf 'Screenshots: %s/screenshots/files\n' "$RUN_DIR"

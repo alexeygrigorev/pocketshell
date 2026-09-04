@@ -628,22 +628,25 @@ jobs:
       - name: "Unreferenced release/AVD harnesses (issue #1853)"
         run: |
           set -euo pipefail
+          # Issue #2481 removed five entries with their subjects (D22):
+          # long-running-release-gate-retry-test.sh (LongRunningSessionStabilityTest),
+          # release-gate-retry-test.sh (RealAgentReleaseGateTest's retry helpers),
+          # phone-walkthrough-dispatch-test.sh (scripts/phone-walkthrough.sh),
+          # reconnect-app-switch-test.sh (scripts/reconnect-app-switch.sh) and
+          # terminal-workbench-retry-test.sh (scripts/terminal-workbench.sh) —
+          # every one drove a deleted `app` module androidTest class. A name
+          # left here for a deleted file is a permanent red, not coverage.
           for t in tests/scripts/app-version-test.sh \
                    tests/scripts/avd-lock-sharing-test.sh \
                    tests/scripts/avd-lock-test.sh \
                    tests/scripts/avd-pool-test.sh \
                    tests/scripts/disk-preflight-test.sh \
                    tests/scripts/gate-isolated-copy-version-test.sh \
-                   tests/scripts/long-running-release-gate-retry-test.sh \
-                   tests/scripts/phone-walkthrough-dispatch-test.sh \
                    tests/scripts/pre-release-emulator-readiness-test.sh \
                    tests/scripts/pre-release-gate-retry-test.sh \
                    tests/scripts/pre-release-version-test.sh \
-                   tests/scripts/reconnect-app-switch-test.sh \
-                   tests/scripts/release-gate-retry-test.sh \
                    tests/scripts/release-validation-storage-test.sh \
                    tests/scripts/start-local-avd-test.sh \
-                   tests/scripts/terminal-workbench-retry-test.sh \
                    tests/scripts/update-install-helper-test.sh \
                    tests/scripts/walkthrough-visual-retry-test.sh; do
             echo "== $t"
@@ -752,8 +755,13 @@ jobs:
       # rewrite's hard cut, so the Gradle command could not even configure. Deleted
       # rather than repointed: app2 has no TmuxSessionScreen equivalent yet, and
       # inventing a placeholder target would be coverage theatre (D22).
-      # scripts/check-dex-register-pressure.sh is now uncalled; it is left on disk
-      # for whoever re-lands an equivalent app2 screen ratchet.
+      # scripts/check-dex-register-pressure.sh was DELETED too (issue #2481).
+      # PR #2480 left it on disk "for whoever re-lands an equivalent app2 screen
+      # ratchet"; that is exactly the deprecated-but-present stub D22 forbids —
+      # an uncalled script hardcoding `:app:assembleDebug` and
+      # `com.pocketshell.app.tmux.TmuxSessionScreen`, neither of which exists.
+      # Re-land it from scratch against the real app2 composable when there is
+      # one; a stale copy is not a head start.
 
       # Issues #1720/#2117. COMPILE ONLY; running stays in the emulator lane.
       # Rationale + the pinned property:

@@ -105,27 +105,33 @@ help_mode_does_not_wait_for_lock() {
   wait "$holder_pid" 2>/dev/null || true
 }
 
-phone_walkthrough_late_help_releases_lock() {
+# Issue #2481: this used to drive scripts/phone-walkthrough.sh, deleted with the
+# `app` module androidTest classes it ran. The property is not
+# phone-walkthrough-specific: it is "a script that takes the AVD lock BEFORE it
+# parses --help must still release the lock when --help exits". The visual pass
+# has exactly that shape (pocketshell_acquire_avd_lock runs above its usage()),
+# so it is the carrier now.
+visual_pass_late_help_releases_lock() {
   local tmpdir="$1"
   local lock_file="$tmpdir/avd.lock"
 
   POCKETSHELL_AVD_LOCK_FILE="$lock_file" \
-    LOG_ROOT="$tmpdir/phone-walkthrough" \
+    LOG_ROOT="$tmpdir/walkthrough-visual-pass" \
     RUN_ID="late-help" \
-    timeout 5s "$ROOT_DIR/scripts/phone-walkthrough.sh" terminal-lab --help \
+    timeout 5s "$ROOT_DIR/scripts/capture-walkthrough-screenshots.sh" --help \
     > "$tmpdir/late-help.out" 2> "$tmpdir/late-help.err" ||
-    fail "phone walkthrough late help did not exit successfully"
+    fail "visual pass late help did not exit successfully"
 
   if ! flock -n "$lock_file" true; then
     fuser -k "$lock_file" >/dev/null 2>&1 || true
-    fail "phone walkthrough late help leaked the AVD lock holder"
+    fail "visual pass late help leaked the AVD lock holder"
   fi
 }
 
 with_tmpdir child_processes_do_not_hold_lock
 with_tmpdir nested_gates_do_not_reacquire_or_release
 with_tmpdir help_mode_does_not_wait_for_lock
-with_tmpdir phone_walkthrough_late_help_releases_lock
+with_tmpdir visual_pass_late_help_releases_lock
 
 # Issue #2113: a harness that exits 0 having run nothing is the vacuous green
 # process.md catalogues. The count line is what makes the JVM assertion about

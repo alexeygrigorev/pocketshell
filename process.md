@@ -214,7 +214,7 @@ Each issue needs a specific title, scope, acceptance criteria with checkboxes, n
 
 ## Local debug APK
 
-The default local compile/phone-install path is `scripts/assemble-debug.sh` (optional `--abi auto --install`, `--android-test`, `--abi all`) — it keeps the Gradle daemon and build cache, pins the Kotlin daemon heap, and compiles only the connected ABI when appropriate. Don't use `scripts/cgroup-run.sh -- ./gradlew assembleDebug` (undersized cgroup and heap, produces a fake OOM) or the release-gate `./gradlew --no-daemon --no-build-cache --max-workers=1 ...` profile (correct only for release/visual-audit builds via `scripts/pre-release-confidence-gate.sh`/`scripts/phone-walkthrough.sh`, not a routine compile check) for this. Connected/emulator tests still go through `scripts/connected-test.sh --suffix i<issue>` (#672).
+The default local compile/phone-install path is `scripts/assemble-debug.sh` (optional `--abi auto --install`, `--android-test`, `--abi all`) — it keeps the Gradle daemon and build cache, pins the Kotlin daemon heap, and compiles only the connected ABI when appropriate. Don't use `scripts/cgroup-run.sh -- ./gradlew assembleDebug` (undersized cgroup and heap, produces a fake OOM) or the release-gate `./gradlew --no-daemon --no-build-cache --max-workers=1 ...` profile (correct only for release/visual-audit builds via `scripts/pre-release-confidence-gate.sh`/`scripts/capture-walkthrough-screenshots.sh`, not a routine compile check) for this. Connected/emulator tests still go through `scripts/connected-test.sh --suffix i<issue>` (#672).
 
 ## Verification Checklist
 
@@ -237,7 +237,7 @@ Two emulation surfaces are first-class: the Android emulator (UI/visual) and the
 
 Reviewer approval for a user-facing flow must include emulator evidence (command, whether Docker was involved, observed result) or return `CHANGES REQUESTED`/`BLOCKED`. Reject stale, missing, contradicted, or non-reproducible artifacts. The detailed acceptance bars — session-switch/reconnect journeys, visual/composer/keyboard/layout regressions, the containment-assertion checklist, fast design renders, and terminal artifact review — live in [docs/review-standards.md](docs/review-standards.md). Load it before reviewing any of those change classes; a code-read plus one happy-path screenshot is grounds for `CHANGES REQUESTED` on all of them.
 
-Reviewer workbench commands: `scripts/terminal-workbench.sh` (use `RUN_ID=issue-<N>-review` for a citable rerun), `REAL_AGENTS=1 scripts/terminal-workbench.sh` for real-agent CLI evidence. Full setup: [docs/testing.md](docs/testing.md); Docker/emulator runbook: [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md).
+Reviewer workbench commands: `scripts/connected-test.sh --suffix i<N>` (app2's whole instrumented set, unfiltered, per #2474) and `RUN_ID=issue-<N>-review scripts/capture-walkthrough-screenshots.sh` for citable journey screenshots. `scripts/terminal-workbench.sh` and its `REAL_AGENTS=1` mode were deleted by #2481 with the `app` module classes they drove; agent awareness is a cut feature, so real-agent CLI evidence has no successor. Full setup: [docs/testing.md](docs/testing.md); Docker/emulator runbook: [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md).
 
 ## Release Builds
 

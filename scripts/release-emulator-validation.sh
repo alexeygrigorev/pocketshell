@@ -56,28 +56,13 @@ PRE_RELEASE_RUN_ID="$RUN_ID-pre-release"
 # gate run without an emulator; the release default is unchanged.
 PRE_RELEASE_GATE_LOG_ROOT="${PRE_RELEASE_GATE_LOG_ROOT:-$ROOT_DIR/build/pre-release-confidence-gate}"
 PRE_RELEASE_GATE_RUN_DIR="$PRE_RELEASE_GATE_LOG_ROOT/$PRE_RELEASE_RUN_ID"
-PRE_RELEASE_GATE_APK="$PRE_RELEASE_GATE_RUN_DIR/worktree/app/build/outputs/apk/debug/app-debug.apk"
-VALIDATED_APK="$RUN_DIR/app-debug.apk"
-TERMINAL_RELEASE_GATE="${TERMINAL_RELEASE_GATE:-0}"
-TERMINAL_RELEASE_RUN_ID="$RUN_ID-terminal-release"
-TERMINAL_WORKBENCH_LOG_ROOT="$ROOT_DIR/build/terminal-workbench"
-REAL_AGENT_RELEASE_GATE_RUN_ID="$RUN_ID-real-agent-release-gate"
-REAL_AGENT_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/real-agent-release-gate"
-REAL_AGENT_RELEASE_GATE_RUN_DIR="$REAL_AGENT_RELEASE_GATE_LOG_ROOT/$REAL_AGENT_RELEASE_GATE_RUN_ID"
-REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS="${REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS:-2}"
-REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
-REAL_AGENT_RELEASE_GATE_TEST_CLASS="com.pocketshell.app.proof.RealAgentReleaseGateTest"
-
-# Issue #150: shared health-status polling helper. Provides
-# `wait_for_container_healthy` used by the real-agent gate below.
-source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
-LONG_RUNNING_TEST="${LONG_RUNNING_TEST:-0}"
-LONG_RUNNING_TEST_RUN_ID="$RUN_ID-long-running"
-LONG_RUNNING_TEST_LOG_ROOT="$ROOT_DIR/build/long-running-session"
-LONG_RUNNING_TEST_RUN_DIR="$LONG_RUNNING_TEST_LOG_ROOT/$LONG_RUNNING_TEST_RUN_ID"
-LONG_RUNNING_TEST_CLASS="com.pocketshell.app.proof.LongRunningSessionStabilityTest"
-LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS="${LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS:-2}"
-LONG_RUNNING_COMPOSE_FILE="${LONG_RUNNING_COMPOSE_FILE:-tests/docker/docker-compose.yml}"
+PRE_RELEASE_GATE_APK="$PRE_RELEASE_GATE_RUN_DIR/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
+VALIDATED_APK="$RUN_DIR/app2-debug.apk"
+# Issue #2481: the journey screenshots the pre-release gate pulls off the device
+# after its unfiltered app2 instrumented run. They are the release VISUAL-AUDIT
+# artifact now that the four walkthrough stages that used to produce one are
+# gone (see the note above the stage list below).
+PRE_RELEASE_GATE_JOURNEY_SCREENSHOTS="$PRE_RELEASE_GATE_RUN_DIR/journey-screenshots"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 
@@ -111,34 +96,26 @@ Environment overrides:
   RELEASE_VALIDATION_SKIP_MAIN_GUARD=1
       Skip the clean pushed-main guard for CI workflow_dispatch runs where the
       checkout is intentionally detached.
-  TERMINAL_RELEASE_GATE=1
-      Also run the optional high-confidence terminal release gate. This starts
-      the real-agent Docker target, SSHes into it from the emulator, drives real
-      interactive agent CLI screens, validates terminal artifacts, and runs the
-      additional RealAgentReleaseGateTest against the same real-agent fixture to
-      assert on visible CLI output and on the JSONL conversation logs the CLIs
-      write back to disk.
-  LONG_RUNNING_TEST=1
-      Also run the opt-in 10-minute foreground hold regression
-      (LongRunningSessionStabilityTest). Brings up the deterministic Docker
-      `agents` service on host port 2222, attaches a tmux session through the
-      emulator, sends a tick every 2 minutes for the full 10 minutes, and
-      asserts on zero SSH transport teardown events plus < 50 MB memory growth
-      via dumpsys meminfo. Use this for terminal/tmux-heavy releases that need
-      long-running stability evidence. The test alone adds ~11 minutes of wall
-      time, hence the opt-in.
+
+The optional TERMINAL_RELEASE_GATE=1 and LONG_RUNNING_TEST=1 stages were
+DELETED by issue #2481, not disabled. Every class they drove lived in the
+`app` module's androidTest tree, which the rewrite's hard cut removed:
+RealAgentReleaseGateTest, LongRunningSessionStabilityTest, and (through
+scripts/release-terminal-gate.sh -> scripts/terminal-workbench.sh, all deleted)
+EmulatorDockerSshSmokeTest, TerminalLabDockerTest, TmuxAttachPrefillDockerTest
+and TmuxExternalUpdateDockerTest. app2's terminal/reconnect evidence comes from
+its own instrumented journeys (J03 attach-and-type, J05 reconnect-after-drop,
+J06 background-grace-return), which the pre-release confidence gate now runs
+unfiltered against the validated APK pair, and which the `app2-journey` lane in
+.github/workflows/app2.yml runs on every push to `stable`/`main`. Real-agent
+CLI evidence has no app2 successor at all — agent awareness is a cut feature
+(docs/rewrite-implementation-plan.md "Scope amendment").
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
-  build/release-emulator-validation/<run-id>/app-debug.apk
+  build/release-emulator-validation/<run-id>/app2-debug.apk
   build/pre-release-confidence-gate/<run-id>-pre-release/
-  build/terminal-workbench/<run-id>-terminal-release/ (optional)
-  build/real-agent-release-gate/<run-id>-real-agent-release-gate/ (optional)
-  build/long-running-session/<run-id>-long-running/ (optional)
-  build/phone-walkthrough/<run-id>-terminal-lab/
-  build/phone-walkthrough/<run-id>-tmux-existing-session/
-  build/phone-walkthrough/<run-id>-setup-detection/
-  build/walkthrough-visual-pass/<run-id>-visual-audit/
+  build/pre-release-confidence-gate/<run-id>-pre-release/journey-screenshots/
 USAGE
 }
 
@@ -279,8 +256,6 @@ write_summary_header() {
     printf 'Branch: %s\n' "$(git branch --show-current)"
     printf 'Automated status: RUNNING\n'
     printf 'Visual audit inspected: no\n'
-    printf 'Optional terminal release gate: %s\n' "$([[ "$TERMINAL_RELEASE_GATE" == "1" ]] && printf enabled || printf skipped)"
-    printf 'Optional long-running session hold: %s\n' "$([[ "$LONG_RUNNING_TEST" == "1" ]] && printf enabled || printf skipped)"
     # Issue #2054: record the execution profile the build actually ran with, so a
     # future "the gate OOMed" triage does not have to guess at heaps and scopes.
     printf 'Gradle resource profile: %s\n' "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
@@ -419,447 +394,26 @@ publish_validated_apk() {
   pocketshell_assert_apk_identity "release publish" "$VALIDATED_APK" \
     "${POCKETSHELL_EXPECTED_APP_APK_SHA256:-}" ||
     fail "the published debug APK does not match the sha256 the pre-release gate validated (issue #2064)"
-  record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app-debug.apk"
+  record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app2-debug.apk"
   printf -- '- published APK sha256: `%s`\n' "$POCKETSHELL_EXPECTED_APP_APK_SHA256" >> "$SUMMARY_PATH"
 }
 
-real_agent_release_gate_instrumentation_log_has_success() {
-  local log_file="$1"
-  grep -q 'INSTRUMENTATION_CODE: -1' "$log_file" &&
-    grep -q 'OK (' "$log_file"
-}
-
-# Issue #2435: the two release-only classes below run through a direct
-# `adb shell am instrument`, not Gradle's connectedAndroidTest task, so the
-# host never receives a JUnit XML for them. That is only an ACCOUNTING gap —
-# both genuinely execute on every release run — but the #2082 ledger step reads
-# JUnit XML and nothing else, so `--verify` reported them NEVER EXECUTED, the
-# job concluded `failure` on a green validation, and `record-validated-rc`
-# (gated on `result == 'success'`) was unreachable.
-#
-# Re-encode the runner's own INSTRUMENTATION_STATUS stream as JUnit XML under
-# `build/outputs/androidTest-results/`, which is exactly where Gradle would have
-# put it and which the release job's collector already scans. `--require-class`
-# means a run that selected nothing, or self-skipped, still produces no
-# evidence: the converter refuses, the ledger stays uncredited, and `--verify`
-# reddens. Nothing here is derived from an exit code.
-DETACHED_INSTRUMENTATION_RESULTS_DIR="${DETACHED_INSTRUMENTATION_RESULTS_DIR:-$ROOT_DIR/build/outputs/androidTest-results/detached-instrumentation}"
-
-record_detached_instrumentation_junit_xml() {
-  local test_class="$1" instrumentation_log="$2"
-  local out="$DETACHED_INSTRUMENTATION_RESULTS_DIR/TEST-$test_class.xml"
-  if bash "$ROOT_DIR/scripts/instrumentation-log-to-junit-xml.sh" \
-    --log "$instrumentation_log" \
-    --out "$out" \
-    --suite "$test_class" \
-    --require-class "$test_class"; then
-    return 0
-  fi
-  # Not fatal on its own: the release job's `--verify` is the backstop and will
-  # redden with "$test_class has NEVER executed". Turning a conversion hiccup
-  # into a second hard release blocker would add a failure mode without adding
-  # detection.
-  printf 'WARN: could not record ledger JUnit XML for %s from %s\n' \
-    "$test_class" "$instrumentation_log" >&2
-  return 0
-}
-
-real_agent_release_gate_instrumentation_log_has_failure_markers() {
-  local log_file="$1"
-  grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^INSTRUMENTATION_RESULT: shortMsg=Process crashed[.]|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])' "$log_file"
-}
-
-real_agent_release_gate_logcat_has_app_or_test_failure_markers() {
-  local logcat_file="$1"
-  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
-}
-
-real_agent_release_gate_logcat_has_adb_transport_drop_markers() {
-  local logcat_file="$1"
-  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file"
-}
-
-real_agent_release_gate_should_retry_interrupted_instrumentation() {
-  local status="$1"
-  local instrumentation_log="$2"
-  local logcat_file="$3"
-  [[ "$status" -eq 255 ]] || return 1
-  real_agent_release_gate_instrumentation_log_has_success "$instrumentation_log" && return 1
-  real_agent_release_gate_instrumentation_log_has_failure_markers "$instrumentation_log" && return 1
-  real_agent_release_gate_logcat_has_app_or_test_failure_markers "$logcat_file" && return 1
-  real_agent_release_gate_logcat_has_adb_transport_drop_markers "$logcat_file"
-}
-
-long_running_session_should_retry_interrupted_instrumentation() {
-  real_agent_release_gate_should_retry_interrupted_instrumentation "$@"
-}
-
-# Run RealAgentReleaseGateTest against the same real-agent Docker fixture the
-# terminal-workbench step exercises. The workbench step covers
-# viewport/visible-text capture; this additional step asserts on real-agent CLI
-# output (deterministic visible substring) AND on the JSONL conversation log
-# the CLIs write back to disk. The two checks are intentionally complementary:
-# either one failing should block a release tag.
-run_real_agent_release_gate_instrumentation() {
-  local run_dir="$REAL_AGENT_RELEASE_GATE_RUN_DIR"
-  local instrumentation_log="$run_dir/instrumentation.log"
-  local docker_log="$run_dir/docker-real-agents.log"
-  local ssh_log="$run_dir/docker-ssh-readiness.log"
-  local logcat="$run_dir/logcat.txt"
-  local instrumentation_status=0
-  local attempt=1
-  local attempt_instrumentation_log
-  local attempt_logcat
-  local attempt_docker_log
-  mkdir -p "$run_dir"
-
-  printf '\n[real-agent release gate instrumentation]\n'
-  printf 'Test class: %s\n' "$REAL_AGENT_RELEASE_GATE_TEST_CLASS"
-  printf 'Artifact root: %s\n' "$run_dir"
-
-  # Bring up (or verify) the real-agent compose service.
-  printf 'Starting real-agent Docker fixture; log: %s\n' "$run_dir/docker-up.log"
-  docker compose -f "$REAL_AGENT_COMPOSE_FILE" up -d --build real-agents \
-    > "$run_dir/docker-up.log" 2>&1
-
-  # Issue #150: wait on the compose `healthcheck:` block via
-  # `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
-  # SSH probe so the readiness log still records the real-agent CLI
-  # sanity check (`claude --version && codex --version`).
-  local ssh_key="$ROOT_DIR/tests/docker/test_key"
-  chmod 600 "$ssh_key" 2>/dev/null || true
-  if ! wait_for_container_healthy "$REAL_AGENT_COMPOSE_FILE" real-agents "$ssh_log" 60; then
-    printf 'FAIL: real-agent SSH fixture did not become healthy (port 2240)\n' >&2
-    tail -n 80 "$ssh_log" >&2 || true
-    return 1
-  fi
-  {
-    printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
-    ssh \
-      -i "$ssh_key" \
-      -p 2240 \
-      -o BatchMode=yes \
-      -o ConnectTimeout=3 \
-      -o ConnectionAttempts=1 \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      testuser@127.0.0.1 \
-      'claude --version && codex --version'
-  } >> "$ssh_log" 2>&1 || {
-    printf 'FAIL: real-agent SSH fixture reported healthy but follow-up SSH probe failed (port 2240)\n' >&2
-    tail -n 80 "$ssh_log" >&2 || true
-    return 1
-  }
-
-  for attempt in $(seq 1 "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS"); do
-    attempt_instrumentation_log="$run_dir/instrumentation-attempt-$attempt.log"
-    attempt_logcat="$run_dir/logcat-attempt-$attempt.txt"
-    attempt_docker_log="$run_dir/docker-real-agents-attempt-$attempt.log"
-
-    # Clear logcat so each captured slice belongs to one instrumentation attempt.
-    "$ADB" logcat -c >/dev/null 2>&1 || true
-
-    set +e
-    "$ADB" shell am instrument -w -r \
-      -e class "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" \
-      -e pocketshellRealAgentReleaseGate 1 \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
-      > "$attempt_instrumentation_log" 2>&1
-    instrumentation_status="$?"
-    set -e
-
-    # Capture diagnostics regardless of outcome so reviewers can audit.
-    docker compose -f "$REAL_AGENT_COMPOSE_FILE" logs --no-color --timestamps real-agents \
-      > "$attempt_docker_log" 2>&1 || true
-    "$ADB" logcat -d -v threadtime -t 6000 > "$attempt_logcat" 2>&1 || true
-    cp "$attempt_instrumentation_log" "$instrumentation_log" || true
-    cp "$attempt_docker_log" "$docker_log" || true
-    cp "$attempt_logcat" "$logcat" || true
-
-    if [[ "$instrumentation_status" -eq 0 ]] ||
-      real_agent_release_gate_instrumentation_log_has_success "$attempt_instrumentation_log"; then
-      break
-    fi
-
-    if real_agent_release_gate_should_retry_interrupted_instrumentation \
-      "$instrumentation_status" "$attempt_instrumentation_log" "$attempt_logcat" &&
-      [[ "$attempt" -lt "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS" ]]; then
-      printf 'RealAgentReleaseGateTest instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
-      "$ADB" reconnect >/dev/null 2>&1 || true
-      "$ADB" wait-for-device >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-      "$ADB" shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
-      "$ADB" shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
-      sleep 2
-      continue
-    fi
-    break
-  done
-
-  {
-    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
-    printf 'instrumentation_attempts=%s\n' "$attempt"
-    printf 'instrumentation_max_attempts=%s\n' "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS"
-    printf 'final_instrumentation_log=%s\n' "$instrumentation_log"
-    printf 'final_logcat=%s\n' "$logcat"
-    printf 'final_docker_log=%s\n' "$docker_log"
-  } > "$run_dir/instrumentation-status.txt"
-
-  if [[ "$instrumentation_status" -ne 0 ]]; then
-    printf 'FAIL: RealAgentReleaseGateTest instrumentation exited %s\n' "$instrumentation_status" >&2
-    print_failure_log_tail "$instrumentation_log"
-    return "$instrumentation_status"
-  fi
-  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
-    printf 'FAIL: RealAgentReleaseGateTest did not report INSTRUMENTATION_CODE: -1\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
-  fi
-  if ! grep -q 'OK (' "$instrumentation_log"; then
-    printf 'FAIL: RealAgentReleaseGateTest did not report an OK summary\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
-  fi
-  record_detached_instrumentation_junit_xml \
-    "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" "$instrumentation_log"
-  return 0
-}
-
-# Run LongRunningSessionStabilityTest against the deterministic Docker `agents`
-# fixture (#148). Holds the activity in RESUMED for ~10 minutes, sends a tick
-# every 2 minutes, and asserts on zero SSH transport teardown events and
-# < 50 MB memory growth via dumpsys meminfo. The on-device test gates itself
-# behind the instrumentation arg `pocketshellLongRunningTest=1`, so passing the
-# arg is what opts the run in; without it the test class is silently skipped.
-#
-# Artifact bundle includes the captured logcat slice, the meminfo summary, and
-# the run docker logs so the reviewer can audit reconnect counters and
-# memory growth without needing to rerun the 10-minute hold.
-run_long_running_session_detached_instrumentation_attempt() {
-  local attempt="$1"
-  local attempt_instrumentation_log="$2"
-  local run_dir="$3"
-  local poll_interval_seconds="${LONG_RUNNING_TEST_POLL_INTERVAL_SECONDS:-15}"
-  local timeout_seconds="${LONG_RUNNING_TEST_INSTRUMENTATION_TIMEOUT_SECONDS:-900}"
-  local device_prefix="/data/local/tmp/pocketshell-long-running-${$}-${attempt}"
-  local device_log="$device_prefix.log"
-  local device_status="$device_prefix.status"
-  local device_done="$device_prefix.done"
-  local poll_log="$run_dir/instrumentation-attempt-$attempt.poll"
-  local status_file="$run_dir/instrumentation-attempt-$attempt.status"
-  local last_streamed_line=0
-  local start_seconds
-  start_seconds="$(date +%s)"
-
-  : > "$attempt_instrumentation_log"
-  rm -f "$poll_log" "$status_file"
-
-  if ! "$ADB" shell "rm -f $device_log $device_status $device_done; nohup sh -c 'am instrument -w -r -e class $LONG_RUNNING_TEST_CLASS -e pocketshellLongRunningTest 1 -e pocketshellCi true com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner > $device_log 2>&1; echo \$? > $device_status; touch $device_done' >/dev/null 2>&1 &"; then
-    printf 'LongRunningSessionStabilityTest detached instrumentation failed to launch\n' |
-      tee -a "$attempt_instrumentation_log" >&2
-    return 1
-  fi
-
-  while true; do
-    if "$ADB" shell "cat $device_log 2>/dev/null" > "$poll_log" 2>/dev/null; then
-      local total_lines
-      total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
-      if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
-        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" >> "$attempt_instrumentation_log"
-        last_streamed_line="$total_lines"
-      fi
-    else
-      "$ADB" reconnect >/dev/null 2>&1 || true
-      "$ADB" wait-for-device >/dev/null 2>&1 || true
-    fi
-
-    if "$ADB" shell "test -f $device_done" >/dev/null 2>&1; then
-      "$ADB" shell "cat $device_status 2>/dev/null" > "$status_file" 2>/dev/null || true
-      "$ADB" shell "cat $device_log 2>/dev/null" > "$poll_log" 2>/dev/null || true
-      local total_lines
-      total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
-      if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
-        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" >> "$attempt_instrumentation_log"
-      fi
-      "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
-      local status
-      status="$(tr -d '[:space:]' < "$status_file" 2>/dev/null || true)"
-      if [[ "$status" =~ ^[0-9]+$ ]]; then
-        return "$status"
-      fi
-
-      local final_tail_file="$run_dir/instrumentation-attempt-$attempt.final-tail"
-      tail -n 80 "$attempt_instrumentation_log" > "$final_tail_file" 2>/dev/null || true
-      {
-        printf 'FAIL: LongRunningSessionStabilityTest detached instrumentation completed but result status was missing, empty, or corrupt\n'
-        printf 'device_status_path=%s\n' "$device_status"
-        printf 'device_done_path=%s\n' "$device_done"
-        printf 'device_log_path=%s\n' "$device_log"
-        printf 'host_status_file=%s\n' "$status_file"
-        printf 'host_poll_log=%s\n' "$poll_log"
-        if [[ -s "$status_file" ]]; then
-          printf 'status_contents=%s\n' "$(tr '\n' ' ' < "$status_file")"
-        else
-          printf 'status_contents=<missing-or-empty>\n'
-        fi
-        printf 'final_instrumentation_log_tail:\n'
-        cat "$final_tail_file" 2>/dev/null || true
-      } | tee -a "$attempt_instrumentation_log" >&2
-      return 1
-    fi
-
-    local now_seconds
-    now_seconds="$(date +%s)"
-    if (( now_seconds - start_seconds >= timeout_seconds )); then
-      printf 'LongRunningSessionStabilityTest detached instrumentation timed out after %s seconds\n' "$timeout_seconds" |
-        tee -a "$attempt_instrumentation_log" >&2
-      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-      "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
-      return 124
-    fi
-
-    sleep "$poll_interval_seconds"
-  done
-}
-
-run_long_running_session_instrumentation() {
-  local run_dir="$LONG_RUNNING_TEST_RUN_DIR"
-  local instrumentation_log="$run_dir/instrumentation.log"
-  local docker_log="$run_dir/docker-agents.log"
-  local logcat="$run_dir/logcat.txt"
-  local artifacts_dir="$run_dir/artifacts/long-running-session"
-  local instrumentation_status=0
-  local attempt=1
-  local attempt_instrumentation_log
-  local attempt_logcat
-  local attempt_docker_log
-  mkdir -p "$run_dir" "$artifacts_dir"
-
-  printf '\n[long-running session stability instrumentation]\n'
-  printf 'Test class: %s\n' "$LONG_RUNNING_TEST_CLASS"
-  printf 'Artifact root: %s\n' "$run_dir"
-
-  # Bring up (or verify) the deterministic agents compose service on port 2222.
-  printf 'Starting deterministic agents Docker fixture; log: %s\n' "$run_dir/docker-up.log"
-  docker compose -f "$LONG_RUNNING_COMPOSE_FILE" up -d agents \
-    > "$run_dir/docker-up.log" 2>&1
-
-  for attempt in $(seq 1 "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS"); do
-    attempt_instrumentation_log="$run_dir/instrumentation-attempt-$attempt.log"
-    attempt_logcat="$run_dir/logcat-attempt-$attempt.txt"
-    attempt_docker_log="$run_dir/docker-agents-attempt-$attempt.log"
-
-    # Clear logcat on the device before each attempt so the captured slice is
-    # exclusively that run window. The instrumentation also clears logcat
-    # internally for the reconnect-counter parse, but pre-clearing here keeps
-    # the post-run pull short.
-    "$ADB" logcat -c >/dev/null 2>&1 || true
-
-    # The on-device test gates picker round-trips on
-    # TerminalTestTimeouts.terminalVisibilityTimeoutMs(), which is 60 s
-    # locally and 180 s when `pocketshellCi=true` is set. The long-running
-    # gate runs unattended for ~11 minutes, so we always opt into the
-    # generous deadline — under heavy worktree contention the host picker
-    # probe alone has been observed to exceed 30 s, and the 10-minute hold
-    # alone is far more expensive than the extra slack on the picker.
-    # Run the long hold detached on the device and poll its output with
-    # short adb calls. Issue #352 showed that a single long-lived host-side
-    # `adb shell am instrument -w -r` can lose the ADB/UiAutomation owner
-    # during the quiet hold even when retrying the whole selector; polling
-    # keeps release evidence and final assertions without binding the
-    # ten-minute test lifetime to one adb transport.
-    set +e
-    run_long_running_session_detached_instrumentation_attempt \
-      "$attempt" "$attempt_instrumentation_log" "$run_dir"
-    instrumentation_status="$?"
-    set -e
-
-    # Capture diagnostics regardless of outcome so reviewers can audit.
-    docker compose -f "$LONG_RUNNING_COMPOSE_FILE" logs --no-color --timestamps agents \
-      > "$attempt_docker_log" 2>&1 || true
-    "$ADB" logcat -d -v threadtime -t 60000 > "$attempt_logcat" 2>&1 || true
-    cp "$attempt_instrumentation_log" "$instrumentation_log" || true
-    cp "$attempt_docker_log" "$docker_log" || true
-    cp "$attempt_logcat" "$logcat" || true
-
-    if [[ "$instrumentation_status" -eq 0 ]] ||
-      real_agent_release_gate_instrumentation_log_has_success "$attempt_instrumentation_log"; then
-      break
-    fi
-
-    if long_running_session_should_retry_interrupted_instrumentation \
-      "$instrumentation_status" "$attempt_instrumentation_log" "$attempt_logcat" &&
-      [[ "$attempt" -lt "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS" ]]; then
-      printf 'LongRunningSessionStabilityTest instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
-      "$ADB" reconnect >/dev/null 2>&1 || true
-      "$ADB" wait-for-device >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-      "$ADB" shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
-      "$ADB" shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
-      sleep 2
-      continue
-    fi
-    break
-  done
-
-  # Pull the device artifact bundle written by the instrumentation
-  # (long-running-summary.txt, captured logcat tail, final visible
-  # transcript) into the run dir so summary.md can link directly to it
-  # and the reviewer does not need to rerun the 10-minute hold to audit.
-  "$ADB" pull \
-    "/sdcard/Android/media/com.pocketshell.app/additional_test_output/long-running-session" \
-    "$artifacts_dir" \
-    >/dev/null 2>&1 || true
-
-  {
-    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
-    printf 'instrumentation_attempts=%s\n' "$attempt"
-    printf 'instrumentation_max_attempts=%s\n' "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS"
-    printf 'final_instrumentation_log=%s\n' "$instrumentation_log"
-    printf 'final_logcat=%s\n' "$logcat"
-    printf 'final_docker_log=%s\n' "$docker_log"
-  } > "$run_dir/instrumentation-status.txt"
-
-  if [[ "$instrumentation_status" -ne 0 ]]; then
-    printf 'FAIL: LongRunningSessionStabilityTest instrumentation exited %s\n' "$instrumentation_status" >&2
-    print_failure_log_tail "$instrumentation_log"
-    return "$instrumentation_status"
-  fi
-  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
-    printf 'FAIL: LongRunningSessionStabilityTest did not report INSTRUMENTATION_CODE: -1\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
-  fi
-  if ! grep -q 'OK (' "$instrumentation_log"; then
-    printf 'FAIL: LongRunningSessionStabilityTest did not report an OK summary\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
-  fi
-  record_detached_instrumentation_junit_xml \
-    "$LONG_RUNNING_TEST_CLASS" "$instrumentation_log"
-  return 0
-}
-
 # Issue #2064: the device-free end-to-end proof of the APK identity chain.
-# Runs the REAL export, the REAL publish assertion, and then the REAL
-# `--verify-apk-identity` mode of every downstream stage as child processes,
-# exactly as the release flow launches them — so the test exercises production
-# wiring rather than a re-spelling of it. No emulator, no Docker, no Gradle.
+# Runs the REAL export and the REAL publish assertion, so the test exercises
+# production wiring rather than a re-spelling of it. No emulator, no Docker, no
+# Gradle.
+#
+# Issue #2481: this used to also launch each downstream stage's own
+# `--verify-apk-identity` mode as a child process. There are no downstream
+# stages left — terminal-workbench, phone-walkthrough, capture-walkthrough-
+# screenshots and parallel-setup-detection were all deleted with the `app`
+# module's androidTest classes they drove. The chain's install site is now the
+# pre-release confidence gate itself (its `verify-debug-apk-identity` step,
+# which runs before `update-install-debug-apk`), and its publish site is
+# publish_validated_apk below; scripts/test-release-apk-identity.sh pins both.
 if [[ "${1:-}" == "--verify-apk-identity" ]]; then
   write_summary_header
   export_validated_apk_identity
-  for stage_script in \
-    scripts/terminal-workbench.sh \
-    scripts/phone-walkthrough.sh \
-    scripts/capture-walkthrough-screenshots.sh \
-    scripts/parallel-setup-detection.sh; do
-    printf '\n[%s --verify-apk-identity]\n' "$stage_script"
-    "$ROOT_DIR/$stage_script" --verify-apk-identity ||
-      fail "$stage_script rejected the validated APK pair"
-  done
   # Test-only boundary seam: prove the publish-time assertion catches a file
   # replaced after every install stage has passed. It is intentionally limited
   # to this device-free verification mode.
@@ -932,112 +486,64 @@ run_required \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
   env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" PRE_RELEASE_MANAGE_EMULATOR=1 scripts/pre-release-confidence-gate.sh
 
-# Issue #2064: from here on, every stage installs the pair the gate just built
-# and validated. Before this, terminal-lab / tmux-existing-session /
-# setup-detection / visual-audit each wiped app/build and rebuilt their own
+# Issue #2064: the gate builds ONE pair and records its identity; whatever runs
+# after it installs THOSE bytes. Before this, terminal-lab / tmux-existing-session
+# / setup-detection / visual-audit each wiped app/build and rebuilt their own
 # byte-different pair (472s in run 20260809-v0442-r3, 603s in 20260808-165533),
 # so the journey evidence the tag rests on was produced against a binary nothing
 # else in the chain validated and that publish_validated_apk does not ship. The
 # rebuild inside terminal-lab is also what OOM-killed release attempt r1, 58
 # minutes in.
+#
+# Issue #2481: all four of those downstream stages are now DELETED, and the
+# journey evidence moved INSIDE the pre-release gate — it installs the recorded
+# pair and runs app2's whole instrumented set against it, so "the journeys ran
+# on the published binary" is true by construction rather than by four separate
+# identity re-checks. This export stays because publish_validated_apk still
+# asserts the shipped file against the recorded digest.
 export_validated_apk_identity
 
-# Issue #2381: every stage from here on installs the pair the pre-release gate
-# built INSIDE its `.git`-less isolated rsync copy, so that APK's versionName is
-# the isolated copy's derivation, not this tagged checkout's. The top-of-script
-# derivation was only right for the stages before this point; re-pin the
-# `agents` fixture stamp to the binary that is actually installed, or every
-# downstream journey runs against a host CLI version the app disagrees with.
-export_agents_fixture_version "$APP_APK"
-printf 'Validated-APK agents fixture stamp: %s (issue #2381)\n' \
-  "${POCKETSHELL_AGENT_FIXTURE_VERSION:-<empty: image default 0.0.0-dev>}"
+# Issue #2481: the four `run_required` stages that lived here — terminal-lab and
+# tmux-existing-session phone walkthroughs, the 7-profile setup-detection matrix
+# (sequential or SETUP_DETECTION_SHARDS-parallel), and the visual-audit
+# screenshot capture — are GONE. scripts/phone-walkthrough.sh and
+# scripts/parallel-setup-detection.sh were deleted with them; the visual pass
+# survives as a STANDALONE tool (scripts/capture-walkthrough-screenshots.sh,
+# repointed at app2's journey screenshots) but is no longer a chain stage,
+# because it would be a SECOND full run of the same instrumented set the gate
+# already ran against the validated pair. Not disabled, not stubbed (D22):
+#
+#   * terminal-lab drove `com.pocketshell.app.terminal.TerminalLabDockerTest`,
+#   * tmux-existing-session drove
+#     `com.pocketshell.app.proof.EmulatorDockerSshSmokeTest`,
+#   * visual-audit drove WalkthroughVisualScreenshotTest,
+#     WalkthroughConversationScreenshotTest and
+#     PromptComposerVisualScreenshotTest,
+#   * setup-detection drove
+#     `com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest`,
+#
+# and every one of those classes was deleted with the `app` module. Three have a
+# successor inside app2's own instrumented set (J03 attach-and-type, J02/J04
+# session tree + create, J07/J08 composer + dictation), which the pre-release
+# gate above now runs unfiltered against the validated pair — pulling the
+# journey screenshots it renders, which is where the visual-audit artifact comes
+# from now; the fourth does
+# not, because the guided host-setup/bootstrap sheet is a CUT feature — only the
+# actionable "update the host CLI" error survives (docs/rewrite-implementation-plan.md,
+# "Scope amendment"). The gate still asserts the 2238 old-CLI fixture really is
+# version-mismatched, so the non-happy host state has not stopped being tested.
 
-if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
-  run_required \
-    "optional terminal release gate" \
-    "build/terminal-workbench/$TERMINAL_RELEASE_RUN_ID/" \
-    env LOG_ROOT="$TERMINAL_WORKBENCH_LOG_ROOT" RUN_ID="$TERMINAL_RELEASE_RUN_ID" REAL_AGENTS=1 scripts/terminal-workbench.sh
-
-  # Additive real-agent CLI + JSONL release gate (#146). The workbench step
-  # above captures viewport/visible-text from the real-agent fixture; this
-  # extra step exercises the same fixture's installed Claude / Codex CLIs
-  # end-to-end and asserts on the on-disk JSONL conversation log.
-  run_required \
-    "real-agent CLI release gate" \
-    "build/real-agent-release-gate/$REAL_AGENT_RELEASE_GATE_RUN_ID/" \
-    run_real_agent_release_gate_instrumentation
-fi
-
-# Additive 10-minute foreground hold (#148). Mirrors the TERMINAL_RELEASE_GATE
-# pattern above: a separate, independently opt-in branch that adds a single
-# heavy regression suite without changing the default release-gate behaviour.
-# When LONG_RUNNING_TEST is unset or 0 the entire block is skipped — the
-# default release validation flow is unchanged.
-if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
-  run_required \
-    "optional long-running session hold" \
-    "build/long-running-session/$LONG_RUNNING_TEST_RUN_ID/" \
-    run_long_running_session_instrumentation
-fi
-
-run_required \
-  "terminal-lab phone walkthrough" \
-  "build/phone-walkthrough/$RUN_ID-terminal-lab/" \
-  env RUN_ID="$RUN_ID-terminal-lab" scripts/phone-walkthrough.sh terminal-lab
-
-run_required \
-  "tmux existing-session phone walkthrough" \
-  "build/phone-walkthrough/$RUN_ID-tmux-existing-session/" \
-  env RUN_ID="$RUN_ID-tmux-existing-session" scripts/phone-walkthrough.sh tmux-existing-session
-
-# Issue #632 (slice 2): the setup-detection matrix is the easiest gate block to
-# parallelize because its 7 profiles bind disjoint Docker ports 2230-2236.
-# Default is the unchanged single-AVD sequential path. Opt in to fan it out
-# across N emulators with SETUP_DETECTION_SHARDS=N (each shard gets a distinct
-# ANDROID_SERIAL, a per-serial AVD lock, and its own COMPOSE_PROJECT_NAME);
-# provide the emulator serials via SETUP_DETECTION_SERIALS="<s1> <s2> ...".
-SETUP_DETECTION_SHARDS="${SETUP_DETECTION_SHARDS:-1}"
-if [[ "$SETUP_DETECTION_SHARDS" =~ ^[1-9][0-9]*$ && "$SETUP_DETECTION_SHARDS" -gt 1 ]]; then
-  declare -a setup_detection_parallel_args=(--shards "$SETUP_DETECTION_SHARDS")
-  if [[ -n "${SETUP_DETECTION_SERIALS:-}" ]]; then
-    setup_detection_parallel_args+=(--serials "$SETUP_DETECTION_SERIALS")
-  fi
-  run_required \
-    "setup-detection phone walkthrough matrix (parallel x$SETUP_DETECTION_SHARDS)" \
-    "build/parallel-setup-detection/$RUN_ID-setup-detection/" \
-    env RUN_ID="$RUN_ID-setup-detection" \
-      scripts/parallel-setup-detection.sh "${setup_detection_parallel_args[@]}"
-else
-  run_required \
-    "setup-detection phone walkthrough matrix" \
-    "build/phone-walkthrough/$RUN_ID-setup-detection/" \
-    env RUN_ID="$RUN_ID-setup-detection" scripts/phone-walkthrough.sh setup-detection
-fi
-
-run_required \
-  "visual-audit screenshot capture" \
-  "build/walkthrough-visual-pass/$RUN_ID-visual-audit/" \
-  env RUN_ID="$RUN_ID-visual-audit" scripts/capture-walkthrough-screenshots.sh
-
+record_artifact "app2 journey screenshots (visual audit)" \
+  "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/journey-screenshots/"
 publish_validated_apk
 write_stage_timings
 
 {
   printf '\n## Release Notes Checklist\n\n'
   printf -- '- [ ] Attach or link every artifact directory listed above in the issue and tag notes.\n'
-  if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
-    printf -- '- [ ] Inspect `build/terminal-workbench/%s/artifact-summary.txt` and the authoritative `*-viewport.png` renders before treating terminal usability as release-ready.\n' "$TERMINAL_RELEASE_RUN_ID"
-    printf -- '- [ ] Inspect `build/real-agent-release-gate/%s/instrumentation.log` plus the Docker/logcat artifacts in the same directory to confirm the real Claude/Codex CLI run was healthy.\n' "$REAL_AGENT_RELEASE_GATE_RUN_ID"
-  else
-    printf -- '- [ ] Optional terminal release gate was skipped. Run `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh` when terminal usability is in release scope.\n'
-  fi
-  if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
-    printf -- '- [ ] Inspect `build/long-running-session/%s/artifacts/long-running-session/long-running-summary.txt` for `reconnect_events=0`, `memory_growth_kb` under the 50 MB budget, six visible tick latencies, and the final visible transcript before treating terminal/tmux stability as release-ready.\n' "$LONG_RUNNING_TEST_RUN_ID"
-  else
-    printf -- '- [ ] Optional long-running session hold was skipped. Run `LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`, or combine it with `TERMINAL_RELEASE_GATE=1`, when terminal/tmux-heavy release evidence needs a 10-minute stability hold.\n'
-  fi
-  printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
-  printf -- '- [ ] Inspect `build/walkthrough-visual-pass/%s-visual-audit/screenshots/walkthrough-visual-pass/` for release blockers.\n' "$RUN_ID"
+  printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app2-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app2-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
+  printf -- '- [ ] Inspect the app2 journey screenshots in `%s/` for release blockers (issue #2481: these replace the deleted visual-audit stage).\n' "$PRE_RELEASE_GATE_JOURNEY_SCREENSHOTS"
+  printf -- '- [ ] If a screenshot is missing or unreadable, regenerate the visual pass on its own with `VISUAL_AUDIT_BUILD_APKS=0 APP_APK=%s TEST_APK=%s scripts/capture-walkthrough-screenshots.sh` — it hard-asserts one rendered frame per app2 journey.\n' "${APP_APK:-<validated app apk>}" "${TEST_APK:-<validated test apk>}"
   printf -- '- [ ] Treat physical phone testing as final user acceptance only; emulator/Docker validation catches basic release blockers before tagging.\n'
 } >> "$SUMMARY_PATH"
 

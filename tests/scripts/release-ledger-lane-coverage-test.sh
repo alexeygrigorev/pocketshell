@@ -613,34 +613,48 @@ detached_instrumentation_runs_produce_ledger_creditable_junit_xml() {
   # The production caller must actually invoke it, with --require-class so a run
   # that selected nothing cannot be laundered into a ledger entry.
   #
-  # There used to be TWO callers. The #2264 two-phase process-restart harness
-  # was hard-cut with the app module, the `proof` source set and
-  # LastSessionProcessRestartProofTest it existed to credit (D22 — see the note
-  # in .github/workflows/tests.yml's `guards-ci-harness` job), so
-  # scripts/release-emulator-validation.sh is the whole contract now. The
-  # nightly phase-5 publish assertion went the same way with the nightly suite.
-  local release_gate="$ROOT_DIR/scripts/release-emulator-validation.sh"
+  # The CALLER MOVED (issue #2481). It used to be
+  # scripts/release-emulator-validation.sh, whose TERMINAL_RELEASE_GATE /
+  # LONG_RUNNING_TEST branches ran RealAgentReleaseGateTest and
+  # LongRunningSessionStabilityTest through direct `am instrument`; both classes
+  # were deleted with the `app` module and both branches went with them (D22).
+  # The surviving detached `am instrument` in the release chain is the
+  # pre-release confidence gate's UNFILTERED run of app2's whole instrumented
+  # set — same accounting gap, same fix. (The #2264 two-phase process-restart
+  # harness was hard-cut earlier for the same reason; see the note in
+  # .github/workflows/tests.yml's `guards-ci-harness` job.)
+  local release_gate="$ROOT_DIR/scripts/pre-release-confidence-gate.sh"
   grep -q 'instrumentation-log-to-junit-xml.sh' "$release_gate" ||
-    fail "the release gate's detached am-instrument runs no longer produce ledger JUnit XML (#2435)"
+    fail "the pre-release gate's detached am-instrument run no longer produces ledger JUnit XML (#2435/#2481)"
+  # ...and the CALL (not the helper definition, which necessarily sits above)
+  # must be wired AFTER the suite it credits: a converter call the suite never
+  # reaches would encode a stale log, or nothing at all.
+  local convert_line suite_line
+  suite_line="$(grep -n 'run_app2_instrumented_suite_script "\$app2_suite_diagnostics_file"' "$release_gate" | head -1 | cut -d: -f1)"
+  convert_line="$(grep -nE '^[[:space:]]+record_detached_instrumentation_junit_xml' "$release_gate" | tail -1 | cut -d: -f1)"
+  [[ -n "$suite_line" && -n "$convert_line" && "$convert_line" -gt "$suite_line" ]] ||
+    fail "the ledger XML conversion is not wired after the app2 instrumented suite run (#2481)"
   grep -q -- '--require-class' "$release_gate" ||
     fail "the release gate converts without --require-class (an empty run could be credited) (#2435)"
   pass_case "direct am instrument runs produce JUnit XML the real ledger credits (#2435)"
 }
 
 # ---------------------------------------------------------------------------
-# The release gate's own detached-`am instrument` helper, end to end into the
-# REAL ledger. tests/scripts/long-running-release-gate-retry-test.sh drives the
-# same helper through its fake-adb release run and proves the helper is WIRED
-# IN (a green run leaves XML naming the class, a self-skipped run leaves none).
-# What must not live there is this half — actually running
-# scripts/check-test-execution-ledger.sh — because that harness is on the Unit
-# critical path through ReleaseGateScriptTest (#2067 C9).
+# The release chain's own detached-`am instrument` helper, end to end into the
+# REAL ledger. Issue #2481 moved it from scripts/release-emulator-validation.sh
+# (whose real-agent / long-running callers were deleted with the `app` module
+# classes they drove) to scripts/pre-release-confidence-gate.sh, whose
+# unfiltered app2 instrumented run is the surviving detached instrumentation.
+# The WIRED-IN half is asserted statically by
+# detached_instrumentation_runs_produce_ledger_creditable_junit_xml above
+# (the converter is called, with --require-class, AFTER the suite it credits);
+# this case drives the helper itself into the real ledger, both directions.
 # ---------------------------------------------------------------------------
 # A LABEL, not a lookup: every use below feeds this name into a synthetic
 # instrumentation transcript and asserts the converter and the real ledger carry
 # it through. Pointed at a live app2 journey so the fixture reads as something
 # the release gate could actually run.
-LONG_RUNNING_CLASS='com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney'
+LONG_RUNNING_CLASS='com.pocketshell.next.connect.J01ConnectAndTrustJourney'
 
 load_detached_instrumentation_recorder() {
   # Take the production helper out of the release wrapper rather than restating
@@ -650,9 +664,9 @@ load_detached_instrumentation_recorder() {
     /^record_detached_instrumentation_junit_xml\(\) \{$/ { found = 1 }
     found { print }
     found && /^\}$/ { exit }
-  ' "$ROOT_DIR/scripts/release-emulator-validation.sh" > "$extracted"
+  ' "$ROOT_DIR/scripts/pre-release-confidence-gate.sh" > "$extracted"
   [[ -s "$extracted" ]] ||
-    fail "could not extract record_detached_instrumentation_junit_xml from the release wrapper"
+    fail "could not extract record_detached_instrumentation_junit_xml from the pre-release gate"
   # shellcheck disable=SC1090
   source "$extracted"
 }

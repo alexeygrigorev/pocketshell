@@ -18,12 +18,20 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 helpers="$tmpdir/pre-release-gate-helpers.sh"
+# Issue #2481: the extracted region is now the UNFILTERED app2 suite runner
+# (run_app2_instrumented_suite_script), which took the place of the per-selector
+# run_app_walkthrough_script when the eight `app` module selectors it drove were
+# deleted with that module. Same retry/recovery machinery, no `-e class`.
 sed -n \
-  '/^run_app_walkthrough_script()/,/^docker_agents_pocketshell_version_script()/p' \
+  '/^run_app2_instrumented_suite_script()/,/^docker_agents_pocketshell_version_script()/p' \
   "$ROOT_DIR/scripts/pre-release-confidence-gate.sh" |
   sed '$d' > "$helpers"
 # shellcheck source=/dev/null
 source "$helpers"
+
+# The gate's runner reads APP2_INSTRUMENTED_SUITE_LABEL for its diagnostics
+# header; the extraction above starts below that assignment, so declare it.
+APP2_INSTRUMENTED_SUITE_LABEL="app2-instrumented-suite"
 
 fake_adb="$tmpdir/adb"
 cat > "$fake_adb" <<'EOF'
@@ -53,7 +61,7 @@ if [[ "$*" == "shell am instrument"* ]]; then
   printf '%s' "$count" > "$state_file"
 
   if [[ "$mode" == "transport_then_success" && "$count" -le 3 ]]; then
-    printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest\n'
+    printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.next.connect.J01ConnectAndTrustJourney\n'
     printf 'INSTRUMENTATION_STATUS: current=1\n'
     printf 'INSTRUMENTATION_STATUS: numtests=1\n'
     printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
@@ -93,8 +101,7 @@ run_generated_walkthrough() {
   export FAKE_ADB_MODE FAKE_ADB_STATE
 
   local generated_script
-  generated_script="$(run_app_walkthrough_script \
-    "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias" \
+  generated_script="$(run_app2_instrumented_suite_script \
     "$run_dir/diagnostics.log" \
     "$run_dir/full-logcat.log")"
 

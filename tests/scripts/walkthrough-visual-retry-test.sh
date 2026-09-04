@@ -76,7 +76,7 @@ fi
 pass_case "instrumentation crash result marker was treated as retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
-printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.app\n' > "$classification_logcat"
+printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.next\n' > "$classification_logcat"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "app crash marker was treated as retryable"
 fi
@@ -95,6 +95,22 @@ if visual_audit_should_retry_interrupted_instrumentation 0 "$classification_log"
   fail "zero status was treated as retryable"
 fi
 pass_case "zero status was treated as retryable"
+
+# Issue #2481 / G3: the unfiltered run's characteristic lie. `OK (0 tests)`
+# still prints `INSTRUMENTATION_CODE: -1` and no `FAILURES!!!`, so the old
+# `grep "OK ("` predicate read it as a pass — a green over an empty suite.
+printf 'INSTRUMENTATION_CODE: -1\nOK (0 tests)\n' > "$classification_log"
+if visual_audit_instrumentation_log_has_success "$classification_log"; then
+  fail "OK (0 tests) was accepted as instrumentation success"
+fi
+pass_case "OK (0 tests) was accepted as instrumentation success"
+
+# ...and the check is not vacuous: a real positive count still passes.
+printf 'INSTRUMENTATION_CODE: -1\nOK (37 tests)\n' > "$classification_log"
+if ! visual_audit_instrumentation_log_has_success "$classification_log"; then
+  fail "OK (37 tests) was rejected as instrumentation success"
+fi
+pass_case "OK (37 tests) is still instrumentation success"
 
 fake_adb="$tmpdir/adb"
 cat > "$fake_adb" <<'EOF'
@@ -136,14 +152,16 @@ chmod +x "$fake_adb"
 RUN_DIR="$tmpdir/run"
 ADB="$fake_adb"
 DEVICE_OUTPUT_DIR="/sdcard/fake-output"
+TEST_PACKAGE="com.pocketshell.next.test"
+APP_PACKAGE="com.pocketshell.next"
 INSTRUMENTATION_ATTEMPTS=2
 FAKE_ADB_STATE="$tmpdir/adb-state"
 export FAKE_ADB_STATE
 mkdir -p "$RUN_DIR"
 
-run_instrumentation_class "strict-mode-instrumentation" "com.pocketshell.app.FakeVisualTest" ||
-  fail "run_instrumentation_class did not retry a nonzero transport interruption"
-pass_case "run_instrumentation_class did not retry a nonzero transport interruption"
+run_instrumentation_suite "strict-mode-instrumentation" "app2 instrumented set (unfiltered)" ||
+  fail "run_instrumentation_suite did not retry a nonzero transport interruption"
+pass_case "run_instrumentation_suite did not retry a nonzero transport interruption"
 
 attempts="$(cat "$FAKE_ADB_STATE")"
 [[ "$attempts" == "2" ]] ||
@@ -157,5 +175,5 @@ pass_case "canonical instrumentation log did not contain final success"
 # Issue #2113: a harness that exits 0 having run nothing is the vacuous green
 # process.md catalogues. The count line is what makes the JVM assertion about
 # behaviour rather than about bash's exit status.
-(( CASES == 12 )) || fail "expected 12 cases to run, saw $CASES"
+(( CASES == 14 )) || fail "expected 14 cases to run, saw $CASES"
 printf 'PASS: walkthrough visual retry helper (%s cases)\n' "$CASES"

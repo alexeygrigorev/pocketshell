@@ -35,10 +35,23 @@ pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 PYTHON3="${PYTHON3:-python3}"
-OLD_REF="${OLD_REF:-v0.3.2}"
-PACKAGE_NAME="${PACKAGE_NAME:-com.pocketshell.app}"
-ACTIVITY_NAME="${ACTIVITY_NAME:-com.pocketshell.app/.MainActivity}"
-NEW_APK_PATH="${NEW_APK_PATH:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
+# Issue #2481: no default OLD_REF any more. The old default (`v0.3.2`) is a tag
+# on the pre-rewrite `app` module, whose applicationId is `com.pocketshell.app`
+# — a DIFFERENT package from app2's `com.pocketshell.next`, so `adb install -r`
+# over it is not an upgrade at all and this gate would assert nothing. There is
+# also no tagged app2 release to compare against yet. Supply an explicit
+# `OLD_REF` on `stable`'s lineage (a commit that already contains `app2/`), or
+# an `OLD_APK_PATH`, and the gate does its real job: prove a Room database
+# survives `adb install -r`.
+#
+# The pre-rewrite -> app2 case (`com.pocketshell.app` data opened by a renamed
+# app2) is rewrite task X-3's applicationId rename + data migration, not
+# something this gate can express while the two packages differ. See
+# docs/rewrite-implementation-plan.md (X-3) and issue #2471.
+OLD_REF="${OLD_REF:-}"
+PACKAGE_NAME="${PACKAGE_NAME:-com.pocketshell.next}"
+ACTIVITY_NAME="${ACTIVITY_NAME:-com.pocketshell.next/.MainActivity}"
+NEW_APK_PATH="${NEW_APK_PATH:-$ROOT_DIR/app2/build/outputs/apk/debug/app2-debug.apk}"
 OLD_APK_PATH="${OLD_APK_PATH:-}"
 BUILD_NEW_APK="${BUILD_NEW_APK:-1}"
 BUILD_OLD_APK="${BUILD_OLD_APK:-1}"
@@ -59,8 +72,12 @@ launches the app, and verifies representative Room rows were preserved.
 
 Environment overrides:
   OLD_APK_PATH=/path/to/old.apk       use an existing old APK
-  OLD_REF=v0.3.2                     ref used when building the old APK
-  NEW_APK_PATH=app/build/...apk       new APK to install with -r
+  OLD_REF=<commit-or-tag>             ref used when building the old APK. NO
+                                      default: it must contain app2/ (i.e. be
+                                      on `stable`'s lineage), because a
+                                      pre-rewrite ref builds a DIFFERENT
+                                      applicationId and proves nothing.
+  NEW_APK_PATH=app2/build/...apk      new APK to install with -r
   BUILD_OLD_APK=1                    build old APK if OLD_APK_PATH is empty
   BUILD_NEW_APK=1                    build current debug APK first
   ADB=/path/to/adb
@@ -90,7 +107,7 @@ install_apk() {
 if [[ "$BUILD_NEW_APK" == "1" ]]; then
   pocketshell_apply_release_gate_scope_memory "android upgrade preservation gate"
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-new-apk" -- \
-    ./gradlew $GRADLE_FLAGS :app:assembleDebug
+    ./gradlew $GRADLE_FLAGS :app2:assembleDebug
 fi
 
 if [[ -z "$OLD_APK_PATH" ]]; then
@@ -98,13 +115,23 @@ if [[ -z "$OLD_APK_PATH" ]]; then
     printf 'OLD_APK_PATH is required when BUILD_OLD_APK=0\n' >&2
     exit 1
   fi
+  if [[ -z "$OLD_REF" ]]; then
+    printf 'OLD_REF is required when OLD_APK_PATH is empty (issue #2481: there is no safe default — a pre-rewrite ref builds com.pocketshell.app, not app2'"'"'s com.pocketshell.next, so the install would not be an upgrade).\n' >&2
+    exit 1
+  fi
   old_worktree="$RUN_DIR/old-$OLD_REF"
   pocketshell_apply_release_gate_scope_memory "android upgrade preservation gate"
   git worktree add --detach "$old_worktree" "$OLD_REF"
+  if [[ ! -d "$old_worktree/app2" ]]; then
+    git worktree remove --force "$old_worktree"
+    printf 'OLD_REF=%s has no app2/ module, so it builds applicationId com.pocketshell.app rather than %s; installing it is not an upgrade of the app under test (issue #2481).\n' \
+      "$OLD_REF" "$PACKAGE_NAME" >&2
+    exit 1
+  fi
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-old-apk" -- \
-    "$old_worktree/gradlew" $GRADLE_FLAGS -p "$old_worktree" :app:assembleDebug
-  built_old_apk="$RUN_DIR/old-app-debug-$OLD_REF.apk"
-  cp "$old_worktree/app/build/outputs/apk/debug/app-debug.apk" "$built_old_apk"
+    "$old_worktree/gradlew" $GRADLE_FLAGS -p "$old_worktree" :app2:assembleDebug
+  built_old_apk="$RUN_DIR/old-app2-debug-$OLD_REF.apk"
+  cp "$old_worktree/app2/build/outputs/apk/debug/app2-debug.apk" "$built_old_apk"
   git worktree remove --force "$old_worktree"
   OLD_APK_PATH="$built_old_apk"
 fi

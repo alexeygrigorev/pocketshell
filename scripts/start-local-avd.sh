@@ -60,7 +60,11 @@ an emulator that exits after boot is reported in the same run directory.
 
 On success, run focused evidence commands such as:
   scripts/connected-test.sh --suffix i123 \
-    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney
+
+A class filter is for reproducing ONE journey; the app2 lane deliberately runs
+the whole set unfiltered in one process (issue #2474), which a bare
+`scripts/connected-test.sh --suffix i123` reproduces.
 USAGE
 }
 

@@ -7,11 +7,13 @@ on:
         description: Optional artifact run id suffix. Leave blank for timestamp.
         required: false
         type: string
-      terminal_release_gate:
-        description: Run optional real-agent terminal release gate.
-        required: false
-        default: false
-        type: boolean
+      # Issue #2481: the `terminal_release_gate` input is gone with the stage
+      # it toggled. scripts/release-emulator-validation.sh's
+      # TERMINAL_RELEASE_GATE branch drove scripts/terminal-workbench.sh and
+      # com.pocketshell.app.proof.RealAgentReleaseGateTest, both deleted with
+      # the `app` module. app2 has no real-agent CLI surface — agent awareness
+      # is a cut feature (docs/rewrite-implementation-plan.md "Scope
+      # amendment") — so there is nothing to repoint it at.
       # Issue #2379 / decision D37: there is deliberately NO input here that
       # waives the nightly-fault release guard. A red / stale / cancelled /
       # missing fault-injection safety verdict on the release commit blocks the
@@ -214,7 +216,6 @@ jobs:
           ADB: ${{ env.ANDROID_SDK }}/platform-tools/adb
           EMULATOR: ${{ env.ANDROID_SDK }}/emulator/emulator
           RELEASE_VALIDATION_SKIP_MAIN_GUARD: ${{ env.RELEASE_VALIDATION_SKIP_MAIN_GUARD }}
-          TERMINAL_RELEASE_GATE: ${{ inputs.terminal_release_gate && '1' || '0' }}
           # Issue #851: `gh` auth for the nightly-fault release guard.
           GH_TOKEN: ${{ github.token }}
         with:
@@ -333,13 +334,8 @@ jobs:
           name: release-emulator-validation-${{ steps.validation.outputs.run_id }}
           path: |
             build/release-emulator-validation/${{ steps.validation.outputs.run_id }}/
-            build/terminal-workbench/${{ steps.validation.outputs.run_id }}-terminal-release/
             build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/
             !build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/worktree/
-            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-terminal-lab/
-            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-tmux-existing-session/
-            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-setup-detection/
-            build/walkthrough-visual-pass/${{ steps.validation.outputs.run_id }}-visual-audit/
             **/build/reports/
             **/build/test-results/
             **/build/outputs/androidTest-results/

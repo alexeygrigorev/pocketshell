@@ -42,7 +42,7 @@
 #      has a third leg: a script can satisfy both and still hand the fixture
 #      nothing, in which case it falls back to the baked `0.0.0-dev` and the
 #      app it installs sees a version mismatch. That is exactly how
-#      scripts/pre-release-confidence-gate.sh and scripts/phone-walkthrough.sh
+#      scripts/pre-release-confidence-gate.sh and the visual-audit capture
 #      shipped broken in round 1 of #2381 — enforced by convention, not by a
 #      gate. Enforcing it only by convention is what produced this whole issue.
 #      Covers scripts/ AND .github/workflows/ (a workflow may bring the fixture
@@ -308,7 +308,7 @@ check_named_release_call_sites() {
   local scripts_dir="$1"
   local required=(
     "pre-release-confidence-gate.sh"
-    "phone-walkthrough.sh"
+    "capture-walkthrough-screenshots.sh"
   )
   local name
   for name in "${required[@]}"; do
@@ -399,8 +399,8 @@ YAML
   mkdir -p "$sandbox/scripts"
 
   # RED: a caller that brings the fixture up without stamping it. This is
-  # byte-for-byte the shape scripts/pre-release-confidence-gate.sh and
-  # scripts/phone-walkthrough.sh had at #2381 round 1.
+  # byte-for-byte the shape scripts/pre-release-confidence-gate.sh and the
+  # visual-audit capture had at #2381 round 1.
   failures=0
   cat > "$sandbox/scripts/broken-gate.sh" <<'SH'
 #!/usr/bin/env bash

@@ -15,6 +15,15 @@ set -uo pipefail
 # journey evidence against a DIFFERENT binary — one nothing else in the chain
 # validated and that is not the one shipped.
 #
+# ISSUE #2481 — ALL FOUR OF THOSE STAGES ARE GONE. They drove `app` module
+# androidTest classes the rewrite's hard cut deleted, so the scripts went with
+# them (D22). The identity chain now has exactly two live sites: the pre-release
+# gate's own `verify-debug-apk-identity` step (which must run BEFORE
+# `update-install-debug-apk`, its install site) and `publish_validated_apk`.
+# Both are still driven here — the recorder/asserter behaviourally, the two
+# wiring facts by line order, which is what would catch someone reintroducing a
+# rebuild between validation and publish.
+#
 # Case `rebuilt_stage_binary_is_rejected` below is that exact scenario: the
 # gate records its pair, then the app APK on disk is replaced by a different
 # (still perfectly valid) build, and the chain is driven. Before the fix the
@@ -25,13 +34,9 @@ set -uo pipefail
 # --------------------------
 # Not a re-spelling of production. Case 5 onward invoke the REAL
 # `scripts/release-emulator-validation.sh --verify-apk-identity`, which runs the
-# REAL `export_validated_apk_identity`, the REAL `publish_validated_apk`
-# assertion, and then launches the REAL
-# `scripts/terminal-workbench.sh` / `scripts/phone-walkthrough.sh` /
-# `scripts/capture-walkthrough-screenshots.sh` /
-# `scripts/parallel-setup-detection.sh` as child processes with exactly the
-# environment the release flow gives them. No emulator, no Docker, no Gradle,
-# no network: a couple of seconds.
+# REAL `export_validated_apk_identity` and the REAL `publish_validated_apk`
+# assertion with exactly the environment the release flow gives them. No
+# emulator, no Docker, no Gradle, no network: a couple of seconds.
 #
 # THE MUTATION THAT MUST REDDEN EACH CHECK is named in every case label. A case
 # whose mutation cannot be stated is decorative, and this repo has paid for that
@@ -68,10 +73,10 @@ fail_case() {
 # ---------------------------------------------------------------------------
 make_fixture() {
   local gate_run_dir="$1"
-  mkdir -p "$gate_run_dir/worktree/app/build/outputs/apk/debug"
-  mkdir -p "$gate_run_dir/worktree/app/build/outputs/apk/androidTest/debug"
-  APP_FIXTURE="$gate_run_dir/worktree/app/build/outputs/apk/debug/app-debug.apk"
-  TEST_FIXTURE="$gate_run_dir/worktree/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+  mkdir -p "$gate_run_dir/worktree/app2/build/outputs/apk/debug"
+  mkdir -p "$gate_run_dir/worktree/app2/build/outputs/apk/androidTest/debug"
+  APP_FIXTURE="$gate_run_dir/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
+  TEST_FIXTURE="$gate_run_dir/worktree/app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk"
   printf 'PK\x03\x04 pocketshell debug apk build A\n' > "$APP_FIXTURE"
   printf 'PK\x03\x04 pocketshell androidTest apk build A\n' > "$TEST_FIXTURE"
   pocketshell_record_apk_identity \
@@ -138,8 +143,8 @@ main() {
 
   # -- 4. the standalone developer run is untouched -------------------------
   # Mutation that reddens this: making the verifier mandatory unconditionally,
-  # which would break every `scripts/phone-walkthrough.sh terminal-lab` run on a
-  # dev box that builds its own APKs.
+  # which would break every standalone `scripts/pre-release-confidence-gate.sh`
+  # run on a dev box that builds its own APKs.
   (
     unset POCKETSHELL_EXPECTED_APP_APK_SHA256 POCKETSHELL_EXPECTED_TEST_APK_SHA256
     pocketshell_verify_walkthrough_apks "standalone"
@@ -167,8 +172,8 @@ main() {
 
   # -- 5. the REAL chain, green ---------------------------------------------
   # Mutation that reddens this: removing export_validated_apk_identity from
-  # scripts/release-emulator-validation.sh, or removing any stage's
-  # pocketshell_verify_walkthrough_apks call.
+  # scripts/release-emulator-validation.sh, or making it tolerate a record it
+  # cannot verify.
   local gate_log_root="$SANDBOX/gate"
   make_fixture "$gate_log_root/chain-green-pre-release"
   if ! run_chain "$gate_log_root" "chain-green" > "$CASE_LOG" 2>&1; then
@@ -176,25 +181,33 @@ main() {
   fi
   grep -q 'PASS: release APK identity chain verified' "$CASE_LOG" ||
     fail_case "the chain did not report its end-to-end pass"
-  local stage
-  for stage in terminal-workbench phone-walkthrough capture-walkthrough-screenshots parallel-setup-detection; do
-    grep -q "scripts/$stage.sh --verify-apk-identity" "$CASE_LOG" ||
-      fail_case "the chain never drove scripts/$stage.sh"
+  # Issue #2481: the four downstream stage scripts this used to launch are
+  # deleted. A stale grep for them would go from "green because they verified"
+  # to "red because they are gone", so assert the OPPOSITE property instead —
+  # the chain must not resurrect a stage that no longer exists (which would be
+  # the D22 fallback-branch smell, and would abort every release).
+  local dead_stage
+  for dead_stage in terminal-workbench phone-walkthrough parallel-setup-detection; do
+    grep -q "scripts/$dead_stage.sh --verify-apk-identity" "$CASE_LOG" &&
+      fail_case "the chain still drives the deleted stage scripts/$dead_stage.sh"
+    [[ -e "$ROOT_DIR/scripts/$dead_stage.sh" ]] &&
+      fail_case "scripts/$dead_stage.sh is back on disk; it drives deleted app-module androidTest classes (issue #2481)"
   done
-  grep -q 'PASS: phone-walkthrough APK identity verified' "$CASE_LOG" ||
-    fail_case "phone-walkthrough did not verify the pair"
-  grep -q 'PASS: visual-audit APK identity verified' "$CASE_LOG" ||
-    fail_case "the visual audit did not verify the pair"
-  grep -q 'PASS: parallel-setup-detection APK identity verified' "$CASE_LOG" ||
-    fail_case "parallel setup-detection did not verify the pair"
-  grep -q 'PASS: terminal-workbench APK identity verified' "$CASE_LOG" ||
-    fail_case "terminal workbench did not verify the pair"
-  pass_case "real chain: export -> all four install stages verify -> publish"
+  # scripts/capture-walkthrough-screenshots.sh SURVIVES, repointed at app2's
+  # journey screenshots — but as a STANDALONE tool, not a chain stage (a second
+  # full run of the set the gate already ran). It keeps the identity contract so
+  # it can be pointed at the validated pair, and that must not rot.
+  grep -q "scripts/capture-walkthrough-screenshots.sh --verify-apk-identity" "$CASE_LOG" &&
+    fail_case "the chain drives the visual pass as a stage again; it is a standalone tool (issue #2481)"
+  local ca="$ROOT_DIR/scripts/capture-walkthrough-screenshots.sh"
+  grep -qE '^[[:space:]]+pocketshell_verify_walkthrough_apks "visual audit \(install\)"' "$ca" ||
+    fail_case "the standalone visual pass no longer re-verifies before installing"
+  pass_case "real chain: export -> publish, with no deleted stage resurrected"
 
   # The published artifact must exist and be byte-identical to the gate's APK.
-  local published="$SANDBOX/release/chain-green/app-debug.apk"
+  local published="$SANDBOX/release/chain-green/app2-debug.apk"
   [[ -f "$published" ]] || fail_case "the chain published no APK"
-  local gate_apk="$gate_log_root/chain-green-pre-release/worktree/app/build/outputs/apk/debug/app-debug.apk"
+  local gate_apk="$gate_log_root/chain-green-pre-release/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
   local published_sha gate_sha recorded_sha
   published_sha="$(sha256sum "$published" | awk '{print $1}')"
   gate_sha="$(sha256sum "$gate_apk" | awk '{print $1}')"
@@ -213,7 +226,7 @@ main() {
   local rebuilt_root="$SANDBOX/gate-rebuilt"
   make_fixture "$rebuilt_root/chain-rebuilt-pre-release"
   printf 'PK\x03\x04 pocketshell debug apk build B (stage rebuild)\n' \
-    > "$rebuilt_root/chain-rebuilt-pre-release/worktree/app/build/outputs/apk/debug/app-debug.apk"
+    > "$rebuilt_root/chain-rebuilt-pre-release/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
   if run_chain "$rebuilt_root" "chain-rebuilt" > "$CASE_LOG" 2>&1; then
     fail_case "a stage-rebuilt, byte-different app APK was accepted — the #2064 defect is not closed"
   fi
@@ -226,7 +239,7 @@ main() {
   local rebuilt_test_root="$SANDBOX/gate-rebuilt-test"
   make_fixture "$rebuilt_test_root/chain-rebuilt-test-pre-release"
   printf 'PK\x03\x04 pocketshell androidTest apk build B (stage rebuild)\n' \
-    > "$rebuilt_test_root/chain-rebuilt-test-pre-release/worktree/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+    > "$rebuilt_test_root/chain-rebuilt-test-pre-release/worktree/app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk"
   if run_chain "$rebuilt_test_root" "chain-rebuilt-test" > "$CASE_LOG" 2>&1; then
     fail_case "a stage-rebuilt androidTest APK was accepted"
   fi
@@ -243,51 +256,24 @@ main() {
   local reloc_root="$SANDBOX/gate-relocated"
   local reloc_run="$reloc_root/chain-relocated-pre-release"
   make_fixture "$reloc_run"
-  local reloc_apk="$reloc_run/worktree/app/build/outputs/apk/debug/app-debug-relocated.apk"
+  local reloc_apk="$reloc_run/worktree/app2/build/outputs/apk/debug/app2-debug-relocated.apk"
   printf 'PK\x03\x04 pocketshell debug apk RELOCATED (the validated one)\n' > "$reloc_apk"
   pocketshell_record_apk_identity "$reloc_run/$POCKETSHELL_APK_IDENTITY_FILE_NAME" \
-    "$reloc_apk" "$reloc_run/worktree/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" \
+    "$reloc_apk" "$reloc_run/worktree/app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk" \
     >/dev/null
   printf 'PK\x03\x04 DECOY at the conventional path — never validated\n' \
-    > "$reloc_run/worktree/app/build/outputs/apk/debug/app-debug.apk"
+    > "$reloc_run/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
   run_chain "$reloc_root" "chain-relocated" > "$CASE_LOG" 2>&1 ||
     fail_case "the chain rejected a validated pair that simply lives at a different path"
   local reloc_published_sha reloc_recorded_sha decoy_sha
-  reloc_published_sha="$(sha256sum "$SANDBOX/release/chain-relocated/app-debug.apk" | awk '{print $1}')"
+  reloc_published_sha="$(sha256sum "$SANDBOX/release/chain-relocated/app2-debug.apk" | awk '{print $1}')"
   reloc_recorded_sha="$(sha256sum "$reloc_apk" | awk '{print $1}')"
-  decoy_sha="$(sha256sum "$reloc_run/worktree/app/build/outputs/apk/debug/app-debug.apk" | awk '{print $1}')"
+  decoy_sha="$(sha256sum "$reloc_run/worktree/app2/build/outputs/apk/debug/app2-debug.apk" | awk '{print $1}')"
   [[ "$reloc_published_sha" == "$reloc_recorded_sha" ]] ||
     fail_case "the release published $reloc_published_sha, not the validated $reloc_recorded_sha"
   [[ "$reloc_published_sha" != "$decoy_sha" ]] ||
     fail_case "the release published the never-validated binary sitting at the conventional path"
   pass_case "publish ships the RECORDED validated binary, not a second path guess"
-
-  # -- 6c. EACH stage independently rejects a tampered binary ---------------
-  # Cases 6/6b fail at the chain-level export, which would mask a single stage
-  # silently losing its own verification. So drive each stage DIRECTLY with a
-  # correct exported expectation and a binary that changed after the export —
-  # i.e. the stage rebuilt behind the chain's back. Every stage must redden on
-  # its own; the mutation is deleting that one stage's verification call.
-  local solo_root="$SANDBOX/gate-solo"
-  make_fixture "$solo_root/solo-pre-release"
-  (
-    pocketshell_export_walkthrough_apk_env "$solo_root/solo-pre-release" >/dev/null 2>&1 ||
-      exit 1
-    printf 'PK\x03\x04 rebuilt behind the chain\n' > "$APP_APK"
-    for solo_stage in \
-      scripts/terminal-workbench.sh \
-      scripts/phone-walkthrough.sh \
-      scripts/capture-walkthrough-screenshots.sh \
-      scripts/parallel-setup-detection.sh; do
-      if env POCKETSHELL_AVD_LOCK_DIR="$SANDBOX/locks" \
-          bash "$ROOT_DIR/$solo_stage" --verify-apk-identity >/dev/null 2>&1; then
-        printf 'stage %s accepted a binary that changed after the export\n' "$solo_stage" >&2
-        exit 1
-      fi
-    done
-  ) > "$CASE_LOG" 2>&1 ||
-    fail_case "a stage accepted a post-export rebuild: $(cat "$CASE_LOG")"
-  pass_case "each stage independently rejects a post-export rebuild"
 
   # -- 6d. a mutation AFTER the last stage but BEFORE publish reddens -------
   # Mutation that reddens this: moving publish_validated_apk before the final
@@ -326,7 +312,7 @@ HOOK
   # -- 8. a gate APK deleted after recording ---------------------------------
   local gone_root="$SANDBOX/gate-gone"
   make_fixture "$gone_root/chain-gone-pre-release"
-  rm -f "$gone_root/chain-gone-pre-release/worktree/app/build/outputs/apk/debug/app-debug.apk"
+  rm -f "$gone_root/chain-gone-pre-release/worktree/app2/build/outputs/apk/debug/app2-debug.apk"
   if run_chain "$gone_root" "chain-gone" > "$CASE_LOG" 2>&1; then
     fail_case "the release chain continued with the validated APK missing"
   fi
@@ -352,55 +338,33 @@ HOOK
     fail_case "the real release flow has no top-level export_validated_apk_identity after the confidence gate"
   [[ "$export_line" -gt "$gate_line" ]] ||
     fail_case "export_validated_apk_identity runs before the gate that produces the identity record"
-  local stage_label
-  for stage_label in \
-    '"optional terminal release gate" \' \
-    '"terminal-lab phone walkthrough" \' \
-    '"tmux existing-session phone walkthrough" \' \
-    '"visual-audit screenshot capture" \'; do
-    local stage_line
-    stage_line="$(grep -nF "$stage_label" "$rev" | head -1 | cut -d: -f1)"
-    [[ -n "$stage_line" ]] ||
-      fail_case "could not locate the release stage: $stage_label"
-    [[ "$stage_line" -gt "$export_line" ]] ||
-      fail_case "release stage $stage_label runs BEFORE the validated-APK export, so it would install an unverified binary"
-  done
-  pass_case "the real release flow exports the identity between the gate and every stage"
+  pass_case "the real release flow exports the identity after the gate"
 
-  local publish_line visual_stage_line
+  local publish_line
   publish_line="$(grep -n '^publish_validated_apk$' "$rev" | tail -1 | cut -d: -f1)"
-  visual_stage_line="$(grep -nF '"visual-audit screenshot capture" \' "$rev" | tail -1 | cut -d: -f1)"
-  [[ -n "$publish_line" && -n "$visual_stage_line" && "$publish_line" -gt "$visual_stage_line" ]] ||
-    fail_case "publish_validated_apk is not pinned after the final install stage"
-  pass_case "the release publishes only after the final validation stage"
+  [[ -n "$publish_line" && "$publish_line" -gt "$export_line" ]] ||
+    fail_case "publish_validated_apk is not pinned after the validated-APK export"
+  pass_case "the release publishes only after the validated-APK export"
 
-  local pw="$ROOT_DIR/scripts/phone-walkthrough.sh"
-  grep -qE '^[[:space:]]+pocketshell_verify_walkthrough_apks "phone walkthrough \(install\)"' "$pw" ||
-    fail_case "phone-walkthrough no longer re-verifies at its install site"
-  local install_verify_line install_line
-  install_verify_line="$(grep -n 'phone walkthrough (install)' "$pw" | head -1 | cut -d: -f1)"
-  install_line="$(grep -n '10-cold-reset-install-apks' "$pw" | head -1 | cut -d: -f1)"
-  [[ -n "$install_verify_line" && -n "$install_line" && "$install_verify_line" -lt "$install_line" ]] ||
-    fail_case "phone-walkthrough verifies the APK after installing it, which proves nothing"
-  local ca="$ROOT_DIR/scripts/capture-walkthrough-screenshots.sh"
-  grep -qE '^[[:space:]]+pocketshell_verify_walkthrough_apks "visual audit \(install\)"' "$ca" ||
-    fail_case "the visual audit no longer re-verifies before installing"
-  local ps="$ROOT_DIR/scripts/parallel-setup-detection.sh"
-  grep -qE '^pocketshell_verify_walkthrough_apks "parallel setup-detection \(pre-shard\)"' "$ps" ||
-    fail_case "parallel setup-detection no longer re-verifies after its pre-shard build"
-  local tw="$ROOT_DIR/scripts/terminal-workbench.sh"
-  grep -qF 'source "$ROOT_DIR/scripts/lib/apk-identity.sh"' "$tw" ||
-    fail_case "terminal-workbench does not participate in the APK identity contract"
-  grep -qF 'APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"' "$tw" ||
-    fail_case "terminal-workbench still replaces the exported APP_APK with its root-checkout path"
-  grep -qF 'TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"' "$tw" ||
-    fail_case "terminal-workbench still replaces the exported TEST_APK with its root-checkout path"
-  local terminal_verify_line terminal_install_line
-  terminal_verify_line="$(grep -n 'terminal workbench (install)' "$tw" | head -1 | cut -d: -f1)"
-  terminal_install_line="$(grep -n '05-install-apks' "$tw" | head -1 | cut -d: -f1)"
-  [[ -n "$terminal_verify_line" && -n "$terminal_install_line" && "$terminal_verify_line" -lt "$terminal_install_line" ]] ||
-    fail_case "terminal-workbench does not verify the exported APK pair immediately before install"
-  pass_case "every stage re-verifies at its install site, before installing"
+  # Issue #2481: with the four walkthrough stages deleted, the pre-release gate
+  # IS the install stage. Its digest re-check must run BEFORE the update-install
+  # that consumes the binary, and it must be checking app2's APK, not a path from
+  # the deleted `app` module. Asserted on line ORDER so a commented-out or
+  # after-the-fact check reddens — the shape that keeps a wiring guard green
+  # while the wiring is gone.
+  local gate="$ROOT_DIR/scripts/pre-release-confidence-gate.sh"
+  local gate_verify_line gate_install_line
+  gate_verify_line="$(grep -n '^run_step "verify-debug-apk-identity"' "$gate" | head -1 | cut -d: -f1)"
+  gate_install_line="$(grep -n '^run_step "update-install-debug-apk"' "$gate" | head -1 | cut -d: -f1)"
+  [[ -n "$gate_verify_line" && -n "$gate_install_line" ]] ||
+    fail_case "the pre-release gate no longer has both a verify-debug-apk-identity and an update-install-debug-apk step"
+  [[ "$gate_verify_line" -lt "$gate_install_line" ]] ||
+    fail_case "the pre-release gate verifies the APK digest AFTER update-installing it, which proves nothing"
+  grep -qF 'APK_PATH="${APK_PATH:-app2/build/outputs/apk/debug/app2-debug.apk}"' "$gate" ||
+    fail_case "the pre-release gate does not validate app2's debug APK (issue #2481)"
+  grep -qF 'TEST_APK_PATH="${TEST_APK_PATH:-app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk}"' "$gate" ||
+    fail_case "the pre-release gate does not validate app2's androidTest APK (issue #2481)"
+  pass_case "the gate re-verifies app2's recorded pair before its install site"
 
   # -- 10. green again, so none of the reds above are permanent --------------
   local again_root="$SANDBOX/gate-again"
@@ -410,8 +374,8 @@ HOOK
   pass_case "green again after every red case"
 
   # The test asserts its OWN check count so it cannot pass vacuously.
-  if [[ "$CHECKS" -ne 20 ]]; then
-    printf 'FAIL: ran %s checks, expected 20\n' "$CHECKS" >&2
+  if [[ "$CHECKS" -ne 19 ]]; then
+    printf 'FAIL: ran %s checks, expected 19\n' "$CHECKS" >&2
     exit 1
   fi
   printf 'PASS: release APK identity contract (%s checks)\n' "$CHECKS"

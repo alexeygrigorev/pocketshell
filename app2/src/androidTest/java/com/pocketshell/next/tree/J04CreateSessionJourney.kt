@@ -1,11 +1,13 @@
 package com.pocketshell.next.tree
 
 import android.os.SystemClock
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -21,12 +23,13 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
+import com.pocketshell.next.terminal.SESSION_TITLE_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -140,7 +143,6 @@ class J04CreateSessionJourney {
      * which the HOST agrees exists, in the folder that was typed.
      */
     @Test
-    @Ignore("quarantined: #2478, expires 2026-10-04 — create-session lands on the wrong destination; pre-existing product bug, needs real investigation not a test fix (D36)")
     fun creatingASessionFromTheTreeLandsOnItAndItAppearsOnTheTree() {
         openTree()
         assertTrue(
@@ -168,10 +170,9 @@ class J04CreateSessionJourney {
 
         compose.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
 
-        // Landed IN the new session (U-4 has not replaced this route yet, so
-        // what renders is the scaffold placeholder carrying the session name).
-        awaitText(sessionRouteLabel(SESSION_NEW))
-        compose.onNodeWithText(sessionRouteLabel(SESSION_NEW)).assertIsDisplayed()
+        // Landed IN the new session — on the REAL terminal screen (U-4), whose
+        // header title is the session identity the route carried.
+        awaitSessionScreen(SESSION_NEW)
         JourneyScreenshots.capture("03-session-opened", JOURNEY)
 
         // The HOST's own answer: the session is really there, and it was really
@@ -199,12 +200,11 @@ class J04CreateSessionJourney {
      * an error, it opens the session that is already there.
      */
     @Test
-    @Ignore("quarantined: #2478, expires 2026-10-04 — same-name create surfaces an error instead of reopening the existing session; pre-existing product bug, needs real investigation not a test fix (D36)")
     fun creatingTheSameNameTwiceOpensTheExistingSessionWithoutAnError() {
         openTree()
 
         createFromSheet(FOLDER_TWICE)
-        awaitText(sessionRouteLabel(SESSION_TWICE))
+        awaitSessionScreen(SESSION_TWICE)
         pressBack()
         awaitTag(SESSION_TREE_TAG)
         assertEquals(
@@ -218,7 +218,7 @@ class J04CreateSessionJourney {
 
         // The second create still OPENS the session — a client that treated
         // `created:false` as a failure would never get here.
-        awaitText(sessionRouteLabel(SESSION_TWICE))
+        awaitSessionScreen(SESSION_TWICE)
         JourneyScreenshots.capture("05-existing-session-opened", JOURNEY)
         assertEquals(
             "an idempotent create must not duplicate the session",
@@ -296,8 +296,28 @@ class J04CreateSessionJourney {
         compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
     }
 
-    /** What the (still placeholder) Session route renders for [name]. */
-    private fun sessionRouteLabel(name: String): String = "Session(hostId=$hostId, name=$name)"
+    /**
+     * The create landed on the SESSION route, and on the session it just made.
+     *
+     * The identity check is the header title, not merely "a session screen is
+     * up": that is the assertion that fails if the create navigates to the
+     * wrong session (a stale `openRequest`, the typed name instead of the
+     * host's answer, a dedup that opens a neighbour). Waiting on
+     * [SESSION_SCREEN_TAG] alone would pass for any of those.
+     */
+    private fun awaitSessionScreen(name: String) {
+        awaitTag(SESSION_SCREEN_TAG)
+        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
+            compose.onAllNodesWithTag(SESSION_TITLE_TAG)
+                .fetchSemanticsNodes()
+                .any { node ->
+                    node.config.getOrNull(SemanticsProperties.Text)
+                        ?.any { it.text == name } == true
+                }
+        }
+        compose.onNodeWithTag(SESSION_SCREEN_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_TITLE_TAG).assertTextEquals(name)
+    }
 
     /**
      * The host's own answer to the command the app just ran, over an
@@ -334,12 +354,6 @@ class J04CreateSessionJourney {
     private fun awaitTag(tag: String) {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
-        }
-    }
-
-    private fun awaitText(text: String) {
-        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
         }
     }
 

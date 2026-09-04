@@ -3,23 +3,17 @@ package com.pocketshell.next
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -55,10 +49,13 @@ import javax.inject.Inject
  * The single Activity of app2 (plan §A.1). Everything is Compose; there are no
  * fragments and no second Activity.
  *
- * Today it hosts the empty scaffold — each route renders a placeholder. The
- * U-tasks replace those placeholders with real screens one at a time, which is
- * why the graph is wired now: every later slice is a one-line swap inside
- * [AppNavHost] rather than a navigation change.
+ * The graph was wired before the screens existed, so each U-task was a one-line
+ * swap inside [AppNavHost] rather than a navigation change. Every route now
+ * resolves to a REAL screen; the `RoutePlaceholder` scaffold those swaps
+ * replaced is gone (D22 — superseded code is deleted, not left dark). It had to
+ * go: journey J04 was still asserting on the placeholder's
+ * `Session(hostId=…, name=…)` label long after U-4 stopped rendering it, and a
+ * dead composable is exactly what lets an oracle like that look alive (#2478).
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -112,9 +109,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
-/** Test tag on the placeholder body, so a journey can assert which route rendered. */
-const val ROUTE_PLACEHOLDER_TAG: String = "route_placeholder"
 
 /**
  * Every non-dial action the host list can start. Grouped into one type because
@@ -412,27 +406,5 @@ fun AppNavHost(
             // are the installation's, not a host's.
             crashReportsScreen { navController.popBackStack() }
         }
-    }
-}
-
-/**
- * Scaffold stand-in for a not-yet-ported screen. Intentionally text-only —
- * building any real chrome here would be a design decision made twice, since
- * every U-task replaces this with the ui-kit primitives (docs/design-system.md).
- */
-@Composable
-private fun RoutePlaceholder(label: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.testTag(ROUTE_PLACEHOLDER_TAG),
-        )
     }
 }

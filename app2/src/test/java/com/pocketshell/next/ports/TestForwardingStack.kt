@@ -25,7 +25,18 @@ import kotlinx.coroutines.runBlocking
  * stubbed the supervisor could not tell whether enabling a host actually persists
  * the intent and opens a forward, which is the only thing worth asserting here.
  */
-class TestForwardingStack(dispatcher: CoroutineDispatcher) {
+class TestForwardingStack(
+    dispatcher: CoroutineDispatcher,
+    /**
+     * When set, every dial evaluates this fingerprint against the real
+     * [RoomTrustStore] the way `RealHostConnectionFactory` does, so a host whose
+     * `trustedHostKeySha256` column is empty (or holds a different key) comes
+     * back as [com.pocketshell.core.transport.ConnectResult.NeedsTrust] — the
+     * unconfirmed/rotated-key fixture #2491 needs. Null keeps the default
+     * always-trusted dial the other tests want.
+     */
+    presentedFingerprint: String? = null,
+) {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
 
@@ -39,7 +50,7 @@ class TestForwardingStack(dispatcher: CoroutineDispatcher) {
         .setTransactionExecutor { it.run() }
         .build()
 
-    val factory = FakeHostConnectionFactory()
+    val factory = FakeHostConnectionFactory(presentedFingerprint)
 
     /**
      * The real store over Robolectric's SharedPreferences. `Unconfined` so its
@@ -107,6 +118,20 @@ class TestForwardingStack(dispatcher: CoroutineDispatcher) {
     }
 
     fun isEnabled(hostId: Long): Boolean = runBlocking { db.hostDao().getById(hostId)?.enabled == true }
+
+    /** Deletes the host row out from under a running forward. */
+    fun deleteHost(hostId: Long) = runBlocking { db.hostDao().deleteById(hostId) }
+
+    /** Confirms [fingerprint] for [hostId], as the host list's trust sheet does. */
+    fun trustHostKey(hostId: Long, fingerprint: String) = runBlocking {
+        val host = requireNotNull(db.hostDao().getById(hostId))
+        db.hostDao().update(
+            host.copy(
+                trustedHostKeyAlgorithm = RoomTrustStore.FINGERPRINT_DIGEST,
+                trustedHostKeySha256 = fingerprint,
+            ),
+        )
+    }
 
     fun close() = db.close()
 }

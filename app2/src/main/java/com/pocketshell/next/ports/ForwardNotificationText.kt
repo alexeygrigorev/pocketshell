@@ -37,7 +37,17 @@ internal object ForwardNotificationText {
                 .sorted()
             when {
                 ports.isNotEmpty() -> "${host.hostName}: ${ports.joinToString(", ")}"
-                else -> "${host.hostName}: ${host.connection.label}"
+                // A host that has stopped retrying says WHY, not just that it is
+                // in a bad state — the notification is the only surface a
+                // backgrounded user sees, and "needs attention" alone leaves
+                // them nothing to act on (#2491).
+                //
+                // `terminalAttention`, not `attention`: the reason belongs to the
+                // terminal state, and reading it through the same gate the screen
+                // uses is what stops the two surfaces describing one snapshot
+                // differently — a fixed host in a network blip must read as
+                // retrying here too, not as an already-answered key question.
+                else -> "${host.hostName}: ${host.terminalAttention ?: host.connection.label}"
             }
         }
     }
@@ -48,6 +58,6 @@ internal object ForwardNotificationText {
             ConnectionState.Connecting -> "connecting"
             ConnectionState.Connected -> "scanning"
             ConnectionState.Reconnecting -> "reconnecting"
-            ConnectionState.Lost -> "unreachable"
+            ConnectionState.Lost -> "needs attention"
         }
 }

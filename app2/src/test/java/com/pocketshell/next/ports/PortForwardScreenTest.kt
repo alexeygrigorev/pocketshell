@@ -114,7 +114,64 @@ class PortForwardScreenTest {
     fun `an unreachable host is distinguishable from an empty one`() {
         setContent(state(enabled = true, connection = ConnectionState.Lost))
 
-        composeRule.onNodeWithText("Could not reach this host. Retrying…").assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Forwarding paused. This host could not be reached.")
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun `a host that stopped retrying reads as needing attention, not reconnecting`() {
+        // #2491: the terminal state has to be visibly distinct from
+        // "Reconnecting" AND must not claim a retry is coming — nothing will
+        // change until the user confirms the key.
+        setContent(
+            state(
+                enabled = true,
+                connection = ConnectionState.Lost,
+                attention = ForwardingController.NEEDS_TRUST_ATTENTION,
+            ),
+        )
+
+        composeRule
+            .onNodeWithText(
+                "Forwarding paused. ${ForwardingController.NEEDS_TRUST_ATTENTION}",
+            )
+            .assertIsDisplayed()
+        // The reconnecting rendering (a spinner that says work is in flight)
+        // must be absent — that is the state this one is distinguished from.
+        composeRule.onNodeWithText("Scanning ports…").assertDoesNotExist()
+        composeRule.onNodeWithText("Retrying…", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun `a reconnecting host still renders as work in flight`() {
+        // The other half of the distinction: a transient failure keeps the
+        // spinner and never shows the terminal message, so the two states can
+        // never read the same.
+        setContent(state(enabled = true, connection = ConnectionState.Reconnecting))
+
+        composeRule.onNodeWithText("Scanning ports…").assertIsDisplayed()
+        composeRule.onNodeWithText("Forwarding paused.", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun `the header state label separates a parked host from a reconnecting one`() {
+        // The header falls back to the connection label when the host has no
+        // subtitle. "Needs attention" is terminal wording; "Reconnecting" is not.
+        setContent(
+            state(enabled = true, connection = ConnectionState.Lost, hostSubtitle = ""),
+        )
+        composeRule.onNodeWithText("Needs attention").assertIsDisplayed()
+        composeRule.onNodeWithText("Reconnecting").assertDoesNotExist()
+    }
+
+    @Test
+    fun `the paused message falls back to a plain reason when none is known`() {
+        assertEquals(
+            "Forwarding paused. This host could not be reached.",
+            pausedMessage(null),
+        )
+        assertEquals("Forwarding paused. Fix the key.", pausedMessage("Fix the key."))
     }
 
     @Test
@@ -204,15 +261,18 @@ class PortForwardScreenTest {
     private fun state(
         enabled: Boolean = false,
         connection: ConnectionState = ConnectionState.Idle,
+        attention: String? = null,
         rows: List<TunnelInfo> = emptyList(),
         hiddenCount: Int = 0,
         showAllPorts: Boolean = false,
+        hostSubtitle: String = "alexey@rmthz:22",
     ) = PortForwardUiState(
         hostId = 1L,
         hostName = "rmthz",
-        hostSubtitle = "alexey@rmthz:22",
+        hostSubtitle = hostSubtitle,
         enabled = enabled,
         connection = connection,
+        attention = attention,
         rows = rows,
         showAllPorts = showAllPorts,
         hiddenCount = hiddenCount,

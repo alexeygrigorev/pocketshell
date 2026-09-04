@@ -2,6 +2,7 @@ package com.pocketshell.next.ports
 
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
+import com.pocketshell.core.portfwd.PermanentConnectionFailure
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
@@ -78,9 +79,41 @@ class ForwardingController @Inject constructor(
         val hostName: String,
         val connection: AutoForwarderSupervisor.ConnectionState,
         val tunnels: List<TunnelInfo> = emptyList(),
+        /**
+         * Why the LAST dial could not connect on its own, when that is knowable
+         * — written by [dial] for a failure no amount of retrying can clear, and
+         * cleared by the next dial that is not one (a success, or an ordinary
+         * transient failure). Paired with
+         * [AutoForwarderSupervisor.ConnectionState.Lost] it is what turns a dead
+         * "Reconnecting…" row into a "here is what to do" one (#2491).
+         *
+         * Read it through [terminalAttention], never directly: outside the
+         * terminal state it describes, this is a leftover.
+         */
+        val attention: String? = null,
     ) {
         val forwardingCount: Int
             get() = tunnels.count { it.status == TunnelInfo.Status.FORWARDING }
+
+        /**
+         * [attention], but ONLY in the terminal state it explains — the single
+         * gate every surface reads the reason through.
+         *
+         * It exists because the notification and the screen disagreed about one
+         * snapshot: the screen showed the reason inside its
+         * `connection == Lost` branch, the notification showed it unconditionally,
+         * so a host that parked on an unconfirmed key, was fixed, un-parked and
+         * then hit an ordinary network blip kept telling a backgrounded user to
+         * confirm an already-confirmed key while the screen said "Reconnecting".
+         *
+         * Gating at the READ site rather than only clearing harder at the write
+         * site is what makes that impossible rather than merely unlikely: a dial
+         * takes real time, so any write-site-only rule still leaves a window
+         * where the supervisor has left [AutoForwarderSupervisor.ConnectionState.Lost]
+         * but the next dial has not produced its answer yet (#2491 review).
+         */
+        val terminalAttention: String?
+            get() = attention.takeIf { connection == AutoForwarderSupervisor.ConnectionState.Lost }
     }
 
     private class ActiveHost(
@@ -153,13 +186,21 @@ class ForwardingController @Inject constructor(
      * the whole of "resume on foreground": the enabled column IS the state, so
      * there is nothing to reconcile and nothing that can drift.
      *
+     * A host that is ALREADY mounted is asked to retry now instead of being
+     * skipped. That is the recovery path for a host parked in the terminal
+     * needs-attention state (#2491): the supervisor stops retrying a host key it
+     * cannot confirm, and coming back to the app — which is the only place that
+     * key CAN be confirmed — is what un-parks it. For a healthy host this is a
+     * no-op, and for one in backoff it just brings the next attempt forward.
+     *
      * Returns the number of hosts now forwarding, so the caller (the service) can
      * stop itself when there is no work.
      */
     suspend fun resumeEnabled(): Int {
         hostDao.getEnabled().first().forEach { host ->
             mutex.withLock {
-                if (host.id !in active) active[host.id] = mount(host)
+                val mounted = active[host.id]
+                if (mounted == null) active[host.id] = mount(host) else mounted.supervisor.reconnectNow()
             }
         }
         return mutex.withLock { active.size }
@@ -217,20 +258,59 @@ class ForwardingController @Inject constructor(
      * the supervisor's backoff owns the retry: a host whose key still needs
      * confirming, or one that is simply unreachable, must not be a silent no-op
      * that leaves the row saying "Connecting" forever.
+     *
+     * Two of those failures can NEVER clear on their own, so they are thrown as
+     * [PermanentConnectionFailure] and the supervisor parks in
+     * [AutoForwarderSupervisor.ConnectionState.Lost] instead of re-running a
+     * full SSH handshake every backoff window forever (#2491):
+     *
+     *  - an unconfirmed/rotated host key — only the host list's trust sheet can
+     *    answer that, and forwarding deliberately never does (two writers to the
+     *    trust store is exactly what that screen prevents);
+     *  - a deleted host row — the id is gone and Room never reissues it.
+     *
+     * Everything else (unreachable, refused, auth) stays transient and keeps the
+     * exponential backoff, because that is the case that self-heals.
+     *
+     * Every outcome writes [HostForwarding.attention], including the transient
+     * one, which clears it. That keeps the field's meaning exactly "the reason
+     * the LAST dial could not connect on its own" rather than "the reason some
+     * earlier dial parked with", so a host that parks again — for whatever
+     * reason, and however the supervisor got there — carries a reason produced
+     * by the dial that parked it (#2491 review).
      */
     private suspend fun dial(hostId: Long): HostConnection {
-        val host = hostDao.getById(hostId) ?: throw IOException("No host row for id $hostId")
+        val host = hostDao.getById(hostId) ?: throw permanent(hostId, MISSING_HOST_ATTENTION)
         return when (val result = connectionFactory.connect(host.toTarget(), trustStore)) {
-            is ConnectResult.Connected -> result.connection
-            // Trust is a decision the user makes once, on the screen that owns it
-            // (U-2's trust sheet). Forwarding never answers a host-key question —
-            // two writers to the trust store is exactly what that screen prevents.
-            is ConnectResult.NeedsTrust -> throw IOException(
-                "${host.name}: host key needs confirmation — connect from the host list first",
-            )
+            is ConnectResult.Connected -> {
+                noteAttention(hostId, null)
+                result.connection
+            }
 
-            is ConnectResult.Failed -> throw IOException(result.message, result.cause)
+            is ConnectResult.NeedsTrust -> throw permanent(hostId, NEEDS_TRUST_ATTENTION)
+
+            is ConnectResult.Failed -> {
+                noteAttention(hostId, null)
+                throw IOException(result.message, result.cause)
+            }
         }
+    }
+
+    /**
+     * Records [reason] on the host's row so the screen and the notification can
+     * show it, and returns the throwable that sends the supervisor terminal.
+     * Publishing here rather than off [AutoForwarderSupervisor.flowOfEvents] is
+     * deliberate: the reason is written by the same coroutine that produced it,
+     * so there is no window in which a `tryEmit` can outrun a collector that has
+     * not subscribed yet and lose the only explanation the user gets.
+     */
+    private fun permanent(hostId: Long, reason: String): PermanentConnectionFailure {
+        noteAttention(hostId, reason)
+        return PermanentConnectionFailure(reason)
+    }
+
+    private fun noteAttention(hostId: Long, reason: String?) {
+        updateHost(hostId) { it.copy(attention = reason) }
     }
 
     private fun publish(
@@ -257,7 +337,18 @@ class ForwardingController @Inject constructor(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * Shown on the row and in the notification when the host key is not
+         * confirmed. Deliberately free of the host name: it is rendered against
+         * a row that already names the host.
+         */
+        internal const val NEEDS_TRUST_ATTENTION: String =
+            "This host's key needs confirming. Open it from the host list and accept the key."
+
+        internal const val MISSING_HOST_ATTENTION: String =
+            "This host no longer exists. Turn forwarding off."
+
         fun HostEntity.toAutoForwardConfig(): AutoForwardConfig = AutoForwardConfig(
             scanIntervalSec = scanIntervalSec.coerceAtLeast(1),
             maxAutoPort = maxAutoPort,

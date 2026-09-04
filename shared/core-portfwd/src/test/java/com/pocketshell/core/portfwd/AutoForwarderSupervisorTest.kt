@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -328,6 +329,176 @@ class AutoForwarderSupervisorTest {
         assertEquals(4, factory.attempts())
         assertEquals(
             AutoForwarderSupervisor.ConnectionState.Connected,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `a permanent dial failure parks in Lost instead of retrying forever`() = runTest {
+        // #2491: an unconfirmed/rotated host key made every dial throw, and with
+        // no maxReconnectAttempts the supervisor re-ran the whole SSH handshake
+        // every 5-60 s forever — foreground service and notification held alive,
+        // row stuck on "Reconnecting", no terminal state anywhere.
+        val attempts = AtomicInteger(0)
+        val events = mutableListOf<AutoForwarderSupervisor.Event>()
+        val supervisor = AutoForwarderSupervisor(
+            connectionFactory = {
+                attempts.incrementAndGet()
+                throw PermanentConnectionFailure("host key needs confirming")
+            },
+            config = smallConfig(),
+            initialReconnectDelayMs = 5_000L,
+            maxReconnectDelayMs = 60_000L,
+            // Exactly the production wiring: no cap, because a transient outage
+            // must still self-heal. The permanence comes from the throwable.
+            maxReconnectAttempts = null,
+        )
+        val collector = launch { supervisor.flowOfEvents().collect { events += it } }
+        runCurrent()
+
+        val job = supervisor.start(this)
+        runCurrent()
+        assertEquals("the first dial still happens", 1, attempts.get())
+
+        // An hour of backoff windows at the production 5-60 s cadence: on the
+        // unfixed loop this is ~60+ handshakes.
+        advanceTimeBy(60 * 60 * 1_000L)
+        runCurrent()
+
+        assertEquals(
+            "a permanently-failing dial must not be retried on a timer",
+            1,
+            attempts.get(),
+        )
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Lost,
+            supervisor.flowOfConnectionState().value,
+        )
+        val lost = events.filterIsInstance<AutoForwarderSupervisor.Event.ConnectionLost>()
+        assertEquals("exactly one terminal event", 1, lost.size)
+        assertEquals(
+            "the terminal event carries the reason to show the user",
+            "host key needs confirming",
+            lost.single().lastError,
+        )
+
+        supervisor.stop()
+        job.cancel()
+        collector.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `a permanent failure after a healthy connection also parks`() = runTest {
+        // Class coverage: the key can rotate WHILE forwarding is up, so the
+        // permanent failure arrives on a reconnect dial, not the first one.
+        val factory = SequentialConnectionFactory().apply {
+            addConnection { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }
+            failPermanentlyNext(1, reason = "host key changed")
+        }
+        val supervisor = AutoForwarderSupervisor(
+            connectionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 5_000L,
+            maxReconnectDelayMs = 60_000L,
+        )
+        val job = supervisor.start(this)
+        runCurrent()
+        val first = requireNotNull(factory.last)
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Connected,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        first.simulateDrop()
+        advanceTimeBy(60 * 60 * 1_000L)
+        runCurrent()
+
+        assertEquals(
+            "the re-dial that hit a permanent failure must be the last one",
+            2,
+            factory.attempts(),
+        )
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Lost,
+            supervisor.flowOfConnectionState().value,
+        )
+        assertTrue(
+            "tunnels from the dead connection must not still read as forwarding",
+            supervisor.flowOfTunnels().first().all { it.status == TunnelInfo.Status.STOPPED },
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `reconnectNow un-parks a supervisor that hit a permanent failure`() = runTest {
+        // The user confirms the host key and comes back to the app; the app
+        // calls reconnectNow(). Parking must be recoverable, not a dead end.
+        val factory = SequentialConnectionFactory().apply { failPermanentlyNext(1) }
+        val supervisor = AutoForwarderSupervisor(
+            connectionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 5_000L,
+            maxReconnectDelayMs = 60_000L,
+        )
+        val job = supervisor.start(this)
+        runCurrent()
+        advanceTimeBy(120_000L)
+        runCurrent()
+        assertEquals(1, factory.attempts())
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Lost,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        factory.addConnection { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }
+        supervisor.reconnectNow()
+        runCurrent()
+
+        assertEquals(2, factory.attempts())
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Connected,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `an ordinary failure keeps retrying and never parks`() = runTest {
+        // The non-goal guard for #2491: only a PermanentConnectionFailure is
+        // terminal. A phone in a tunnel keeps its uncapped backoff, so the
+        // forwards come back on their own when the network does.
+        val attempts = AtomicInteger(0)
+        val supervisor = AutoForwarderSupervisor(
+            connectionFactory = {
+                attempts.incrementAndGet()
+                throw java.io.IOException("network is unreachable")
+            },
+            config = smallConfig(),
+            initialReconnectDelayMs = 5_000L,
+            maxReconnectDelayMs = 60_000L,
+        )
+        val job = supervisor.start(this)
+        runCurrent()
+        advanceTimeBy(10 * 60 * 1_000L)
+        runCurrent()
+
+        assertTrue(
+            "a transient failure must keep retrying, got ${attempts.get()} attempts",
+            attempts.get() > 5,
+        )
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Reconnecting,
             supervisor.flowOfConnectionState().value,
         )
 
@@ -821,12 +992,18 @@ class AutoForwarderSupervisorTest {
             repeat(n) { queue += Lambda.Failure }
         }
 
+        /** Scripts a dial that can never succeed on its own (#2491). */
+        fun failPermanentlyNext(n: Int, reason: String = "scripted permanent failure") {
+            repeat(n) { queue += Lambda.Permanent(reason) }
+        }
+
         fun next(): FakeConnection {
             attempts.incrementAndGet()
             val entry = queue.removeFirstOrNull()
                 ?: throw IllegalStateException("factory script exhausted (attempt $attempts)")
             return when (entry) {
                 is Lambda.Failure -> throw RuntimeException("scripted factory failure")
+                is Lambda.Permanent -> throw PermanentConnectionFailure(entry.reason)
                 is Lambda.Connected -> {
                     val s = FakeConnection().apply(entry.init)
                     s.closeBlock = closeBlock
@@ -840,6 +1017,7 @@ class AutoForwarderSupervisorTest {
 
         sealed class Lambda {
             object Failure : Lambda()
+            data class Permanent(val reason: String) : Lambda()
             data class Connected(val init: FakeConnection.() -> Unit) : Lambda()
         }
     }

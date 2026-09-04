@@ -316,6 +316,23 @@ session-scoped. `ForwardService` is one foreground service with one notification
 channel and one serialized `updateNotification(snapshot)` — replacing ~900 lines
 of mutation-authority/stop-authority/close-barrier machinery.
 
+Reconnect is uncapped for a *transient* failure — a phone in a tunnel has to
+self-heal on its own — but a dial that can never succeed without the user
+(`NeedsTrust` on an unconfirmed/rotated host key, a deleted host row) is thrown
+as `PermanentConnectionFailure`. The supervisor then goes terminal at once
+(`ConnectionState.Lost` + `Event.ConnectionLost`) instead of re-running the SSH
+handshake every 5-60 s forever, and the row/notification carry what to do about
+it rather than a permanent "Reconnecting" (#2491). `resumeEnabled` calls
+`reconnectNow()` on an already-mounted host, so returning to the app after
+confirming the key is what un-parks it.
+
+That "what to do about it" reason belongs to the terminal state, so every
+surface reads it through the single `HostForwarding.terminalAttention` gate
+(`attention` only while `connection == Lost`). Without it the screen and the
+notification described the same snapshot differently: a host that parked on an
+unconfirmed key, was fixed, un-parked and then hit an ordinary network blip kept
+telling a backgrounded user to confirm an already-confirmed key.
+
 ## Navigation and screen surface
 
 `app2/nav/Destination` is a sealed class of route templates plus typed builders,

@@ -7,6 +7,7 @@ import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.ComposerDraftStore
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.voice.PendingTranscriptionStore
 import dagger.hilt.EntryPoint
@@ -51,6 +52,14 @@ interface AppGraph {
      * inferring the D21 window's state from the notification tray alone.
      */
     fun graceCoordinator(): GraceCoordinator
+
+    /**
+     * Task P-6. The app's own settings store, so a journey can change a
+     * preference the way the Settings screen does — through the SAME
+     * `@Singleton` the production graph reads from — and then assert on what
+     * the app actually did with it (issue #2488).
+     */
+    fun settingsRepository(): SettingsRepository
 
     /**
      * Task P-2. The offline-dictation queue, so a journey can seed a

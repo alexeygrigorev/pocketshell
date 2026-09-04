@@ -51,7 +51,7 @@ interface GraceServiceControl {
  *
  * ## What runs while backgrounded
  *
- * Exactly two timers, both bounded by [graceMs] and both cancelled on return:
+ * Exactly two timers, both bounded by the window [graceMs] returns and both cancelled on return:
  * the transport's own delayed close ([com.pocketshell.core.transport.HostConnection.scheduleGraceClose],
  * task T-5) and this class's expiry job, whose ONLY job is to take the service
  * down at the same instant so no wake lock outlives the connection it was held
@@ -91,7 +91,24 @@ class GraceCoordinator(
     private val connections: ConnectionsRegistry,
     private val service: GraceServiceControl,
     private val clock: () -> Long = { System.currentTimeMillis() },
-    private val graceMs: Long = DEFAULT_GRACE_MS,
+    /**
+     * How long the next window lasts, in millis. A SUPPLIER, read once each
+     * time a window is armed, for the same reason [clock] is one: the value is
+     * a user setting ([com.pocketshell.next.settings.AppSettings.backgroundGraceMillis],
+     * task P-6) and this class is a process-lifetime `@Singleton`, so a value
+     * captured when the Hilt graph was built would pin the window to whatever
+     * was stored at launch — changing the Settings row would do nothing until
+     * the process died, which is the inert-setting bug issue #2488 filed (the
+     * provider simply never passed the value at all, so the window was always
+     * the 90 s default).
+     *
+     * Reading it per-arm rather than per-instance is what makes "change it and
+     * background the app" take effect immediately. It is read ONCE per window
+     * inside [enterBackground]'s lock, so the transport's deadline, the
+     * notification's count-down and this class's expiry timer can never be
+     * three different numbers because the user tapped a new option mid-arm.
+     */
+    private val graceMs: () -> Long = { DEFAULT_GRACE_MS },
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : DefaultLifecycleObserver, Application.ActivityLifecycleCallbacks {
 
@@ -215,13 +232,15 @@ class GraceCoordinator(
         // Nothing to hold: no service, no notification, no wake lock.
         if (live.isEmpty()) return
         armed = true
-        handles = live.map { it.scheduleGraceClose(graceMs) }
+        // ONE read of the user's setting for this whole window — see [graceMs].
+        val window = graceMs()
+        handles = live.map { it.scheduleGraceClose(window) }
         // Arming, showing and timing the window happen under ONE lock so a
         // foreground return landing mid-sequence cannot cancel a close that has
         // not been armed yet, or stop a service that is started a line later.
-        service.start(clock() + graceMs)
+        service.start(clock() + window)
         expiry = scope.launch {
-            delay(graceMs)
+            delay(window)
             onGraceExpired()
         }
     }
@@ -343,11 +362,20 @@ class GraceCoordinator(
         private val activeInstance = AtomicReference<GraceCoordinator?>(null)
 
         /**
-         * The ONE grace default (D21, #1159): 90 seconds. Long enough to answer
-         * a message, check a calendar or paste something in from another app;
+         * The grace DEFAULT (D21, #1159): 90 seconds. Long enough to answer a
+         * message, check a calendar or paste something in from another app;
          * short enough that a phone left in a pocket is not holding an SSH
-         * transport and a wake lock. There is deliberately no setting for it —
-         * plan §U-8 non-goal.
+         * transport and a wake lock.
+         *
+         * It is the value a coordinator built with no [graceMs] supplier uses
+         * — i.e. every test that does not care about the window, and nothing
+         * in production: [com.pocketshell.next.di.AppModule.provideGraceCoordinator]
+         * supplies the user's stored
+         * [com.pocketshell.next.settings.AppSettings.backgroundGraceMillis],
+         * whose own default is this same 90 s (pinned by
+         * `AppSettingsTest`), so a fresh install behaves identically. Task
+         * U-8 called a setting a non-goal; task P-6 shipped the row, and
+         * issue #2488 is what it cost to ship the row without the wire.
          */
         const val DEFAULT_GRACE_MS: Long = 90_000L
     }

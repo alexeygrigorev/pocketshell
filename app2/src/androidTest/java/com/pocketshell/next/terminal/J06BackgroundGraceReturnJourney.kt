@@ -22,6 +22,8 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.settings.AppSettings
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
 import com.termux.view.TerminalView
@@ -124,6 +126,12 @@ class J06BackgroundGraceReturnJourney {
         // clean slate rather than racing the previous test's teardown.
         graph.connectionsRegistry().closeAll()
         graph.graceCoordinator().enterForeground()
+        // The grace window is now a real preference (issue #2488), stored in a
+        // process-wide SharedPreferences file that outlives any one test
+        // method. Resetting it here means no method inherits a shortened window
+        // from a sibling that failed before its own restore ran.
+        graph.settingsRepository()
+            .setBackgroundGraceMillis(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS)
         graph.hostDao().getAll().first().forEach { graph.hostDao().deleteById(it.id) }
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
@@ -330,7 +338,7 @@ class J06BackgroundGraceReturnJourney {
         val retired = GraceCoordinator(
             connections = registry,
             service = AndroidGraceServiceControl(application),
-            graceMs = RETIRED_GRACE_MS,
+            graceMs = { RETIRED_GRACE_MS },
         )
         instrumentation.runOnMainSync {
             retired.register(application)
@@ -494,7 +502,7 @@ class J06BackgroundGraceReturnJourney {
         val shortWindow = GraceCoordinator(
             connections = registry,
             service = AndroidGraceServiceControl(application),
-            graceMs = EXPIRING_GRACE_MS,
+            graceMs = { EXPIRING_GRACE_MS },
         )
         instrumentation.runOnMainSync { shortWindow.register(application) }
 
@@ -562,6 +570,92 @@ class J06BackgroundGraceReturnJourney {
         // Same reason as the sibling tests: leave no live connection behind for
         // the Activity teardown to arm a real window over.
         runBlocking { registry.closeAll() }
+    }
+
+    /**
+     * Regression for issue #2488, on the real device path: the Settings row
+     * that says how long a backgrounded session is held has to be the window
+     * the running app actually uses.
+     *
+     * ## What broke
+     *
+     * `AppModule.provideGraceCoordinator` built the app's `@Singleton`
+     * coordinator as `GraceCoordinator(connections, service)` — no window
+     * argument — so [AppSettings.backgroundGraceMillis] was persisted, shown as
+     * a selected option, and read by nothing. Every window was
+     * [GraceCoordinator.DEFAULT_GRACE_MS]. A user who set "30 sec" to save
+     * battery still held the transport and a wake lock for 90 s, and a user who
+     * set "10 min" lost their session after 90.
+     *
+     * ## Why it is a journey and not only [GraceWindowSettingWiringTest]
+     *
+     * The JVM test drives the provider function directly; it cannot see whether
+     * the RUNNING app's Hilt graph builds its one real coordinator that way, and
+     * that graph is exactly where the bug lived. So this uses no test-built
+     * coordinator at all: it writes the preference through the app's own
+     * [SettingsRepository] singleton, backgrounds the real Activity, and reads
+     * the window back out of the REAL posted notification — whose `when` is the
+     * deadline [GraceService] anchors the system count-down on, i.e. the number
+     * the user is looking at.
+     *
+     * The preference is process-wide and outlives this test method, so it is
+     * restored in a `finally` (and again by every [seed]) — a leftover 30 s
+     * window would otherwise expire under a later journey's live session.
+     */
+    @Test
+    fun theGraceWindowSettingChangesTheRealHoldTheAppArms() {
+        val settings = appGraph().settingsRepository()
+        try {
+            // Exactly what tapping the Settings row does — the same @Singleton
+            // the Settings screen writes through.
+            settings.setBackgroundGraceMillis(SHORT_GRACE_OPTION_MS)
+            assertEquals(
+                "the fixture setting must really be stored before backgrounding",
+                SHORT_GRACE_OPTION_MS,
+                settings.settings.value.backgroundGraceMillis,
+            )
+
+            openSession()
+            awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+            assertTrue(
+                "the window must be armed over a REAL live connection",
+                appGraph().connectionsRegistry().liveConnections().isNotEmpty(),
+            )
+
+            // Background the app for real: the app's OWN coordinator arms the
+            // window, with no test-built instance anywhere in the picture.
+            val armedAt = System.currentTimeMillis()
+            compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+            awaitGraceHolding(true, "after backgrounding with a 30s window configured")
+            val notification = awaitGraceNotification("after backgrounding")
+            JourneyScreenshots.capture("12-configured-window-notification", JOURNEY)
+
+            // `setWhen(deadlineMs)` is what the system count-down is anchored
+            // on, so this IS the window the user sees and the one the transport
+            // is dropped at.
+            val window = notification.notification.`when` - armedAt
+            assertTrue(
+                "issue #2488: the app must hold for the CONFIGURED " +
+                    "${SHORT_GRACE_OPTION_MS}ms, but the real notification counts down " +
+                    "${window}ms (the inert-setting bug always armed " +
+                    "${GraceCoordinator.DEFAULT_GRACE_MS}ms)",
+                window >= SHORT_GRACE_OPTION_MS && window <= SHORT_GRACE_OPTION_MS + SETTING_SLACK_MS,
+            )
+
+            // Come back well inside even the short window, so nothing is
+            // dropped and the next test starts clean.
+            compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+            awaitGraceHolding(false, "after returning")
+            awaitNoGraceNotification("after returning")
+            assertNoReconnectBanner("after returning from the configured-window scenario")
+            compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+
+            // Same reason as the sibling tests: leave no live connection behind
+            // for the Activity teardown to arm a real window over.
+            runBlocking { appGraph().connectionsRegistry().closeAll() }
+        } finally {
+            settings.setBackgroundGraceMillis(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS)
+        }
     }
 
     // --- helpers ------------------------------------------------------------
@@ -766,6 +860,21 @@ class J06BackgroundGraceReturnJourney {
         const val EXPIRED_MARKER = "j06-back-after-expiry"
 
         /**
+         * Issue #2488 picks the SHORTEST offered option: it is the furthest
+         * from [GraceCoordinator.DEFAULT_GRACE_MS], so a coordinator still
+         * using the inert default misses it by a minute, and it is short enough
+         * that a test which failed to come back leaves nothing held for long.
+         */
+        const val SHORT_GRACE_OPTION_MS = AppSettings.BACKGROUND_GRACE_30_SECONDS_MS
+
+        /**
+         * Head-room between arming the window and reading the posted
+         * notification back. Far below the 60 s gap to the inert default, so a
+         * regression cannot slip through this band.
+         */
+        const val SETTING_SLACK_MS = 15_000L
+
+        /**
          * Issue #2487's window has to actually ELAPSE inside a test, so it is
          * seconds rather than [GraceCoordinator.DEFAULT_GRACE_MS]. Long enough
          * that arming it over the real connection finishes first — the test
@@ -783,6 +892,7 @@ class J06BackgroundGraceReturnJourney {
             "aRetiredCoordinatorsExpiryCannotTakeDownTheLiveHold" to 9_603L,
             "returningAfterTheGraceWindowExpiresReattachesInsteadOfReportingTheSessionEnded"
                 to 9_604L,
+            "theGraceWindowSettingChangesTheRealHoldTheAppArms" to 9_605L,
         )
     }
 }

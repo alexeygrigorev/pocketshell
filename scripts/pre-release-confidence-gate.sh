@@ -1739,7 +1739,14 @@ dump_instrumentation_diagnostics() {
 }
 
 instrumentation_output_has_failure_markers() {
-  printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
+  # STATUS_CODE -1/-2 (STATUS_ERROR/STATUS_FAILURE) are real failures.
+  # -3 (STATUS_IGNORED, an @Ignore'd/quarantined test per D36) and -4
+  # (STATUS_ASSUMPTION_FAILURE) are not: JUnit itself does not count either as
+  # a failure, and this suite carries deliberately-quarantined tests (#2478)
+  # whose whole point is to NOT gate anything. Matching every negative code
+  # made a clean "0 failed, 2 ignored" run indistinguishable from a real
+  # failure, which is exactly the false failure this run reproduced.
+  printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[12]$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
 }
 
 logcat_has_app_or_test_failure_markers() {

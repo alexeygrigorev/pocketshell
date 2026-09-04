@@ -188,10 +188,13 @@ class PortForwardIntegrationTest {
     fun portScannerDiscoversSshdOnPort22InsideTheContainer() = runBlocking {
         val connection = connect()
         try {
-            val ports = PortScanner.scan(connection)
+            val scan = PortScanner.scan(connection)
             // Alpine busybox has no `ss`, so the netstat fallback wins. We accept
             // either path (different distros pick differently); what matters is
-            // that port 22 lands somewhere.
+            // that port 22 lands somewhere — and that a real container scan
+            // reports Ports, never Failed (issue #2489).
+            assertTrue("expected a successful scan, got $scan", scan is PortScanResult.Ports)
+            val ports = (scan as PortScanResult.Ports).ports
             assertTrue("expected to find sshd on port 22, got $ports", ports.any { it.port == 22 })
         } finally {
             connection.close()
@@ -266,7 +269,8 @@ class PortForwardIntegrationTest {
             assertTrue(
                 "the remote service never started listening on $REMOTE_SERVICE_PORT",
                 waitUntilTrue(ciScaled(10_000)) {
-                    runBlocking { PortScanner.scan(connection) }.any { it.port == REMOTE_SERVICE_PORT }
+                    val scan = runBlocking { PortScanner.scan(connection) }
+                    scan is PortScanResult.Ports && scan.ports.any { it.port == REMOTE_SERVICE_PORT }
                 },
             )
 

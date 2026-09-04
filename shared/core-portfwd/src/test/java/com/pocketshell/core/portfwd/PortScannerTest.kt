@@ -89,9 +89,51 @@ class PortScannerTest {
     }
 
     @Test
-    fun `scan returns empty list when every strategy fails`() = runTest {
+    fun `scan reports Failed when every strategy fails`() = runTest {
+        // Issue #2489: the failure case is its own type, not an empty list —
+        // the AutoForwarder must be able to tell "the scan didn't work" from
+        // "the remote has nothing listening" before it tears tunnels down.
         val host = stubHost { _ -> exec(exitCode = 127) }
-        assertEquals(emptyList<RemotePort>(), PortScanner.scan(host))
+        assertEquals(PortScanResult.Failed, PortScanner.scan(host))
+    }
+
+    @Test
+    fun `scan reports Failed when a strategy produces output no parser recognises`() = runTest {
+        // Non-blank garbage that yields zero ports is a broken strategy, not
+        // an empty host (issue #2489) — Ports(emptyList()) is unreachable.
+        val host = stubHost { _ -> exec("bind: Address family not supported\n") }
+        assertEquals(PortScanResult.Failed, PortScanner.scan(host))
+    }
+
+    @Test
+    fun `scan treats a timed-out exec as a failed strategy, not truncated output`() = runTest {
+        // Issue #2489: exec returns partial stdout with timedOut=true instead
+        // of throwing. Parsing that half-written listing reports a short port
+        // list as authoritative. RED on base: scan returns just :22.
+        val host = stubHost { cmd ->
+            when {
+                cmd.startsWith("ss -tlnp") -> timedOutExec("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))\n")
+                else -> exec(exitCode = 127)
+            }
+        }
+        assertEquals(PortScanResult.Failed, PortScanner.scan(host))
+    }
+
+    @Test
+    fun `scan falls through to netstat when the primary times out`() = runTest {
+        // The timed-out primary must not short-circuit the chain either — the
+        // next strategy still gets its turn and its full listing wins.
+        val host = stubHost { cmd ->
+            when {
+                cmd.startsWith("ss -tlnp") -> timedOutExec("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))\n")
+                cmd.startsWith("netstat -tlnp") -> exec("0.0.0.0:22 1/sshd\n0.0.0.0:3000 7/app\n")
+                else -> error("last resort should not have run: cmd=$cmd")
+            }
+        }
+        assertEquals(
+            PortScanResult.Ports(listOf(RemotePort(22, "sshd"), RemotePort(3000, "app"))),
+            PortScanner.scan(host),
+        )
     }
 
     @Test
@@ -103,7 +145,10 @@ class PortScannerTest {
                 else -> error("primary strategy should have won: cmd=$cmd")
             }
         }
-        assertEquals(listOf(RemotePort(8080, "app")), PortScanner.scan(host))
+        assertEquals(
+            PortScanResult.Ports(listOf(RemotePort(8080, "app"))),
+            PortScanner.scan(host),
+        )
     }
 
     @Test
@@ -115,7 +160,10 @@ class PortScannerTest {
                 else -> error("last resort should not have run: cmd=$cmd")
             }
         }
-        assertEquals(listOf(RemotePort(22, "sshd")), PortScanner.scan(host))
+        assertEquals(
+            PortScanResult.Ports(listOf(RemotePort(22, "sshd"))),
+            PortScanner.scan(host),
+        )
     }
 
     @Test
@@ -128,7 +176,9 @@ class PortScannerTest {
                 else -> error("unexpected command: $cmd")
             }
         }
-        assertTrue(PortScanner.scan(host).contains(RemotePort(9000, "")))
+        val result = PortScanner.scan(host)
+        assertTrue("expected a successful scan, got $result", result is PortScanResult.Ports)
+        assertTrue((result as PortScanResult.Ports).ports.contains(RemotePort(9000, "")))
     }
 
     /**
@@ -142,4 +192,12 @@ class PortScannerTest {
     /** A finished command: the scanner only ever reads stdout and the exit code. */
     private fun exec(stdout: String = "", exitCode: Int = 0): ExecResult =
         ExecResult(exitCode = exitCode, stdout = stdout, stderr = "", timedOut = false)
+
+    /**
+     * A command whose wall-clock budget elapsed: [HostConnection.exec] does
+     * not throw for this, it hands back whatever was captured so far with
+     * `timedOut = true` and a meaningless exit code.
+     */
+    private fun timedOutExec(partialStdout: String): ExecResult =
+        ExecResult(exitCode = 0, stdout = partialStdout, stderr = "", timedOut = true)
 }

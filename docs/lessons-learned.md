@@ -123,3 +123,20 @@ check and only the new check.
   Prefer waiting on a PID (`while kill -0 $PID`) or a distinctive log-file
   marker over `pgrep -f` on a string that might reappear in your own
   wrapper.
+- When a rewrite implementer is stuck reinventing behavior the pre-rewrite
+  app already had (e.g. debouncing/coalescing a burst of resize or layout
+  events into one correct settled result), check the old code on
+  `origin/backup-main-pre-rewrite-<date>` for the IDEA before iterating
+  blind — it was already debugged against real bugs the new code hasn't
+  hit yet. Port the approach, never the code (D22: no compat shims, no
+  copy-paste of deleted modules). Concretely this once meant: the old app's
+  `TmuxSessionViewModel.maybeRefreshControlClientSize` didn't use a
+  time-based `delay()` debounce at all (a shape that can hang a JVM test
+  under `advanceTimeBy`/virtual time if the implementation and the test's
+  ticking don't line up) — it fired every real resize immediately and used
+  a monotonic generation counter to discard a stale in-flight result if a
+  newer resize superseded it before the round-trip returned. The invariant
+  worth carrying over is "the applied end-state is always the last real
+  one," not "exactly one wire call is ever sent" — a new test that asserts
+  the latter is stricter than the old app ever guaranteed and can drive an
+  implementation toward the exact debounce shape that hangs.

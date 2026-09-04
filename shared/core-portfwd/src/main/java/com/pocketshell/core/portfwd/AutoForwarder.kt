@@ -331,7 +331,19 @@ public class AutoForwarder(
     }
 
     private suspend fun scanAndForward() {
-        val remotePorts = PortScanner.scan(connection)
+        // A failed scan (every strategy errored, timed out, or produced
+        // nothing) is NOT an observation that the remote's ports vanished, so
+        // it must not drive the teardown sweep below — one transient exec
+        // timeout used to close every auto-forwarded tunnel and reset the TCP
+        // connections running through them (issue #2489). We still run the
+        // rest of the tick: the user's manual desired-state ports (issue #439)
+        // are re-opened from our own state, not from the scan.
+        val scan = PortScanner.scan(connection)
+        val remotePorts = when (scan) {
+            is PortScanResult.Ports -> scan.ports
+            PortScanResult.Failed -> emptyList()
+        }
+        val scanObservedRemote = scan is PortScanResult.Ports
         val remotePortSet = remotePorts.map { it.port }.toSet()
 
         val tunnelsToClose = mutableListOf<PortForward>()
@@ -382,25 +394,34 @@ public class AutoForwarder(
             // Tear down forwards whose remote port has vanished — but keep
             // ones the user manually toggled on; those persist across
             // disappearances (the user may have just restarted the service).
-            tunnels.keys.toList().forEach { remotePort ->
-                if (remotePort !in remotePortSet && remotePort !in manualPorts) {
-                    detachTunnelLocked(remotePort)?.let(tunnelsToClose::add)
+            //
+            // Only a scan that actually observed the remote may conclude a
+            // port vanished. Without this guard a failed scan's empty port set
+            // made every forwarded port look gone (issue #2489).
+            if (scanObservedRemote) {
+                tunnels.keys.toList().forEach { remotePort ->
+                    if (remotePort !in remotePortSet && remotePort !in manualPorts) {
+                        detachTunnelLocked(remotePort)?.let(tunnelsToClose::add)
+                    }
                 }
-            }
-            localPortMap.keys.toList().forEach { remotePort ->
-                if (
-                    remotePort !in tunnels &&
-                    remotePort !in remotePortSet &&
-                    remotePort !in manualPorts
-                ) {
-                    localPortMap.remove(remotePort)
+                localPortMap.keys.toList().forEach { remotePort ->
+                    if (
+                        remotePort !in tunnels &&
+                        remotePort !in remotePortSet &&
+                        remotePort !in manualPorts
+                    ) {
+                        localPortMap.remove(remotePort)
+                    }
                 }
-            }
 
-            // Reset the failed-port memo for ports that have disappeared, so
-            // a future "service restarted on the same port" attempt gets a
-            // fresh try rather than being suppressed forever.
-            failedPorts.keys.removeAll { it !in remotePortSet }
+                // Reset the failed-port memo for ports that have disappeared,
+                // so a future "service restarted on the same port" attempt
+                // gets a fresh try rather than being suppressed forever. Also
+                // scan-derived, so it stays inside the guard: clearing the
+                // deny-list on every failed scan would turn a transport
+                // outage into an open-retry storm.
+                failedPorts.keys.removeAll { it !in remotePortSet }
+            }
 
             updateStateLocked()
             (discoveredPortsToOpen + manualPortsToOpen).distinct()

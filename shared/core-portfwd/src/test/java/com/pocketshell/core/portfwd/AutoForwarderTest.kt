@@ -196,16 +196,26 @@ class AutoForwarderTest {
     @Test
     fun `port disappearing between scans tears down its forward`() = runTest {
         val connection = FakeConnection()
-        connection.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        // sshd is always listening on a host we can scan at all, so a
+        // *successful* scan that no longer lists :3000 still lists :22. The
+        // fixture keeps it that way so this exercises a genuine vanish rather
+        // than the "scan produced nothing" case (issue #2489), which is a
+        // failure, not an observation.
+        connection.setListening(
+            """
+            0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+            0.0.0.0:3000 users:(("app",pid=1,fd=4))
+            """.trimIndent(),
+        )
 
         val forwarder = AutoForwarder(connection, smallConfig())
         val job = forwarder.start(this)
         runCurrent()
-        assertEquals(1, forwarder.flowOfTunnels().first().size)
+        assertEquals(1, connection.openForwards.size)
 
         // Service stops; next scan should observe it gone and tear the
         // local forward down.
-        connection.setListening("")
+        connection.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
         advanceTimeBy(2_000L)
         runCurrent()
 
@@ -216,6 +226,118 @@ class AutoForwarderTest {
         )
         val firstForward = connection.openForwards.values.first()
         assertFalse("underlying forward should have been closed", firstForward.isActive)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `a failed scan does not tear down existing forwards`() = runTest {
+        // Issue #2489 (bug 1): PortScanner reports "nothing found" when every
+        // strategy fails — an exec error, a dead-ish shell, a hiccup on the
+        // transport. Reading that as "every remote port vanished" closed every
+        // auto-forwarded tunnel and reset the TCP connections running through
+        // them, on ONE transient scan failure. RED on base: the forward is
+        // closed by the next tick.
+        val connection = FakeConnection()
+        connection.setListening(
+            """
+            0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+            0.0.0.0:3000 users:(("app",pid=1,fd=4))
+            """.trimIndent(),
+        )
+
+        val forwarder = AutoForwarder(
+            connection,
+            smallConfig(),
+            localPortAvailability = allLocalPortsAvailable,
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+        val forward = connection.openForwards.values.single()
+        assertTrue("first scan should have opened the :3000 forward", forward.isActive)
+
+        connection.failScan()
+        advanceTimeBy(2_000L)
+        runCurrent()
+
+        assertTrue(
+            "a failed scan must not close a live forward — nothing was observed to vanish",
+            forward.isActive,
+        )
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            forwarder.flowOfTunnels().first().single { it.remotePort == 3000 }.status,
+        )
+
+        // ...and the tunnel comes back to a healthy scan untouched: no
+        // close/reopen churn, the same forward object is still in place.
+        connection.setListening(
+            """
+            0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+            0.0.0.0:3000 users:(("app",pid=1,fd=4))
+            """.trimIndent(),
+        )
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(1, connection.openForwards.size)
+        assertTrue("the forward should have survived the failed scan", forward.isActive)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `a timed-out scan is not treated as a shorter port list`() = runTest {
+        // Issue #2489 (bug 2): exec does not throw on a wall-clock overrun —
+        // it returns the partial stdout with timedOut=true. Parsing that
+        // truncated `ss` listing made every port missing from the cut-off
+        // output look vanished. RED on base: the :4000 forward, absent from
+        // the truncated listing, is closed.
+        val connection = FakeConnection()
+        connection.setListening(
+            """
+            0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+            0.0.0.0:3000 users:(("app",pid=1,fd=4))
+            0.0.0.0:4000 users:(("db",pid=2,fd=5))
+            """.trimIndent(),
+        )
+
+        val forwarder = AutoForwarder(
+            connection,
+            smallConfig(),
+            localPortAvailability = allLocalPortsAvailable,
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+        assertEquals(2, connection.openForwards.size)
+        val truncatedAway = connection.openForwards.getValue(4000)
+
+        // The next scan is cut off mid-listing: :4000 never made it to stdout.
+        connection.timeOutScan(
+            """
+            0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+            0.0.0.0:3000 users:(("app",pid=1,fd=4))
+            """.trimIndent(),
+        )
+        advanceTimeBy(2_000L)
+        runCurrent()
+
+        assertTrue(
+            "a timed-out scan is truncated output, not evidence :4000 vanished",
+            truncatedAway.isActive,
+        )
+        val snapshot = forwarder.flowOfTunnels().first()
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            snapshot.single { it.remotePort == 4000 }.status,
+        )
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            snapshot.single { it.remotePort == 3000 }.status,
+        )
 
         forwarder.stop()
         job.cancel()
@@ -970,18 +1092,52 @@ class AutoForwarderTest {
         @Volatile
         private var blockedClose: Pair<CountDownLatch, CountDownLatch>? = null
 
+        // How the primary `ss -tlnp` strategy answers. `timedOut` models the
+        // wall-clock overrun exec reports without throwing: partial stdout
+        // plus timedOut=true (issue #2489).
+        @Volatile
+        private var timedOut: Boolean = false
+
+        @Volatile
+        private var exitCode: Int = 0
+
         init {
             // Primary `ss -tlnp` returns the scripted output; netstat /
             // last-resort are not modelled here — PortScannerTest owns the
             // fallback chain.
             delegate.onExecMatching("ss -tlnp ...", match = { it.startsWith("ss -tlnp") }) {
-                ExecResult(exitCode = 0, stdout = output, stderr = "", timedOut = false)
+                ExecResult(exitCode = exitCode, stdout = output, stderr = "", timedOut = timedOut)
             }
             delegate.defaultExec = ExecResult(exitCode = 0, stdout = "", stderr = "", timedOut = false)
         }
 
         fun setListening(ssOutput: String) {
             output = ssOutput
+            timedOut = false
+            exitCode = 0
+        }
+
+        /**
+         * Every scan strategy fails from here on: `ss` exits non-zero with no
+         * output, and the fake's default exec answers netstat / last-resort
+         * with nothing. This is a transport hiccup, NOT an observation that
+         * the remote's ports went away (issue #2489).
+         */
+        fun failScan() {
+            output = ""
+            exitCode = 127
+            timedOut = false
+        }
+
+        /**
+         * The primary strategy overruns its wall-clock budget after emitting
+         * [partialOutput]. `exec` does not throw for this — it returns the
+         * partial stdout with `timedOut = true` (issue #2489).
+         */
+        fun timeOutScan(partialOutput: String) {
+            output = partialOutput
+            exitCode = 0
+            timedOut = true
         }
 
         fun blockNextOpen(entered: CountDownLatch, release: CountDownLatch) {

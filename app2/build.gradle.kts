@@ -339,7 +339,12 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.compose.ui.test.junit4)
-    // Supplies the empty host Activity `createComposeRule()` launches.
+    // Supplies the empty host Activity `createComposeRule()` launches, for the
+    // DEBUG variant only (its AAR manifest declares the activity
+    // `android:exported="true"`, which must never reach a shipped APK). The
+    // release variant gets the same activity from app2/src/release/
+    // AndroidManifest.xml instead — see the comment in that file for why a
+    // `testImplementation` cannot do this job in an application module.
     debugImplementation(libs.compose.ui.test.manifest)
 
     // Task P-6: Roborazzi renders app2's own screens to PNG on the host JVM, so

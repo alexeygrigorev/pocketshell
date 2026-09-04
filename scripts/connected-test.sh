@@ -400,22 +400,28 @@ fi
 # P3 (issue #776) + #2128 — network-fault classes used to share ONE global
 # toxiproxy (hardcoded 10.0.2.2:2228 / API 8474). --pool now isolates that:
 # a pool lane brings up its own network-fault-proxy under the claimed
-# agents compose project and NetworkFaultPorts derives the host ports from
+# agents compose project and ToxiproxyControl derives the host ports from
 # the agents port. The machine-wide toxiproxy lock still serializes
 # fault-class runs so a --no-pool sibling on the shared 2228 singleton
-# cannot race another --no-pool (or a pool fallback to 2222). Detection
-# matches the known NetworkFaultProofBase-derived class names.
+# cannot race another --no-pool (or a pool fallback to 2222).
+#
+# DETECTION CHANGED WITH THE REWRITE. It used to enumerate the old app
+# module's NetworkFaultProofBase-derived class names, one glob per class —
+# every one of those classes was removed by the hard cut, so the whole `case`
+# had become dead and a fault-class run brought up no proxy at all. Under
+# issue #2474 app2's instrumented suite runs UNFILTERED in one process
+# (`:app2:connectedDebugAndroidTest`, no `-Pandroid.testInstrumentationRunner
+# Arguments.class=`), and that suite always contains the Toxiproxy-driven
+# reconnect journey — so the whole-suite task IS a fault-class run and the
+# task name is the honest thing to match. The per-class globs are NOT kept
+# alongside it (D22): a filtered app2 run is not a supported shape, and a
+# glob list that can never match is exactly what silently broke here.
+# scripts/test-network-fault-pool-isolation.sh pins this both ways.
 NETWORK_FAULT_RUN=0
 gradle_args_str="${GRADLE_ARGS[*]:-}"
 if [[ "$CLEANUP_ONLY" != "1" ]]; then
   case "$gradle_args_str" in
-    *NetworkFault*|*NetworkLatencyModel*|*PacketLoss*|*DisconnectBlackhole*\
-      |*DisconnectFlap*|*KeepAliveDeadPeer*|*RideThrough*|*WithinGrace*\
-      |*StaleLeaseSwitchRecovery*|*CodexRedrawOverflowReconnect*\
-      |*OutboundAttachmentOffsetResumeJourneyE2eTest*\
-      |*SilentMidSessionDrop*|*ColdDialUnderBandwidth*|*RealisticWifiStability*\
-      |*NatIdleMapping*|*MobileLatencyStorm*|*PushResumeDeadSocket*\
-      |*ConversationOpenLatency*|*AttachNavigationMultiFolderE2eTest*)
+    *:app2:connectedDebugAndroidTest*|*ToxiproxyControl*|*ReconnectAfterDrop*)
       NETWORK_FAULT_RUN=1
       ;;
   esac

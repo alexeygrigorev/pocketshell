@@ -610,17 +610,20 @@ detached_instrumentation_runs_produce_ledger_creditable_junit_xml() {
   [[ "$output" == *"--record credits the converted class"* ]] ||
     fail "$(printf '%s\n' "the converter self-test no longer proves the REAL ledger credits its XML:" "$output")"
 
-  # The two production callers must actually invoke it, with --require-class so
-  # a run that selected nothing cannot be laundered into a ledger entry.
-  local two_phase="$ROOT_DIR/scripts/two-phase-android-instrumentation.sh"
-  grep -q 'instrumentation-log-to-junit-xml.sh' "$two_phase" ||
-    fail "the #2264 two-phase harness no longer emits JUnit XML; LastSessionProcessRestartProofTest becomes uncreditable again (#2435)"
-  grep -q -- '--require-class' "$two_phase" ||
-    fail "the #2264 two-phase harness converts without --require-class (an empty run could be credited)"
-  # The nightly phase-5 publish assertion is gone with the nightly suite; the
-  # two surviving production callers below are the whole contract now.
-  grep -q 'instrumentation-log-to-junit-xml.sh' "$ROOT_DIR/scripts/release-emulator-validation.sh" ||
+  # The production caller must actually invoke it, with --require-class so a run
+  # that selected nothing cannot be laundered into a ledger entry.
+  #
+  # There used to be TWO callers. The #2264 two-phase process-restart harness
+  # was hard-cut with the app module, the `proof` source set and
+  # LastSessionProcessRestartProofTest it existed to credit (D22 — see the note
+  # in .github/workflows/tests.yml's `guards-ci-harness` job), so
+  # scripts/release-emulator-validation.sh is the whole contract now. The
+  # nightly phase-5 publish assertion went the same way with the nightly suite.
+  local release_gate="$ROOT_DIR/scripts/release-emulator-validation.sh"
+  grep -q 'instrumentation-log-to-junit-xml.sh' "$release_gate" ||
     fail "the release gate's detached am-instrument runs no longer produce ledger JUnit XML (#2435)"
+  grep -q -- '--require-class' "$release_gate" ||
+    fail "the release gate converts without --require-class (an empty run could be credited) (#2435)"
   pass_case "direct am instrument runs produce JUnit XML the real ledger credits (#2435)"
 }
 

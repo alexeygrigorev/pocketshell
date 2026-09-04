@@ -30,7 +30,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/assemble-debug.sh [options]
 
-Fast local :app:assembleDebug. Keeps the Gradle daemon and build cache.
+Fast local :app2:assembleDebug. Keeps the Gradle daemon and build cache.
 
 Options:
   --abi auto|all|<abi>  Native ABI to compile (default: auto).
@@ -147,10 +147,10 @@ GRADLE_ARGS=(
   --max-workers=4
   -Dorg.gradle.jvmargs=-Xmx3072m
   -Pkotlin.daemon.jvmargs=-Xmx3072m
-  :app:assembleDebug
+  :app2:assembleDebug
 )
 if [[ "$WITH_ANDROID_TEST" -eq 1 ]]; then
-  GRADLE_ARGS+=(:app:assembleDebugAndroidTest)
+  GRADLE_ARGS+=(:app2:assembleDebugAndroidTest)
 fi
 if [[ -n "$ABI_FILTER" ]]; then
   GRADLE_ARGS+=(-PpocketshellAbiFilters="$ABI_FILTER")
@@ -178,7 +178,7 @@ start_seconds="$(date +%s)"
   ./gradlew "${GRADLE_ARGS[@]}"
 end_seconds="$(date +%s)"
 
-apk="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+apk="$ROOT_DIR/app2/build/outputs/apk/debug/app2-debug.apk"
 [[ -f "$apk" ]] || fail "expected APK missing at $apk"
 printf 'PASS: assembled %s in %ss\n' "$apk" "$((end_seconds - start_seconds))"
 

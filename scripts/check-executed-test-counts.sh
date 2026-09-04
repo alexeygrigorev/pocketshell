@@ -78,15 +78,19 @@
 # `testReleaseUnitTest`. `./gradlew test` would have run it; neither shard task
 # names it, so it would vanish from CI with every shard still green — a whole
 # module's tests silently unrun, which is the #1646 disease in a new costume.
-# Today every module applies an Android plugin so every task is one of the two,
-# but adding one plain `kotlin("jvm")` module with tests is a two-line change
-# nobody would connect to CI coverage.
+# That is not hypothetical any more: `shared/core-hostapi` IS such a module (a
+# deliberate `kotlin("jvm")` so the host-CLI wire contract cannot reach for the
+# Android SDK), and adding it silently left its seven test classes unrun by both
+# shards.
 #
 # So the SHARD PARTITION CHECK below is unconditional (it runs with or without
 # --variant, so the local full gate catches it too): every task a required
-# module expects must be one of the two shard tasks. It is the mechanical form
-# of the coverage invariant "union of the shards == the whole graph" — asserted
-# from the module set rather than eyeballed from a task list.
+# module expects must be OWNED — either one of the two shard tasks, or named in
+# full by the Unit lane's own `./gradlew` command, which `unit_lane_extra_tasks`
+# reads back out of .github/workflows/tests.yml. It is the mechanical form of
+# the coverage invariant "union of the shards == the whole graph" — asserted
+# from the module set and the running command, rather than eyeballed from a task
+# list or waved through by an allowlist.
 #
 # WHAT THIS SCRIPT DOES NOT COVER
 # -------------------------------
@@ -187,10 +191,45 @@ modules_from_settings() {
   local root="$1"
   local settings="$root/settings.gradle.kts"
   [ -f "$settings" ] || return 0
-  # include(":shared:core-ssh") -> shared/core-ssh
+  # include(":shared:core-transport") -> shared/core-transport
   grep -oE '^[[:space:]]*include\("[^"]+"\)' "$settings" |
     sed -E 's/.*include\("//; s/"\)//' |
     sed -E 's/^://; s/:/\//g'
+}
+
+# ---------------------------------------------------------------------------
+# EXTRA tasks the CI Unit lane runs alongside its two variant shards.
+#
+# The partition check below (issue #2069) exists because the union of
+# `testDebugUnitTest` and `testReleaseUnitTest` is the whole graph only while
+# every required task is one of those two. A plain `kotlin("jvm")` module gets
+# one variant-less `test` task instead, which neither shard names — that hole is
+# what T20 pins.
+#
+# There are two legitimate ways to close it: give the module the Android plugin
+# so it produces both variant tasks, or have the Unit lane NAME the odd task
+# explicitly. This reads the second case off `.github/workflows/tests.yml`'s
+# `Run JVM unit tests` step — the command that actually runs, in the workflow
+# whose `Unit tests` check is the required one — rather than carrying a
+# hand-maintained allowlist that could claim ownership nothing exercises.
+#
+# FAIL-CLOSED: no workflow file, no readable step, or a renamed step yields an
+# EMPTY set, so every non-shard task stays a violation. Only a task literally
+# spelled out in that Gradle command is granted ownership.
+unit_lane_extra_tasks() {
+  local root="$1"
+  local workflow="$root/.github/workflows/tests.yml"
+  [ -f "$workflow" ] || return 0
+  awk '
+    /^      - name: Run JVM unit tests$/ { in_step = 1; next }
+    in_step && /^      - name: / { in_step = 0 }
+    in_step { print }
+  ' "$workflow" |
+    sed -E 's/\\$//' |
+    tr '\n' ' ' |
+    tr ' \t' '\n\n' |
+    grep -xE '(:[A-Za-z0-9_.-]+){2,}' |
+    sort -u
 }
 
 module_has_test_sources() {
@@ -238,6 +277,10 @@ check_root() {
   local total_executed=0 checked_tasks=0 nosource_modules=()
   local expected_task_paths=() testfree_task_paths=() sourceless_task_paths=()
   local unshardable_task_paths=() shard_task=""
+  local lane_extra_tasks=()
+  while IFS= read -r _extra; do
+    [ -n "$_extra" ] && lane_extra_tasks+=("$_extra")
+  done < <(unit_lane_extra_tasks "$root")
 
   if [ -n "$variant" ]; then
     case "$variant" in
@@ -275,18 +318,32 @@ check_root() {
       # is to catch a task that belongs to NO shard, and a variant filter would
       # skip exactly that task first. Only required modules matter — a task-free
       # module's unrun task loses nothing.
+      #
+      # A task the Unit lane's own Gradle command names in full is OWNED, even
+      # though it is not a variant task — that is the second legitimate remedy
+      # this check's failure message offers, read back off the workflow that
+      # runs it (unit_lane_extra_tasks). Everything else is still a violation.
+      local lane_owned=0
+      if in_list "$task_path" ${lane_extra_tasks[@]+"${lane_extra_tasks[@]}"}; then
+        lane_owned=1
+      fi
       case "$task" in
         testDebugUnitTest|testReleaseUnitTest) ;;
         *)
-          if [ "$has_sources" -eq 1 ] ||
-             [ -n "$(explicit_floor_for_task "$root" "$task_path")" ]; then
+          if [ "$lane_owned" -eq 0 ] &&
+             { [ "$has_sources" -eq 1 ] ||
+               [ -n "$(explicit_floor_for_task "$root" "$task_path")" ]; }; then
             unshardable_task_paths+=("$task_path")
           fi
           ;;
       esac
 
       # ---- scope to this shard's half of the graph ------------------------
-      if [ -n "$shard_task" ] && [ "$task" != "$shard_task" ]; then
+      # A lane-owned extra task is run by EVERY shard (it has no variant split
+      # to divide), so it stays in scope here and its executed count is asserted
+      # in each shard rather than in neither.
+      if [ -n "$shard_task" ] && [ "$task" != "$shard_task" ] &&
+         [ "$lane_owned" -eq 0 ]; then
         continue
       fi
 
@@ -372,7 +429,7 @@ check_root() {
   if [ ${#unshardable_task_paths[@]} -gt 0 ]; then
     local u
     for u in "${unshardable_task_paths[@]}"; do
-      violations+=("$u is not one of the two CI Unit shard tasks (testDebugUnitTest / testReleaseUnitTest), so NEITHER shard job runs it and its tests would silently stop running with the required \`Unit tests\` check still green (issue #2069). This module is not an Android application/library, so Gradle gives it a plain \`test\` task. Either apply the Android plugin so it produces both variant tasks, or re-shard the Unit lane in .github/workflows/tests.yml so this task is owned by a shard.")
+      violations+=("$u is not one of the two CI Unit shard tasks (testDebugUnitTest / testReleaseUnitTest), so NEITHER shard job runs it and its tests would silently stop running with the required \`Unit tests\` check still green (issue #2069). This module is not an Android application/library, so Gradle gives it a plain \`test\` task. Either apply the Android plugin so it produces both variant tasks, or name this exact task in the \`Run JVM unit tests\` step's ./gradlew command in .github/workflows/tests.yml, which is how :shared:core-hostapi:test is owned — this check reads that command back, so the ownership claim and the command that runs it cannot drift apart.")
     done
   fi
 
@@ -985,6 +1042,57 @@ EOF
   check_root "$root" >/dev/null 2>&1
   selftest_assert "T20b the unsharded local gate FAILS on the same unowned task" 1 "$?"
 
+  # -- T20c CLOSING the hole: the Unit lane NAMES the odd task --------------
+  # The second legitimate remedy (the first is "apply the Android plugin"), and
+  # the one :shared:core-hostapi:test uses. Same tree as T20, plus a workflow
+  # whose `Run JVM unit tests` step spells the task out. It must go GREEN, and
+  # the task must be IN SCOPE for the count check (not merely tolerated), which
+  # T20d proves by emptying its results.
+  mkdir -p "$root/.github/workflows"
+  cat > "$root/.github/workflows/tests.yml" <<'EOF'
+jobs:
+  unit:
+    steps:
+      - name: Run JVM unit tests
+        run: |
+          set -o pipefail
+          ./gradlew "test${{ matrix.variant }}UnitTest" \
+            :tools:analyzer:test \
+            --rerun-tasks --no-build-cache
+      - name: Assert tests actually executed
+        run: scripts/check-executed-test-counts.sh
+EOF
+  out="$(check_root "$root" "" "" Debug 2>&1)"; rc=$?
+  selftest_assert "T20c a task the Unit lane NAMES is owned, so the shard PASSES" 0 "$rc"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if grep -q ':tools:analyzer:test' <<< "$out"; then
+    echo "  ok   T20c the lane-owned task is counted by this shard, not skipped"
+  else
+    echo "  FAIL T20c: the lane-owned task was waved through without a count" >&2
+    echo "$out" | sed 's/^/       /' >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+
+  # -- T20d ...and ownership is not a licence to execute nothing ------------
+  # The load-bearing negative for T20c (G6): same workflow, same claim, but the
+  # task's results are gone. Ownership must not launder a task that ran zero
+  # tests, or "name it in the lane" becomes a way to silence the guard.
+  rm -rf "$root/tools/analyzer/build/test-results/test"
+  check_root "$root" "" "" Debug >/dev/null 2>&1
+  selftest_assert "T20d a lane-owned task with NO results still FAILS" 1 "$?"
+  mkdir -p "$root/tools/analyzer/build/test-results/test"
+  cp "$root/app/build/test-results/testDebugUnitTest/TEST-SomeTest.xml" \
+     "$root/tools/analyzer/build/test-results/test/"
+
+  # -- T20e a RENAMED/absent step revokes ownership (fail-closed) -----------
+  # The derivation must not degrade into "assume owned" when it cannot read the
+  # command. Rename the step and the same tree goes red again.
+  sed -i 's/- name: Run JVM unit tests/- name: Run some tests/' \
+    "$root/.github/workflows/tests.yml"
+  check_root "$root" "" "" Debug >/dev/null 2>&1
+  selftest_assert "T20e ownership derived from an unreadable step FAILS closed" 1 "$?"
+  rm -rf "$root/.github"
+
   # -- T21 the load-bearing negative (G6): a test-FREE jvm module is fine ---
   # Otherwise the partition check would ban a perfectly ordinary build-logic or
   # support module and get switched off.
@@ -1027,7 +1135,8 @@ EOF
   selftest_assert "T23b FROM-CACHE on the shard's OWN task still FAILS" 1 "$rc"
 
   # -- meta: assert the self-test itself is not vacuous ---------------------
-  local expected_checks=47
+  # 47 -> 51: T20c/T20d/T20e (lane-named task ownership) add four checks.
+  local expected_checks=51
   echo
   # G3 on the self-test itself: a self-test that ran ZERO cases and reported
   # PASS would be this script's own disease. Assert count > 0 explicitly before

@@ -20,6 +20,7 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
@@ -377,7 +378,7 @@ class J06BackgroundGraceReturnJourney {
      * semantics tree AT ALL, not merely "not currently displayed".
      */
     private fun assertNoReconnectBanner(`when`: String) {
-        compose.waitForIdle()
+        compose.awaitIdle("before asserting the reconnect banner is absent")
         assertTrue(
             "the reconnect banner must never render $`when`",
             compose.onAllNodesWithTag(SESSION_RECONNECT_BANNER_TAG).fetchSemanticsNodes().isEmpty(),
@@ -388,7 +389,7 @@ class J06BackgroundGraceReturnJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("transcript poll: $what")
             last = renderedTranscript()
             if (predicate(squashed(last))) return last
             SystemClock.sleep(POLL_MS)
@@ -424,7 +425,7 @@ class J06BackgroundGraceReturnJourney {
 
     private fun typeLine(line: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        compose.waitForIdle()
+        compose.awaitIdle("before typing a line")
         instrumentation.runOnMainSync {
             val view = terminalView()
             checkNotNull(view) { "no TerminalView on screen to type into" }

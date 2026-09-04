@@ -20,6 +20,7 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.di.VoiceModule
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
@@ -151,13 +152,13 @@ class J08VoiceDictationJourney {
         awaitTag(COMPOSER_DISCARD_RECORDING_TAG, "the recording indicator")
 
         ScriptedSpeechRecognitionProvider.partial("run the")
-        compose.waitForIdle()
+        compose.awaitIdle("after a partial transcript")
         ScriptedSpeechRecognitionProvider.partial("run the tests")
-        compose.waitForIdle()
+        compose.awaitIdle("after a partial transcript")
         JourneyScreenshots.capture("01-recording", JOURNEY)
 
         ScriptedSpeechRecognitionProvider.final("run the tests now")
-        compose.waitForIdle()
+        compose.awaitIdle("after the final transcript")
         JourneyScreenshots.capture("02-transcribed", JOURNEY)
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertTextContains("run the tests now", substring = true)
@@ -211,7 +212,7 @@ class J08VoiceDictationJourney {
     private fun awaitTag(tag: String, what: String = tag) {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
+            compose.awaitIdle("tag poll: $what")
             if (compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()) return
             SystemClock.sleep(POLL_MS)
         }

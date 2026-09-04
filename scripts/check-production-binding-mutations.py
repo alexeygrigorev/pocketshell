@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import os
+import datetime as _dt
 import re
 import shutil
 import signal
@@ -59,7 +60,7 @@ from typing import Any, Callable, Mapping
 SCRIPT_PATH = Path(__file__).resolve()
 DEFAULT_ROOT = SCRIPT_PATH.parent.parent
 DEFAULT_MANIFEST = SCRIPT_PATH.parent / "production-binding-manifest.json"
-DEFAULT_WORKFLOW = DEFAULT_ROOT / ".github" / "workflows" / "nightly-extensive.yml"
+DEFAULT_WORKFLOW = DEFAULT_ROOT / ".github" / "workflows" / "app2.yml"
 DEFAULT_ARTIFACTS = DEFAULT_ROOT / "artifacts" / "production-binding-mutations"
 HARNESS_REL = "scripts/check-production-binding-mutations.py"
 RUN_INVOCATION = f"{HARNESS_REL} --run"
@@ -115,6 +116,8 @@ class Manifest:
     max_artifact_bytes: int
     required_sites: tuple[RequiredSite, ...]
     bindings: tuple[Binding, ...]
+    # Set only while the curated set is deliberately empty; see validate_sites.
+    pending_recuration: Mapping[str, str] | None = None
 
     def binding(self, ident: str) -> Binding:
         for item in self.bindings:
@@ -226,9 +229,15 @@ def parse_manifest(payload: Any) -> Manifest:
     max_artifact = require_int(payload, "max_artifact_bytes", "manifest", 1)
     raw_sites = payload.get("required_sites")
     raw_bindings = payload.get("bindings")
-    if not isinstance(raw_sites, list) or not raw_sites:
+    pending = payload.get("pending_recuration")
+    if pending is not None and not isinstance(pending, Mapping):
+        fail("pending_recuration must be an object")
+    # An empty curated set is legal ONLY with a tracked, dated pending_recuration
+    # block; validate_sites enforces its issue + deadline.
+    empty_ok = bool(pending)
+    if not isinstance(raw_sites, list) or (not raw_sites and not empty_ok):
         fail("manifest must list required_sites")
-    if not isinstance(raw_bindings, list) or not raw_bindings:
+    if not isinstance(raw_bindings, list) or (not raw_bindings and not empty_ok):
         fail("manifest must list bindings")
     sites: list[RequiredSite] = []
     for index, item in enumerate(raw_sites):
@@ -269,6 +278,7 @@ def parse_manifest(payload: Any) -> Manifest:
         max_artifact_bytes=max_artifact,
         required_sites=tuple(sites),
         bindings=tuple(bindings),
+        pending_recuration=pending,
     )
 
 
@@ -355,7 +365,40 @@ def collect_needle_hits(root: Path, needle: str) -> list[str]:
 
 def validate_sites(root: Path, manifest: Manifest) -> None:
     if not manifest.bindings:
-        fail("manifest must list bindings")
+        # AN EMPTY MANIFEST IS ONLY EVER A TRACKED, DATED STATE.
+        #
+        # The rewrite deleted the single curated binding this harness carried
+        # (`outbound-budget-factory`, in the removed app module's
+        # TmuxSessionScreenStateHelpers.kt), so the curated set is empty until
+        # somebody picks an app2 binding worth the slot and writes the proof
+        # test that must fail when it is mutated. That is curation judgment,
+        # not a mechanical repoint, so it gets an owner and a deadline rather
+        # than a silent pass — the same queue-with-an-expiry shape D36 uses for
+        # flake quarantine. The harness's own --self-test keeps proving the
+        # MECHANISM can still go red on synthetic fixtures meanwhile.
+        pending = manifest.pending_recuration
+        if not pending:
+            fail("manifest must list bindings")
+        expires = pending.get("expires", "")
+        issue = pending.get("issue", "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expires):
+            fail(f"pending_recuration.expires must be YYYY-MM-DD (got {expires!r})")
+        if not issue:
+            fail("pending_recuration.issue is required — an untracked empty manifest has no owner")
+        today = _dt.date.today().isoformat()
+        if today > expires:
+            fail(
+                f"the curated binding set has been EMPTY past its deadline "
+                f"(expires {expires}, today {today}, tracked {issue}). Re-curate "
+                f"at least one app2 production binding with a proof test, or "
+                f"re-triage the deadline with a reason."
+            )
+        print(
+            f"NOTICE: curated binding set is EMPTY pending re-curation for app2 "
+            f"(tracked {issue}, expires {expires}). The harness mechanism is still "
+            f"proven by --self-test; it has no live target to mutate."
+        )
+        return
     for binding in manifest.bindings:
         validate_binding_target(root, binding)
     covered: set[str] = set()

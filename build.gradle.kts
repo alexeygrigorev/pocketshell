@@ -6,6 +6,11 @@ plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.android) apply false
+    // Rewrite task K-1: shared/core-hostapi is a pure-JVM module (no Android
+    // SDK), so it applies kotlin("jvm") + the serialization compiler plugin
+    // rather than the Android library pair above.
+    alias(libs.plugins.kotlin.jvm) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.hilt) apply false
     alias(libs.plugins.ksp) apply false
@@ -76,12 +81,14 @@ val expectedBouncyCastlePins = mapOf(
     "org.bouncycastle:bcprov-jdk18on" to "1.80.2",
 )
 
+// app/, core-ssh, core-tmux were deleted and core-portfwd shelved in the
+// "stable" rewrite branch (docs/_scratch/simplification-implementation-plan-2026-09-02.md).
+// sshj now lives in shared/core-transport (task T-1), so the #2172 resolution
+// assertion has a real graph to inspect again; app2 / core-portfwd rejoin this
+// list as they are rewired onto core-transport.
 val sshjClasspathGraphs = listOf(
-    ":shared:core-ssh" to "releaseRuntimeClasspath",
-    ":shared:core-ssh" to "releaseUnitTestRuntimeClasspath",
-    ":app" to "releaseRuntimeClasspath",
-    ":shared:core-portfwd" to "releaseRuntimeClasspath",
-    ":shared:core-tmux" to "releaseRuntimeClasspath",
+    ":shared:core-transport" to "releaseRuntimeClasspath",
+    ":shared:core-transport" to "releaseUnitTestRuntimeClasspath",
 )
 
 tasks.register("assertNoDynamicDependencyVersions") {
@@ -119,9 +126,14 @@ tasks.register("assertNoDynamicDependencyVersions") {
         if (!rootScript.contains("pinBouncyCastleTransitives")) {
             errors += "root build.gradle.kts no longer applies pinBouncyCastleTransitives"
         }
-        val coreSshScript = rootProject.file("shared/core-ssh/build.gradle.kts").readText()
-        if (!coreSshScript.contains("libs.bouncycastle.bcutil")) {
-            errors += "shared/core-ssh/build.gradle.kts no longer constrains bcutil"
+        // shared/core-ssh was deleted in the "stable" rewrite branch; sshj's pin
+        // site moves to shared/core-transport (task T-1/T-2). Check it there
+        // once it exists, skip until then rather than fail on a missing file.
+        val coreTransportBuildFile = rootProject.file("shared/core-transport/build.gradle.kts")
+        if (coreTransportBuildFile.exists() &&
+            !coreTransportBuildFile.readText().contains("libs.bouncycastle.bcutil")
+        ) {
+            errors += "shared/core-transport/build.gradle.kts no longer constrains bcutil"
         }
 
         sshjClasspathGraphs.forEach { (path, configName) ->

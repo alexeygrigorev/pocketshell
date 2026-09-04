@@ -598,18 +598,23 @@ exists.
 Use this for full journey screenshots:
 
 ```bash
-scripts/phone-walkthrough.sh visual-audit
+scripts/capture-walkthrough-screenshots.sh
 ```
 
-Expected normalized output is documented in [`docs/testing.md`](testing.md):
+Expected output is documented in [`docs/testing.md`](testing.md): app2's
+journeys render through `JourneyScreenshots.capture` into one directory per
+journey, and the script fails unless every one of them produced at least one
+frame:
 
-- `build/phone-walkthrough/<run-id>/screenshots/visual-audit/01-host-list.png`
-- `02-host-setup-folder-list.png`
-- `03-terminal-session-input-controls.png`
-- `04-snippets.png`
-- `05b-composer-idle-draft.png`
-- `06-composer-recording.png`
-- `07-composer-transcribing.png`
+- `build/walkthrough-visual-pass/<run-id>/screenshots/files/j01-connect-trust/`
+- `.../j02-session-tree/`, `.../j03-attach-type/`, `.../j04-create-session/`
+- `.../j05-reconnect/`, `.../j06-background-grace-return/`
+- `.../j07-composer-send/`, `.../j08-voice-dictation/`
+- `.../j10-files/`, `.../j11-share-upload/`, `.../j12-usage-panel/`
+
+(Issue #2481: `scripts/phone-walkthrough.sh visual-audit` and its nine fixed
+PNG names are gone with the three `app` module screenshot tests behind them —
+one of which captured the conversation view, itself a cut feature.)
 
 This command uses emulator and Docker-backed instrumentation, so it is not the
 cheap inner loop. Run it for migration PRs that affect app screens or sheets.

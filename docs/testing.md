@@ -201,8 +201,8 @@ given.
 **Port 2222 is deliberately NOT a pool candidate (issue #1842).** It is the
 default single-lane fixture, and a dozen scripts that know nothing about the
 pool recreate it unconditionally — some with `--force-recreate`
-(`terminal-workbench.sh`, `phone-walkthrough.sh`,
-`pre-release-confidence-gate.sh`, `capture-terminal-lab.sh`, ...). None of them
+(`pre-release-confidence-gate.sh`, `capture-walkthrough-screenshots.sh`,
+`agents-pool.sh`, ...). None of them
 takes the port lock and none of them can, so no lock is able to defend 2222: a
 lane handed that port held a lock nobody else consults while a sibling wiped its
 tmux server. Pool lanes therefore claim only ports whose sole writer is the
@@ -280,7 +280,7 @@ fingerprint, so a disturbed lane goes quiet again.
 The
 androidTest target host:port is centralized in `AgentsFixtureTarget`
 (`AndroidSshTestFixtures.kt`), defaulting to `10.0.2.2:2222`, so single-lane and
-CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-journey-suite.sh`
+CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-app2-journey-suite.sh`
 shards across lanes only when `POCKETSHELL_JOURNEY_SHARD=1`; its default is the
 clean single-lane serial loop.
 
@@ -555,7 +555,7 @@ flake quarantine") states the POLICY: a flaking journey class is auto-filed as
 an issue on first occurrence, moved into a non-blocking lane within 24h, and
 carries an expiry so it cannot sit forgotten. #2355 builds the MECHANISM.
 
-**The signal already existed.** `scripts/ci-journey-class-loop-functions.sh`'s
+**The signal already existed.** `scripts/ci-app2-journey-suite.sh`'s
 per-push retry-once loop (issue #712) already detects and names the exact D36
 flake definition — a class that fails attempt 1 and passes attempt 2 with no
 code change — printing `JOURNEY_FLAKE_RECOVERED: <fqcn> ...`. Quarantine builds
@@ -571,7 +571,7 @@ class is treated as quarantined — every failure blocks, never fewer.
 **Consumption — non-blocking, not "removed from coverage".** A quarantined
 class runs on every push exactly like any other selected journey class;
 nothing upstream of the suite's final pass/fail decision changes. Only
-`scripts/ci-journey-summary-functions.sh::finish_ci_journey_suite` changes: a
+`scripts/ci-app2-journey-suite.sh::finish_ci_journey_suite` changes: a
 class that fails BOTH attempts is split into `BLOCKING_FAILED_CLASSES` (drives
 the exit code and the `Failed BOTH attempts` / `JOURNEY_FAILED` section the
 workflow's classify step greps for) and `QUARANTINED_BLOCKED_CLASSES` (gets its
@@ -603,7 +603,7 @@ own `--self-test`): given a flaky class it previews or files/updates a
 de-duplicated tracking issue (`--file-issue`, via `gh`), and separately appends
 a quarantine row (`--quarantine --issue REF --reason TEXT [--days N]`, refuses
 a duplicate). It is deliberately NOT wired to fire unattended from inside
-`tests.yml`/`pr-journey-smoke.yml` this round — see the script's own header for
+`tests.yml`/`app2.yml` this round — see the script's own header for
 the reasoning (duplicate-issue risk, single-flake-vs-genuine-pattern
 judgment, `gh` auth inside the emulator-journey job, de-dup across concurrent
 shards). An on-call/human runs it after seeing `JOURNEY_FLAKE_RECOVERED` (or a
@@ -638,7 +638,7 @@ manifest, the executed-classes ledger, the validity guards — can see them.
 a NEW one fails. #2065 is the other half: a decision per file.
 
 **The premise the decision had to correct first.** "Zero hits in
-`scripts/ci-journey-suite.sh`" was read as "does not execute". It is not.
+`scripts/ci-app2-journey-suite.sh`" was read as "does not execute". It is not.
 Nightly-extensive **phase 1 runs `:app:connectedDebugAndroidTest` wholesale**,
 with only a `notClass` exclusion list — so an androidTest class in no explicit
 suite still executes every night. And `DesignRenders` runs 68 testcases in
@@ -674,7 +674,7 @@ execution is separately ledger-observed through the sibling conventional
 
 - `<executor>` is `unit-source-set` (path must be under `*/src/test/`) or
   `nightly-connected` (path must be under `app/src/androidTest/`, **and** the
-  class's simple name must appear nowhere in `nightly-extensive-suite.sh` —
+  class's simple name must appear nowhere in the journey suite —
   fail-closed, so naming it there for any reason forces the claim to be
   re-argued). An executor the guard cannot check is rejected, not believed.
 - `<gate>` is either a FQCN, resolved through the **same class index** the area
@@ -731,15 +731,15 @@ force-full path is in the diff — plus nightly, plus the release gate.
 | Tier | Trigger | Scope |
 |---|---|---|
 | per-PR / per-push | every push | always-tier + affected areas + their couplings |
-| nightly | `nightly-extensive.yml` cron | everything |
-| nightly binding mutations (#1932 / #1671) | `nightly-extensive.yml` `binding-mutations` job | curated production-binding mutants only |
+| nightly | `app2.yml` cron | everything |
+| nightly binding mutations (#1932 / #1671) | `app2.yml` `binding-mutations` job | curated production-binding mutants only |
 | release gate | `scripts/release-emulator-validation.sh` | everything, unchanged |
 
 ### Production-binding mutation lane (issue #1932)
 
 A conventional constructor change can keep policy-unit tests green while
 bypassing the intended production owner. The curated periodic lane in
-`.github/workflows/nightly-extensive.yml` (`binding-mutations`) applies one
+`.github/workflows/app2.yml` (`app2-journey`, nightly cron) (`binding-mutations`) applies one
 deterministic mutant at a time from
 `scripts/production-binding-manifest.json` and requires the named
 production-wired proof to fail. Attendance and per-binding evidence land on
@@ -1390,161 +1390,134 @@ UI, sends walkthrough shell commands through the prompt composer, verifies visib
 terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
 artifacts, and cleans up the remote temp directory and tmux session.
 
+### app2 (rewrite) connected journeys
+
+The rewrite's `app2` module has its own instrumented journey suite, starting
+with `J01ConnectAndTrustJourney` (rewrite task U-2). It uses the SAME fixture
+and the same key as everything above:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
+scripts/connected-test.sh --suffix iapp2
+```
+
+1. **`--module app2` is no longer needed (issue #2481).**
+   `scripts/connected-test.sh` now DEFAULTS to
+   `:app2:connectedDebugAndroidTest` — the old `app` module it used to default
+   to does not exist on this branch. The wrapper still owns the task name (it
+   appends `:connectedDebugAndroidTest` itself), so never pass the task as a
+   trailing gradle argument; `--module` remains the way to redirect at a
+   `shared:*` module. A bare invocation runs the WHOLE set unfiltered, which is
+   the shape the CI journey lane uses on purpose (issue #2474) and is therefore
+   also the shape that classifies as a fault-class run under `--pool`.
+2. **The wrapper does not start the fixture.** It claims the emulator (and,
+   with `--pool`, an agents port); bringing the `agents`/`sshd` container up is
+   the caller's job, as in every section above. The suite fails fast with an
+   explicit "bring it up with docker compose …" message rather than an
+   unexplained UI timeout, and calls out `EPERM`/`EACCES` separately since that
+   means a missing `android.permission.INTERNET` rather than a down fixture.
+
+`J04CreateSessionJourney` (rewrite task U-6) additionally exercises
+`pocketshell sessions create --json` on the fixture. That arm of
+`tests/docker/agent-bin/pocketshell` delegates to the repository's REAL host
+implementation and creates a genuine detached tmux session on that session's own
+`tmuxctl-<name>` socket, so the session the journey just created is enumerated
+by `sessions list --json` for real — which also means **the fixture image must
+be rebuilt** (`up -d --build agents`) after changing those shims, and that a
+journey run leaves its `j04-*` sessions behind (each test kills its own before
+creating, so a re-run is still deterministic).
+
+The port is read from the `agentsPort` instrumentation argument and defaults to
+2222 (`AgentsFixture` in `app2/src/androidTest`), so `--pool` works unchanged.
+
+`J05ReconnectAfterDropJourney` also dials through the `network-fault-proxy`
+Toxiproxy, so the whole set needs `agents` AND `network-fault-proxy` up.
+
+CI lane (issue #2474): `.github/workflows/app2.yml`'s `app2-journey` job — the
+same API-35 AVD the other emulator lanes use, both fixtures, then
+`scripts/ci-app2-journey-suite.sh`, which is `:app2:connectedDebugAndroidTest`
+with NO class filter so all 11 journeys share one instrumentation process and
+cross-journey pollution (#2477) stays visible. Batched on pushes to
+`stable`/`main` and `gh workflow run app2.yml --ref stable`, never per-PR. The
+job header and that script's header carry the rest.
+
 ### Short app-switch reconnect proof
 
-Issue #548/#450/#577/#392/#177 has a focused emulator harness for the reported
-"switch away for 5-10 seconds, return to reconnect/disconnect" path:
+Issue #548/#450/#577/#392/#177's "switch away for 5-10 seconds, return to
+reconnect/disconnect" path is covered by app2's own journey,
+`com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney`. The dedicated
+`scripts/reconnect-app-switch.sh` harness was deleted by issue #2481: it drove
+`com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest`, removed with the
+`app` module, and its validator asserted artifacts (`timings.txt` with
+`six_second_production_grace_cycle_ms`, `issue548-sixsec-*` viewport PNGs, an
+`ISSUE548-BG-GRACE-READY` marker) that only that test produced. Repointing it
+would have meant weakening the validator to "instrumentation passed", which is
+the green-structural-proxy shape reviews reject.
+
+J06 runs on every push in the `app2-journey` lane
+(`.github/workflows/app2.yml`), inside the release gate's unfiltered
+instrumented run, and on demand:
 
 ```bash
-scripts/reconnect-app-switch.sh
-```
-
-The script starts or reuses the local AVD, starts the deterministic Docker
-`agents` SSH target, installs the debug app/test APKs, and runs only:
-
-```bash
-com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest#sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect
-```
-
-That connected test backgrounds the real `MainActivity` for six seconds under
-the production background grace window, foregrounds it, and asserts the tmux
-session stays connected with no visible `Connecting`, `Reconnecting`,
-`Disconnected`, `Tap Reconnect`, disconnect band, or reconnect/reattach
-diagnostic inside the short settle TTL. Artifacts land under
-`build/reconnect-app-switch/<run-id>/`, including terminal viewport PNGs,
-visible-terminal sidecars, timings, Docker logs, instrumentation output, and
-logcat.
-
-If an emulator and the Docker `agents` service are already running, the focused
-wrapper equivalent is:
-
-```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
 scripts/connected-test.sh --suffix i548 \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest#sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.terminal.J06BackgroundGraceReturnJourney
 ```
 
-### Local phone walkthrough reproduction
+### Local visual pass (app2 journey screenshots)
 
 For fast visual feedback without installing an APK on a physical phone, run the
-local phone-walkthrough harness against an already-booted emulator:
+visual pass against an already-booted emulator:
 
 ```bash
-scripts/phone-walkthrough.sh terminal-lab
+scripts/capture-walkthrough-screenshots.sh
 ```
 
-The harness verifies the explicit SDK paths from `AGENTS.md`, fails clearly if
-no booted emulator is connected, starts/verifies the Docker `agents` SSH
-fixture, builds and installs the debug app/test APKs, runs only the selected
-scenario, and writes one artifact bundle under
-`build/phone-walkthrough/<run-id>/`.
-By default it uses `build/phone-walkthrough/gradle-home` as an isolated
-`GRADLE_USER_HOME`, disables the Gradle build cache and parallel execution for
-the APK build, and removes the app module's generated build output directory so
-stale KSP/Hilt/Javac transaction state cannot be reused. Set
-`PHONE_WALKTHROUGH_CLEAN_GENERATED=0` only when investigating those generated
-outputs directly.
+It verifies the explicit SDK paths from `AGENTS.md`, fails clearly if no booted
+emulator is connected, starts the Docker `agents` fixture and the
+`network-fault-proxy` (J05 dials through Toxiproxy), builds and installs app2's
+debug + androidTest APKs, runs the **whole instrumented set unfiltered in one
+process** (issue #2474 — a per-class filter hides cross-journey state leaks),
+pulls the screenshots the journeys render through `JourneyScreenshots.capture`,
+and hard-fails unless **every** expected journey directory contains at least one
+frame:
 
-The first supported scenario is `terminal-lab`. It opens the isolated terminal
-lab activity, connects from the emulator to Docker SSH, sends commands through
-the terminal input path, captures named screenshots, records transition timing,
-and collects bounded logcat, instrumentation output, Docker logs, command
-timings, and crash diagnostics. Use `BUILD_APKS=0` to reuse existing debug APKs
-when iterating on harness behavior:
+```text
+build/walkthrough-visual-pass/<run-id>/screenshots/files/
+  j01-connect-trust/  j02-session-tree/  j03-attach-type/  j04-create-session/
+  j05-reconnect/      j06-background-grace-return/         j07-composer-send/
+  j08-voice-dictation/ j10-files/        j11-share-upload/  j12-usage-panel/
+```
+
+To screenshot the exact binary a release validated rather than a fresh build:
 
 ```bash
-BUILD_APKS=0 scripts/phone-walkthrough.sh terminal-lab
+VISUAL_AUDIT_BUILD_APKS=0 \
+  APP_APK=<validated app2-debug.apk> TEST_APK=<validated app2-debug-androidTest.apk> \
+  scripts/capture-walkthrough-screenshots.sh
 ```
 
-For terminal reviewer approval, use the stricter terminal workbench commands in
-[docker-emulator-runbook.md](docker-emulator-runbook.md#standard-commands) and
-the artifact rejection checklist in [process.md](../process.md#terminal-artifact-review).
-Direct terminal viewport renders plus visible terminal text are authoritative;
-full-device screenshots are advisory for terminal content unless the run summary
-proves they are reliable.
-The workbench deletes stale pulled artifacts before each run, verifies SSH,
-terminal command input, PTY sizing, direct viewport renders, visible terminal
-sidecars, timings, and summary hashes, and fails on missing, blank, duplicate
-non-hold, or contradictory authoritative terminal evidence. Set
-`REAL_AGENTS=1` when the issue requires real interactive agent CLI screens.
-
-The host setup matrix is available through the same harness. It starts the
-bootstrap Docker services on ports `2230` through `2236`, drives the emulator UI
-for each profile, and stores per-profile screenshots, UI assertion output,
-remote probes, timings, logcat, Docker logs, and crash diagnostics:
-
-```bash
-scripts/phone-walkthrough.sh setup-detection
-scripts/phone-walkthrough.sh setup-detection:uv-install
-```
-
-##### Parallel setup-detection across multiple emulators (issue #632)
-
-The 7 setup-detection profiles bind **disjoint** Docker ports (`2230`-`2236`),
-so the matrix can be sharded across several emulators and run concurrently
-instead of serially. `scripts/parallel-setup-detection.sh` is a fan-out/join
-wrapper that does exactly that:
-
-```bash
-# Two emulators, full matrix; profiles split round-robin across the two serials.
-scripts/parallel-setup-detection.sh --serials "emulator-5554 emulator-5556"
-
-# Print the shard plan only (serial / lock / compose project per shard) — no
-# emulator or Docker is touched.
-scripts/parallel-setup-detection.sh --dry-run --serials "emulator-5554 emulator-5556"
-
-# Subset of profiles, capped shard count.
-scripts/parallel-setup-detection.sh --serials "a b c" --shards 2 ready unsupported
-```
-
-Each shard is isolated so concurrent shards never collide:
-
-- **emulator** — a distinct `ANDROID_SERIAL` per shard.
-- **AVD lock** — a per-serial lock file
-  (`build/.avd-lock-<serial>`, via `pocketshell_avd_lock_file_for_serial` in
-  `scripts/lib/avd-lock.sh`) instead of the single global `build/.avd-lock`, so
-  shards do not serialise against each other. Callers that don't opt in keep the
-  single-lock default.
-- **Docker** — a per-shard `COMPOSE_PROJECT_NAME`
-  (`pocketshell-setup-detection-shard<i>`). The 7 bootstrap services in
-  `tests/docker/docker-compose.yml` deliberately carry **no** `container_name:`
-  so compose namespaces their containers per project
-  (`<project>_bootstrap-<scenario>_<n>`); a fixed name would be global to the
-  daemon and defeat the per-shard project. Fixtures are addressed by host port,
-  never by container name.
-
-The APKs are built **once** before fan-out (shards run with `BUILD_APKS=0` and
-`PHONE_WALKTHROUGH_CLEAN_GENERATED=0`) so no two shards race on the shared
-`app/build/` directory. The wrapper aggregates per-profile pass/fail into
-`build/parallel-setup-detection/<run-id>/summary.txt`, writes the same
-per-profile artifacts the sequential path produces under each
-`shard<i>/phone-walkthrough/setup-detection/`, and exits non-zero if any
-profile failed. With a single serial it collapses to one sequential shard — the
-existing single-AVD behaviour, no regression.
-
-The release gate (`scripts/release-emulator-validation.sh`) opts in via
-`SETUP_DETECTION_SHARDS=N` (default `1` = the unchanged sequential path);
-provide the serials with `SETUP_DETECTION_SERIALS="<s1> <s2> ..."`.
-
-For release visual review without a physical phone, run:
-
-```bash
-scripts/phone-walkthrough.sh visual-audit
-```
-
-This runs the Docker-backed visual screenshot instrumentation and the composer
-state renderer, then writes reviewer-facing PNGs under
-`build/phone-walkthrough/<run-id>/screenshots/visual-audit/`. The normalized set is
-`01-host-list.png`, `02-host-setup-folder-list.png`,
-`03-terminal-session-input-controls.png`, `04-snippets.png`,
-`05b-composer-idle-draft.png`, `06-composer-recording.png`, and
-`07-composer-transcribing.png`; raw pulled device output remains under
-`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
+**Issue #2481 deleted the scripts this section used to document.**
+`scripts/phone-walkthrough.sh` (scenarios `terminal-lab`,
+`tmux-existing-session`, `visual-audit`, `setup-detection[:<profile>]`) and
+`scripts/parallel-setup-detection.sh` drove `app` module androidTest classes —
+`TerminalLabDockerTest`, `EmulatorDockerSshSmokeTest`,
+`WalkthroughVisualScreenshotTest`, `WalkthroughConversationScreenshotTest`,
+`PromptComposerVisualScreenshotTest`, `HostBootstrapScenarioSuiteTest` — every
+one of which the rewrite's hard cut removed. Three of the four scenarios have a
+successor inside app2's instrumented set (attach-and-type, session tree/create,
+composer/dictation); the setup-detection matrix does not, because the guided
+host-setup sheet is a **cut** feature — only the actionable "update the host
+CLI" error survives (`docs/rewrite-implementation-plan.md`, "Scope amendment").
+The 7 bootstrap Docker services on ports `2230`-`2236` are still in
+`tests/docker/docker-compose.yml` but nothing drives them from the client side.
 
 This differs from CI and the pre-release confidence gate: it is a local
-reproduction loop for one walkthrough journey and reviewer-visible artifacts. It
-does not replace unit tests, connected CI, or the slower release gate. A
-physical phone is not required for basic release confidence; emulator + Docker
-evidence is the release blocker, and phone testing is final user acceptance.
+reproduction loop for reviewer-visible artifacts. It does not replace unit
+tests, connected CI, or the slower release gate. A physical phone is not
+required for basic release confidence; emulator + Docker evidence is the release
+blocker, and phone testing is final user acceptance.
 
 ### APK pre-release confidence gate
 
@@ -1563,13 +1536,18 @@ confirming `HEAD == origin/main`:
 scripts/release-emulator-validation.sh
 ```
 
-That wrapper requires `HEAD == origin/main`, then runs the confidence gate,
-`scripts/phone-walkthrough.sh terminal-lab`,
-`scripts/phone-walkthrough.sh tmux-existing-session`,
-`scripts/phone-walkthrough.sh setup-detection`, and visual-audit screenshot
-capture. It writes `build/release-emulator-validation/<run-id>/summary.md`
-with the artifact directories that must be attached or linked in the issue and
-tag notes.
+That wrapper requires `HEAD == origin/main`, then runs the nightly-fault guard
+and the confidence gate — which is now the whole emulator chain: it builds the
+one validated APK pair, installs it, and runs app2's whole instrumented set
+unfiltered against those exact bytes, pulling the journey screenshots as the
+visual-audit artifact. It writes
+`build/release-emulator-validation/<run-id>/summary.md` with the artifact
+directories that must be attached or linked in the issue and tag notes.
+
+The four downstream walkthrough stages it used to run (terminal-lab,
+tmux-existing-session, the setup-detection matrix, visual-audit) were deleted by
+issue #2481 with the scripts and `app` module test classes behind them; see
+"Local visual pass" above.
 
 A GitHub Actions Release Emulator Validation summary is acceptable release
 evidence only when its `Commit SHA` is the commit being tagged. If the run was
@@ -1594,13 +1572,13 @@ fast path runs only the emulator stages relevant to what changed:
 ```bash
 scripts/dev-fast-gate.sh --dry-run            # classify + print the plan, no emulator
 scripts/dev-fast-gate.sh                       # run the scoped stages
-scripts/dev-fast-gate.sh --profile fish-user-local-path   # scope setup-detection
 ```
 
 It diffs the branch against the `origin/main` merge base, maps the changed
 paths to a minimal stage set, and calls the existing building blocks directly
-(`scripts/phone-walkthrough.sh <scenarios>` and/or
-`scripts/pre-release-confidence-gate.sh`).
+(`scripts/pre-release-confidence-gate.sh` and/or
+`scripts/capture-walkthrough-screenshots.sh`). Its `--profile <name>` flag went
+with the setup-detection matrix (issue #2481).
 
 Since #2063 the mapping is **data, not inline case arms**: it reads the
 `devgate` column of `scripts/test-areas.txt` through
@@ -1638,9 +1616,8 @@ evidence.
 The release-gate scripts that touch the shared local Android emulator
 (`scripts/release-emulator-validation.sh`,
 `scripts/pre-release-confidence-gate.sh`,
-`scripts/phone-walkthrough.sh`,
-`scripts/terminal-workbench.sh`, and
-`scripts/release-terminal-gate.sh`) each acquire an exclusive `flock` on
+`scripts/capture-walkthrough-screenshots.sh`, and
+`scripts/android-upgrade-preservation-gate.sh`) each acquire an exclusive `flock` on
 `build/.avd-lock` (relative to the repo root) before installing APKs or
 running instrumentation. If a sibling worktree is already running an
 emulator-touching gate, the second invocation prints
@@ -1648,7 +1625,7 @@ emulator-touching gate, the second invocation prints
 blocks until the first one exits. The lock is released automatically when
 the holding script exits (the open file descriptor closes).
 
-Direct `./gradlew :app:connectedDebugAndroidTest` invocations from implementer
+Direct `./gradlew :app2:connectedDebugAndroidTest` invocations from implementer
 or reviewer worktrees do not take the AVD lock or cgroup scope and should not be
 used for local evidence. Use `scripts/connected-test.sh` for ad-hoc connected
 tests; it owns the lock/suffix/serial-pin/cgroup path. Some legacy broad
@@ -1664,193 +1641,38 @@ POCKETSHELL_AVD_LOCK_FILE=/tmp/my-avd-lock scripts/release-emulator-validation.s
 ```
 
 When one gate script invokes another (for example,
-`release-emulator-validation.sh` runs `pre-release-confidence-gate.sh`,
-`phone-walkthrough.sh`, and `terminal-workbench.sh` in sequence) the inner
-scripts inherit `POCKETSHELL_AVD_LOCK_ACQUIRED=1` from the outer one and
-skip re-acquiring; the outer lock holds for the entire chain.
+`release-emulator-validation.sh` runs `pre-release-confidence-gate.sh`) the inner
+script inherits `POCKETSHELL_AVD_LOCK_ACQUIRED=1` from the outer one and
+skips re-acquiring; the outer lock holds for the entire chain.
 
-Terminal-heavy release candidates can opt into the slower real-agent terminal
-release gate:
+#### The optional terminal / long-running / real-agent gates are gone (issue #2481)
 
-```bash
-TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
-```
+`TERMINAL_RELEASE_GATE=1` and `LONG_RUNNING_TEST=1` no longer exist, and the
+GitHub Actions workflow input `terminal_release_gate` was removed with them.
+They were not disabled, they were deleted (D22), because every class they drove
+lived in the `app` module's androidTest tree that the rewrite's hard cut
+removed:
 
-The optional step runs after the normal pre-release confidence gate and before
-the rest of the release evidence. It starts
-`tests/docker/real-agent/compose.yml`, SSHes from the emulator into Docker on
-port `2240`, drives at least one real interactive agent CLI screen through
-`TerminalLabDockerTest`, validates the authoritative viewport and visible-text
-artifacts, and writes
-`build/terminal-workbench/<run-id>-terminal-release/artifact-summary.txt`. It
-is manual/optional unless explicitly enabled through the environment or the
-GitHub Actions workflow input.
+| Deleted lane | What it drove |
+|---|---|
+| `TERMINAL_RELEASE_GATE=1` -> `scripts/terminal-workbench.sh` | `TerminalLabDockerTest`, `EmulatorDockerSshSmokeTest`, `TmuxAttachPrefillDockerTest`, `TmuxExternalUpdateDockerTest` |
+| `TERMINAL_RELEASE_GATE=1` -> real-agent step | `com.pocketshell.app.proof.RealAgentReleaseGateTest` |
+| `LONG_RUNNING_TEST=1` | `com.pocketshell.app.proof.LongRunningSessionStabilityTest` |
+| `scripts/release-terminal-gate.sh` (5-step chain) | all of the above, plus `docs/release-terminal-gate.md` |
 
-For terminal/tmux-heavy releases where short connected tests are not enough
-evidence, add the opt-in 10-minute stability hold:
+Terminal and reconnect evidence now comes from app2's own instrumented
+journeys — `J03AttachAndTypeJourney`, `J05ReconnectAfterDropJourney`,
+`J06BackgroundGraceReturnJourney` — which run on every push in the
+`app2-journey` lane and inside the pre-release confidence gate's unfiltered run
+against the validated APK pair.
 
-```bash
-TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
-```
-
-This remains optional for unrelated small releases. The long-running hold writes
-its artifact bundle under
-`build/long-running-session/<run-id>-long-running/`; the primary file to inspect
-and link is
-`build/long-running-session/<run-id>-long-running/artifacts/long-running-session/long-running-summary.txt`.
-Treat the hold as acceptable only when the wrapper passes, the summary reports
-`tick_count=6`, `reconnect_events=0`, `memory_growth_kb` under the recorded
-50 MB budget, and the final visible transcript still contains the last tick.
-Failures should be evaluated from `long-running-summary.txt` first, then the
-same directory's `long-running-logcat-tail.txt`,
-`long-running-visible-terminal.txt`, `instrumentation.log`, and
-`docker-agents.log`.
-
-#### Real-agent CLI interaction test (issue #146)
-
-When `TERMINAL_RELEASE_GATE=1` is set, the release validation also runs
-`RealAgentReleaseGateTest`
-(`app/src/androidTest/java/com/pocketshell/app/proof/RealAgentReleaseGateTest.kt`)
-against the same `tests/docker/real-agent/compose.yml` fixture. The test:
-
-- Connects through the real PocketShell app UI to `testuser@10.0.2.2:2240`,
-  attaches a tmux pane, and types commands through the same `TerminalView`
-  input connection the phone user hits.
-- Invokes the actual installed `claude --print '<prompt>'` and
-  `codex exec --skip-git-repo-check '<prompt>'` binaries inside the tmux pane
-  (Claude Code 2.x and Codex CLI 0.x via the fixture's `Dockerfile`). The
-  real-agent image deliberately ships without API credentials, so the
-  deterministic visible substrings the test matches against are the CLI-emitted
-  startup texts — `Not logged in` for Claude and `OpenAI Codex v` for Codex —
-  using `TerminalTextMatcher.containsWrapTolerant` so the soft-wrap at the
-  Compose grid boundary does not flake the assertion.
-- Reads the JSONL conversation log back over SSH from
-  `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` and
-  `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<session>.jsonl`, then
-  asserts on a minimal schema (`sessionId` field for Claude; `session_meta`
-  payload with `id`/`cwd` for Codex). This is the load-bearing JSONL contract
-  PocketShell's
-  [com.pocketshell.app.session.AgentConversationRepository](../app/src/main/java/com/pocketshell/app/session/AgentConversationRepository.kt)
-  parses, so a CLI version bump that broke the schema would surface here.
-
-The test is opt-in via the instrumentation runner argument
-`pocketshellRealAgentReleaseGate=1`, set automatically by
-`scripts/release-emulator-validation.sh` when `TERMINAL_RELEASE_GATE=1`. Without
-the argument the test class is skipped by `Assume.assumeTrue`, so normal
-`connectedDebugAndroidTest` runs and the default release gate are unaffected.
-Artifacts (instrumentation log, Docker compose log, SSH readiness probe,
-emulator logcat) are written under
-`build/real-agent-release-gate/<run-id>-real-agent-release-gate/`.
-
-To run it locally (a booted emulator and the real-agent Docker image are both
-required):
-
-```bash
-REAL_AGENTS=1 TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
-```
-
-`REAL_AGENTS=1` is consumed by the underlying `scripts/terminal-workbench.sh`
-step; `TERMINAL_RELEASE_GATE=1` opts both the workbench step and the new
-`RealAgentReleaseGateTest` step in. To exercise the test in isolation against a
-running emulator + real-agent fixture without the rest of the release gate:
-
-```bash
-docker compose -f tests/docker/real-agent/compose.yml up -d --build real-agents
-scripts/connected-test.sh --suffix realagent \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.RealAgentReleaseGateTest \
-  -Pandroid.testInstrumentationRunnerArguments.pocketshellRealAgentReleaseGate=1
-```
-
-The same validation can be run manually from GitHub Actions when local emulator
-capacity is unavailable: Actions -> Release Emulator Validation -> Run
-workflow. Choose the release branch or `main`; optionally provide a `run_id`.
-Read the job summary first, then download the
-`release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
-release summary. The tested debug APK is included inside that artifact at
-`release-emulator-validation/<run-id>/app-debug.apk`; locally, the same file is
-written under `build/release-emulator-validation/<run-id>/app-debug.apk`.
-Inspect the visual-audit screenshots before using the artifact as release
-evidence. This workflow produces evidence only; it does not push the tag and
-does not relax the stable-main tag rule.
-
-This combines the normal compile/unit check, deterministic Docker `agents`
-target verification, explicit-path emulator readiness checks, focused connected
-walkthrough journeys for keyboard/input, snippets/composer, dictation, planner, and
-Docker SSH/tmux smoke, then builds and installs
-`app/build/outputs/apk/debug/app-debug.apk` on the emulator. Logs are written
-under `build/pre-release-confidence-gate/<run-id>/`. By default the gate also
-uses `build/pre-release-confidence-gate/gradle-home` as an isolated
-`GRADLE_USER_HOME`, so unrelated local Gradle daemon/cache activity cannot stop
-or corrupt the scripted run. Gate Gradle invocations use the shared
-release-chain profile from `scripts/lib/gradle-profile.sh` — `--no-build-cache`,
-`--no-parallel`, `--max-workers=1`, `-Dorg.gradle.jvmargs=-Xmx3072m`,
-`-Pkotlin.daemon.jvmargs=-Xmx3072m`, inside a `POCKETSHELL_TEST_MEM=24G` build
-scope — to avoid cache-packing, generated-source races, local resource
-oversubscription, and the Kotlin/packaging heap exhaustion that killed three
-v0.4.42 release runs before any assertion ran (issue #2054). Check a machine's
-profile in milliseconds with
-`scripts/pre-release-confidence-gate.sh --check-profile`. The
-compile/check phase pre-generates focused app KSP/Hilt sources for debug,
-release, androidTest, and unit-test variants before `check`, which keeps lint
-from depending on stale generated files in the checkout without building a full
-release APK inside the fast gate. Lint is excluded from this local pre-release gate
-so unrelated dirty-worktree lint issues cannot prevent the install and focused
-instrumentation checks from running; run lint separately before release when the
-checkout is clean.
-By default the gate also copies the current working tree to
-`build/pre-release-confidence-gate/<run-id>/worktree` and re-execs there,
-excluding `.git`, `.gradle`, and `build` directories. That keeps shared
-`app/build` output from unrelated local work out of the release gate while still
-testing the current source files. Set `GATE_ISOLATED_WORKTREE=0` only when the
-checkout is otherwise idle.
-Every run also writes
-`build/pre-release-confidence-gate/<run-id>/summary.txt`, including the commit,
-run directory, APK path, emulator serial when available, Docker target,
-step-by-step status/log paths, focused selector status, the focused walkthrough
-cold-reset install status, the final data-preserving update install status, and
-the final pass/fail result. On failures, start review from that summary: it
-names the failing step and, for focused instrumentation failures, the diagnostics
-and bounded logcat artifact paths.
-
-The focused app walkthrough selectors run through direct
-`adb shell am instrument -e class <selector>` invocations after one app/test
-package reset and one explicit app/test APK install for the whole focused phase.
-This is a destructive cold-reset path for deterministic walkthrough tests, not
-the user update path. It makes the gate repeatable on a reused emulator, avoids
-stale Gradle connected-test runner arguments, and keeps package
-deletion/replacement work out of the selector window.
-The cold-reset setup clears existing package data without uninstalling in the
-normal path, then replace-installs both APKs and waits for package-manager
-handlers to go idle. Uninstall is only used as a logged fallback for incompatible
-existing packages in that cold-reset setup. After install, the gate watches a
-stability window for delayed PocketShell package removal broadcasts from earlier
-emulator work and reinstalls before instrumentation if one appears. The gate then
-force-stops app/test packages before each selector and waits until no PocketShell
-process is running and both packages report
-`stopped=true`, followed by a short stable settle window. If Android restarts
-the app/test package during that settle window due prior instrumentation
-teardown, the gate repeats the force-stop/idle/settle cycle up to three times.
-That keeps delayed
-package deletion, the quiesce force-stop itself, Android's normal `start instr`
-force-stop, prior selector teardown, and any restored task cleanup from killing
-the running instrumentation process. Each focused invocation clears logcat; if
-Android reports a process-crashed instrumentation result with no app exception
-and logcat shows the app was externally force-stopped while instrumentation was
-running, the selector is retried once after another package-manager idle wait.
-If the retry also fails, or the failure is not that exact transient shape, the
-gate keeps the final failure. If
-instrumentation crashes or reports a non-success code, the step log includes
-filtered crash context and points to the bounded full logcat artifact in the same
-run directory.
-
-The final APK install in the pre-release gate is the data-preserving update gate:
-`scripts/install-update-apk.sh app/build/outputs/apk/debug/app-debug.apk`. That
-helper runs exactly `adb install -r <apk>` and intentionally has no `pm clear`,
-uninstall fallback, or cold-install flags.
-
-See [docker-emulator-runbook.md](docker-emulator-runbook.md#apk-pre-release-gate)
-for the exact steps, SDK paths, focused test list, APK location, and slower
-opt-in suites that remain outside the fast gate.
+**Real-agent CLI evidence has no successor and is not coming back as a client
+feature.** Agent awareness (agent badges, state polling, the conversation view,
+engine pickers, agent slash-commands) is cut from the rewrite; if it returns it
+is expected to live in `aplexer`, not in the client. See
+`docs/rewrite-implementation-plan.md`, "Scope amendment". The
+`tests/docker/real-agent/` fixture is still on disk and still builds; nothing in
+the client drives it.
 
 ### Opt-in end-to-end scenario suites
 
@@ -2325,12 +2147,10 @@ uses the audited immutable v2.37.0 commit. The static guard in the `Tests`
 workflow rejects a floating tag, a different SHA, or a missing `# v2.37.0`
 comment.
 
-The optional long-running lanes stay separate from these canonical gates. A
-terminal-heavy release may opt into the real-agent terminal release check with
-`TERMINAL_RELEASE_GATE=1`. It may also enable the ten-minute stability hold
-with `LONG_RUNNING_TEST=1`. The hold isn't required for unrelated small
-releases and never replaces the canonical unit, integration, journey, nightly,
-or release evidence gates described above.
+The optional real-agent terminal check (`TERMINAL_RELEASE_GATE=1`) and the
+ten-minute stability hold (`LONG_RUNNING_TEST=1`) were deleted by issue #2481
+along with the `app` module test classes behind them; see "The optional
+terminal / long-running / real-agent gates are gone" above.
 
 ---
 

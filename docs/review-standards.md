@@ -127,10 +127,16 @@ contradicts the screenshots; timing files are missing for a responsiveness
 claim; logs are from another run or contradict the claimed result; or a
 full-device screenshot is the only proof of terminal content.
 
-Local workbench: `scripts/terminal-workbench.sh` (use `RUN_ID=issue-<N>-review`
-for a citable rerun). Real-agent CLI rendering:
-`REAL_AGENTS=1 scripts/terminal-workbench.sh`. Full setup in
-[testing.md](testing.md).
+Local workbench: `scripts/connected-test.sh --suffix i<N>` runs app2's whole
+instrumented set unfiltered against a booted emulator (the CI shape, issue
+#2474); add `-Pandroid.testInstrumentationRunnerArguments.class=<FQCN>` to
+reproduce one journey. For screenshots,
+`RUN_ID=issue-<N>-review scripts/capture-walkthrough-screenshots.sh` gives a
+citable rerun that hard-fails unless every app2 journey rendered a frame.
+Issue #2481 deleted `scripts/terminal-workbench.sh` and its
+`REAL_AGENTS=1` real-agent mode with the `app` module classes they drove;
+real-agent CLI rendering has no successor because agent awareness is a cut
+feature. Full setup in [testing.md](testing.md).
 
 ## Reopened / recurring issues — durable-fix gate (D31)
 

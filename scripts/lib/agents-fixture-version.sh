@@ -36,7 +36,7 @@
 #      prediction of it, and the two genuinely diverge on the release chain:
 #      scripts/pre-release-confidence-gate.sh builds its APK inside a `.git`-less
 #      isolated rsync copy (so that APK says `0.0.0-dev`), then every downstream
-#      stage — phone-walkthrough, terminal-workbench, capture-* — installs THAT
+#      stage — the confidence gate, capture-walkthrough-screenshots — installs THAT
 #      pair (issue #2064) while running from the tagged outer checkout, whose
 #      derivation says e.g. `0.4.45-4-gSHA`. Deriving there would stamp the
 #      fixture with a version no installed binary ever reports.

@@ -29,16 +29,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS_YML = ROOT / ".github" / "workflows" / "tests.yml"
-NIGHTLY_YML = ROOT / ".github" / "workflows" / "nightly-extensive.yml"
+JOURNEY_YML = ROOT / ".github" / "workflows" / "app2.yml"
 RELEASE_YML = ROOT / ".github" / "workflows" / "release-emulator-validation.yml"
-NIGHTLY_SUITE = ROOT / "scripts" / "nightly-extensive-suite.sh"
 SELECTION_GUARDS = ROOT / "scripts" / "ci-test-selection-guards.sh"
 RECORD_WRAPPER = "scripts/ci-record-test-execution-ledger.sh"
-NIGHTLY_WRAPPER = "scripts/ci-nightly-execution-ledger.sh"
+LEDGER_SCRIPT_REL = "scripts/check-test-execution-ledger.sh"
 LEDGER_SCRIPT = "scripts/check-test-execution-ledger.sh"
 LEDGER_PATH = "build/test-execution-ledger.tsv"
-PIN_COLD = "com.pocketshell.app.proof.ColdInstallE2eTest"
-PIN_WORKFLOW = "com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
+PIN_COLD = "com.pocketshell.next.connect.J01ConnectAndTrustJourney"
+PIN_WORKFLOW = "com.pocketshell.next.terminal.J03AttachAndTypeJourney"
 JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*(#.*)?$")
 CACHE_KEY_PREFIX = "test-execution-ledger-"
 
@@ -104,37 +103,72 @@ def validate_tests_yml(text: str) -> None:
         raise GuardFailure("tests.yml must record the ledger AFTER the JVM unit tests run")
 
 
-def validate_nightly_yml(text: str) -> None:
-    if "execution-ledger:" not in text:
+def validate_journey_ledger(job: str) -> None:
+    """The CONNECTED lane records into the rolling ledger.
+
+    This used to validate a dedicated shard-merging wrapper
+    (scripts/ci-nightly-execution-ledger.sh) for the six-shard nightly. app2's
+    lane is ONE unfiltered run (issue #2474), so the wrapper collapsed into two
+    inline calls in the journey job and `--merge-attendance` no longer applies —
+    there are no shards to merge. What still has to hold is that the lane
+    RECORDS and is held to the wholesale selected set, with the load-bearing
+    journeys pinned by name.
+    """
+    require(job, LEDGER_SCRIPT_REL, "journey job must invoke the execution ledger")
+    # The flag AND its argument: a bare "--record" substring is satisfied by
+    # "--record-not", so the mutation that removes recording would still pass.
+    require(job, "--record app2/", "journey job must --record its connected JUnit XML")
+    require(job, "--attendance", "journey job must run current-run attendance")
+    require(job, "--selected-from app2-journey", "journey attendance must use the wholesale selected set")
+    require(job, "--require-class", "journey attendance must --require-class the pins")
+    require(job, PIN_COLD, "journey attendance must pin the connect/trust journey")
+    require(job, PIN_WORKFLOW, "journey attendance must pin the attach/type journey")
+
+
+def validate_journey_yml(text: str) -> None:
+    """app2.yml's journey job is the CONNECTED lane's ledger recorder.
+
+    The nightly equivalent needed a separate `execution-ledger` aggregator job,
+    because six parallel shards cannot each save the rolling cache without
+    clobbering it. app2's lane is a single unfiltered run (issue #2474), so
+    there is nothing to aggregate and the recording lives in the journey job
+    itself — which is why this no longer looks for an aggregator, a
+    `--aggregate` flag or `download-artifact`.
+    """
+    job = extract_job(text, "app2-journey")
+    if re.search(r"^    continue-on-error:\s*true\s*$", job, re.M):
         raise GuardFailure(
-            "nightly-extensive.yml must have an execution-ledger aggregator job "
-            "(parallel shards cannot save the rolling cache without clobbering)"
+            "app2-journey must not be continue-on-error — a truncated run would "
+            "otherwise look like a passing attendance verdict"
         )
-    agg = extract_job(text, "execution-ledger")
-    if re.search(r"^    continue-on-error:\s*true\s*$", agg, re.M):
+    validate_journey_ledger(job)
+    # The recording step must survive a RED suite, or the lane only ever records
+    # its own good news.
+    # Bound the slice to THIS step. Running it to the end of the job means every
+    # later `if: always()` (docker logs, artifact upload) vouches for the ledger
+    # step, so deleting always() from the ledger step alone stayed green.
+    step_at = job.find("Record journey execution")
+    if step_at < 0:
+        raise GuardFailure("app2-journey has no 'Record journey execution' step")
+    next_step = job.find("\n      - name:", step_at)
+    ledger_step = job[step_at : next_step if next_step > 0 else len(job)]
+    if "if: always()" not in ledger_step:
         raise GuardFailure(
-            "execution-ledger must not be continue-on-error — a truncated shard "
-            "would otherwise look like a passing attendance verdict"
-        )
-    require(agg, NIGHTLY_WRAPPER, "nightly execution-ledger job")
-    require(agg, "--aggregate", "nightly execution-ledger job")
-    require(agg, "actions/download-artifact@", "nightly execution-ledger must download shard artifacts")
-    require(agg, f"path: {LEDGER_PATH}", "nightly execution-ledger cache path")
-    require(agg, "uses: actions/cache@v5", "nightly execution-ledger must persist the rolling ledger")
-    require(agg, "needs.guard.outputs.should_run == 'true'", "nightly execution-ledger if:")
-    if "if: always()" not in agg and "if: ${{ always()" not in agg:
-        raise GuardFailure(
-            "nightly execution-ledger must run if: always() when the suite ran, "
-            "so a crashed shard still produces a missing-artifact RED"
+            "the journey ledger step must run with if: always() — a lane that "
+            "records only on success cannot show which classes a red run reached"
         )
 
 
-def validate_nightly_wrapper(text: str) -> None:
-    require(text, PIN_COLD, "nightly ledger wrapper must pin ColdInstallE2eTest")
-    require(text, PIN_WORKFLOW, "nightly ledger wrapper must pin EmulatorWorkflowE2eTest")
-    require(text, "--require-class", "nightly ledger wrapper must --require-class the pins")
-    require(text, "--merge-attendance", "nightly ledger wrapper must merge shard attendance")
-    require(text, "--selected-from nightly-phase1", "nightly ledger wrapper must reuse wholesale selected set")
+def validate_release_yml(text: str) -> None:
+    job = extract_job(text, "emulator-release-validation")
+    require(job, "uses: actions/cache@v5", "release ledger cache")
+    require(job, f"path: {LEDGER_PATH}", "release ledger cache path")
+    require(job, "check-test-execution-ledger.sh --record", "release must --record real JUnit results")
+    require(job, "check-test-execution-ledger.sh --verify", "release must --verify the rolling ledger")
+    record_at = job.find("check-test-execution-ledger.sh --record")
+    run_at = job.find("Run emulator-only release validation")
+    if run_at < 0 or record_at < run_at:
+        raise GuardFailure("release must record the ledger AFTER the emulator validation run")
 
 
 def validate_unit_wrapper(text: str) -> None:
@@ -161,37 +195,37 @@ def validate_unit_wrapper(text: str) -> None:
 def validate_ledger_script(text: str) -> None:
     require(text, "unit-debug", "ledger must know the Debug unit selected set")
     require(text, "unit-release", "ledger must know the Release unit selected set")
-    # Nightly phase 1 is :app:connectedDebugAndroidTest, not every module.
-    require(
-        text,
-        "app/src/androidTest",
-        "nightly-phase1 selected set must be restricted to app/src/androidTest",
+
+    # THE JOURNEY LANE IS ONE MODULE'S androidTest SET, AND THAT IS CHECKED AS
+    # CODE, NOT AS A PATH LITERAL.
+    #
+    # This used to `require(text, "app/src/androidTest", ...)`. That is a
+    # substring search over the whole file, so a COMMENT mentioning the path
+    # satisfied it — and after the rewrite repointed the lane at app2 that is
+    # exactly what happened: the guard stayed green because a block comment
+    # still contained the words, while the code it was meant to pin had moved.
+    # A prose-satisfiable assertion is the G6 shape (docs/ci-pitfalls.md), so
+    # both halves of the real property are asserted against code lines instead:
+    # the lane derives its root from the suite that runs it, and it refuses to
+    # do so if that suite ever grows a class filter.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
     )
-
-
-def validate_release_yml(text: str) -> None:
-    job = extract_job(text, "emulator-release-validation")
-    require(job, "uses: actions/cache@v5", "release ledger cache")
-    require(job, f"path: {LEDGER_PATH}", "release ledger cache path")
-    require(job, "check-test-execution-ledger.sh --record", "release must --record real JUnit results")
-    require(job, "check-test-execution-ledger.sh --verify", "release must --verify the rolling ledger")
-    record_at = job.find("check-test-execution-ledger.sh --record")
-    run_at = job.find("Run emulator-only release validation")
-    if run_at < 0 or record_at < run_at:
-        raise GuardFailure("release must record the ledger AFTER the emulator validation run")
-
-
-def validate_nightly_suite(text: str) -> None:
-    require(text, "--print-phase1-exclusions", "nightly suite must print phase-1 exclusions")
-    require(text, NIGHTLY_WRAPPER, "nightly suite must invoke shard attendance")
-    require(text, "--shard", "nightly suite shard attendance")
-    # Wholesale premise must remain: attendance selected-from reads notClass,
-    # it must not replace connectedDebugAndroidTest minus notClass with an
-    # allowlist.
-    if ":app:connectedDebugAndroidTest" not in text:
-        raise GuardFailure("nightly suite must still run :app:connectedDebugAndroidTest")
-    if "RunnerArguments.notClass=" not in text:
-        raise GuardFailure("nightly suite must still subtract a notClass list (wholesale premise)")
+    require(
+        code,
+        "journey_lane_android_test_dir",
+        "journey-lane selected set must derive its androidTest root from the suite that runs it",
+    )
+    require(
+        code,
+        "src/androidTest",
+        "journey-lane selected set must be restricted to an androidTest root",
+    )
+    require(
+        code,
+        "testInstrumentationRunnerArguments",
+        "journey-lane derivation must reject a suite that filters which classes run",
+    )
 
 
 def validate_selection_guards(text: str) -> None:
@@ -209,10 +243,8 @@ def validate_selection_guards(text: str) -> None:
 
 def validate_tree(root: Path = ROOT) -> None:
     validate_tests_yml((root / ".github/workflows/tests.yml").read_text())
-    validate_nightly_yml((root / ".github/workflows/nightly-extensive.yml").read_text())
+    validate_journey_yml((root / ".github/workflows/app2.yml").read_text())
     validate_release_yml((root / ".github/workflows/release-emulator-validation.yml").read_text())
-    validate_nightly_suite((root / "scripts/nightly-extensive-suite.sh").read_text())
-    validate_nightly_wrapper((root / "scripts/ci-nightly-execution-ledger.sh").read_text())
     validate_unit_wrapper((root / "scripts/ci-record-test-execution-ledger.sh").read_text())
     validate_ledger_script((root / "scripts/check-test-execution-ledger.sh").read_text())
     validate_selection_guards((root / "scripts/ci-test-selection-guards.sh").read_text())
@@ -231,22 +263,18 @@ def self_test() -> None:
         live_error = str(exc)
 
     tests = TESTS_YML.read_text()
-    nightly = NIGHTLY_YML.read_text()
+    journey = JOURNEY_YML.read_text()
     release = RELEASE_YML.read_text()
-    suite = NIGHTLY_SUITE.read_text()
     guards = SELECTION_GUARDS.read_text()
-    nightly_wrapper = (ROOT / "scripts/ci-nightly-execution-ledger.sh").read_text()
     unit_wrapper = (ROOT / RECORD_WRAPPER).read_text()
     ledger_script = (ROOT / LEDGER_SCRIPT).read_text()
 
     def write_tree(tmp: Path, **files: str) -> None:
         mapping = {
             ".github/workflows/tests.yml": tests,
-            ".github/workflows/nightly-extensive.yml": nightly,
+            ".github/workflows/app2.yml": journey,
             ".github/workflows/release-emulator-validation.yml": release,
-            "scripts/nightly-extensive-suite.sh": suite,
             "scripts/ci-test-selection-guards.sh": guards,
-            "scripts/ci-nightly-execution-ledger.sh": nightly_wrapper,
             RECORD_WRAPPER: unit_wrapper,
             LEDGER_SCRIPT: ledger_script,
         }
@@ -268,6 +296,26 @@ def self_test() -> None:
             else:
                 raise GuardFailure(f"self-test accepted an unsafe mutation: {label}")
 
+    def expect_green(label: str, **files: str) -> None:
+        """A change that must NOT redden the guard.
+
+        Every assertion here is a substring search, and a substring search over a
+        whole file happily matches PROSE. That is not hypothetical: the
+        `app/src/androidTest` requirement went on passing after the lane moved to
+        app2 purely because a block comment still contained the words. So the
+        comment-only edit below is now a first-class case — the guard must be
+        indifferent to it, which is only true if the assertion reads code.
+        """
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            write_tree(tmp, **files)
+            try:
+                validate_tree(tmp)
+            except GuardFailure as exc:
+                raise GuardFailure(
+                    f"self-test rejected a harmless change: {label} ({exc})"
+                ) from exc
+
     # Mutations that must redden — each names the property it exists to prove.
     expect_red(
         "unit job without --record wrapper",
@@ -278,35 +326,39 @@ def self_test() -> None:
         **{".github/workflows/tests.yml": tests.replace(f"path: {LEDGER_PATH}", "path: /tmp/not-the-ledger")},
     )
     expect_red(
-        "nightly without aggregator job",
-        **{".github/workflows/nightly-extensive.yml": nightly.replace("execution-ledger:", "not-the-ledger:")},
-    )
-    expect_red(
-        "aggregator continue-on-error (absent result looks like a pass)",
+        "journey job stops recording into the ledger",
         **{
-            ".github/workflows/nightly-extensive.yml": re.sub(
-                r"(execution-ledger:\n(?:    .*\n)*?)(    steps:)",
-                r"\1    continue-on-error: true\n\2",
-                nightly,
-                count=1,
+            ".github/workflows/app2.yml": journey.replace(
+                "--record app2/build/outputs", "--record-not app2/build/outputs"
             )
         },
     )
     expect_red(
-        "missing ColdInstall pin",
+        "journey attendance drops the wholesale selected set",
         **{
-            "scripts/ci-nightly-execution-ledger.sh": nightly_wrapper.replace(
-                PIN_COLD, "com.example.NotThePin"
+            ".github/workflows/app2.yml": journey.replace(
+                "--selected-from app2-journey", "--selected-from unit"
             )
         },
     )
     expect_red(
-        "missing EmulatorWorkflow pin",
+        "journey ledger step only records on success (a red run shows nothing)",
         **{
-            "scripts/ci-nightly-execution-ledger.sh": nightly_wrapper.replace(
-                PIN_WORKFLOW, "com.example.NotThePin"
+            ".github/workflows/app2.yml": journey.replace(
+                "      - name: Record journey execution into the rolling ledger (#2082)\n"
+                "        if: always() && steps.journey.conclusion != 'skipped'",
+                "      - name: Record journey execution into the rolling ledger (#2082)\n"
+                "        if: steps.journey.conclusion == 'success'",
             )
         },
+    )
+    expect_red(
+        "missing connect/trust journey pin",
+        **{".github/workflows/app2.yml": journey.replace(PIN_COLD, "com.example.NotThePin")},
+    )
+    expect_red(
+        "missing attach/type journey pin",
+        **{".github/workflows/app2.yml": journey.replace(PIN_WORKFLOW, "com.example.NotThePin")},
     )
     expect_red(
         "release without --verify",
@@ -323,14 +375,6 @@ def self_test() -> None:
             ".github/workflows/release-emulator-validation.yml": release.replace(
                 "check-test-execution-ledger.sh --record",
                 "true --record-not",
-            )
-        },
-    )
-    expect_red(
-        "nightly suite without print-phase1-exclusions (selected set unreadable)",
-        **{
-            "scripts/nightly-extensive-suite.sh": suite.replace(
-                "--print-phase1-exclusions", "--print-nothing"
             )
         },
     )
@@ -372,9 +416,44 @@ def self_test() -> None:
         "unit wrapper drops unit-debug selected set",
         **{RECORD_WRAPPER: unit_wrapper.replace('SELECTED_FROM="unit-debug"', 'SELECTED_FROM="unit"')},
     )
+    # Three mutations, because validate_ledger_script now pins three separate
+    # code properties instead of one greppable path literal. The middle one is
+    # the regression that motivated the change: replacing the path ONLY inside a
+    # comment must NOT be enough to redden the guard, and replacing it in code
+    # must be — the old single assertion could not tell those apart.
     expect_red(
-        "ledger script drops app/src/androidTest nightly-phase1 filter",
-        **{LEDGER_SCRIPT: ledger_script.replace("app/src/androidTest", "NOT_APP_ANDROID_TEST")},
+        "ledger script drops the journey-lane root derivation",
+        **{LEDGER_SCRIPT: ledger_script.replace("journey_lane_android_test_dir", "some_other_helper")},
+    )
+    expect_red(
+        "ledger script drops the androidTest root restriction from CODE",
+        **{
+            LEDGER_SCRIPT: "\n".join(
+                line
+                if line.lstrip().startswith("#")
+                else line.replace("src/androidTest", "src/NOT_ANDROID_TEST")
+                for line in ledger_script.splitlines()
+            )
+        },
+    )
+    expect_red(
+        "ledger script stops rejecting a class-filtered journey suite",
+        **{
+            LEDGER_SCRIPT: ledger_script.replace(
+                "testInstrumentationRunnerArguments", "someOtherRunnerArgument"
+            )
+        },
+    )
+    expect_green(
+        "rewording a COMMENT that mentions an androidTest path",
+        **{
+            LEDGER_SCRIPT: "\n".join(
+                line.replace("src/androidTest", "src/SOME_PROSE_PATH")
+                if line.lstrip().startswith("#")
+                else line
+                for line in ledger_script.splitlines()
+            )
+        },
     )
     expect_red(
         "tests.yml unit step does not pass --variant",
@@ -386,7 +465,7 @@ def self_test() -> None:
         },
     )
 
-    expected = 18
+    expected = 20
     if checks != expected:
         raise GuardFailure(f"self-test ran {checks} red mutations, expected {expected}")
 
@@ -410,7 +489,7 @@ def main(argv: list[str]) -> int:
     except GuardFailure as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print("PASS: unit, nightly, and release workflows wire --record/--verify/attendance to real JUnit results")
+    print("PASS: unit, journey, and release workflows wire --record/--verify/attendance to real JUnit results")
     return 0
 
 

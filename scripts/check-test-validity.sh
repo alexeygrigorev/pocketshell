@@ -76,7 +76,7 @@
 #       Advisory + baselined; the bound + regression test is the #847 hotfix.
 #
 #   J1 (HARD-FAIL on a NEW occurrence) — an androidTest `*E2eTest` /
-#       `*DockerTest` class that is not wired into `scripts/ci-journey-suite.sh`
+#       `*DockerTest` class that lives outside the wholesale journey root
 #       and has no local `// CI_JOURNEY_SUITE_JUSTIFIED:` reason. The per-push
 #       journey suite is the load-bearing connected-test net; new journey-shaped
 #       classes must either join it or say, next to the class, why they are
@@ -183,23 +183,29 @@ cd "$REPO_ROOT" || exit 1
 # modules — including the FolderListViewModelTreeDurabilityTest seam class that
 # hid #847 — were invisible to it.
 # --------------------------------------------------------------------------
-TEST_ROOTS=(app/src/androidTest app/src/test)
+# REPOINTED AT app2 (D22). These were `app/src/androidTest app/src/test`, both
+# deleted by the rewrite's hard cut — so `collect_test_files` returned ONLY the
+# shared/*/src/test files and EVERY detector below (A5, A5L, C1, J1, TIMING1,
+# SEAM1) saw zero files from the application module. The guard passed each push
+# over an app it was not looking at: the single largest vacuous green this
+# repointing sweep found.
+TEST_ROOTS=(app2/src/androidTest app2/src/test)
 while IFS= read -r d; do
   [[ -d "$d" ]] && TEST_ROOTS+=("$d")
 done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/test' 2>/dev/null | sort)
 
 # Connect-path production RPC sources (#850 AWAIT1). These are the warm-session
 # RPC seams consumed on the connect / cold-start path.
-RPC_SOURCE_ROOT="app/src/main/java/com/pocketshell/app"
-ANDROID_TEST_ROOT="app/src/androidTest/java"
-CI_JOURNEY_SUITE="scripts/ci-journey-suite.sh"
+RPC_SOURCE_ROOT="app2/src/main/java/com/pocketshell/next"
+ANDROID_TEST_ROOT="app2/src/androidTest/java"
+CI_JOURNEY_SUITE="scripts/ci-app2-journey-suite.sh"
 # #1430: the vetted state-injection seam registry (SEAM1). Overridable via the
 # VETTED_SEAM_REGISTRY env var so the self-test can point at a temp registry.
 VETTED_SEAM_REGISTRY="${VETTED_SEAM_REGISTRY:-scripts/vetted-test-state-setters.txt}"
 # Production source roots where a matching `fun ...ForTest(` / `var ...ForTest`
 # DEFINITION makes a seam a genuine production seam (vs a test-double helper or
 # property of the same name).
-PROD_SRC_ROOTS=(app/src/main)
+PROD_SRC_ROOTS=(app2/src/main)
 while IFS= read -r d; do
   [[ -d "$d" ]] && PROD_SRC_ROOTS+=("$d")
 done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/main' 2>/dev/null | sort)
@@ -225,7 +231,7 @@ mapfile -t ALL_TEST_FILES < <(collect_test_files)
 # methods — so V1 does NOT scan src/test.
 # --------------------------------------------------------------------------
 collect_android_test_files() {
-  [[ -d app/src/androidTest ]] && find app/src/androidTest -type f -name '*.kt'
+  [[ -d app2/src/androidTest ]] && find app2/src/androidTest -type f -name '*.kt'
   find shared -maxdepth 4 -type d -path 'shared/*/src/androidTest' 2>/dev/null \
     | while IFS= read -r d; do find "$d" -type f -name '*.kt'; done
 }
@@ -251,9 +257,10 @@ fi
 # reported as KNOWN-baseline (advisory) so CI stays green, while any NEW
 # unjustified A5 occurrence outside this list hard-fails.
 # --------------------------------------------------------------------------
+# Emptied by the app2 rewrite's hard cut (D22): both catalogued offenders lived
+# in the deleted app/src/androidTest/.../composer tree. A NEW A5 occurrence
+# anywhere hard-fails again — there is nothing left to grandfather.
 A5_BASELINE=(
-  "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSheetImeReachabilityTest.kt"   # issue #615
-  "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeLayoutRegressionTest.kt"    # issue #682
 )
 
 # --------------------------------------------------------------------------
@@ -296,76 +303,14 @@ AWAIT1_BASELINE=(
 # BASELINE — J1 (#848 follow-up): current androidTest `*E2eTest` /
 # `*DockerTest` classes that are intentionally not in the per-push
 # ci-journey-suite yet. New journey-shaped classes must be wired into
-# scripts/ci-journey-suite.sh or carry a local
+# the wholesale journey root or carry a local
 # `// CI_JOURNEY_SUITE_JUSTIFIED:` reason in their source. Stale entries are a
 # hard failure so this list is removed when a class is promoted or deleted.
 # --------------------------------------------------------------------------
+# Emptied by the app2 rewrite's hard cut (D22): all 65 catalogued classes lived
+# in the deleted app/src/androidTest tree. Every app2 journey is wired into
+# the wholesale journey root, so no unwired *E2eTest/*DockerTest survives.
 J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
-  "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
-  "com.pocketshell.app.costs.CostsScreenE2eTest"
-  "com.pocketshell.app.crash.ShareAllReportsDockerTest"
-  "com.pocketshell.app.fileexplorer.FileExplorerDockerTest"
-  "com.pocketshell.app.fileviewer.LinkTapParsingDockerTest"
-  "com.pocketshell.app.fileviewer.TerminalFilePathTapToViewerDockerTest"
-  "com.pocketshell.app.git.GitHistoryDockerTest"
-  "com.pocketshell.app.hosts.DefaultHostLaunchE2eTest"
-  "com.pocketshell.app.hosts.HostAndFolderListScrollE2eTest"
-  "com.pocketshell.app.hosts.HostEditFromKebabE2eTest"
-  "com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest"
-  "com.pocketshell.app.projects.AgentLaunchCommandDockerTest"
-  "com.pocketshell.app.projects.FolderListGatewayDockerTest"
-  "com.pocketshell.app.projects.FolderListGatewayStaleChannelHealDockerTest"
-  "com.pocketshell.app.projects.FolderListKillSessionDockerTest"
-  "com.pocketshell.app.projects.FolderListOutOfBandSessionDockerTest"
-  "com.pocketshell.app.projects.FolderListSessionResumeDockerTest"
-  "com.pocketshell.app.projects.FolderListTreeStopSessionDockerTest"
-  "com.pocketshell.app.projects.WatchedFoldersE2eTest"
-  "com.pocketshell.app.proof.CodexOverflowNoReconnectE2eTest"
-  "com.pocketshell.app.proof.CodexRedrawOverflowReconnectE2eTest"
-  "com.pocketshell.app.proof.CodexWindowStartupControlSequenceE2eTest"
-  "com.pocketshell.app.proof.ColdInstallE2eTest"
-  "com.pocketshell.app.proof.DisconnectBlackholeE2eTest"
-  "com.pocketshell.app.proof.DisconnectFlapSoakE2eTest"
-  "com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
-  "com.pocketshell.app.proof.FastResumeReconnectE2eTest"
-  "com.pocketshell.app.proof.MultiHostSessionE2eTest"
-  "com.pocketshell.app.proof.NavigatorBackForegroundNoSshE2eTest"
-  "com.pocketshell.app.proof.NetworkLatencyModelE2eTest"
-  "com.pocketshell.app.proof.NoBackgroundWorkE2eTest"
-  "com.pocketshell.app.proof.PacketLossNetworkFaultE2eTest"
-  "com.pocketshell.app.proof.ProjectSwitcherDropdownE2eTest"
-  "com.pocketshell.app.proof.RideThroughInterruptionE2eTest"
-  "com.pocketshell.app.proof.SessionSwipeSwitchE2eTest"
-  "com.pocketshell.app.proof.SilentMidSessionDropDetectionE2eTest"
-  "com.pocketshell.app.proof.SshReconnectE2eTest"
-  "com.pocketshell.app.proof.StaleLeaseSwitchRecoveryE2eTest"
-  "com.pocketshell.app.proof.StrictModeNoNetworkOnMainE2eTest"
-  "com.pocketshell.app.proof.SystemBackForegroundE2eTest"
-  "com.pocketshell.app.proof.TmuxBracketedPasteDictationE2eTest"
-  "com.pocketshell.app.proof.TmuxDetachOnBackgroundE2eTest"
-  "com.pocketshell.app.proof.TmuxExternalUpdateDockerTest"
-  "com.pocketshell.app.proof.TmuxOrphanClientCleanupE2eTest"
-  "com.pocketshell.app.proof.TmuxSessionSwitchE2eTest"
-  "com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest"
-  "com.pocketshell.app.proof.WarmLeaseReuseBatchCDockerTest"
-  "com.pocketshell.app.proof.WarmLeaseReuseDockerTest"
-  "com.pocketshell.app.proof.WithinGraceResumeRideThroughE2eTest"
-  "com.pocketshell.app.session.ConversationToolResultPairingE2eTest"
-  "com.pocketshell.app.sessions.service.SessionConnectionServiceE2eTest"
-  "com.pocketshell.app.settings.ConversationFontSizeSettingE2eTest"
-  "com.pocketshell.app.settings.DiagnosticsRecordingIndicatorE2eTest"
-  "com.pocketshell.app.settings.SettingsAboutFooterE2eTest"
-  "com.pocketshell.app.settings.SettingsPersistenceE2eTest"
-  "com.pocketshell.app.settings.SettingsSectionOrderE2eTest"
-  "com.pocketshell.app.share.SharePasteIntoSessionE2eTest"
-  "com.pocketshell.app.snippets.SnippetPickerTmuxZOrderDockerTest"
-  "com.pocketshell.app.terminal.TerminalLabDockerTest"
-  "com.pocketshell.app.tmux.ConversationOpenLatencyRttDockerTest"
-  "com.pocketshell.app.tmux.Issue887TerminalFixedUnderImeE2eTest"
-  "com.pocketshell.app.tmux.TmuxAttachPrefillDockerTest"
-  "com.pocketshell.app.tmux.TmuxAttachTimeoutDockerTest"
-  "com.pocketshell.app.tmux.TmuxDetectedPortForwardDockerTest"
-  "com.pocketshell.app.usage.UsageScreenE2eTest"
 )
 
 # --------------------------------------------------------------------------
@@ -377,56 +322,62 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
 # narrow hard-fail (a bare Thread.sleep(N) immediately before a load-bearing
 # assert with no bounded loop) is NEVER baselined; baselined files are advisory.
 # --------------------------------------------------------------------------
+# Emptied by the app2 rewrite's hard cut (D22): every catalogued entry lived in
+# the deleted app/ or shared/core-ssh trees.
 TIMING1_BASELINE=(
-  "app/src/test/java/com/pocketshell/app/tmux/TmuxSessionOpenFailedReconnectTest.kt"           # real-IO factoryScope
-  "app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelVoiceTest.kt"                # real-IO factoryScope
-  "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/SshConnectionCancellationTest.kt"    # CountDownLatch cross-thread sync
-  "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/TransportDispatcherWedgeBoundTest.kt" # deliberate wall-clock wedge harness
-  # Issue #1048: surfaced when the TIMING1 scope widened to app/hosts. This is the
-  # #1110 fix's deliberate Shape-B real-await — the off-main close assertion needs
-  # a REAL background thread, so it bounds completion with a generous wall-clock
-  # CountDownLatch.await(10s) (not the idleFor+currentTimeMillis loop the lint can
-  # auto-recognise). Legitimate convention shape, not a smell — same as
-  # SshConnectionCancellationTest above.
-  "app/src/test/java/com/pocketshell/app/hosts/HostListViewModelTest.kt"                        # CountDownLatch off-main close await (#1110 Shape-B)
 )
 
 # Connection/terminal plus #2026 portfwd/prefs test roots TIMING1 is scoped to
 # (path-prefix match).
+# REPOINTED AT app2 BY THE REWRITE (D22, no shim). Every branch below used to
+# name a deleted root — shared/core-ssh, shared/core-tmux, shared/core-connection
+# and eleven app/src/... package prefixes — so `timing1_in_scope` returned 1 for
+# EVERY file in the tree and the whole TIMING1 detector had gone silent while its
+# `--self-test` still went green (the self-test plants its fixtures into paths it
+# creates, so it never noticed the real roots were gone). The mapping keeps the
+# ORIGINAL intent — connection/terminal, plus the JVM-only roots #2026/#2339
+# widened it to — on app2's package layout:
+#   shared/core-ssh + core-tmux + core-connection -> shared/core-transport
+#   app/.../tmux, app/.../connectivity            -> app2/.../terminal, .../connect
+#   app/.../portfwd                               -> app2/.../ports
+#   app/.../prefs                                 -> app2/.../settings
+#   app/.../projects, app/.../fileviewer          -> app2/.../files, .../tree
+#   app/.../composer, app/.../hosts               -> app2/.../composer, .../hosts
 timing1_in_scope() {
   case "$1" in
-    shared/core-ssh/src/test/*) return 0 ;;
-    shared/core-tmux/src/test/*) return 0 ;;
-    shared/core-connection/src/test/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/tmux/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/tmux/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/connectivity/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/connectivity/*) return 0 ;;
+    # The connection core. core-ssh/core-tmux/core-connection all collapsed into
+    # this one module in the rewrite.
+    shared/core-transport/src/test/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/terminal/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/terminal/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/connect/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/connect/*) return 0 ;;
     # Issue #2026: two hand-rolled 5 s Shape-B pumps survived in these JVM
     # roots because the original connection/terminal sweep could not see them.
-    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
+    # `ports` is app2's port-forwarding UI; `settings` absorbed the old prefs.
+    app2/src/test/java/com/pocketshell/next/ports/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/settings/*) return 0 ;;
     # Issue #1048: widened to the areas that actually flaked this class —
     # composer (#1102, sidecar-store real-IO drain) and hosts (#1110, real
-    # off-main close) — plus projects, the sibling source-binding area, so a
-    # future virtual-clock-vs-real-dispatcher timing flake there gets linted.
-    app/src/test/java/com/pocketshell/app/composer/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/composer/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/hosts/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/hosts/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/projects/*) return 0 ;;
-    app/src/androidTest/java/com/pocketshell/app/projects/*) return 0 ;;
+    # off-main close) — plus the session tree, the sibling source-binding area,
+    # so a future virtual-clock-vs-real-dispatcher timing flake there gets linted.
+    app2/src/test/java/com/pocketshell/next/composer/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/composer/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/hosts/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/tree/*) return 0 ;;
+    app2/src/androidTest/java/com/pocketshell/next/tree/*) return 0 ;;
     # Issue #2339: five JVM fileviewer classes drove a ViewModel whose blocking
     # SSH hop ran on a real Dispatchers.IO pool from hand-rolled 10 s / 5 s
     # `System.currentTimeMillis()` pumps. That is the exact #708/#882/#1048
     # virtual-clock-vs-real-dispatcher shape, and it reddened the required Unit
     # check on `main` with a DIFFERENT member failing on each run of the same
     # tree — but the guard was blind to the whole root, so nothing caught it.
-    # Deliberately JVM-only, like portfwd/prefs above: the sibling
-    # app/src/androidTest/.../fileviewer classes are emulator+Docker journeys
-    # with no virtual clock at all, so their wall-clock deadlines are the
-    # legitimate real-device wait, not this smell.
-    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
+    # app2's `files` package is that root's successor. Deliberately JVM-only,
+    # like ports/settings above: the sibling
+    # app2/src/androidTest/.../files classes are emulator+Docker journeys with
+    # no virtual clock at all, so their wall-clock deadlines are the legitimate
+    # real-device wait, not this smell.
+    app2/src/test/java/com/pocketshell/next/files/*) return 0 ;;
   esac
   return 1
 }
@@ -445,15 +396,15 @@ declare -a TIMING1_SCOPE_ERRORS=()
 validate_timing1_scope_contract() {
   local probe
   for probe in \
-    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
+    "app2/src/test/java/com/pocketshell/next/ports/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/settings/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/files/Timing1ScopeProbeTest.kt"; do
     timing1_in_scope "$probe" || TIMING1_SCOPE_ERRORS+=("$probe -> required root is not scanned")
   done
   for probe in \
-    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
+    "app2/src/test/java/com/pocketshell/next/ports/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/settings/Timing1ScopeProbeTest.kt" \
+    "app2/src/test/java/com/pocketshell/next/files/Timing1ScopeProbeTest.kt"; do
     timing1_uses_shared_pump_only_scope "$probe" ||
       TIMING1_SCOPE_ERRORS+=("$probe -> required root is not hand-rolled-pump enforced")
   done
@@ -481,9 +432,26 @@ android_class_file_for() {
   printf '%s/%s.kt\n' "$ANDROID_TEST_ROOT" "$rel"
 }
 
+# Derive an FQCN from ANY scanned androidTest file, not just one under
+# $ANDROID_TEST_ROOT. Since issue #2474 "wired" means "lives under the wholesale
+# journey root", so J1 has to look at the androidTest roots OUTSIDE that root
+# too — a scan confined to the journey root can only ever find wired classes and
+# the detector becomes a no-op (which is exactly what it silently was after the
+# rewrite repointed $ANDROID_TEST_ROOT at app2). Strip the longest matching
+# `<...>/src/androidTest/java|kotlin/` prefix so a shared-module class yields its
+# real package.
 android_test_fqcn_for_file() {
   local file="$1"
   local rel="${file#"$ANDROID_TEST_ROOT"/}"
+  if [[ "$rel" == "$file" ]]; then
+    rel="${file##*/src/androidTest/java/}"
+    if [[ "$rel" == "$file" ]]; then
+      rel="${file##*/src/androidTest/kotlin/}"
+    fi
+    if [[ "$rel" == "$file" ]]; then
+      rel="${file##*/src/androidTest/}"
+    fi
+  fi
   rel="${rel%.kt}"
   printf '%s\n' "${rel//\//.}"
 }
@@ -974,31 +942,61 @@ declare -a J1_KNOWN=()
 declare -a J1_JUSTIFIED=()
 declare -a J1_STALE_BASELINE=()
 declare -a J1_PARSER_FAILURE=()
+J1_JOURNEY_ROOT=""
 declare -a J1_WIRED_ANDROID_TEST_CLASSES=()
 declare -A J1_WIRED_ANDROID_TEST_SEEN=()
 
+# J1's registry used to be an explicit FQCN list inside the per-class journey
+# suite, and "wired" meant "your class is named in it". Issue #2474 replaced that
+# shape: the lane runs one module's whole instrumented set, unfiltered, in a
+# single process. So "wired" now means "your class lives under the module that
+# lane runs" — which is a property of the PATH, not of a list, and is why no
+# per-class registry is parsed any more. The premise is still checked rather
+# than assumed: if the suite grows a class filter, "the whole module runs" stops
+# being true and the parser fails closed.
 parse_ci_journey_suite_classes() {
   if [[ ! -f "$CI_JOURNEY_SUITE" ]]; then
     J1_PARSER_FAILURE+=("missing $CI_JOURNEY_SUITE")
     return
   fi
 
-  local fqcn
-  while IFS= read -r fqcn; do
-    [[ -z "${fqcn:-}" ]] && continue
+  local task args_body mod
+  task="$(sed -nE 's/^JOURNEY_TASK="([^"]+)".*/\1/p' "$CI_JOURNEY_SUITE" | head -1)"
+  if [[ -z "$task" ]]; then
+    J1_PARSER_FAILURE+=("no JOURNEY_TASK=\"...\" in $CI_JOURNEY_SUITE, so the wholesale journey set cannot be derived")
+    return
+  fi
+  args_body="$(sed -n '/^gradle_args() {$/,/^}$/p' "$CI_JOURNEY_SUITE")"
+  if [[ -z "$args_body" ]]; then
+    J1_PARSER_FAILURE+=("no gradle_args() in $CI_JOURNEY_SUITE, so its command line cannot be checked for a class filter")
+    return
+  fi
+  if grep -Eq 'testInstrumentationRunnerArguments\.(class|package|annotation)=' <<<"$args_body"; then
+    J1_PARSER_FAILURE+=("$CI_JOURNEY_SUITE now filters which classes run, so 'every class in $task is wired' is no longer true")
+    return
+  fi
+  mod="${task#:}"; mod="${mod%:*}"
+  J1_JOURNEY_ROOT="${mod//://}/src/androidTest"
+  if [[ ! -d "$J1_JOURNEY_ROOT" ]]; then
+    J1_PARSER_FAILURE+=("$task names $J1_JOURNEY_ROOT, which does not exist")
+    return
+  fi
+
+  local f rel fqcn
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel="${f#"$J1_JOURNEY_ROOT"/}"
+    rel="${rel#java/}"; rel="${rel#kotlin/}"
+    rel="${rel%.kt}"; rel="${rel%.java}"
+    fqcn="${rel//\//.}"
     if [[ -z "${J1_WIRED_ANDROID_TEST_SEEN[$fqcn]:-}" ]]; then
       J1_WIRED_ANDROID_TEST_CLASSES+=("$fqcn")
       J1_WIRED_ANDROID_TEST_SEEN[$fqcn]=1
     fi
-  done < <(
-    sed -nE \
-      -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
-      -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
-      "$CI_JOURNEY_SUITE"
-  )
+  done < <(find "$J1_JOURNEY_ROOT" -type f \( -name '*.kt' -o -name '*.java' \) 2>/dev/null)
 
   if [[ "${#J1_WIRED_ANDROID_TEST_CLASSES[@]}" -eq 0 ]]; then
-    J1_PARSER_FAILURE+=("no androidTest classes parsed from $CI_JOURNEY_SUITE")
+    J1_PARSER_FAILURE+=("no androidTest classes found under $J1_JOURNEY_ROOT")
   fi
 }
 
@@ -1019,9 +1017,11 @@ scan_j1() {
       J1_NEW+=("$fqcn")
     fi
   done < <(
-    find "$ANDROID_TEST_ROOT" -type f \
-      \( -name '*E2eTest.kt' -o -name '*DockerTest.kt' \) \
-      2>/dev/null | sort
+    # EVERY scanned androidTest root (app2 + every shared/*/src/androidTest),
+    # not just $ANDROID_TEST_ROOT — see android_test_fqcn_for_file above.
+    printf '%s\n' "${ANDROID_TEST_FILES[@]:-}" \
+      | grep -E '(E2eTest|DockerTest)\.kt$' \
+      | sort || true
   )
 
   for fqcn in "${J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]}"; do
@@ -1029,7 +1029,7 @@ scan_j1() {
     if [[ ! -f "$file" ]]; then
       J1_STALE_BASELINE+=("$fqcn -> missing source file")
     elif in_list "$fqcn" "${J1_WIRED_ANDROID_TEST_CLASSES[@]}"; then
-      J1_STALE_BASELINE+=("$fqcn -> now wired into $CI_JOURNEY_SUITE")
+      J1_STALE_BASELINE+=("$fqcn -> now covered by the wholesale journey root")
     elif has_ci_journey_suite_justification "$file"; then
       J1_STALE_BASELINE+=("$fqcn -> now has local CI_JOURNEY_SUITE_JUSTIFIED")
     fi
@@ -1105,9 +1105,9 @@ timing1_has_code_smell() {
 # `runCurrent()`, so a reintroduced deadline pump here is a hard fail.
 timing1_uses_shared_pump_only_scope() {
   case "$1" in
-    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
-    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/ports/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/settings/*) return 0 ;;
+    app2/src/test/java/com/pocketshell/next/files/*) return 0 ;;
   esac
   return 1
 }
@@ -1800,7 +1800,7 @@ scan_seam1() {
 #   InvalidTestClassError: Method x() should be void
 # and every test in that class NEVER RUNS. The #1138 connected journey shipped
 # broken exactly this way (found in v0.4.20 release validation). It slips every
-# other gate: it COMPILES, passes check-ci-journey-harness.sh (shape only), and
+# other gate: it COMPILES, passes the journey-harness shape check, and
 # the batched emulator lane where it would surface is infra-down (#771).
 #
 # The bulletproof, non-fragile static rule is: an androidTest JUnit lifecycle
@@ -1894,7 +1894,7 @@ echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048 / #185
 echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
-echo " CI journey suite: $CI_JOURNEY_SUITE (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} androidTest class entr(y/ies) parsed)"
+echo " CI journey suite: $CI_JOURNEY_SUITE — runs ${J1_JOURNEY_ROOT:-?} wholesale (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} androidTest class(es) covered)"
 echo " Vetted state-injection seam registry: $VETTED_SEAM_REGISTRY (${#SEAM1_REGISTRY_NAMES[@]} seam(s) vetted)"
 echo "=============================================================="
 
@@ -1933,12 +1933,12 @@ print_list "FAKE1 — NEW connect-path test with an always-answering fake (no fa
 print_list "FAKE1 — KNOWN baseline (always-answering connect fake; #847/#849) [advisory]" "${FAKE1_KNOWN[@]:-}"
 print_list "AWAIT1 — NEW unbounded connect-path RPC await (no withTimeout) [advisory]" "${AWAIT1_FINDINGS[@]:-}"
 print_list "AWAIT1 — KNOWN baseline (unbounded connect RPC; #847) [advisory]" "${AWAIT1_KNOWN[@]:-}"
-print_list "J1 — WIRED androidTest E2e/Docker classes in ci-journey-suite.sh [advisory]" "${J1_WIRED[@]:-}"
+print_list "J1 — WIRED androidTest E2e/Docker classes (under the wholesale journey root) [advisory]" "${J1_WIRED[@]:-}"
 print_list "J1 — NEW androidTest E2e/Docker class missing ci-journey-suite coverage or local justification [HARD FAIL]" "${J1_NEW[@]:-}"
 print_list "J1 — KNOWN unwired androidTest E2e/Docker baseline (#848 follow-up) [advisory]" "${J1_KNOWN[@]:-}"
 print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisory]" "${J1_JUSTIFIED[@]:-}"
 print_list "J1 — STALE unwired baseline entry [HARD FAIL]" "${J1_STALE_BASELINE[@]:-}"
-print_list "J1 — PARSER failure reading ci-journey-suite.sh [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
+print_list "J1 — PARSER failure deriving the wholesale journey root [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
 print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, no bounded loop [HARD FAIL]" "${TIMING1_NEW_HARD[@]:-}"
 print_list "TIMING1 — hand-rolled wall-clock deadline pump in portfwd/prefs/fileviewer [HARD FAIL]" "${TIMING1_HAND_ROLLED_PUMPS[@]:-}"
 print_list "TIMING1 — REQUIRED scan root missing [HARD FAIL]" "${TIMING1_SCOPE_ERRORS[@]:-}"
@@ -1974,7 +1974,7 @@ echo "        never-returns/hang, timeout) so Loading must still resolve"
 echo "        (the v0.4.10 #847 gap; fixture work tracked in #849)."
 echo " AWAIT1 bound the warm-session RPC with withTimeout so a"
 echo "        non-returning exec cannot pin the cold-start coroutine (#847)."
-echo " J1     wire the androidTest journey into scripts/ci-journey-suite.sh"
+echo " J1     move the androidTest journey under the wholesale journey root"
 echo "        or add a local // CI_JOURNEY_SUITE_JUSTIFIED: reason."
 echo " TIMING1 Shape A: inject StandardTestDispatcher(testScheduler) for every"
 echo "        owned scope (SshLeaseAcquireBoundCharacterizationTest:191-219)."
@@ -2026,7 +2026,7 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857/#2026)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, hand-rolled portfwd/prefs wall-clock deadline pump, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or the audited drainMainLooperUntil helper per #1048/#2026). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857/#2026)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, hand-rolled portfwd/prefs wall-clock deadline pump, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must live under the wholesale journey root (app2/src/androidTest) or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or the audited drainMainLooperUntil helper per #1048/#2026). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
   echo
   echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
   exit 1

@@ -539,6 +539,19 @@ def _grok_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
     return []
 
 
+def _handoff_messages_from_row(engine: str, row: dict[str, Any]) -> List[HandoffMessage]:
+    """Dispatch one parsed JSONL row to its per-engine message extractor."""
+    if engine == "claude":
+        return _claude_messages_from_row(row)
+    if engine == "codex":
+        return _codex_messages_from_row(row)
+    if engine == "opencode":
+        return _opencode_messages_from_row(row)
+    if engine == "grok":
+        return _grok_messages_from_row(row)
+    return []
+
+
 def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[HandoffMessage]:
     """Extract user/assistant prose from raw agent JSONL rows."""
     messages: List[HandoffMessage] = []
@@ -546,14 +559,7 @@ def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[Hand
         row = _parse_json_line(line)
         if row is None:
             continue
-        if engine == "claude":
-            messages.extend(_claude_messages_from_row(row))
-        elif engine == "codex":
-            messages.extend(_codex_messages_from_row(row))
-        elif engine == "opencode":
-            messages.extend(_opencode_messages_from_row(row))
-        elif engine == "grok":
-            messages.extend(_grok_messages_from_row(row))
+        messages.extend(_handoff_messages_from_row(engine, row))
     return messages
 
 

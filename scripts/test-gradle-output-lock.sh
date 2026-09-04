@@ -874,7 +874,7 @@ a_crashed_holder_does_not_wedge_the_lock() {
 #     worktree RUNS.
 #
 #     This is the production shape, not a hypothetical: `run_bounded`
-#     (scripts/ci-journey-budget-functions.sh) escalates to `kill -KILL` on the
+#     (the deleted journey budget helper) escalates to `kill -KILL` on the
 #     --no-pool connected path, and this box's session harness hard-kills
 #     long-running background bash. SIGTERM is not the risk (the EXIT trap
 #     releases); SIGKILL is, because every descendant the wrapper started is

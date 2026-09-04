@@ -24,23 +24,30 @@ rootProject.name = "pocketshell"
 // and an explicit comment list is more discoverable than a conditional
 // `file().exists()` filter (no silent skips, no magic).
 //
-// Issue #2 will uncomment :app.
-// Issue #3 will uncomment the :shared:core-* modules and :shared:ui-kit.
-
-include(":app")
-
-include(":shared:core-ssh")
+// Rewrite in progress (docs/_scratch/simplification-implementation-plan-2026-09-02.md).
+// app/, core-ssh, core-tmux, core-connection, core-agents were deleted in the
+// "stable" branch hard cut. New modules (core-transport, core-hostapi, app2)
+// are uncommented here as their scaffolding tasks land.
+//
+// Task P-4 rewired core-portfwd's transport acquisition from the deleted
+// core-ssh onto core-transport's HostConnection, so it is back in the build.
 include(":shared:core-portfwd")
-include(":shared:core-tmux")
+include(":shared:core-transport")
+// Task K-1: the host-CLI JSON parser/client. Pure JVM (kotlin("jvm")), the
+// first non-Android module in the tree — it must stay free of the Android SDK
+// so it is testable on the host JVM with no Robolectric/emulator.
+include(":shared:core-hostapi")
 include(":shared:core-terminal")
-include(":shared:core-agents")
 include(":shared:core-usage")
 include(":shared:core-storage")
 include(":shared:core-voice")
 include(":shared:core-assistant")
-include(":shared:core-connection")
 include(":shared:ui-kit")
 
 // Test-only support module (issue #1048): the ONE audited shared de-flake
 // settle-pump, consumed via `testImplementation` only — never ships in the APK.
 include(":shared:test-support")
+
+// The rewrite's application module (task M-1), applicationId
+// `com.pocketshell.next` so it installs side by side with the old client.
+include(":app2")

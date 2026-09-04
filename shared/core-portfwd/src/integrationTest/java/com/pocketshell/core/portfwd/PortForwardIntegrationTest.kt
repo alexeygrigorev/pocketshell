@@ -1,15 +1,20 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.transport.AuthMaterial
+import com.pocketshell.core.transport.AuthSecretResolver
+import com.pocketshell.core.transport.ConnectResult
+import com.pocketshell.core.transport.HostConnection
+import com.pocketshell.core.transport.HostTarget
+import com.pocketshell.core.transport.RealHostConnectionFactory
+import com.pocketshell.core.transport.TrustDecision
+import com.pocketshell.core.transport.TrustStore
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -17,7 +22,6 @@ import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.images.builder.ImageFromDockerfile
 import java.io.BufferedReader
-import java.io.File
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -26,37 +30,59 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 /**
- * End-to-end integration tests for the `core-portfwd` module driven by
- * Testcontainers against the same `pocketshell-test:ssh` image core-ssh
- * uses. Verifies the cross-module wiring:
+ * End-to-end integration tests for `core-portfwd`, driven by Testcontainers
+ * against the same `pocketshell-test:ssh` image `core-transport` uses. Verifies
+ * the cross-module wiring after task P-4 moved the transport acquisition from
+ * the deleted `core-ssh` onto `core-transport`:
  *
- * - [PortScanner.scan] discovers sshd's listening port 22 inside the
- *   container (Alpine's busybox netstat path)
- * - [SshSession.openLocalPortForward] really creates a forward — we connect
- *   to the local end and read the SSH banner the container's sshd writes
- * - [AutoForwarder] picks the same port up on its own when manually toggled
+ * - [PortScanner.scan] discovers sshd's listening port 22 inside the container
+ *   (Alpine's busybox netstat path)
+ * - [HostConnection.openPortForward] really creates a forward — we connect to
+ *   the local end and read the SSH banner the container's sshd writes
+ * - a real (non-sshd) service started inside the container is discovered by the
+ *   scanner, forwarded, and answers an HTTP request made to `127.0.0.1:<local>`
+ *   on this machine: request bytes out, response body back
+ * - [AutoForwarder] opens the same port itself when manually toggled
+ * - [AutoForwarderSupervisor] re-establishes a manually-opted-in forward after a
+ *   real transport drop
  *
- * Skipped when Docker is unavailable, identical to `core-ssh`'s integration
- * test, so `./gradlew test` stays green on Docker-less dev boxes.
+ * Skipped when Docker is unavailable, identical to `core-transport`'s
+ * integration tests, so `./gradlew test` stays green on Docker-less dev boxes.
  */
 class PortForwardIntegrationTest {
 
     companion object {
         private const val CONTAINER_SSH_PORT = 22
+        private const val TEST_USER = "testuser"
 
         /**
-         * Factor applied to locally-tuned timeout budgets when the test
-         * runs on a CI runner (see [ciScaled]). 4x covers the observed
-         * worst-case real-SSH reconnect + local-accept-thread settle on
-         * the shared GitHub Actions host while the sibling `core-ssh`
-         * integration suite and the Testcontainers image build compete
-         * for the same 2 cores — the source of the #545 line-409 flake.
+         * Port the canned HTTP service listens on inside the container. Well
+         * above `skipPortsBelow` so the scanner treats it as a normal
+         * application port, and unremarkable enough not to collide with sshd.
+         */
+        private const val REMOTE_SERVICE_PORT = 8_099
+        private const val SERVICE_BODY = "pocketshell-forward-ok"
+
+        /**
+         * A minimal HTTP/1.0 response, written as a shell `printf` format string
+         * (hence the doubled backslashes: Kotlin unescapes once, the remote shell
+         * interprets `\r\n` itself).
+         */
+        private const val HTTP_RESPONSE =
+            "HTTP/1.0 200 OK\\r\\nContent-Length: 21\\r\\nConnection: close\\r\\n\\r\\n$SERVICE_BODY"
+
+        /**
+         * Factor applied to locally-tuned timeout budgets when the test runs on
+         * a CI runner (see [ciScaled]). 4x covers the observed worst-case real
+         * reconnect + local-accept-thread settle on the shared GitHub Actions
+         * host while the sibling `core-transport` integration suite and the
+         * Testcontainers image build compete for the same 2 cores.
          */
         private const val CI_TIMEOUT_MULTIPLIER = 4
 
         /**
          * Project root — we walk up looking for `tests/docker/Dockerfile.ssh`
-         * exactly like `core-ssh`'s integration test does.
+         * exactly like `core-transport`'s integration tests do.
          */
         private val projectRoot: Path by lazy { findProjectRoot() }
 
@@ -101,131 +127,194 @@ class PortForwardIntegrationTest {
         }
     }
 
-    private val sshPort: Int
-        get() = container!!.getMappedPort(CONTAINER_SSH_PORT)
+    /** Resolves every KeyRef to the disposable fixture keypair on disk. */
+    private val fixtureSecrets = object : AuthSecretResolver {
+        override suspend fun resolvePrivateKeyPem(keyId: Long): String =
+            projectRoot.resolve("tests/docker/test_key").toFile().readText()
 
-    private val privateKeyFile: File
-        get() = projectRoot.resolve("tests/docker/test_key").toFile()
-
-    private suspend fun connect(): SshSession {
-        return SshConnection.connect(
-            host = container!!.host,
-            port = sshPort,
-            user = "testuser",
-            key = SshKey.Path(privateKeyFile),
-            passphrase = null,
-            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
-            timeoutMs = 15_000,
-        ).getOrThrow()
+        override suspend fun resolvePassword(secretRef: String): CharArray =
+            fail("password auth is not part of the Docker fixture") as Nothing
     }
 
-    @Test
-    fun `PortScanner discovers sshd on port 22 inside the container`() = runTest {
-        connect().use { session ->
-            val ports = PortScanner.scan(session)
-            // Alpine busybox has no `ss`, so the netstat fallback wins. We
-            // accept either path (different distros will pick differently);
-            // what we care about is that port 22 lands somewhere.
-            assertTrue(
-                "expected to find sshd on port 22, got $ports",
-                ports.any { it.port == 22 },
-            )
+    /** TOFU store over a single volatile slot. */
+    private class InMemoryTrustStore : TrustStore {
+        @Volatile
+        private var stored: String? = null
+
+        override suspend fun evaluate(target: HostTarget, presentedSha256: String): TrustDecision {
+            val known = stored ?: return TrustDecision.Unknown(presentedSha256)
+            return if (known == presentedSha256) {
+                TrustDecision.Trusted
+            } else {
+                TrustDecision.Mismatch(storedSha256 = known, presentedSha256 = presentedSha256)
+            }
+        }
+
+        override suspend fun recordTrusted(target: HostTarget, sha256: String) {
+            stored = sha256
         }
     }
 
-    @Test
-    fun `openLocalPortForward forwards traffic to the container sshd and exposes the banner`() = runTest {
-        connect().use { session ->
+    private fun target(): HostTarget = HostTarget(
+        hostId = 1L,
+        hostname = container!!.host,
+        port = container!!.getMappedPort(CONTAINER_SSH_PORT),
+        username = TEST_USER,
+        auth = AuthMaterial.KeyRef(keyId = 1L),
+    )
+
+    /** Full TOFU journey: dial, accept the Unknown fingerprint, retry, expect Connected. */
+    private suspend fun connect(): HostConnection {
+        val factory = RealHostConnectionFactory(secrets = fixtureSecrets)
+        val trust = InMemoryTrustStore()
+        val target = target()
+        val outcome = when (val first = factory.connect(target, trust)) {
+            is ConnectResult.Connected -> first
+            is ConnectResult.NeedsTrust -> {
+                val decision = first.decision as? TrustDecision.Unknown
+                    ?: fail("first contact should be Unknown, got ${first.decision}") as Nothing
+                trust.recordTrusted(target, decision.fingerprintSha256)
+                first.retry()
+            }
+
+            is ConnectResult.Failed ->
+                fail("connect failed: ${first.message} (${first.cause})") as Nothing
+        }
+        return (outcome as? ConnectResult.Connected)?.connection
+            ?: fail("retry after recordTrusted should connect, got $outcome") as Nothing
+    }
+
+    @Test(timeout = 180_000)
+    fun portScannerDiscoversSshdOnPort22InsideTheContainer() = runBlocking {
+        val connection = connect()
+        try {
+            val ports = PortScanner.scan(connection)
+            // Alpine busybox has no `ss`, so the netstat fallback wins. We accept
+            // either path (different distros pick differently); what matters is
+            // that port 22 lands somewhere.
+            assertTrue("expected to find sshd on port 22, got $ports", ports.any { it.port == 22 })
+        } finally {
+            connection.close()
+        }
+    }
+
+    @Test(timeout = 180_000)
+    fun openPortForwardTunnelsTrafficToTheContainerSshd() = runBlocking {
+        val connection = connect()
+        try {
             val localPort = pickFreeLocalPort()
-            session.openLocalPortForward(
+            val forward = connection.openPortForward(
                 remoteHost = "127.0.0.1",
                 remotePort = 22,
                 localPort = localPort,
-            ).use { forward ->
+            )
+            try {
                 assertTrue(forward.isActive)
                 assertEquals(22, forward.remotePort)
                 assertEquals(localPort, forward.localPort)
 
-                // Talk to the local end of the forward and read the SSH
-                // banner. sshd always writes `SSH-2.0-...` first on a new
-                // connection; if we see it, the forward is wired through.
+                // Talk to the local end of the forward and read the SSH banner.
+                // sshd always writes `SSH-2.0-...` first on a new connection; if
+                // we see it, the forward is wired through.
                 Socket().use { client ->
                     client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
                     client.soTimeout = 5_000
-                    val reader = BufferedReader(InputStreamReader(client.getInputStream()))
-                    val banner = reader.readLine() ?: ""
+                    val banner = BufferedReader(InputStreamReader(client.getInputStream()))
+                        .readLine() ?: ""
                     assertTrue(
                         "expected SSH banner from forwarded connection, got `$banner`",
                         banner.startsWith("SSH-2.0-"),
                     )
-                    // Some bytes flowed remote→local; the forward's counter
-                    // should reflect that.
                     assertTrue(
-                        "bytesReceived should be > 0 after reading banner, got ${forward.bytesReceived}",
+                        "bytesReceived should be > 0 after reading the banner, " +
+                            "got ${forward.bytesReceived}",
                         forward.bytesReceived > 0,
                     )
                 }
+            } finally {
+                forward.close()
             }
+            assertFalse("close must deactivate the forward", forward.isActive)
+        } finally {
+            connection.close()
         }
     }
 
-    @Test
-    fun `concurrent close on the same forward is race-free and deterministic`() = runTest {
-        connect().use { session ->
-            val localPort = pickFreeLocalPort()
-            val forward = session.openLocalPortForward(
-                remoteHost = "127.0.0.1",
-                remotePort = 22,
-                localPort = localPort,
+    /**
+     * The end-to-end proof the feature actually exists: start a real service
+     * inside the container, discover it with the scanner, forward it, and fetch
+     * its response through `127.0.0.1:<localPort>` on THIS machine.
+     *
+     * The SSH-banner test above proves bytes come BACK through the tunnel; this
+     * one proves a request goes OUT and is answered — request bytes leave the
+     * device, a remote server that is not sshd handles them, and its body
+     * arrives. A forward that only carried the banner could still be a
+     * half-working tunnel; this cannot be.
+     */
+    @Test(timeout = 180_000)
+    fun aRealServiceOnTheHostIsDiscovered_forwarded_andAnswersThroughTheTunnel() = runBlocking {
+        val connection = connect()
+        try {
+            // busybox nc serves one canned HTTP response per accepted connection;
+            // the loop re-listens so the port stays up for the scan AND the fetch.
+            // Backgrounded + detached from stdio so it survives the exec channel.
+            val start = connection.exec(
+                "nohup sh -c 'while true; do printf \"$HTTP_RESPONSE\" | " +
+                    "nc -l -p $REMOTE_SERVICE_PORT >/dev/null 2>&1; done' >/dev/null 2>&1 & echo started",
             )
-            assertTrue(forward.isActive)
+            assertEquals("failed to start the remote service: ${start.stderr}", 0, start.exitCode)
+            assertTrue(
+                "the remote service never started listening on $REMOTE_SERVICE_PORT",
+                waitUntilTrue(ciScaled(10_000)) {
+                    runBlocking { PortScanner.scan(connection) }.any { it.port == REMOTE_SERVICE_PORT }
+                },
+            )
 
-            // Make sure at least one copy thread is alive by driving a
-            // real connection through the forward — that gets the
-            // bidirectional copiers running.
-            Socket().use { client ->
-                client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
-                client.soTimeout = 5_000
-                val reader = BufferedReader(InputStreamReader(client.getInputStream()))
-                reader.readLine() // banner — proves the copy threads are pumping
-            }
+            val localPort = pickFreeLocalPort()
+            val forward = connection.openPortForward("127.0.0.1", REMOTE_SERVICE_PORT, localPort)
+            try {
+                val body = Socket().use { client ->
+                    client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+                    client.soTimeout = 5_000
+                    client.getOutputStream().write("GET /probe HTTP/1.0\r\n\r\n".toByteArray())
+                    client.getOutputStream().flush()
+                    client.getInputStream().readBytes().toString(Charsets.UTF_8)
+                }
 
-            // Fire several concurrent close() calls. Only one wins the
-            // compareAndSet inside close(); the rest must be no-op and
-            // return without throwing. After all of them return, the
-            // forward must be fully inactive.
-            val closers = (1..8).map {
-                Thread { forward.close() }.apply { isDaemon = true; start() }
+                assertTrue(
+                    "expected the remote service's body through the forward, got `$body`",
+                    body.contains(SERVICE_BODY),
+                )
+                assertTrue(
+                    "the request bytes must have been forwarded out, got ${forward.bytesForwarded}",
+                    forward.bytesForwarded > 0,
+                )
+                assertTrue(
+                    "the response bytes must have come back, got ${forward.bytesReceived}",
+                    forward.bytesReceived > 0,
+                )
+            } finally {
+                forward.close()
             }
-            closers.forEach { it.join(2_000) }
-            for (c in closers) {
-                assertFalse("closer thread #${c.name} did not finish in 2 s", c.isAlive)
-            }
-            assertFalse("forward must be inactive after concurrent close()", forward.isActive)
+        } finally {
+            connection.close()
         }
     }
 
-    @Test
-    fun `close joins in-flight copy threads so no copy thread outlives the call`() = runTest {
-        connect().use { session ->
+    @Test(timeout = 180_000)
+    fun closeJoinsInFlightCopyThreadsSoNoneOutlivesTheCall() = runBlocking {
+        val connection = connect()
+        try {
             val localPort = pickFreeLocalPort()
-            val forward = session.openLocalPortForward(
-                remoteHost = "127.0.0.1",
-                remotePort = 22,
-                localPort = localPort,
-            )
+            val forward = connection.openPortForward("127.0.0.1", 22, localPort)
 
-            // Open a real connection so the bidirectional copy threads
-            // are alive (otherwise there's nothing to join).
+            // Open a real connection so the bidirectional copy threads are alive
+            // (otherwise there is nothing to join).
             val client = Socket()
             client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
             client.soTimeout = 5_000
-            val reader = BufferedReader(InputStreamReader(client.getInputStream()))
-            reader.readLine() // banner
+            BufferedReader(InputStreamReader(client.getInputStream())).readLine() // banner
 
-            // Snapshot the thread set this JVM knows about that are
-            // named after our forward, *before* close(). They should
-            // exist (we just exercised the copiers).
             val before = currentForwardThreads(localPort)
             assertTrue(
                 "expected at least one live copy thread for port $localPort, got $before",
@@ -235,99 +324,82 @@ class PortForwardIntegrationTest {
             forward.close()
             client.close()
 
-            // After close() returns we must see no live copy threads
-            // for this forward. close() joins them with a per-thread
-            // budget, so this should be deterministic — not a sleep
-            // race.
+            // Deterministic, not a sleep race: close() joins the copiers.
             val after = currentForwardThreads(localPort).filter { it.isAlive }
-            assertTrue(
-                "expected no live copy threads after close(), still alive: $after",
-                after.isEmpty(),
-            )
+            assertTrue("expected no live copy threads after close(), still alive: $after", after.isEmpty())
+        } finally {
+            connection.close()
         }
     }
 
-    /** Find live threads named after this forward (l2r/r2l copy threads). */
-    private fun currentForwardThreads(localPort: Int): List<Thread> {
-        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2 + 16)
-        val n = Thread.enumerate(all)
-        return (0 until n).mapNotNull { all[it] }
-            .filter { it.name.startsWith("ssh-portfwd-l2r-$localPort") || it.name.startsWith("ssh-portfwd-r2l-$localPort") }
-    }
-
-    @Test
-    fun `AutoForwarder discovers and forwards an in-window port via togglePort`() = runTest {
-        connect().use { session ->
-            // sshd-on-22 is below skipPortsBelow=1024, so the scanner sees it
-            // as AVAILABLE. We use togglePort to force the forward — that
-            // also exercises the openLocalPortForward path end-to-end
-            // through the AutoForwarder.
-            val config = AutoForwardConfig(
-                scanIntervalSec = 1,
-                maxAutoPort = 10_000,
-                skipPortsBelow = 1024,
-                // Use a high port range to avoid colliding with anything
-                // already bound on the test host.
-                localPortRange = randomHighPortRange(),
-            )
-            val forwarder = AutoForwarder(session, config)
-            val scope = kotlinx.coroutines.CoroutineScope(
-                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
-            )
-            try {
-                val loop = forwarder.start(scope)
-                // Let the first scan complete.
-                waitUntil(5_000) {
-                    forwarder.flowOfTunnels().value().any { it.remotePort == 22 }
-                }
-
-                forwarder.togglePort(22)
-
-                val tunnel = waitForForwardingTunnelWithBanner(
-                    timeoutMs = 5_000,
-                    remotePort = 22,
-                    tunnels = { forwarder.flowOfTunnels().value() },
-                )
-                assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
-                assertTrue(
-                    "manually-toggled port should be allocated from localPortRange, got ${tunnel.localPort}",
-                    tunnel.localPort in config.localPortRange,
-                )
-                loop.cancel()
-            } finally {
-                forwarder.stop()
-                scope.cancel()
-            }
-        }
-    }
-
-    @Test
-    fun `manual forward auto-restores after a real SSH drop and reconnect`() = runTest {
-        // Issue #439: a port the user manually opted into must be
-        // re-forwarded automatically after the transport drops and the
-        // supervisor reconnects. sshd-on-22 is below skipPortsBelow, so it
-        // is NEVER auto-forwarded — the only way it comes back is via the
-        // supervisor's desired-state set surviving the AutoForwarder swap.
+    @Test(timeout = 180_000)
+    fun autoForwarderForwardsAnOutOfWindowPortViaTogglePort() = runBlocking {
+        val connection = connect()
+        // sshd-on-22 is below skipPortsBelow=1024, so the scanner sees it as
+        // AVAILABLE. togglePort forces the forward, exercising the
+        // openPortForward path end to end through the AutoForwarder.
         val config = AutoForwardConfig(
             scanIntervalSec = 1,
             maxAutoPort = 10_000,
             skipPortsBelow = 1024,
             localPortRange = randomHighPortRange(),
         )
-        // Each factory call opens a fresh real SSH session to the same
-        // container — exactly what PortForwardPanelViewModel does on
-        // reconnect.
-        val liveSession = java.util.concurrent.atomic.AtomicReference<SshSession?>(null)
-        val sessionAttempts = java.util.concurrent.atomic.AtomicInteger(0)
+        val forwarder = AutoForwarder(connection, config)
+        val scope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+        )
+        try {
+            val loop = forwarder.start(scope)
+            waitUntil(ciScaled(10_000)) {
+                forwarder.flowOfTunnels().value().any { it.remotePort == 22 }
+            }
+
+            forwarder.togglePort(22)
+
+            val tunnel = waitForForwardingTunnelWithBanner(
+                timeoutMs = ciScaled(10_000),
+                remotePort = 22,
+                tunnels = { forwarder.flowOfTunnels().value() },
+            )
+            assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
+            assertTrue(
+                "a manually-toggled port should be allocated from localPortRange, " +
+                    "got ${tunnel.localPort}",
+                tunnel.localPort in config.localPortRange,
+            )
+            loop.cancel()
+        } finally {
+            forwarder.stop()
+            scope.cancel()
+            connection.close()
+        }
+    }
+
+    @Test(timeout = 240_000)
+    fun manualForwardAutoRestoresAfterARealDropAndReconnect() = runBlocking {
+        // A port the user manually opted into must be re-forwarded automatically
+        // after the transport drops and the supervisor reconnects. sshd-on-22 is
+        // below skipPortsBelow, so it is NEVER auto-forwarded — the only way it
+        // comes back is via the supervisor's desired-state set surviving the
+        // AutoForwarder swap.
+        val config = AutoForwardConfig(
+            scanIntervalSec = 1,
+            maxAutoPort = 10_000,
+            skipPortsBelow = 1024,
+            localPortRange = randomHighPortRange(),
+        )
+        // Each factory call dials a fresh real connection to the same container —
+        // the D21 forwarding carve-out: forwards own their transport.
+        val live = java.util.concurrent.atomic.AtomicReference<HostConnection?>(null)
+        val attempts = java.util.concurrent.atomic.AtomicInteger(0)
         val supervisor = AutoForwarderSupervisor(
-            sessionFactory = {
-                sessionAttempts.incrementAndGet()
-                connect().also { liveSession.set(it) }
+            connectionFactory = {
+                attempts.incrementAndGet()
+                connect().also { live.set(it) }
             },
             config = config,
             initialReconnectDelayMs = 500L,
             maxReconnectDelayMs = 500L,
-            sessionHealthPollMs = 200L,
         )
         val scope = kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
@@ -335,7 +407,6 @@ class PortForwardIntegrationTest {
         try {
             val job = supervisor.start(scope)
 
-            // Wait for the first connect + scan, then opt :22 in.
             waitUntil(ciScaled(15_000)) {
                 supervisor.flowOfConnectionState().value ==
                     AutoForwarderSupervisor.ConnectionState.Connected
@@ -347,27 +418,23 @@ class PortForwardIntegrationTest {
                 tunnels = { supervisor.flowOfTunnels().value() },
             )
 
-            // Simulate a transport drop by closing the live session out
-            // from under the supervisor. The session-health poll notices
-            // and the supervisor reconnects.
-            val firstSession = requireNotNull(liveSession.get())
-            firstSession.close()
+            // Simulate a transport drop by closing the live connection out from
+            // under the supervisor. Its TransportState watch notices and it
+            // re-dials.
+            val first = requireNotNull(live.get())
+            first.close()
 
-            // The supervisor must re-establish SSH and re-open :22 from its
-            // desired-state set — without the user touching anything.
             waitForForwardingTunnelWithBanner(
                 timeoutMs = ciScaled(20_000),
                 remotePort = 22,
                 tunnels = { supervisor.flowOfTunnels().value() },
                 readyToProbe = {
-                    val newSessionMounted =
-                        sessionAttempts.get() >= 2 && liveSession.get() !== firstSession
+                    val mounted = attempts.get() >= 2 && live.get() !== first
                     val reconnected = supervisor.flowOfConnectionState().value ==
                         AutoForwarderSupervisor.ConnectionState.Connected
-                    newSessionMounted && reconnected
+                    mounted && reconnected
                 },
             )
-            // No duplicate :22 rows after the reconnect cycle.
             assertEquals(
                 "exactly one :22 tunnel after auto-restore",
                 1,
@@ -381,26 +448,37 @@ class PortForwardIntegrationTest {
         }
     }
 
+    // ------------------------------------------------------------------ helpers
+
+    /** Find live threads named after this forward (l2r/r2l copy threads). */
+    private fun currentForwardThreads(localPort: Int): List<Thread> {
+        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2 + 16)
+        val n = Thread.enumerate(all)
+        return (0 until n).mapNotNull { all[it] }
+            .filter {
+                it.name.startsWith("portfwd-l2r-$localPort") ||
+                    it.name.startsWith("portfwd-r2l-$localPort")
+            }
+    }
+
     private fun waitForForwardingTunnelWithBanner(
         timeoutMs: Long,
         remotePort: Int,
         tunnels: () -> List<TunnelInfo>,
         readyToProbe: () -> Boolean = { true },
     ): TunnelInfo {
-        // The forward's local accept thread can lag a few hundred ms
-        // behind the FORWARDING status flip. Treat the tunnel as restored
-        // only after the same snapshot also yields the remote SSH banner,
-        // so this test cannot pass on a premature status row.
+        // The forward's local accept thread can lag a few hundred ms behind the
+        // FORWARDING status flip. Treat the tunnel as restored only once the same
+        // snapshot also yields the remote SSH banner, so this cannot pass on a
+        // premature status row.
         val deadline = System.currentTimeMillis() + timeoutMs
         var lastSnapshot = emptyList<TunnelInfo>()
         var lastBanner = ""
         while (System.currentTimeMillis() < deadline) {
             lastSnapshot = tunnels()
-            val tunnel = lastSnapshot
-                .singleOrNull {
-                    it.remotePort == remotePort &&
-                        it.status == TunnelInfo.Status.FORWARDING
-                }
+            val tunnel = lastSnapshot.singleOrNull {
+                it.remotePort == remotePort && it.status == TunnelInfo.Status.FORWARDING
+            }
             if (tunnel != null && readyToProbe()) {
                 val banner = readForwardedBannerOrEmpty(tunnel.localPort)
                 if (banner.startsWith("SSH-2.0-")) return tunnel
@@ -409,9 +487,8 @@ class PortForwardIntegrationTest {
             Thread.sleep(200)
         }
         error(
-            "timed out after ${timeoutMs}ms waiting for remote port $remotePort " +
-                "to be FORWARDING and banner-readable; lastSnapshot=$lastSnapshot, " +
-                "lastBanner=`$lastBanner`",
+            "timed out after ${timeoutMs}ms waiting for remote port $remotePort to be " +
+                "FORWARDING and banner-readable; lastSnapshot=$lastSnapshot, lastBanner=`$lastBanner`",
         )
     }
 
@@ -426,31 +503,16 @@ class PortForwardIntegrationTest {
 
     /**
      * Snapshot the current value of a [kotlinx.coroutines.flow.Flow] backed by a
-     * StateFlow. AutoForwarder.flowOfTunnels() returns a StateFlow up-cast to
-     * Flow, but we know its shape and just want the latest value without
-     * suspending.
+     * StateFlow. `flowOfTunnels()` returns a StateFlow up-cast to Flow; we know
+     * its shape and just want the latest value without suspending.
      */
-    private fun kotlinx.coroutines.flow.Flow<List<TunnelInfo>>.value(): List<TunnelInfo> {
-        return (this as kotlinx.coroutines.flow.StateFlow<List<TunnelInfo>>).value
-    }
+    private fun kotlinx.coroutines.flow.Flow<List<TunnelInfo>>.value(): List<TunnelInfo> =
+        (this as kotlinx.coroutines.flow.StateFlow<List<TunnelInfo>>).value
 
     /**
-     * Multiply a locally-tuned timeout budget by [CI_TIMEOUT_MULTIPLIER]
-     * when running on a CI runner. The deadlines in this real-SSH
-     * reconnect test are tight enough for a fast dev box but flake on the
-     * shared GitHub Actions runner (2 cores, swiftshader-less but sharing
-     * the host with the sibling `core-ssh` integration suite and the
-     * Testcontainers build), where the real SSH connect + scan + local
-     * accept-thread settle can take several times longer. The waits are
-     * already poll-until loops that early-exit the moment the condition
-     * holds, so a generous CI ceiling never slows a healthy local run.
-     *
-     * CI is detected from the runner environment (`CI` / `GITHUB_ACTIONS`),
-     * which GitHub Actions exports for every step. Unlike Android
-     * instrumentation tests (where the env belongs to the workflow VM, not
-     * the on-device test process), this is a forked-JVM Gradle test that
-     * inherits the runner's environment directly, so `System.getenv` is
-     * the right channel here.
+     * Multiply a locally-tuned timeout budget when running on a CI runner. The
+     * waits are poll-until loops that early-exit the moment the condition holds,
+     * so a generous CI ceiling never slows a healthy local run.
      */
     private fun ciScaled(localTimeoutMs: Long): Long =
         if (isRunningOnCi()) localTimeoutMs * CI_TIMEOUT_MULTIPLIER else localTimeoutMs
@@ -458,6 +520,16 @@ class PortForwardIntegrationTest {
     private fun isRunningOnCi(): Boolean =
         System.getenv("CI")?.toBoolean() == true ||
             System.getenv("GITHUB_ACTIONS")?.toBoolean() == true
+
+    /** [waitUntil] that reports rather than throws, for use inside an assertion. */
+    private fun waitUntilTrue(timeoutMs: Long, predicate: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (predicate()) return true
+            Thread.sleep(100)
+        }
+        return predicate()
+    }
 
     private fun waitUntil(timeoutMs: Long, predicate: () -> Boolean) {
         val start = System.currentTimeMillis()
@@ -469,16 +541,11 @@ class PortForwardIntegrationTest {
         }
     }
 
-    private fun pickFreeLocalPort(): Int {
-        // Bind 0 to get a free ephemeral port, then close — same trick the
-        // legacy ssh-auto-forward-android used. There's a (very narrow) race
-        // before the forwarder reclaims it, which is fine for tests.
-        return ServerSocket(0).use { it.localPort }
-    }
+    private fun pickFreeLocalPort(): Int = ServerSocket(0).use { it.localPort }
 
     private fun randomHighPortRange(): IntRange {
-        // Pick a 100-port window starting somewhere in the ephemeral range
-        // so concurrent test runs don't fight each other for the same range.
+        // Pick a 100-port window somewhere in the ephemeral range so concurrent
+        // test runs do not fight each other for the same range.
         val start = (40_000..50_000).random()
         return start..(start + 99)
     }

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Issue #672 (option 1 + 2): lock-wrapped ad-hoc connected-test runner.
 #
-# Ad-hoc `./gradlew :app:connectedDebugAndroidTest` runs fired by implementers
+# Ad-hoc `./gradlew :app2:connectedDebugAndroidTest` runs fired by implementers
 # and reviewers never sourced scripts/lib/avd-lock.sh, so parallel agents
 # SIGKILLed each other on the shared AVD. This thin wrapper:
 #
@@ -12,15 +12,22 @@ set -euo pipefail
 #      Distinct emulators retain independent locks and run concurrently.
 #   2. Threads the per-worktree applicationIdSuffix (option 2) into the gradle
 #      invocation so each worktree's DEBUG apk installs under a distinct
-#      applicationId (e.g. com.pocketshell.app.i672) and multiple test apps
+#      applicationId (e.g. com.pocketshell.next.i672) and multiple test apps
 #      coexist on ONE emulator without uninstalling each other.
+#
+# THE DEFAULT MODULE IS `app2` (issue #2481). The rewrite's hard cut deleted the
+# old `app` module, so `:app:connectedDebugAndroidTest` cannot even be
+# configured; the application module in this build is `:app2`, applicationId
+# `com.pocketshell.next` (app2/build.gradle.kts, which implements the same
+# `-PpocketshellAppIdSuffix` contract). `--module` still redirects at a
+# `shared:*` module. There is deliberately no "try app2, fall back to app"
+# branch (D22): the old module is gone, not deprecated.
 #
 # Usage:
 #   scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
-#     [--deny-notifications-before-instrumentation] \
 #     [--pool|--no-pool] [gradle args...]
 #   POCKETSHELL_APP_ID_SUFFIX=i672 scripts/connected-test.sh \
-#     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+#     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney
 #
 #   # Run a shared:* module's androidTest under the SAME lock + suffix machinery
 #   # (issue #798) — the #796 proof CodexOutputBurstImeMainThreadProofTest lives
@@ -29,12 +36,18 @@ set -euo pipefail
 #     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.terminal.core.CodexOutputBurstImeMainThreadProofTest
 #
 #   scripts/connected-test.sh --cleanup-suffixes   # uninstall leftover
-#                                                   # com.pocketshell.app.i* apps
+#                                                   # com.pocketshell.next.i* apps
+#
+# NOTE on class filters: CI's app2 journey lane runs the WHOLE instrumented set
+# unfiltered in ONE process on purpose (issue #2474 — cross-journey state
+# pollution is invisible otherwise), see scripts/ci-app2-journey-suite.sh. A
+# filter here is for ad-hoc local reproduction of ONE class; it is not the
+# shape a gate may use.
 #
 # Contention hardening (issue #776): even WITHOUT --pool, when more than one
 # emulator is online the wrapper now (P1) claims + pins a single FREE serial so
 # AGP can't fan the install onto every device (sibling SIGKILL), and (P0) sweeps
-# a leftover base com.pocketshell.app[.test] off the pinned device before
+# a leftover base com.pocketshell.next[.test] off the pinned device before
 # installing a suffixed APK so it can't hijack the suffixed MainActivity launch.
 # Journey/E2e/Docker classes auto-default to --pool when >1 emulator is online
 # (P2); pass --no-pool to opt out.
@@ -52,8 +65,8 @@ set -euo pipefail
 #                        :connectedDebugAndroidTest itself, so a shared:* module's
 #                        androidTest runs under the SAME AVD flock +
 #                        -PpocketshellAppIdSuffix coexistence as the app-module
-#                        default. Default empty -> :app:connectedDebugAndroidTest
-#                        (byte-for-byte the legacy behaviour). Pass the module path
+#                        default. Default empty -> :app2:connectedDebugAndroidTest
+#                        (the rewrite's application module). Pass the module path
 #                        WITHOUT a trailing :connectedDebugAndroidTest; that task
 #                        name is fixed because the suffix/lock plumbing assumes a
 #                        connectedDebugAndroidTest target.
@@ -89,20 +102,22 @@ set -euo pipefail
 #   --no-pool            Force the legacy single-lane path even for a journey/E2e
 #                        class that would otherwise auto-default to --pool (P2).
 #                        Still honours the P0/P1 base-sweep + serial-pin hygiene.
-#   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i*
+#   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.next.i*
 #                        (and .test) package from the target device, then exit.
 #                        Prevents install pile-up across worktrees.
-#   --deny-notifications-before-instrumentation
-#                        Narrow issue-#1741 fixture for
-#                        NoNotificationPromptOnAppOpenE2eTest. Installs the exact
-#                        base/suffixed target APK, externally revokes and verifies
-#                        POST_NOTIFICATIONS before the runner starts, validates a
-#                        non-vacuous named result, then externally restores and
-#                        verifies the grant after the runner exits.
+#
+# The `--deny-notifications-before-instrumentation` fixture (issue #1741) was
+# DELETED with its subject (D22, issue #2481). It existed to drive exactly one
+# class, `com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest`,
+# which the rewrite's hard cut removed along with the whole `app` module. app2
+# has no notifications journey and no POST_NOTIFICATIONS prompt-on-open surface
+# to prove anything about (grep: nothing under app2/src/androidTest touches
+# POST_NOTIFICATIONS), so the flag is removed rather than repointed at a
+# stand-in target.
 #
 # Everything after the recognised flags is forwarded verbatim to gradle's
 # connectedDebugAndroidTest task (e.g. instrumentation-runner-argument filters).
-# The task defaults to :app:connectedDebugAndroidTest and is overridable per
+# The task defaults to :app2:connectedDebugAndroidTest and is overridable per
 # --module (issue #798). The base package (no suffix) and release build are
 # never touched.
 #
@@ -133,7 +148,7 @@ source "$ROOT_DIR/scripts/lib/agents-pool.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 # Issue #2007: the AVD lock protects the EMULATOR; nothing protected the Gradle
 # OUTPUT TREE. A connected build and scripts/full-jvm-gate.py overlapping in one
-# worktree both rewrite this checkout's app/build graph, and `--rerun-tasks`
+# worktree both rewrite this checkout's app2/build graph, and `--rerun-tasks`
 # deletes intermediates the sibling is consuming (the #893 gate died on a
 # missing processDebugResources/R.jar). Sourcing this makes
 # pocketshell_release_all also release the output-tree lock on exit.
@@ -159,7 +174,6 @@ Lock-wrapped ad-hoc connected-test runner (issues #672/#724/#798).
 
 Usage:
   scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
-    [--deny-notifications-before-instrumentation] \
     [--pool|--no-pool] [gradle args...]
   scripts/connected-test.sh --cleanup-suffixes
   scripts/connected-test.sh --help
@@ -174,22 +188,18 @@ Flags:
                        :connectedDebugAndroidTest itself so a shared:* module's
                        androidTest runs under the SAME AVD flock +
                        -PpocketshellAppIdSuffix coexistence as the app default.
-                       Default empty -> :app:connectedDebugAndroidTest (unchanged).
+                       Default empty -> :app2:connectedDebugAndroidTest.
   --pool               Lane pool mode: claim an isolated (emulator, agents-port)
                        lane for parallel journey testing (issues #674 + #724).
   --no-pool            Force the legacy single-lane path.
-  --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i* package
+  --cleanup-suffixes   Uninstall every accumulated com.pocketshell.next.i* package
                        from the target device, then exit.
-  --deny-notifications-before-instrumentation
-                       Run the NoNotificationPromptOnAppOpenE2eTest permission
-                       fixture outside instrumentation: install, revoke+verify,
-                       run, validate its named result, then grant+verify.
   --help, -h           Print this help and exit.
 
 Examples:
-  # App-module proof (default task :app:connectedDebugAndroidTest):
+  # app2 journey (default task :app2:connectedDebugAndroidTest):
   scripts/connected-test.sh --suffix i672 \
-    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney
 
   # shared:* module proof (task :shared:core-terminal:connectedDebugAndroidTest):
   scripts/connected-test.sh --module shared:core-terminal --suffix i798 \
@@ -203,10 +213,9 @@ USAGE
 
 SUFFIX="${POCKETSHELL_APP_ID_SUFFIX:-}"
 # Gradle module whose connectedDebugAndroidTest task to run (issue #798). Empty
-# -> the :app default below. Set via --module.
+# -> the :app2 default below. Set via --module.
 MODULE=""
 CLEANUP_ONLY=0
-DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION=0
 USE_POOL=0
 # 0 = unset (auto-decide), 1 = caller forced --pool, -1 = caller forced --no-pool.
 POOL_FLAG=0
@@ -250,10 +259,6 @@ while [[ $# -gt 0 ]]; do
       CLEANUP_ONLY=1
       shift
       ;;
-    --deny-notifications-before-instrumentation)
-      DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION=1
-      shift
-      ;;
     --)
       shift
       GRADLE_ARGS+=("$@")
@@ -274,14 +279,14 @@ if [[ -n "$SUFFIX" ]]; then
 fi
 
 # Resolve the gradle connectedDebugAndroidTest task (issue #798). Default is the
-# app module; --module redirects to a shared:* (or any) module's task while the
+# app2 module; --module redirects to a shared:* (or any) module's task while the
 # rest of the wrapper — the AVD flock, the serial pin, and -PpocketshellAppIdSuffix
 # — applies unchanged. We OWN the :connectedDebugAndroidTest task name: the suffix
 # + lock plumbing assumes that exact task, so the caller passes only the module
 # path and we append the task. Normalise both `shared:core-terminal` and
 # `:shared:core-terminal`, and tolerate a redundant trailing
 # `:connectedDebugAndroidTest`.
-CONNECTED_TASK=":app:connectedDebugAndroidTest"
+CONNECTED_TASK=":app2:connectedDebugAndroidTest"
 if [[ -n "$MODULE" ]]; then
   module_path="$MODULE"
   # Strip a leading colon so we can re-add exactly one.
@@ -303,38 +308,6 @@ if [[ -n "$MODULE" ]]; then
     exit 2
   fi
   CONNECTED_TASK=":${module_path}:connectedDebugAndroidTest"
-fi
-
-NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
-NOTIFICATION_PERMISSION_TEST_METHOD="appOpenDoesNotPopNotificationPermissionDialog"
-NOTIFICATION_PERMISSION="android.permission.POST_NOTIFICATIONS"
-if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
-  if [[ "$CLEANUP_ONLY" == "1" ]]; then
-    printf 'FAIL: notification-permission fixture cannot be combined with --cleanup-suffixes\n' >&2
-    exit 2
-  fi
-  if [[ "$CONNECTED_TASK" != ":app:connectedDebugAndroidTest" ]]; then
-    printf 'FAIL: notification-permission fixture is valid only for the app module\n' >&2
-    exit 2
-  fi
-  notification_class_selected=0
-  for arg in "${GRADLE_ARGS[@]}"; do
-    case "$arg" in
-      "-Pandroid.testInstrumentationRunnerArguments.class=$NOTIFICATION_PERMISSION_TEST_CLASS")
-        notification_class_selected=1
-        ;;
-      -Pandroid.testInstrumentationRunnerArguments.numShards=*\
-      |-Pandroid.testInstrumentationRunnerArguments.shardIndex=*)
-        printf 'FAIL: notification-permission fixture must be a dedicated unsharded invocation\n' >&2
-        exit 2
-        ;;
-    esac
-  done
-  if [[ "$notification_class_selected" != "1" ]]; then
-    printf 'FAIL: notification-permission fixture requires dedicated class=%s\n' \
-      "$NOTIFICATION_PERMISSION_TEST_CLASS" >&2
-    exit 2
-  fi
 fi
 
 # Issue #1989: free-disk preflight, run BEFORE anything expensive or shared.
@@ -377,21 +350,41 @@ online_emulator_count() {
 # mode ONLY when ALL of:
 #   * the caller did not force it either way (POOL_FLAG == 0; --pool / --no-pool
 #     are always honoured verbatim),
-#   * the gradle args target a journey-style class (*E2eTest / *JourneyE2eTest /
-#     *DockerTest / *ProofBase-derived suites named in the runner-args class
-#     filter), AND
+#   * the RUN DESCRIPTOR names a journey-style target — either a journey class
+#     in the runner-args filter (*E2eTest / *DockerTest / *Journey) or the app2
+#     whole-suite task itself, AND
 #   * more than one emulator is online (so single-AVD / CI is untouched).
 # An explicit ANDROID_SERIAL is left as-is: a caller pinning a device knows what
 # it wants, and the pool claim already honours a preset serial.
+#
+# Issue #2481: the descriptor is `$CONNECTED_TASK` PLUS the forwarded gradle
+# args, not the args alone. With `:app2:connectedDebugAndroidTest` now the
+# DEFAULT task, the whole journey set runs with no class filter at all
+# (issue #2474), so an args-only test would classify the most journey-heavy
+# invocation there is as "not a journey".
+# Issue #2481: "the WHOLE app2 instrumented set is about to run" — i.e. app2's
+# connected task with NO `-Pandroid.testInstrumentationRunnerArguments.class=`
+# filter. That, and only that, is the invocation that certainly executes every
+# journey (issue #2474's deliberate shape). A FILTERED app2 run is an ad-hoc
+# single-class reproduction and must keep the cheap single-lane path: treating
+# it as a whole-suite run would put every ad-hoc connected test behind the
+# machine-wide toxiproxy serialization lock, which is an unbounded wait.
+run_descriptor="$CONNECTED_TASK ${GRADLE_ARGS[*]:-}"
+APP2_WHOLE_SUITE_RUN=0
+if [[ "$CONNECTED_TASK" == ":app2:connectedDebugAndroidTest" \
+      && "$run_descriptor" != *testInstrumentationRunnerArguments.class=* ]]; then
+  APP2_WHOLE_SUITE_RUN=1
+fi
+
 if [[ "$POOL_FLAG" == "0" && "$CLEANUP_ONLY" != "1" ]]; then
-  gradle_args_str="${GRADLE_ARGS[*]:-}"
-  if [[ "$gradle_args_str" == *E2eTest* \
-        || "$gradle_args_str" == *JourneyE2eTest* \
-        || "$gradle_args_str" == *DockerTest* \
-        || "$gradle_args_str" == *Journey* ]]; then
+  if [[ "$run_descriptor" == *E2eTest* \
+        || "$run_descriptor" == *JourneyE2eTest* \
+        || "$run_descriptor" == *DockerTest* \
+        || "$run_descriptor" == *Journey* \
+        || "$APP2_WHOLE_SUITE_RUN" == "1" ]]; then
     if (( "$(online_emulator_count)" > 1 )); then
       USE_POOL=1
-      printf 'Auto-pool (issue #776): journey/E2e class + %s emulators online -> --pool. Pass --no-pool to opt out.\n' \
+      printf 'Auto-pool (issue #776): journey/E2e target + %s emulators online -> --pool. Pass --no-pool to opt out.\n' \
         "$(online_emulator_count)" >&2
     fi
   fi
@@ -400,22 +393,50 @@ fi
 # P3 (issue #776) + #2128 — network-fault classes used to share ONE global
 # toxiproxy (hardcoded 10.0.2.2:2228 / API 8474). --pool now isolates that:
 # a pool lane brings up its own network-fault-proxy under the claimed
-# agents compose project and NetworkFaultPorts derives the host ports from
+# agents compose project and ToxiproxyControl derives the host ports from
 # the agents port. The machine-wide toxiproxy lock still serializes
 # fault-class runs so a --no-pool sibling on the shared 2228 singleton
-# cannot race another --no-pool (or a pool fallback to 2222). Detection
-# matches the known NetworkFaultProofBase-derived class names.
+# cannot race another --no-pool (or a pool fallback to 2222).
+#
+# DETECTION CHANGED WITH THE REWRITE. It used to enumerate the old app
+# module's NetworkFaultProofBase-derived class names, one glob per class —
+# every one of those classes was removed by the hard cut, so the whole `case`
+# had become dead and a fault-class run brought up no proxy at all. Under
+# issue #2474 app2's instrumented suite runs UNFILTERED in one process
+# (`:app2:connectedDebugAndroidTest`, no `-Pandroid.testInstrumentationRunner
+# Arguments.class=`), and that suite always contains the Toxiproxy-driven
+# reconnect journey — so the whole-suite task IS a fault-class run and the
+# task name is the honest thing to match. The per-class globs are NOT kept
+# alongside it (D22): a filtered app2 run is not a supported shape, and a
+# glob list that can never match is exactly what silently broke here.
+# scripts/test-network-fault-pool-isolation.sh pins this both ways.
+#
+# Issue #2481: classify the TASK as well as the forwarded args, because
+# `:app2:connectedDebugAndroidTest` is now the wrapper's DEFAULT task rather
+# than something a caller spells out — matching only the forwarded args left a
+# bare `scripts/connected-test.sh`, the exact invocation that runs the Toxiproxy
+# reconnect journey, bringing up no per-lane proxy. The task only counts when
+# the run is UNFILTERED ($APP2_WHOLE_SUITE_RUN): the toxiproxy lock is an
+# unbounded machine-wide wait, so flagging every ad-hoc single-class run would
+# serialise unrelated lanes against each other for no proxy benefit.
 NETWORK_FAULT_RUN=0
 gradle_args_str="${GRADLE_ARGS[*]:-}"
 if [[ "$CLEANUP_ONLY" != "1" ]]; then
+  # The task-based half is gated on POOL MODE as well as on being unfiltered.
+  # Pool is where the classification has a job to do: it is the branch that
+  # brings up this lane's OWN network-fault proxy. A --no-pool whole-suite run
+  # would only gain the machine-wide toxiproxy serialization lock, which is an
+  # UNBOUNDED wait acquired before the serial claim — so flagging it would
+  # silently defeat the wrapper's POCKETSHELL_POOL_WAIT_SECONDS=0 fail-fast
+  # contract (pinned by tests/scripts/connected-test-serial-ownership-test.sh's
+  # busy_timeout_fails_before_mutation). A caller that deliberately wants the
+  # shared-singleton serialization on a single lane still gets it through the
+  # explicit fault-class args below.
+  if [[ "$APP2_WHOLE_SUITE_RUN" == "1" && "$USE_POOL" == "1" ]]; then
+    NETWORK_FAULT_RUN=1
+  fi
   case "$gradle_args_str" in
-    *NetworkFault*|*NetworkLatencyModel*|*PacketLoss*|*DisconnectBlackhole*\
-      |*DisconnectFlap*|*KeepAliveDeadPeer*|*RideThrough*|*WithinGrace*\
-      |*StaleLeaseSwitchRecovery*|*CodexRedrawOverflowReconnect*\
-      |*OutboundAttachmentOffsetResumeJourneyE2eTest*\
-      |*SilentMidSessionDrop*|*ColdDialUnderBandwidth*|*RealisticWifiStability*\
-      |*NatIdleMapping*|*MobileLatencyStorm*|*PushResumeDeadSocket*\
-      |*ConversationOpenLatency*|*AttachNavigationMultiFolderE2eTest*)
+    *:app2:connectedDebugAndroidTest*|*ToxiproxyControl*|*ReconnectAfterDrop*)
       NETWORK_FAULT_RUN=1
       ;;
   esac
@@ -434,7 +455,7 @@ fi
 # resource, and long before any gradle task runs. The per-serial AVD lock is a
 # different resource and stays a separate concern: two lanes on DISTINCT
 # emulators legitimately hold distinct AVD locks, yet they still write the one
-# app/build graph of this worktree, so they must queue here. A `--pool` lane
+# app2/build graph of this worktree, so they must queue here. A `--pool` lane
 # relocates its build dir to build/lane-<suffix> (issue #724) and therefore
 # passes that lane token, keeping genuinely disjoint output trees concurrent.
 #
@@ -852,182 +873,6 @@ pocketshell_run_guarded_mutation() {
   return "$child_rc"
 }
 
-notification_permission_capture() {
-  local output_file="$1"
-  shift
-  local adb_target=("$ADB")
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    adb_target+=(-s "$ANDROID_SERIAL")
-  fi
-  : > "$output_file"
-  pocketshell_run_guarded_mutation "${adb_target[@]}" "$@" > "$output_file"
-}
-
-notification_permission_state() {
-  local target_package="$1"
-  local output_file="$2"
-  local line
-  notification_permission_capture \
-    "$output_file" \
-    shell dumpsys package "$target_package"
-  line="$(grep -F "$NOTIFICATION_PERMISSION: granted=" "$output_file" | head -1 || true)"
-  case "$line" in
-    *"granted=true"*)
-      printf 'granted\n'
-      ;;
-    *"granted=false"*)
-      printf 'denied\n'
-      ;;
-    *)
-      printf 'unknown\n'
-      ;;
-  esac
-}
-
-notification_permission_prepare() {
-  local target_package="$1"
-  local scratch_dir="$2"
-  local sdk_file="$scratch_dir/sdk"
-  local package_file="$scratch_dir/package"
-  local state_file="$scratch_dir/state"
-  local adb_target=("$ADB")
-  local sdk state
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    adb_target+=(-s "$ANDROID_SERIAL")
-  fi
-
-  notification_permission_capture "$sdk_file" shell getprop ro.build.version.sdk
-  sdk="$(tr -d '\r[:space:]' < "$sdk_file")"
-  if [[ ! "$sdk" =~ ^[0-9]+$ || "$sdk" -lt 33 ]]; then
-    printf 'FAIL: POST_NOTIFICATIONS fixture requires Android API 33+ (got: %s)\n' \
-      "${sdk:-empty}" >&2
-    return 1
-  fi
-
-  notification_permission_capture "$package_file" shell pm path "$target_package"
-  if ! grep -q '^package:' "$package_file"; then
-    printf 'FAIL: target package %s is not installed before permission revoke\n' \
-      "$target_package" >&2
-    return 1
-  fi
-
-  if ! pocketshell_run_guarded_mutation \
-      "${adb_target[@]}" shell pm revoke \
-      "$target_package" "$NOTIFICATION_PERMISSION"; then
-    printf 'FAIL: external pre-instrumentation revoke failed for %s\n' \
-      "$target_package" >&2
-    return 1
-  fi
-  state="$(notification_permission_state "$target_package" "$state_file")"
-  if [[ "$state" != "denied" ]]; then
-    printf 'FAIL: %s must be denied before instrumentation (state=%s)\n' \
-      "$NOTIFICATION_PERMISSION" "${state:-empty}" >&2
-    return 1
-  fi
-  printf 'Notification permission fixture prepared externally: package=%s state=denied api=%s\n' \
-    "$target_package" "$sdk"
-}
-
-notification_permission_restore() {
-  local target_package="$1"
-  local scratch_dir="$2"
-  local target_apk="$3"
-  local package_file="$scratch_dir/restore-package"
-  local state_file="$scratch_dir/restore-state"
-  local adb_target=("$ADB")
-  local state
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    adb_target+=(-s "$ANDROID_SERIAL")
-  fi
-
-  notification_permission_capture "$package_file" shell pm path "$target_package"
-  if ! grep -q '^package:' "$package_file"; then
-    if [[ ! -s "$target_apk" ]]; then
-      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: target APK missing for restore: %s\n' \
-        "$target_apk" >&2
-      return 1
-    fi
-    if ! pocketshell_run_guarded_mutation \
-        "${adb_target[@]}" install -r "$target_apk"; then
-      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: reinstall failed for %s\n' \
-        "$target_package" >&2
-      return 1
-    fi
-    notification_permission_capture "$package_file" shell pm path "$target_package"
-    if ! grep -q '^package:' "$package_file"; then
-      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: %s absent after reinstall\n' \
-        "$target_package" >&2
-      return 1
-    fi
-  fi
-
-  if ! pocketshell_run_guarded_mutation \
-      "${adb_target[@]}" shell pm grant \
-      "$target_package" "$NOTIFICATION_PERMISSION"; then
-    printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: external grant failed for %s\n' \
-      "$target_package" >&2
-    return 1
-  fi
-  state="$(notification_permission_state "$target_package" "$state_file")"
-  if [[ "$state" != "granted" ]]; then
-    printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: %s was not restored for %s (state=%s)\n' \
-      "$NOTIFICATION_PERMISSION" "$target_package" "${state:-empty}" >&2
-    return 1
-  fi
-  printf 'Notification permission fixture restored externally: package=%s state=granted\n' \
-    "$target_package"
-}
-
-notification_permission_validate_report() {
-  local report_dir="$1"
-  local tests=0 skipped=0 failures=0 errors=0
-  local xml line value
-  local named_method=0 xml_count=0
-
-  while IFS= read -r -d '' xml; do
-    xml_count=$((xml_count + 1))
-    line="$(grep -m1 '<testsuite ' "$xml" 2>/dev/null || true)"
-    [[ -n "$line" ]] || continue
-    value="$(sed -n 's/.* tests="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
-    tests=$((tests + ${value:-0}))
-    value="$(sed -n 's/.* skipped="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
-    skipped=$((skipped + ${value:-0}))
-    value="$(sed -n 's/.* failures="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
-    failures=$((failures + ${value:-0}))
-    value="$(sed -n 's/.* errors="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
-    errors=$((errors + ${value:-0}))
-    if grep -q "classname=\"$NOTIFICATION_PERMISSION_TEST_CLASS\"" "$xml" \
-        && grep -q "name=\"$NOTIFICATION_PERMISSION_TEST_METHOD\"" "$xml"; then
-      named_method=1
-    fi
-  done < <(find "$report_dir" -type f -name '*.xml' -print0 2>/dev/null)
-
-  local executed=$((tests - skipped))
-  if (( xml_count == 0 || executed != 1 )); then
-    printf 'FAIL: notification-permission invocation must execute exactly one test (xml=%s tests=%s skipped=%s executed=%s)\n' \
-      "$xml_count" "$tests" "$skipped" "$executed" >&2
-    return 1
-  fi
-  if (( skipped != 0 )); then
-    printf 'FAIL: notification-permission invocation skipped %s test(s); no-self-skip policy requires zero\n' \
-      "$skipped" >&2
-    return 1
-  fi
-  if (( failures != 0 || errors != 0 )); then
-    printf 'FAIL: notification-permission invocation report is red (failures=%s errors=%s)\n' \
-      "$failures" "$errors" >&2
-    return 1
-  fi
-  if [[ "$named_method" != "1" ]]; then
-    printf 'FAIL: notification-permission report did not contain %s#%s\n' \
-      "$NOTIFICATION_PERMISSION_TEST_CLASS" "$NOTIFICATION_PERMISSION_TEST_METHOD" >&2
-    return 1
-  fi
-  printf 'NOTIFICATION_PERMISSION_TEST_RESULT executed=%s skipped=%s failures=%s errors=%s class=%s method=%s\n' \
-    "$executed" "$skipped" "$failures" "$errors" \
-    "$NOTIFICATION_PERMISSION_TEST_CLASS" "$NOTIFICATION_PERMISSION_TEST_METHOD"
-}
-
 # Issue #1662 / G5: Gradle's connected-test task can return zero after the
 # instrumentation runner has written a red authoritative JUnit XML. Never let
 # that wrapper result launder a product assertion failure into a green journey.
@@ -1086,7 +931,7 @@ connected_test_validate_report() {
 
 cleanup_suffixed_packages() {
   # Optional first arg:
-  #   --include-base   ALSO uninstall the base com.pocketshell.app[.test] and
+  #   --include-base   ALSO uninstall the base com.pocketshell.next[.test] and
   #                    every suffixed sibling that is NOT this run's $SUFFIX.
   #                    Used as a pre-run hygiene sweep on a suffixed lane (P0,
   #                    issue #776) so a leftover base install can't hijack the
@@ -1117,10 +962,10 @@ cleanup_suffixed_packages() {
   fi
   local pkg removed=0 cleanup_rc=0
   # The default (no --include-base) match: the per-worktree convention
-  # com.pocketshell.app.i<token> (and its .test sibling) ONLY. This deliberately
+  # com.pocketshell.next.i<token> (and its .test sibling) ONLY. This deliberately
   # excludes:
-  #   * the base package        com.pocketshell.app
-  #   * the base test package   com.pocketshell.app.test
+  #   * the base package        com.pocketshell.next
+  #   * the base test package   com.pocketshell.next.test
   # so the sweep can never nuke a normal (non-suffixed) install's test app.
   # Worktree suffixes follow the `i<N>` convention (e.g. i672), so the token
   # must start with `i`.
@@ -1131,15 +976,15 @@ cleanup_suffixed_packages() {
   # both $SUFFIX is non-empty AND $ANDROID_SERIAL is pinned (see the pre-run
   # call site), so it can only touch the one targeted emulator and never a bare
   # non-suffixed manual install on some other device.
-  local match_re='^com\.pocketshell\.app\.i[A-Za-z0-9._]*(\.test)?$'
+  local match_re='^com\.pocketshell\.next\.i[A-Za-z0-9._]*(\.test)?$'
   if [[ "$include_base" == "1" ]]; then
-    match_re='^com\.pocketshell\.app(\.i[A-Za-z0-9._]*)?(\.test)?$'
+    match_re='^com\.pocketshell\.next(\.i[A-Za-z0-9._]*)?(\.test)?$'
   fi
   # Packages belonging to THIS run's suffix, which --include-base must skip.
   local self_pkg="" self_test_pkg=""
   if [[ -n "$SUFFIX" ]]; then
-    self_pkg="com.pocketshell.app.$SUFFIX"
-    self_test_pkg="com.pocketshell.app.$SUFFIX.test"
+    self_pkg="com.pocketshell.next.$SUFFIX"
+    self_test_pkg="com.pocketshell.next.$SUFFIX.test"
   fi
   while IFS= read -r pkg; do
     pkg="${pkg#package:}"
@@ -1194,7 +1039,7 @@ fi
 
 # P0 (issue #776) — pre-run hygiene sweep on a SUFFIXED, SERIAL-PINNED lane.
 # Before installing this lane's suffixed APK, uninstall the base
-# com.pocketshell.app[.test] AND any stale suffixed sibling that is NOT this
+# com.pocketshell.next[.test] AND any stale suffixed sibling that is NOT this
 # run's $SUFFIX, on the pinned emulator. A leftover base install shares the
 # IDENTICAL MAIN/LAUNCHER + VIEW pocketshell://import intent filters with every
 # suffixed package, so with two installed a launcher/VIEW launch is ambiguous
@@ -1214,9 +1059,9 @@ fi
 GRADLE_SUFFIX_ARGS=()
 if [[ -n "$SUFFIX" ]]; then
   GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$SUFFIX")
-  printf 'Running %s as com.pocketshell.app.%s\n' "$CONNECTED_TASK" "$SUFFIX" >&2
+  printf 'Running %s as com.pocketshell.next.%s\n' "$CONNECTED_TASK" "$SUFFIX" >&2
 else
-  printf 'Running %s as com.pocketshell.app (no suffix)\n' "$CONNECTED_TASK" >&2
+  printf 'Running %s as com.pocketshell.next (no suffix)\n' "$CONNECTED_TASK" >&2
 fi
 
 # Issue #724: thread the claimed (or caller-preset) agents fixture port into the
@@ -1247,13 +1092,13 @@ fi
 
 # Per-lane build-directory isolation (issue #724). Two `--pool` lanes run in the
 # SAME git checkout, so a plain concurrent build has BOTH writing the one
-# `app/build/intermediates/...` tree and racing on directory deletion (one lane
+# `app2/build/intermediates/...` tree and racing on directory deletion (one lane
 # dies with "Unable to delete directory ...transformDebugAndroidTestClassesWithAsm").
 # applicationIdSuffix isolates the INSTALLED app identity but NOT the on-disk
 # build outputs. So in pool mode we relocate every project's build directory to a
 # per-suffix path via a generated init script — keeping the lanes' build outputs
 # fully disjoint. This is gated on --pool: the single-lane / CI path is untouched
-# and keeps the default `app/build`.
+# and keeps the default `app2/build`.
 GRADLE_INIT_ARGS=()
 LANE_INIT_SCRIPT=""
 if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
@@ -1261,7 +1106,7 @@ if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
   # Relocate each project's build dir to build/lane-<suffix> under the project
   # dir, so concurrent lanes never share intermediates. Nesting UNDER the
   # existing per-project `build/` keeps the lane outputs inside the already
-  # gitignored build tree (/build, /app/build, /shared/*/build, */build/), so a
+  # gitignored build tree (/build, /app2/build, /shared/*/build, */build/), so a
   # lane run never pollutes `git status` or risks being committed. allprojects
   # covers the root + every module the connected build touches.
   printf '%s\n' \
@@ -1279,15 +1124,6 @@ if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
   }
   trap 'pocketshell_cleanup_lane_init; pocketshell_release_all' EXIT
 fi
-
-NOTIFICATION_PERMISSION_RESTORE_NEEDED=0
-NOTIFICATION_PERMISSION_TARGET_PACKAGE="com.pocketshell.app${SUFFIX:+.$SUFFIX}"
-NOTIFICATION_PERMISSION_SCRATCH=""
-NOTIFICATION_PERMISSION_BUILD_DIR="$ROOT_DIR/app/build"
-if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
-  NOTIFICATION_PERMISSION_BUILD_DIR="$ROOT_DIR/app/build/lane-$SUFFIX"
-fi
-NOTIFICATION_PERMISSION_TARGET_APK="$NOTIFICATION_PERMISSION_BUILD_DIR/outputs/apk/debug/app-debug.apk"
 
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2317
@@ -1334,23 +1170,13 @@ pocketshell_connected_test_exit_cleanup() {
       | sort -z \
       | xargs -0 -r sha256sum \
       > "$CONNECTED_EVIDENCE_DIR/SHA256SUMS" 2>/dev/null || true
-    evidence_output_root="$ROOT_DIR/app/build${SUFFIX:+/lane-$SUFFIX}/outputs/connected_android_test_additional_output"
+    evidence_output_root="$ROOT_DIR/app2/build${SUFFIX:+/lane-$SUFFIX}/outputs/connected_android_test_additional_output"
     while IFS= read -r evidence_target; do
       cp -a "$CONNECTED_EVIDENCE_DIR" "$evidence_target/fixture-run-bundle"
     done < <(find "$evidence_output_root" -type d -name issue1526-exactly-once 2>/dev/null || true)
   fi
-  if [[ "$NOTIFICATION_PERMISSION_RESTORE_NEEDED" == "1" \
-        && -n "$NOTIFICATION_PERMISSION_SCRATCH" ]]; then
-    notification_permission_restore \
-      "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
-      "$NOTIFICATION_PERMISSION_SCRATCH" \
-      "$NOTIFICATION_PERMISSION_TARGET_APK" || true
-  fi
   if declare -F pocketshell_cleanup_lane_init >/dev/null 2>&1; then
     pocketshell_cleanup_lane_init
-  fi
-  if [[ -n "$NOTIFICATION_PERMISSION_SCRATCH" ]]; then
-    pocketshell_run_without_avd_lock_fd rm -rf "$NOTIFICATION_PERMISSION_SCRATCH"
   fi
   pocketshell_release_all
   return "$original_rc"
@@ -1426,42 +1252,7 @@ trap 'forward_signal TERM' TERM
 # The wrapper retains the serial flock while scope-run/Gradle has its inherited
 # copy closed. Helper death is monitored until the mutation process exits.
 rc=0
-cleanup_rc=0
 connected_test_report_rc=0
-notification_report_rc=0
-notification_report_dir=""
-if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
-  NOTIFICATION_PERMISSION_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-notification-permission.XXXXXX")"
-
-  # Install the exact base/suffixed target before changing its runtime grant.
-  # No instrumentation process exists during this install/revoke/verify stage.
-  set +e
-  pocketshell_run_guarded_mutation pocketshell_scope_run "${SCOPE_UNIT}-permission-install" \
-    ./gradlew --no-daemon :app:installDebug \
-    "${GRADLE_INIT_ARGS[@]}" \
-    "${GRADLE_SUFFIX_ARGS[@]}" \
-    "${GRADLE_ARGS[@]}"
-  rc=$?
-  set -e
-  if (( rc == 0 )); then
-    NOTIFICATION_PERMISSION_RESTORE_NEEDED=1
-    set +e
-    notification_permission_prepare \
-      "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
-      "$NOTIFICATION_PERMISSION_SCRATCH"
-    rc=$?
-    set -e
-  fi
-
-  notification_build_dir="$NOTIFICATION_PERMISSION_BUILD_DIR"
-  notification_report_dir="$notification_build_dir/outputs/androidTest-results/connected"
-  if (( rc == 0 )); then
-    # Prevent a killed/zero-test runner from borrowing an earlier invocation's
-    # XML. The directory is a generated output owned by this dedicated run.
-    rm -rf "$notification_report_dir"
-  fi
-fi
-
 if (( rc == 0 )); then
   connected_test_report_dir_path="$(connected_test_report_dir)"
   rm -rf "$connected_test_report_dir_path"
@@ -1489,39 +1280,6 @@ if (( rc == 0 )); then
   set -e
   if (( connected_test_report_rc != 0 )); then
     rc="$connected_test_report_rc"
-  fi
-fi
-
-# The generic report verdict remains primary, but the notification fixture has
-# an additional identity/count contract whose diagnostic must survive a generic
-# XML failure. Run that validator when it was the generic validator that made
-# the invocation red, while never replacing an already-nonzero primary status.
-if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \
-      && ( "$rc" == "0" || "$connected_test_report_rc" != "0" ) ]]; then
-  set +e
-  notification_permission_validate_report "$notification_report_dir"
-  notification_report_rc=$?
-  set -e
-  if (( rc == 0 && notification_report_rc != 0 )); then
-    rc="$notification_report_rc"
-  fi
-fi
-
-if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \
-      && "$NOTIFICATION_PERMISSION_RESTORE_NEEDED" == "1" ]]; then
-  set +e
-  notification_permission_restore \
-    "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
-    "$NOTIFICATION_PERMISSION_SCRATCH" \
-    "$NOTIFICATION_PERMISSION_TARGET_APK"
-  cleanup_rc=$?
-  set -e
-  NOTIFICATION_PERMISSION_RESTORE_NEEDED=0
-  if (( cleanup_rc != 0 )); then
-    printf 'NOTIFICATION_PERMISSION_PRIMARY_RC=%s CLEANUP_RC=%s\n' "$rc" "$cleanup_rc" >&2
-    if (( rc == 0 )); then
-      rc="$cleanup_rc"
-    fi
   fi
 fi
 

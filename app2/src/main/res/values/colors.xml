@@ -1,0 +1,7 @@
+<resources>
+    <!-- Mirrors `PocketShellColors.Background` (0xFF0D1117) from
+         :shared:ui-kit. Used only by the platform window theme so the cold-start
+         window matches the Compose background instead of flashing white; Compose
+         itself always reads the ui-kit value, never this one. -->
+    <color name="pocketshell_window_background">#FF0D1117</color>
+</resources>

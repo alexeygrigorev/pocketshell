@@ -154,7 +154,8 @@ liveness-probe DECLARED DROP (control channel definitively closed)
 After downloading one Android-report shard artifact into `<REPORT_ROOT>`, run:
 
 ```bash
-scripts/ci-journey-dead-channel-oracle.py <REPORT_ROOT>
+# (the dead-channel oracle was deleted with the per-class journey lane;
+# read the app2-journey job's logcat/screenshot artifacts directly)
 ```
 
 The counter deliberately enforces these evidence rules:

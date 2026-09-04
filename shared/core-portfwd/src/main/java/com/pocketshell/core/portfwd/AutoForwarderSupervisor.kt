@@ -1,6 +1,7 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.transport.HostConnection
+import com.pocketshell.core.transport.TransportState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -9,25 +10,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Long-lived supervisor that pairs a single [AutoForwarder] (per-session
+ * Long-lived supervisor that pairs a single [AutoForwarder] (per-connection
  * scan-and-forward engine) with the outer connection lifecycle:
  *
- *  - Calls the supplied [sessionFactory] to acquire a fresh [SshSession]
- *  - Drives an [AutoForwarder] over that session for as long as it stays
+ *  - Calls the supplied [connectionFactory] to acquire a fresh [HostConnection]
+ *  - Drives an [AutoForwarder] over that connection for as long as it stays
  *    connected
  *  - On disconnect or factory failure, applies exponential backoff and
  *    reconnects, up to [maxReconnectAttempts] (after which the supervisor
@@ -44,31 +44,31 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Design rationale — why a supervisor on top of [AutoForwarder] rather
  * than folding the reconnect loop back into [AutoForwarder] itself:
  *
- *  - [AutoForwarder] today takes a single [SshSession] and is fully
- *    covered by 24+ unit tests that pass that session in directly. Adding
+ *  - [AutoForwarder] today takes a single [HostConnection] and is fully
+ *    covered by 24+ unit tests that pass that connection in directly. Adding
  *    a reconnect loop inside it would force every existing test to grow a
  *    factory callback even when reconnect is irrelevant.
  *  - The supervisor lets us layer reconnect tests independently of
- *    forwarder tests (factories that fail N times, sessions that drop
+ *    forwarder tests (factories that fail N times, connections that drop
  *    mid-scan, ...).
  *  - The foreground service (`ForwardingService.kt`) owns one supervisor
  *    per active host. The supervisor presents a stable `flowOfTunnels()` /
- *    `flowOfEvents()` surface even across session swaps, so the service's
+ *    `flowOfEvents()` surface even across connection swaps, so the service's
  *    notification can keep rendering through a reconnect window without
  *    needing to re-subscribe.
  *
  * Lifecycle contract: [start], [stop], and [reconnectNow] may be called
  * concurrently from any thread. [start] is idempotent and publishes exactly
- * one loop job; [stop] is terminal and linearizes with job/session
+ * one loop job; [stop] is terminal and linearizes with job/connection
  * publication, so a late connect result is closed rather than mounted.
  * [reconnectNow] only publishes a wake/force intent while the supervisor is
  * live. [lifecycleLock] protects those lifecycle fields and all state
- * publication; blocking session/forwarder teardown happens after releasing
+ * publication; blocking connection/forwarder teardown happens after releasing
  * the lock.
  */
 public class AutoForwarderSupervisor(
     /**
-     * Produces a fresh [SshSession] each time the supervisor needs to
+     * Produces a fresh [HostConnection] each time the supervisor needs to
      * connect (initial connect + after every drop). The factory is
      * expected to throw on failure; the supervisor catches the throwable
      * and applies backoff before retrying.
@@ -77,7 +77,7 @@ public class AutoForwarderSupervisor(
      * service) can run the real `SshConnection.connect(...)` flow inside
      * it, including DAO lookups for the host / key.
      */
-    private val sessionFactory: suspend () -> SshSession,
+    private val connectionFactory: suspend () -> HostConnection,
     private val config: AutoForwardConfig = AutoForwardConfig(),
     private val initialRemappings: Map<Int, Int> = emptyMap(),
     /**
@@ -106,23 +106,15 @@ public class AutoForwarderSupervisor(
      */
     private val maxReconnectAttempts: Int? = null,
     /**
-     * How often the supervisor polls live-session health while a
-     * forwarder is mounted. The supervisor only reads
-     * [SshSession.isConnected], which is in-process state on the sshj
-     * client, so a 1 s cadence is cheap. Tunable so unit tests can
-     * tighten it for deterministic test runtime.
-     */
-    private val sessionHealthPollMs: Long = 1_000L,
-    /**
-     * Dispatcher the terminal [stop] teardown closes the live SSH session
+     * Dispatcher the terminal [stop] teardown closes the live connection
      * on. [stop] is reached on the Android Main thread (the port-forward
      * panel's auto-forward toggle-off and the foreground service's
      * `ACTION_STOP` both call it synchronously via
      * `ForwardingController.stopForwarding`/`stopAllForwarding` →
-     * `ActiveHost.stopOwnedSupervisor`), and `SshSession.close()` drives an
+     * `ActiveHost.stopOwnedSupervisor`), and `HostConnection.close()` drives an
      * `SSH_MSG_DISCONNECT` socket write that blocks the caller until the
      * disconnect finishes — on a wedged socket that froze the UI (the #1085
-     * freeze-hunt F-E finding). Defaults to [Dispatchers.IO] so the session
+     * freeze-hunt F-E finding). Defaults to [Dispatchers.IO] so the connection
      * close runs off the caller's thread; injectable so tests can pin it.
      */
     private val teardownDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -143,7 +135,7 @@ public class AutoForwarderSupervisor(
     /** Long-lived tunnel snapshot stream — bridges per-forwarder swaps. */
     private val tunnelsState = MutableStateFlow<List<TunnelInfo>>(emptyList())
 
-    /** Connection state — UI can render "Reconnecting…" between sessions. */
+    /** Connection state — UI can render "Reconnecting…" between dials. */
     private val connectionState = MutableStateFlow(ConnectionState.Idle)
 
     /** Event stream for one-shot notifications (connected, disconnected, ...). */
@@ -161,12 +153,22 @@ public class AutoForwarderSupervisor(
     @Volatile
     private var reconnectImmediately: Boolean = false
 
+    /**
+     * Completed by [reconnectNow] to unpark the mounted-forwarder wait without
+     * the transport itself having dropped — the "the OS says the network came
+     * back, this connection is stale even though sshj still calls it live" case.
+     * Installed while a forwarder is mounted, cleared when it unmounts, so a
+     * later [reconnectNow] can never complete a stale waiter.
+     */
+    @Volatile
+    private var forcedDropWaiter: CompletableDeferred<Unit>? = null
+
     /** Serializes lifecycle check-then-act transitions and resource ownership. */
     private val lifecycleLock = Any()
 
     /**
      * User-desired manual port forwards (issue #439), independent of the
-     * live transport. The per-session [AutoForwarder] is rebuilt on every
+     * live transport. The per-connection [AutoForwarder] is rebuilt on every
      * reconnect, so the user's explicit opt-ins (which may be outside the
      * auto-forward window or not currently listening) would otherwise be
      * lost on a drop+reconnect. This supervisor-level set is the
@@ -188,7 +190,7 @@ public class AutoForwarderSupervisor(
     private var currentForwarder: AutoForwarder? = null
 
     @Volatile
-    private var currentSession: SshSession? = null
+    private var currentConnection: HostConnection? = null
 
     @Volatile
     private var stopped: Boolean = false
@@ -213,7 +215,7 @@ public class AutoForwarderSupervisor(
      * is cancelled).
      *
      * Internally the supervisor launches `runConnectAndReconnectLoop`
-     * inside a [coroutineScope] block so all child jobs (the per-session
+     * inside a [coroutineScope] block so all child jobs (the per-connection
      * forwarder loop, the tunnel-snapshot bridge) are direct children of
      * the supervisor's own job. Cancelling that job — or calling
      * [stop] — tears the whole tree down deterministically, which the
@@ -225,7 +227,7 @@ public class AutoForwarderSupervisor(
         supervisorJob?.let { return@synchronized it }
         val job = scope.launch {
             // Run inside a `coroutineScope { ... }` so the child
-            // launches inside `runForwarderUntilSessionDrops` (the
+            // launches inside `runForwarderUntilConnectionDrops` (the
             // bridge collector + the AutoForwarder.start job) attach
             // to *this* coroutine's job. When the outer supervisor job
             // is cancelled or the scope ends, `coroutineScope` waits
@@ -242,7 +244,7 @@ public class AutoForwarderSupervisor(
         // resource that survived that finally block. Job completion runs only
         // after the loop's finally blocks have run, so this cannot steal the
         // normal synchronous close from the cancelled loop.
-        job.invokeOnCompletion { closeRemainingResources(offThread = true) }
+        job.invokeOnCompletion { closeRemainingResourcesOffThread() }
         // stop() may be called re-entrantly by a dispatcher while launch() is
         // publishing the coroutine but before it returns. A cancelled
         // supervisor must never become the live, restartable job afterward.
@@ -256,7 +258,7 @@ public class AutoForwarderSupervisor(
 
     /**
      * Cancel the supervisor loop, tear down any active forwarder, and
-     * close the live session. Idempotent.
+     * close the live connection. Idempotent.
      */
     public fun stop() {
         var waiterToWake: CompletableDeferred<Unit>? = null
@@ -282,10 +284,10 @@ public class AutoForwarderSupervisor(
         // caller may cancel a live supervisor while its test dispatcher is
         // parked), and it runs off the caller's thread.
         val resourcesToStop = synchronized(lifecycleLock) {
-            currentForwarder to currentSession
+            currentForwarder to currentConnection
         }
         resourcesToStop.first?.stop()
-        resourcesToStop.second?.let(::closeSessionOffThread)
+        resourcesToStop.second?.let(::closeConnectionOffThread)
     }
 
     /**
@@ -297,7 +299,7 @@ public class AutoForwarderSupervisor(
      */
     public fun reconnectNow(force: Boolean = false) {
         var waiterToWake: CompletableDeferred<Unit>? = null
-        var sessionToClose: SshSession? = null
+        var dropToSignal: CompletableDeferred<Unit>? = null
         synchronized(lifecycleLock) {
             if (stopped || supervisorJob == null) return
             // Wake any pending backoff sleep. Completing the deferred is a
@@ -310,16 +312,22 @@ public class AutoForwarderSupervisor(
                 // waiter is installed: the loop consumes it instead of
                 // entering a missed backoff sleep.
                 reconnectImmediately = true
-                sessionToClose = currentSession
+                dropToSignal = forcedDropWaiter
             }
         }
         waiterToWake?.complete(Unit)
-        // A real default-network loss/recovery can leave sshj's session object
-        // reporting "connected" even though the phone-side forwards are dead.
-        // Force/non-connected reconnects close the transport so the next
-        // session restores desired forwards promptly. Do not churn a healthy
-        // connected tunnel on an ordinary availability callback.
-        runCatching { sessionToClose?.close() }
+        // A real default-network loss/recovery can leave sshj's client reporting
+        // "connected" even though the phone-side forwards are dead. A
+        // force/non-connected reconnect therefore has to tear the transport down
+        // so the next connection restores desired forwards promptly (an ordinary
+        // availability callback must NOT churn a healthy tunnel — hence the
+        // `force ||` guard above).
+        //
+        // We do NOT close the connection here. Completing this signal unparks the
+        // mounted-forwarder wait, and the loop's own `finally` closes the
+        // connection on the loop's dispatcher — one owner for the teardown, and
+        // no blocking socket work on the Main thread this is called from.
+        dropToSignal?.complete(Unit)
     }
 
     /**
@@ -373,7 +381,7 @@ public class AutoForwarderSupervisor(
                     markTunnelsStopped()
                 }
 
-                val session = sessionFactory()
+                val connection = connectionFactory()
                 attemptCount += 1
                 // Snapshot the desired-state set so the fresh forwarder
                 // re-opens every user-enabled manual port (issue #439).
@@ -384,7 +392,7 @@ public class AutoForwarderSupervisor(
                     desiredManualPorts.toSet()
                 }
                 val forwarder = AutoForwarder(
-                    session = session,
+                    connection = connection,
                     config = config,
                     initialRemappings = initialRemappings,
                     initialManualPorts = manualPortsSnapshot,
@@ -398,23 +406,23 @@ public class AutoForwarderSupervisor(
                     if (!stillActive || stopped) {
                         false
                     } else {
-                        currentSession = session
+                        currentConnection = connection
                         currentForwarder = forwarder
                         true
                     }
                 }
                 if (!published) {
                     forwarder.stop()
-                    runCatching { session.close() }
+                    runCatching { connection.close() }
                     break
                 }
-                // Reset bookkeeping for the new session — backoff
+                // Reset bookkeeping for the new connection — backoff
                 // restarts at the initial delay and consecutive-failure
                 // count resets so [maxReconnectAttempts] doesn't trip
                 // off historical, since-recovered failures.
                 reconnectDelay = initialReconnectDelayMs
                 consecutiveFailures = 0
-                // Do not let the previous session's FORWARDING snapshot
+                // Do not let the previous connection's FORWARDING snapshot
                 // satisfy restore/readiness observers while this fresh
                 // forwarder is still doing its first scan.
                 markTunnelsStopped()
@@ -424,16 +432,16 @@ public class AutoForwarderSupervisor(
                 // Drive the forwarder loop on the supervisor scope and
                 // mirror its tunnel snapshots out through our long-lived
                 // tunnelsState.
-                runForwarderUntilSessionDrops()
+                runForwarderUntilConnectionDrops()
 
                 // We get here when the forwarder loop exited cleanly
-                // (e.g. session dropped or stop() was called). Mark all
+                // (e.g. the connection dropped or stop() was called). Mark all
                 // tunnels STOPPED on the way out so the UI can show
                 // "reconnecting…" without the tunnels disappearing
                 // entirely.
                 if (!stopped) {
                     markTunnelsStopped()
-                    emitEventIfRunning(Event.Disconnected("session lost"))
+                    emitEventIfRunning(Event.Disconnected("connection lost"))
                 }
             } catch (ce: CancellationException) {
                 throw ce
@@ -445,7 +453,7 @@ public class AutoForwarderSupervisor(
                     markTunnelsStopped()
                 }
             } finally {
-                // Always release the per-session forwarder + session
+                // Always release the per-connection forwarder + connection
                 // before sleeping into the next reconnect attempt.
                 closeRemainingResources()
             }
@@ -507,74 +515,115 @@ public class AutoForwarderSupervisor(
         }
     }
 
-    private suspend fun runForwarderUntilSessionDrops() {
+    private suspend fun runForwarderUntilConnectionDrops() {
         val resources = synchronized(lifecycleLock) {
-            if (stopped) null else currentForwarder to currentSession
+            if (stopped) null else currentForwarder to currentConnection
         } ?: return
         val forwarder = resources.first ?: return
-        val session = resources.second ?: return
+        val connection = resources.second ?: return
         // Run the forwarder + tunnel-bridge inside a nested coroutineScope
-        // so we deterministically join both when the session drops, the
+        // so we deterministically join both when the connection drops, the
         // supervisor stops, or the outer scope is cancelled. The nested
         // scope is a child of `parent` (which is itself the supervisor
         // coroutine's `coroutineScope` body), so any cancellation
         // propagates correctly and `runTest` sees a clean shutdown.
-        kotlinx.coroutines.coroutineScope {
-            val bridgeJob = launch {
-                forwarder.flowOfTunnels().collect { publishTunnelsIfRunning(it) }
+        // Unparked either by the transport settling into a terminal state (a real
+        // drop) or by a forced [reconnectNow]. Published before the children
+        // start so a reconnectNow racing the mount cannot miss it.
+        val drop = CompletableDeferred<Unit>()
+        val mounted = synchronized(lifecycleLock) {
+            if (stopped) {
+                false
+            } else {
+                forcedDropWaiter = drop
+                true
             }
-            val forwarderJob = forwarder.start(this)
-
-            try {
-                // Poll for disconnection — the per-session forwarder
-                // doesn't own session liveness; that's the supervisor's
-                // job. The poll cadence is bounded by
-                // [sessionHealthPollMs] (default 1 s; tunable for tests).
-                while (!stopped && session.isConnected && currentCoroutineContext().isActive) {
-                    delay(sessionHealthPollMs)
+        }
+        if (!mounted) return
+        try {
+            kotlinx.coroutines.coroutineScope {
+                val bridgeJob = launch {
+                    forwarder.flowOfTunnels().collect { publishTunnelsIfRunning(it) }
                 }
-            } finally {
-                // Cancel the children so the nested coroutineScope can
-                // exit promptly on session drop. On outer cancellation
-                // both jobs are already cancelled by structured
-                // concurrency, but cancelling explicitly here lets the
-                // session-dropped path exit without waiting for the next
-                // upstream cancellation event.
-                forwarderJob.cancel()
-                bridgeJob.cancel()
+                val forwarderJob = forwarder.start(this)
+                // Wait for the drop. The old core-ssh session exposed only a
+                // boolean `isConnected`, so this had to be a 1 s poll;
+                // core-transport publishes a [TransportState] StateFlow, so the
+                // supervisor simply awaits the terminal state. That removes both
+                // the polling-cadence knob and the up-to-one-interval lag between
+                // a real drop and the reconnect starting.
+                val stateWatch = launch {
+                    connection.state.first { it.isTerminal() }
+                    drop.complete(Unit)
+                }
+
+                try {
+                    drop.await()
+                } finally {
+                    stateWatch.cancel()
+                    // Cancel the children so the nested coroutineScope can
+                    // exit promptly on the drop. On outer cancellation
+                    // both jobs are already cancelled by structured
+                    // concurrency, but cancelling explicitly here lets the
+                    // dropped-connection path exit without waiting for the next
+                    // upstream cancellation event.
+                    forwarderJob.cancel()
+                    bridgeJob.cancel()
+                }
+            }
+        } finally {
+            // Unmounted: a later reconnectNow must not complete this waiter.
+            synchronized(lifecycleLock) {
+                if (forcedDropWaiter === drop) forcedDropWaiter = null
             }
         }
     }
 
     private fun completedJob(): Job = Job().apply { complete() }
 
-    /** Claims and tears down resources left by a completed/cancelled loop. */
-    private fun closeRemainingResources(offThread: Boolean = false) {
-        var forwarderToStop: AutoForwarder? = null
-        var sessionToClose: SshSession? = null
+    /**
+     * Claims the resources a completed/cancelled loop left behind, clearing the
+     * fields under the lifecycle lock so exactly ONE caller owns the teardown.
+     */
+    private fun claimResources(): Pair<AutoForwarder?, HostConnection?> =
         synchronized(lifecycleLock) {
-            forwarderToStop = currentForwarder.also { currentForwarder = null }
-            sessionToClose = currentSession.also { currentSession = null }
+            val forwarder = currentForwarder.also { currentForwarder = null }
+            val connection = currentConnection.also { currentConnection = null }
+            forwarder to connection
         }
+
+    /**
+     * Suspending teardown for the reconnect loop's `finally`: the loop must not
+     * start the next dial until the previous connection is actually closed,
+     * otherwise a flapping host accumulates transports.
+     */
+    private suspend fun closeRemainingResources() {
+        val (forwarder, connection) = claimResources()
         // AutoForwarder.stop() already closes its forwards off the caller's
         // thread (it offloads to its own teardownDispatcher), so this call
         // returns promptly.
-        forwarderToStop?.stop()
-        val session = sessionToClose ?: return
-        if (!offThread) {
-            runCatching { session.close() }
-            return
+        forwarder?.stop()
+        connection ?: return
+        runCatching {
+            withTimeoutOrNull(CONNECTION_CLOSE_TIMEOUT_MS) { connection.close() }
         }
-        closeSessionOffThread(session)
     }
 
-    /** Closes a session without allowing a wedged socket to block its caller. */
-    private fun closeSessionOffThread(session: SshSession) {
+    /**
+     * Non-suspending last-resort teardown, used from [Job.invokeOnCompletion]
+     * where there is no coroutine to suspend in.
+     */
+    private fun closeRemainingResourcesOffThread() {
+        val (forwarder, connection) = claimResources()
+        forwarder?.stop()
+        connection?.let(::closeConnectionOffThread)
+    }
+
+    /** Closes a connection without allowing a wedged socket to block its caller. */
+    private fun closeConnectionOffThread(connection: HostConnection) {
         CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
             runCatching {
-                withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
-                    runInterruptible { session.close() }
-                }
+                withTimeoutOrNull(CONNECTION_CLOSE_TIMEOUT_MS) { connection.close() }
             }
         }
     }
@@ -652,9 +701,13 @@ public class AutoForwarderSupervisor(
     }
 
     private companion object {
-        // Bound on the terminal [stop] session-close (see [teardownDispatcher]).
+        // Bound on the terminal [stop] connection close (see [teardownDispatcher]).
         // Long enough for a healthy disconnect, short enough that a wedged
         // socket can't pin the teardown worker.
-        private const val SESSION_CLOSE_TIMEOUT_MS = 5_000L
+        private const val CONNECTION_CLOSE_TIMEOUT_MS = 5_000L
+
+        /** Spent: the instance can never come back, so the supervisor must re-dial. */
+        private fun TransportState.isTerminal(): Boolean =
+            this is TransportState.Lost || this == TransportState.Closed
     }
 }

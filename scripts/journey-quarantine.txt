@@ -5,15 +5,25 @@
 # it documents the format, the fail-safe direction, and exactly what changes
 # (and what does NOT change) for a class listed here.
 #
-# One row per quarantined class, TAB-separated:
-#   <FQCN><TAB><issue><TAB><added YYYY-MM-DD><TAB><expires YYYY-MM-DD><TAB><reason>
+# One row per quarantined TEST METHOD, TAB-separated:
+#   <FQCN#method><TAB><issue><TAB><added YYYY-MM-DD><TAB><expires YYYY-MM-DD><TAB><reason>
+#
+# A row is a REGISTRY entry, not a runtime exclusion. The quarantine itself is
+# the `@Ignore("quarantined: #<issue>, expires <date> — <reason>")` annotation on
+# the method; this file is what gives that annotation an owner and a deadline.
+# The guard reconciles the two in BOTH directions, so neither can drift:
+# a row without its @Ignore is a lie, and an @Ignore without a row is a
+# graveyard entry.
 #
 # scripts/check-journey-quarantine-expiry.sh fails CI once `expires` has
 # passed. Resolve an entry by DELETING its row (the class is fixed or removed)
 # or by RE-TRIAGING it (replace the row with a fresh `added`/`expires` and a
 # reason that says why it is still flaking) — never let a row sit expired.
 #
-# Empty today: no journey class is currently known to flake. The first entry
-# added here should be filed the same way scripts/report-journey-flake.sh
-# templates it (see that script's header for the semi-automated procedure).
-com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest	#2391	2026-08-28	2026-09-11	the inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints method times out: shared pocketshell-test-agents fixture carries 31+ leaked sibling sessions from prior runs, causing the collision-entry-point walk to time out; pre-existing on clean main, found during #2378 review
+# scripts/check-journey-quarantine-expiry.sh fails CI once `expires` has
+# passed. Resolve an entry by DELETING its row AND its @Ignore (the method is
+# fixed or removed) or by RE-TRIAGING it (a fresh `added`/`expires` in both
+# places, and a reason that says why it is still broken) — never let a row sit
+# expired.
+com.pocketshell.next.tree.J04CreateSessionJourney#creatingASessionFromTheTreeLandsOnItAndItAppearsOnTheTree	#2478	2026-09-04	2026-10-04	create-session lands on the wrong destination; pre-existing product bug found during the app2 journey bring-up, needs real investigation not a test fix, hence the 30-day window rather than the 2-week default
+com.pocketshell.next.tree.J04CreateSessionJourney#creatingTheSameNameTwiceOpensTheExistingSessionWithoutAnError	#2478	2026-09-04	2026-10-04	same-name create surfaces an error instead of reopening the existing session; same pre-existing bug as the sibling row, same 30-day investigation window

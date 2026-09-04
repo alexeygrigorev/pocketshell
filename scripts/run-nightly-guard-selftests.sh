@@ -22,4 +22,3 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 bash scripts/lib/nightly-exact-method-guard.sh --self-test
-bash scripts/lib/nightly-phase-reports.sh --self-test

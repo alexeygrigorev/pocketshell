@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Sequence
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from pocketshell.cli import cli, main
@@ -335,6 +336,7 @@ def test_kotlin_test_resource_matches_the_python_producer_fixture() -> None:
     ), "the Android test resource has drifted from the Python producer fixture"
 
 
+@pytest.mark.skip(reason="app/ deleted for app2 rewrite; re-enable once app2 has the journey fixture")
 def test_kotlin_androidtest_literal_matches_the_python_producer_fixture() -> None:
     """The connected usage-render journey must assert against REAL producer bytes.
 

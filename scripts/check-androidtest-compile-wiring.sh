@@ -375,24 +375,24 @@ $out3b" ;;
   # would be exactly the shared-file cross-agent damage the process catalogue
   # documents, so the sandbox is its own tiny git repository.
   local scan_sandbox="$sandbox/scan-repo"
-  mkdir -p "$scan_sandbox/app/src/androidTest/java"
+  mkdir -p "$scan_sandbox/app2/src/androidTest/java"
   git -C "$scan_sandbox" init -q
   git -C "$scan_sandbox" config user.email selftest@example.invalid
   git -C "$scan_sandbox" config user.name selftest
-  printf 'class AppProof\n' > "$scan_sandbox/app/src/androidTest/java/AppProof.kt"
+  printf 'class AppProof\n' > "$scan_sandbox/app2/src/androidTest/java/AppProof.kt"
   git -C "$scan_sandbox" add -A
   git -C "$scan_sandbox" commit -qm base
 
   EXPECT_SCAN_ROOT="$scan_sandbox"
-  expect_green "6 sandbox with only :app androidTest" "$src"
+  expect_green "6 sandbox with only :app2 androidTest" "$src"
 
   # Case 7 — a SECOND module grows an androidTest source set that no required-lane
-  #          job compiles. A literal `:app:compileDebugAndroidTestKotlin` grep
+  #          job compiles. A literal `:app2:compileDebugAndroidTestKotlin` grep
   #          stays green here; the class check is what reddens.
-  mkdir -p "$scan_sandbox/shared/core-ssh/src/androidTest/java"
-  printf 'class SshProof\n' > "$scan_sandbox/shared/core-ssh/src/androidTest/java/SshProof.kt"
+  mkdir -p "$scan_sandbox/shared/core-newmod/src/androidTest/java"
+  printf 'class NewModProof\n' > "$scan_sandbox/shared/core-newmod/src/androidTest/java/NewModProof.kt"
   git -C "$scan_sandbox" add -A
-  expect_red "7 a new module's androidTest source set is uncompiled" ":shared:core-ssh" "$src"
+  expect_red "7 a new module's androidTest source set is uncompiled" ":shared:core-newmod" "$src"
   EXPECT_SCAN_ROOT=""
 
   # Case 8 — no androidTest sources discovered at all. A guard that finds nothing

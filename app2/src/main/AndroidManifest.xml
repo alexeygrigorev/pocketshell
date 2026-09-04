@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Task U-2: the app dials SSH. Without this the socket in
+        `RealHostConnectionFactory` fails with EACCES on every device and every
+        connect surfaces as an opaque `ConnectResult.Failed` — a failure no
+        host-JVM test can see, because Robolectric does not enforce Android
+        permissions. It is declared here, with the first code that opens a
+        socket, rather than preemptively in the M-1 scaffold.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        Task P-4: port forwarding runs in a foreground service so tunnels the
+        user opened keep answering while the app is backgrounded (D21's
+        background-work carve-out). POST_NOTIFICATIONS is what makes its ongoing
+        notification visible on Android 13+; without the FOREGROUND_SERVICE pair
+        the service cannot start at all.
+    -->
+    <!--
+        Task P-6: the QR host importer points the camera at a code rendered on
+        a computer (or another phone) to add a host without typing it. Declared
+        optional as a feature so a device with no camera can still install —
+        the scanner falls back to picking a QR image from storage.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!--
+        Task U-8: the background grace window (D21). The CPU must stay awake for
+        the bounded 90 s hold, or the phone dozes, the SSH transport dies
+        underneath the session the grace exists to preserve, and the foreground
+        return becomes the full redial grace was supposed to avoid. The lock is
+        PARTIAL (screen off is fine) and is acquired with a platform timeout of
+        the remaining window, so it cannot outlive the hold even if teardown
+        never runs — see GraceService.
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+        Task P-2: the composer's mic. Both dictation arms need it — Android's
+        `SpeechRecognizer` opens the microphone in the recognition service's
+        process on the caller's behalf, and the Whisper arm records a WAV
+        locally. Declared here AND requested at runtime by `ComposerBar`; a
+        manifest-only declaration would make every mic tap fail silently on
+        Android 6+.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+        Task P-2: package visibility for the system speech recognizer. Since
+        Android 11 an app cannot see another package unless it declares a
+        matching query, and `SpeechRecognizer.isRecognitionAvailable()` answers
+        FALSE without this — the mic would render permanently disabled on every
+        modern device with a perfectly good recognizer installed.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PocketShellNext">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.PocketShellNext"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Task P-9: the system share target. `exported` because that is what
+            "appears in the share sheet" means — and why ShareActivity treats
+            its intent as untrusted input.
+
+            `excludeFromRecents`, and the default `standard` launch mode
+            (deliberately NOT MainActivity's `singleTask`): a share is a
+            one-shot transaction that finishes itself, so it must neither join
+            the task the user's live terminal session lives in nor leave a
+            second PocketShell card in Recents afterwards.
+
+            One `*/*` filter per action rather than a list of specific types:
+            the destination is a directory on a Unix box, which takes any bytes,
+            so narrowing the filter would only hide PocketShell from the share
+            sheet for file types it handles perfectly well. `*/*` also matches
+            the `text/plain` selection/URL share, which arrives with no stream.
+        -->
+        <activity
+            android:name=".share.ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Send to host"
+            android:theme="@style/Theme.PocketShellNext">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Task P-4: the port-forwarding foreground service.
+
+            `foregroundServiceType="specialUse"` because keeping a user-initiated
+            SSH transport alive so forwards survive backgrounding matches none of
+            the predefined types — it is not scheduled `dataSync`, and there is no
+            `connectedDevice`. The PROPERTY_SPECIAL_USE_FGS_SUBTYPE below is the
+            informational metadata Play review reads.
+
+            `exported="false"`: only PocketShell's own code may wake it.
+        -->
+        <service
+            android:name=".ports.ForwardService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled forwarding on." />
+        </service>
+
+        <!--
+            Task U-8: the background-grace foreground service (D21).
+
+            `foregroundServiceType="specialUse"` for the same reason
+            ForwardService uses it: holding a user-initiated SSH transport open
+            across a short app-switch matches none of the predefined types — it
+            is not scheduled `dataSync`, and there is no `connectedDevice`.
+
+            `exported="false"`: only PocketShell's own GraceCoordinator may start
+            or stop it.
+        -->
+        <service
+            android:name=".terminal.GraceService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds the user's already-connected SSH session open for a bounded 90-second window while the app is backgrounded, so returning to it does not require a reconnect. Shows a live count-down and stops itself when the window ends." />
+        </service>
+
+        <!--
+            Task P-10: the crash-reports screen's "Share all reports" action
+            zips local crash reports into `cacheDir/report-archives/` and hands
+            the bundle to `ACTION_SEND` via a content URI (`ReportsArchive`,
+            `CrashReportsViewModel`) — never a raw `file://` URI, which Android
+            N+ blocks with a `FileUriExposedException`.
+
+            `exported="false"`: only PocketShell's own code may resolve a URI
+            through this authority; `grantUriPermissions` is what lets the
+            share-sheet target app read the one file it was granted, without
+            opening the whole cache directory.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/crash_report_export_paths" />
+        </provider>
+    </application>
+
+</manifest>

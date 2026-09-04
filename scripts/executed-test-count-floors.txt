@@ -7,15 +7,27 @@
 #
 # THESE FLOORS ARE DELIBERATELY LOOSE, NOT AN EXACT-COUNT RATCHET (G6).
 # A check that red-lights honest runs is worse than the gap it closes, because
-# people then ignore it. The floors below sit FAR under the real counts (:app is
-# ~3900 per variant as of 2026-07-16), so adding, moving, or removing tests
-# never reddens CI. They exist to catch the "a filter matched almost nothing"
-# shape, where the count is non-zero but nowhere near a real run.
+# people then ignore it. The floors below sit FAR under the real counts, so
+# adding, moving, or removing tests never reddens CI. They exist to catch the
+# "a filter matched almost nothing" shape, where the count is non-zero but
+# nowhere near a real run.
 #
 # Only raise a floor when you are confident the task can never legitimately drop
 # to it. When in doubt, leave the task off this list and take the default of 1.
 #
+# The `:app:testDebugUnitTest 1000` / `:app:testReleaseUnitTest 1000` pair that
+# lived here was DELETED with the module (rewrite hard cut, D22). It had gone
+# INERT rather than red: floors are only consulted for modules discovered from
+# settings.gradle.kts, so once `:app` left the build these two lines declared a
+# floor for a task no run could ever produce — the exact "declaration that
+# enforces nothing" the T13 property exists to prevent. :app2 deliberately gets
+# no replacement floor: the default of 1 already catches a zero-test run, and a
+# four-figure floor on a module still being written is a ratchet (G6).
+#
 # format: <task-path> <min-executed>
 
-:app:testDebugUnitTest 1000
-:app:testReleaseUnitTest 1000
+# 97 executed as of 2026-09-04. Floor deliberately far below that. This is the
+# one task the Unit lane names explicitly rather than reaching through a variant
+# shard (see .github/workflows/tests.yml, `Run JVM unit tests`), so a floor here
+# is also a second, independent statement that the task really does have tests.
+:shared:core-hostapi:test 40

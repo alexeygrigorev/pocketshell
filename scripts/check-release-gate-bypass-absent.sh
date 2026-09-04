@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # WHY THIS EXISTS
 # ---------------
-# The nightly fault-injection safety verdict (toxiproxy network-fault proofs +
+# The scheduled fault-injection safety verdict (toxiproxy network-fault proofs +
 # the bootstrap setup-scenario matrix) is what stands between a release tag and
 # shipping a broken reconnect/transport path. It used to carry an opt-out: an
 # environment variable read by scripts/check-nightly-fault-run.sh, plus a
@@ -267,7 +267,7 @@ check_behavioural() {
   assert_guard_blocks "C2 red-verdict" "$guard" "failure" \
     "safety verdict is RED" || rc=1
   assert_guard_blocks "C3 no-verdict"  "$guard" "" \
-    "did not run the fault-verdict job" || rc=1
+    "did not run the journey job" || rc=1
   return "$rc"
 }
 
@@ -568,7 +568,7 @@ ENVFIX
   cat > "$unpinned" <<'UNPINNED'
 #!/usr/bin/env bash
 set -euo pipefail
-runs="$(gh run list --workflow=nightly-extensive.yml --limit 1 --json databaseId,headSha,status)"
+runs="$(gh run list --workflow=app2.yml --limit 1 --json databaseId,headSha,status)"
 if [[ "$(jq 'length' <<<"$runs")" -gt 0 ]]; then
   echo "PASS: nightly fault-injection safety verdict is green."
   exit 0

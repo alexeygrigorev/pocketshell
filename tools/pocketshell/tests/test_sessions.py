@@ -293,8 +293,15 @@ def test_sessions_list_json_unions_aplexer_snapshot(install_fake_a) -> None:
     assert "git-tmuxcli" in names
     assert "toyaikit:codex" in names
     aplexer = next(row for row in parsed["sessions"] if row["manager"] == "aplexer")
-    assert aplexer["attach"].startswith("a attach ")
+    # Schema 2 dropped the pre-rendered ``attach`` command string (the
+    # client runs ``pocketshell sessions attach NAME``) and always emits the
+    # full key set, so ``id`` is present on every row.
+    assert "attach" not in aplexer
     assert aplexer["id"] == "sess-1"
+    assert parsed["schema"] == 2
+    assert parsed["errors"] == []
+    tmux_row = next(row for row in parsed["sessions"] if row["manager"] == "tmux")
+    assert tmux_row["id"] is None
 
 
 def test_sessions_list_human_appends_aplexer_table(install_fake_a) -> None:

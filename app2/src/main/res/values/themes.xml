@@ -1,0 +1,13 @@
+<resources>
+    <!-- Platform-level theme only. It exists so the window has a dark
+         background before Compose's first frame (avoids a white flash on cold
+         start); every pixel after that comes from `PocketShellTheme` in
+         :shared:ui-kit, which is the single source of truth for colour,
+         typography, and shapes. Parented on the framework Material theme so
+         app2 needs no AppCompat dependency. -->
+    <style name="Theme.PocketShellNext" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/pocketshell_window_background</item>
+        <item name="android:statusBarColor">@color/pocketshell_window_background</item>
+        <item name="android:navigationBarColor">@color/pocketshell_window_background</item>
+    </style>
+</resources>

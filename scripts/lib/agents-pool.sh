@@ -53,9 +53,8 @@ fi
 # Port 2222 is the DEFAULT single-lane fixture — container
 # `pocketshell-test-agents` on the default compose project. A dozen scripts that
 # know nothing about the pool recreate it unconditionally, some with
-# `--force-recreate` (capture-terminal-lab.sh, terminal-workbench.sh,
-# phone-walkthrough.sh, pre-release-confidence-gate.sh, keyboard-stress.sh,
-# release-terminal-gate.sh, ...). None of them takes the port lock, and they
+# `--force-recreate` (pre-release-confidence-gate.sh,
+# capture-walkthrough-screenshots.sh, ...). None of them takes the port lock, and they
 # never can: they are the legacy single-lane path and D21/CI depend on them
 # hitting 2222.
 #

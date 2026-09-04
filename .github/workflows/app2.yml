@@ -1,0 +1,937 @@
+name: app2
+
+# Rewrite task M-2 — CI lanes for the modules the rewrite adds.
+#
+# The rewrite (docs/_scratch/simplification-implementation-plan-2026-09-02.md)
+# hard-cut the old `app/`, `core-ssh`, `core-tmux`, `core-connection` and
+# `core-agents` modules on the `stable` branch and grew three new ones:
+# `shared/core-hostapi` (pure JVM host-CLI wire contract), `shared/core-transport`
+# (the one module that knows sshj) and `app2` (the new application module).
+# None of them had a CI lane. This workflow is that lane.
+#
+# Task P-4 un-shelved `shared/core-portfwd` (the port-forwarding tunnel engine,
+# rewired from the deleted core-ssh onto core-transport) and added its two lanes
+# here, unit + Docker, for the same reason: a module in settings.gradle.kts that
+# no gate runs is a module whose regression tests do not exist.
+#
+# DELIBERATELY A SEPARATE FILE FROM tests.yml
+#   * tests.yml still describes the OLD module graph (it runs
+#     `:app:integrationTest :shared:core-ssh:integrationTest
+#     :shared:core-tmux:integrationTest`, none of which exist on this branch any
+#     more) and needs its own cleanup pass. Adding the new modules to it would entangle the two.
+#   * tests.yml is under a hard file-size ratchet
+#     (scripts/check-file-size-hygiene.sh) with very little headroom — the same
+#     reason full-suite-notify.yml (#2353) was
+#     were split out.
+#
+# NOT A REQUIRED CHECK. Registering a workflow that carries trigger-level
+# `paths:` as a required status check is the #2354 footgun: GitHub never starts
+# a run for a non-matching PR, so the required context sits at "Expected"
+# forever with no admin bypass short of dropping the requirement. If these jobs
+# are ever promoted to required, the trigger-level `paths:` below must be
+# removed first and ALL selection moved into the `changes` job (which already
+# does the per-job half and reports a skipped-but-present job either way).
+#
+# TWO LAYERS OF androidTest PROTECTION.
+#   * `app2-unit` COMPILES the androidTest source set on every run — cheap, no
+#     emulator — so a journey cannot silently rot against a main-source change
+#     (the old module learned this the expensive way: the required Unit job
+#     never compiled `androidTest`, so a signature break there surfaced only
+#     after merge and took out every connected gate at once — see process.md,
+#     "Local Confidence Before CI").
+#   * `app2-journey` (issue #2474) actually RUNS the whole set — J01-J08,
+#     J10-J12 — on an emulator against the Docker `agents` +
+#     `network-fault-proxy` fixtures. Batched on push/dispatch, never per-PR;
+#     that job's own header carries the one-unfiltered-run and no-`needs:`
+#     decisions.
+
+on:
+  push:
+    branches:
+      - main
+      - stable
+    paths:
+      # The UNION of every job's filter below. Per-JOB selection is the
+      # `changes` job's business — GitHub's own `paths:` is workflow-level.
+      - "app2/**"
+      - "shared/core-transport/**"
+      - "shared/core-portfwd/**"
+      - "shared/core-hostapi/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - "tests/docker/**"
+      - ".github/workflows/app2.yml"
+      - "scripts/ci-app2-changed-modules.sh"
+      - "scripts/check-app2-lane-execution.py"
+      - "scripts/ci-app2-journey-suite.sh"
+  pull_request:
+    paths:
+      - "app2/**"
+      - "shared/core-transport/**"
+      - "shared/core-portfwd/**"
+      - "shared/core-hostapi/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - "tests/docker/**"
+      - ".github/workflows/app2.yml"
+      - "scripts/ci-app2-changed-modules.sh"
+      - "scripts/check-app2-lane-execution.py"
+      - "scripts/ci-app2-journey-suite.sh"
+  workflow_dispatch:
+  # NIGHTLY CADENCE (decision D37). D37 requires the fault/journey release gate
+  # to run on a scheduled cadence with no off switch; it used to be satisfied by
+  # .github/workflows/nightly-extensive.yml, which the rewrite deleted along with
+  # the `:app` module every one of its five Gradle invocations targeted. This
+  # lane is that gate's successor, so it takes the cadence too — 02:17 UTC, the
+  # slot the old nightly held, kept rather than moved so the off-hours window is
+  # unchanged. `schedule` runs no `paths:` filter, and the `changes` job's
+  # selector fail-opens on a non-push event (no diff base -> ALL lanes), so a
+  # scheduled run exercises the whole suite rather than whatever a diff picked.
+  schedule:
+    - cron: "17 2 * * *"
+
+concurrency:
+  # A scheduled run gets its OWN group and is never cancelled. Without this it
+  # would share `ref-refs/heads/main` with pushes and `cancel-in-progress: true`
+  # would let any push kill the nightly mid-flight — a cadence that silently
+  # does not run is exactly the D37 bypass this cron exists to close, and it
+  # would look green (cancelled, not failed) while doing it. Same split
+  # tests.yml already uses for its own schedule.
+  group: ${{ github.event_name == 'schedule' && format('{0}-sched', github.workflow) || format('{0}-{1}', github.workflow, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref)) }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Per-JOB path filtering. scripts/ci-app2-changed-modules.sh carries the
+  # logic (and its own self-test) so the "never under-select" property is
+  # exercised rather than living in an untested YAML expression. Every
+  # uncertain case — unknown base, unreadable diff, workflow_dispatch, a change
+  # to shared build infrastructure — fails OPEN and selects all four lanes.
+  changes:
+    name: Select lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      hostapi: ${{ steps.select.outputs.hostapi }}
+      transport: ${{ steps.select.outputs.transport }}
+      portfwd: ${{ steps.select.outputs.portfwd }}
+      app2: ${{ steps.select.outputs.app2 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The diff base must be present in the clone, so no shallow fetch.
+          fetch-depth: 0
+
+      - name: Self-test the lane selector
+        run: |
+          chmod +x scripts/ci-app2-changed-modules.sh
+          scripts/ci-app2-changed-modules.sh --self-test
+
+      # Issue #2474: wired HERE, in the cheap always-runs job, not inside the
+      # emulator job it belongs to — the journey lane is skipped on PRs, so a
+      # self-test living there would only ever run on the push that already
+      # broke `stable`. It needs no JDK, no Docker and no emulator.
+      - name: Self-test the app2 journey runner
+        run: |
+          chmod +x scripts/ci-app2-journey-suite.sh
+          scripts/ci-app2-journey-suite.sh --self-test
+
+      - name: Select lanes
+        id: select
+        run: |
+          scripts/ci-app2-changed-modules.sh \
+            --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}"
+
+  # ---------------------------------------------------------------------------
+  # shared/core-hostapi — pure JVM (kotlin("jvm")), no Android SDK, no
+  # Robolectric. `test` is the single Java-plugin test task; there is no
+  # Debug/Release split to shard.
+  hostapi-test:
+    name: core-hostapi unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.hostapi == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/hostapi-run-start"
+
+      # --rerun-tasks --no-build-cache is not belt-and-braces: a plain
+      # `:shared:core-hostapi:test` came back FROM-CACHE in 1s, zero tests
+      # executed, while this lane was being written.
+      - name: Run core-hostapi unit tests
+        id: hostapi_tests
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-hostapi:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/hostapi-gradle.log"
+
+      # Floors are set a little under the count observed when the lane landed
+      # (28) so ordinary churn does not trip them but a mass loss of tests does.
+      - name: Assert tests actually executed
+        if: always() && steps.hostapi_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-hostapi:test" \
+            --results-dir shared/core-hostapi/build/test-results/test \
+            --min 20 \
+            --newer-than "${RUNNER_TEMP}/hostapi-run-start"
+
+      - name: Upload core-hostapi test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-hostapi-test-reports
+          path: |
+            shared/core-hostapi/build/reports/tests/
+            shared/core-hostapi/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-transport — Android library. `:test` is AGP's variant-spanning
+  # alias, so BOTH testDebugUnitTest and testReleaseUnitTest run and both result
+  # dirs are checked. The Testcontainers *IntegrationTest classes are excluded
+  # from these tasks by the module's build script; they run in the Docker lane
+  # below.
+  transport-test:
+    name: core-transport unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.transport == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/transport-run-start"
+
+      - name: Run core-transport unit tests
+        id: transport_tests
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-transport:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/transport-gradle.log"
+
+      # 38 observed when the lane landed (19 per variant); floor 30.
+      - name: Assert tests actually executed
+        if: always() && steps.transport_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-transport:test" \
+            --results-dir shared/core-transport/build/test-results/testDebugUnitTest \
+            --results-dir shared/core-transport/build/test-results/testReleaseUnitTest \
+            --min 30 \
+            --newer-than "${RUNNER_TEMP}/transport-run-start"
+
+      - name: Upload core-transport unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-transport-test-reports
+          path: |
+            shared/core-transport/build/reports/tests/
+            shared/core-transport/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-transport Docker lane. Service-startup shape copied from
+  # tests.yml's `integration` job: JDK 17 + Gradle cache + `docker info` before
+  # handing off to Testcontainers, then a fresh-run marker, --rerun-tasks
+  # --no-build-cache, an execution guard, and an always-on report upload.
+  #
+  # tests.yml's two extra fixture steps ("Smoke shared tmux-wrapper fixtures",
+  # "Shared SSH/tmux fixture health on a REAL fixture") are DELIBERATELY not
+  # copied: they build the `agents`/tmux-shim compose fixtures that the old
+  # core-tmux/core-agents suites needed. RealHostConnectionIntegrationTest uses
+  # none of them — Testcontainers builds its own sshd image from
+  # tests/docker/Dockerfile.ssh — so those steps would add several minutes of
+  # unrelated image builds and a failure mode this lane cannot cause.
+  #
+  # The suite skips itself via `assumeTrue` when Docker is unreachable, which
+  # would be a green run of 8 SKIPPED tests. The execution guard counts
+  # executed = tests - skipped, so that shape fails here instead of passing.
+  transport-integration:
+    name: core-transport integration tests (Docker)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.transport == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # ubuntu-latest runners have Docker preinstalled and the daemon running,
+      # which is what Testcontainers needs. Sanity-check before we hand off.
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Mark integration-run start
+        run: touch "${RUNNER_TEMP}/transport-integration-run-start"
+
+      - name: Run core-transport integration tests
+        id: transport_integration
+        timeout-minutes: 35
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-transport:integrationTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/transport-integration-gradle.log"
+
+      # 8 observed when the lane landed; floor 6.
+      - name: Assert integration tests actually executed
+        if: always() && steps.transport_integration.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-transport:integrationTest" \
+            --results-dir shared/core-transport/build/test-results/integrationTest \
+            --min 6 \
+            --newer-than "${RUNNER_TEMP}/transport-integration-run-start"
+
+      - name: Upload core-transport integration reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-transport-integration-reports
+          path: |
+            shared/core-transport/build/reports/tests/
+            shared/core-transport/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-portfwd — the port-forwarding tunnel engine (task P-4).
+  # Android library like core-transport, so `:test` is AGP's variant-spanning
+  # alias and BOTH result dirs are checked. The Testcontainers *IntegrationTest
+  # classes are excluded from these tasks by the module's build script; they run
+  # in the Docker lane below.
+  portfwd-test:
+    name: core-portfwd unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.portfwd == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/portfwd-run-start"
+
+      - name: Run core-portfwd unit tests
+        id: portfwd_tests
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-portfwd:test \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/portfwd-gradle.log"
+
+      # 108 observed when the lane landed (54 per variant); floor 80.
+      - name: Assert tests actually executed
+        if: always() && steps.portfwd_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-portfwd:test" \
+            --results-dir shared/core-portfwd/build/test-results/testDebugUnitTest \
+            --results-dir shared/core-portfwd/build/test-results/testReleaseUnitTest \
+            --min 80 \
+            --newer-than "${RUNNER_TEMP}/portfwd-run-start"
+
+      - name: Upload core-portfwd unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-portfwd-test-reports
+          path: |
+            shared/core-portfwd/build/reports/tests/
+            shared/core-portfwd/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # shared/core-portfwd Docker lane (task P-4). Same shape as the transport
+  # Docker lane: Testcontainers builds its own sshd image from
+  # tests/docker/Dockerfile.ssh, so none of tests.yml's compose fixtures are
+  # needed. This is the lane that proves a REAL forward carries bytes — the
+  # suite dials the container, opens `-L`, reads the sshd banner back through
+  # the tunnel, and re-establishes a manual forward after a real drop.
+  #
+  # The suite skips itself via `assumeTrue` when Docker is unreachable, which
+  # would be a green run of 6 SKIPPED tests. The execution guard counts
+  # executed = tests - skipped, so that shape fails here instead of certifying
+  # nothing.
+  portfwd-integration:
+    name: core-portfwd integration tests (Docker)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.portfwd == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Mark integration-run start
+        run: touch "${RUNNER_TEMP}/portfwd-integration-run-start"
+
+      - name: Run core-portfwd integration tests
+        id: portfwd_integration
+        timeout-minutes: 35
+        run: |
+          set -o pipefail
+          ./gradlew :shared:core-portfwd:integrationTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            2>&1 | tee "${RUNNER_TEMP}/portfwd-integration-gradle.log"
+
+      # 6 observed when the lane landed; floor 5.
+      - name: Assert integration tests actually executed
+        if: always() && steps.portfwd_integration.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":shared:core-portfwd:integrationTest" \
+            --results-dir shared/core-portfwd/build/test-results/integrationTest \
+            --min 5 \
+            --newer-than "${RUNNER_TEMP}/portfwd-integration-run-start"
+
+      - name: Upload core-portfwd integration reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-portfwd-integration-reports
+          path: |
+            shared/core-portfwd/build/reports/tests/
+            shared/core-portfwd/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # app2 — Robolectric-backed host-JVM unit tests (the nav graph runs as a real
+  # composition). Debug only: the module's tests are Robolectric/Compose tests
+  # with no variant-specific behaviour, and neither build type minifies.
+  app2-unit:
+    name: app2 unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.app2 == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Mark test-run start
+        run: touch "${RUNNER_TEMP}/app2-run-start"
+
+      - name: Run app2 unit tests
+        id: app2_tests
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          ./gradlew :app2:testDebugUnitTest \
+            --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/app2-gradle.log"
+
+      # 11 when the lane landed, 59 after U-2's connect-flow and trust-prompt
+      # suites, 117 after U-4's session ViewModel/screen suites, 424 after
+      # U-5's key-byte/geometry/key-bar suites (with U-6, P-3, P-4 and P-6
+      # landed alongside); floor 380 — comfortably under the current count but
+      # far above the point where a whole suite could silently stop running.
+      - name: Assert tests actually executed
+        if: always() && steps.app2_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":app2:testDebugUnitTest" \
+            --results-dir app2/build/test-results/testDebugUnitTest \
+            --min 380 \
+            --newer-than "${RUNNER_TEMP}/app2-run-start"
+
+      # Compile-only guard for the instrumented journey (see the header note).
+      # Cheap — no emulator, no Docker — and it is the check that would have
+      # caught an androidTest break before it reached the emulator lane.
+      - name: Compile app2 instrumented tests
+        if: always() && steps.app2_tests.conclusion != 'skipped'
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          ./gradlew :app2:compileDebugAndroidTestKotlin \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+
+      - name: Upload app2 test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-unit-test-reports
+          path: |
+            app2/build/reports/tests/
+            app2/build/test-results/
+          overwrite: true
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # app2 journey lane (issue #2474) — the emulator lane the header note above
+  # promised. app2's 11 instrumented journeys (J01-J08, J10-J12) all passed by
+  # hand and NONE of them ran in CI: `app2-unit` only COMPILES the androidTest
+  # source set, so any journey regression stayed invisible until a human
+  # happened to run scripts/connected-test.sh.
+  #
+  # ONE JOB, ONE UNFILTERED RUN. No shard matrix and no per-class invocation,
+  # deliberately: the whole set runs in a SINGLE instrumentation process, which
+  # is the only shape that can see one journey leaking state into the next.
+  # That is not hypothetical — running the set together for the first time is
+  # exactly what surfaced issue #2477's cross-journey pollution, which a
+  # per-class lane would have been green through. scripts/ci-app2-journey-suite.sh
+  # owns the invocation and its --self-test (run in the `changes` job above)
+  # asserts a class filter can never creep back in.
+  #
+  # NOT A PER-PR GATE. Emulator + Docker + 11 journeys is ~30-45 min, so it
+  # follows the established split (process.md, "Protected `main` checks"): heavy
+  # Docker/emulator work batches on push and manual dispatch while PRs keep the
+  # cheap required checks. The `github.event_name != 'pull_request'` half of the
+  # `if:` below is that decision. The push trigger covers `main` and `stable`
+  # (see the `on:` block), and `workflow_dispatch` gives an on-demand run.
+  #
+  # NO `needs: app2-unit`. tests.yml gates its emulator matrix on a cheap
+  # compile job (`dex`) to protect the Actions budget; app2's only equivalent is
+  # `app2-unit` itself, up to 25 min, which would nearly double this lane's wall
+  # clock. Instead the fast-fail moved INSIDE this job: the APKs are assembled
+  # in a normal step BEFORE the emulator boots, so a tree that does not compile
+  # reddens without ever spending an AVD, and the in-emulator run starts warm.
+  app2-journey:
+    name: app2 journey suite (emulator + Docker agents)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.app2 == 'true' }}
+    runs-on: ubuntu-latest
+    # BUDGET, and why the two step caps below matter more than this one. The
+    # 11-journey run measured 15 min locally on a warm build; the assemble step
+    # is ~8 min warm and up to ~25 cold; the action's own cold boot is capped at
+    # 900 s. The job cap (90) is deliberately LOOSER than the sum of the step
+    # caps (30 assemble + 45 journey + ~10 setup), because a job that hits ITS
+    # cap is killed by GitHub and uploads NOTHING — the `if: always()` report
+    # steps never run and a wedge produces zero evidence. Letting the STEP time
+    # out first keeps the artifacts, which is the whole point of the lane.
+    timeout-minutes: 90
+
+    steps:
+      # fetch-depth 0 (#2381): the APK's versionName derives from the git tag,
+      # and scripts/ci-journey-fixture-retry.sh stamps the `agents` fixture with
+      # the SAME derivation. A shallow clone makes the APK report the
+      # `0.0.0-dev` placeholder while the fixture is stamped from the tag, and a
+      # host/client version mismatch is precisely the state journeys must not
+      # start from. scripts/check-emulator-apk-version-wiring.sh enforces this
+      # on every emulator-booting job.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + suite script executable
+        run: chmod +x ./gradlew scripts/ci-app2-journey-suite.sh
+
+      - name: Verify Docker is available
+        run: docker info
+
+      # Assemble BEFORE the emulator boots (see the job header): a compile break
+      # fails here in minutes with no AVD spent, and the in-action gradle run
+      # then only has to install and instrument.
+      - name: Assemble app2 debug + androidTest APKs
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          ./gradlew :app2:assembleDebug :app2:assembleDebugAndroidTest \
+            --no-daemon --stacktrace --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Same two hosted-runner failure modes tests.yml
+      # hit (#760 disk pressure FATAL-ing the AVD create, #771 the stock
+      # sdkmanager crashing so the emulator action's own license accept dies).
+      # Reusing the exact scripts keeps this lane's provisioning identical to
+      # theirs rather than a second copy that can drift.
+      - name: Free disk space for the AVD
+        run: scripts/ci-emulator-free-disk.sh
+
+      - name: Initialize journey artifacts
+        run: mkdir -p artifacts/app2-journey
+
+      - name: Repair Android cmdline-tools + accept licenses (issue #771)
+        run: scripts/ci-emulator-repair-sdk-tools.sh
+
+      - name: Build SSH base image
+        run: scripts/ci-journey-fixture-retry.sh sshd -- docker compose -f tests/docker/docker-compose.yml build sshd
+
+      # `agents` on 2222 is what AgentsFixture dials (10.0.2.2:2222 from the
+      # emulator) for all 11 journeys.
+      - name: Start Docker fixture (agents)
+        run: scripts/ci-journey-fixture-retry.sh agents -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
+
+      - name: Wait for the agents fixture to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+
+      # J05ReconnectAfterDropJourney dials the fixture THROUGH this Toxiproxy
+      # (2228) and cuts the link over its control API (8474) — see
+      # app2/src/androidTest/.../connect/ToxiproxyControl.kt. Started explicitly,
+      # and its API polled, so J05 fails loudly on a missing fixture instead of
+      # silently degrading. None of the 11 journeys touch the old-CLI (2238),
+      # daemon (2239) or packet-loss (2229) fixtures, so those stay down.
+      - name: Start Docker fixture (network-fault-proxy)
+        run: |
+          scripts/ci-journey-fixture-retry.sh network-fault-proxy -- docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8474/version; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy
+          exit 1
+
+      # The execution guard below credits only result XML newer than this
+      # marker, so a task that was skipped, UP-TO-DATE or died before running
+      # cannot be certified by a previous run's leftovers.
+      - name: Mark journey-run start
+        run: touch "${RUNNER_TEMP}/app2-journey-run-start"
+
+      - name: Run the full app2 journey suite on the emulator
+        id: journey
+        # See the job's `timeout-minutes` note: this cap must fire BEFORE the
+        # job cap so the report/artifact steps below still run on a wedge.
+        timeout-minutes: 45
+        # Pinned to the same v2.37.0 commit tests.yml
+        # use (#771), so a floating-tag bump cannot silently change SDK-install
+        # behaviour under this lane alone.
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          # API 35 / pixel_7 / swiftshader, identical to the other two emulator
+          # lanes — one AVD definition to reason about across the repo.
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
+          script: scripts/ci-app2-journey-suite.sh
+
+      # G3: a green `BUILD SUCCESSFUL` proves nothing on its own. 30 tests across
+      # the 11 journey classes ran when this lane landed; floor 26 tolerates
+      # ordinary churn while a lost class (2-5 tests each) or a vacuous
+      # zero-executed run still reddens. `--newer-than` rejects stale XML.
+      - name: Assert the journeys actually executed
+        if: always() && steps.journey.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-app2-lane-execution.py
+          scripts/check-app2-lane-execution.py --self-test
+          scripts/check-app2-lane-execution.py \
+            --label ":app2:connectedDebugAndroidTest" \
+            --results-dir app2/build/outputs/androidTest-results/connected/debug \
+            --min 26 \
+            --newer-than "${RUNNER_TEMP}/app2-journey-run-start"
+
+      # Issue #2082/#2063: the execution ledger's CONNECTED lane. The old nightly
+      # wrapper (ci-nightly-execution-ledger.sh) recorded this for
+      # `:app:connectedDebugAndroidTest` across six shards; both it and the suite
+      # it served are gone, and without a recorder here the `app2-journey` lane
+      # would be a selected set that nothing ever credits — every journey class
+      # would read as "never executed" in the rolling ledger.
+      #
+      # One shard, so plain attendance rather than merge-attendance. The two
+      # --require-class pins are the load-bearing journeys the release path
+      # depends on; attendance fails closed on an absent results root or an
+      # empty XML set, so a suite that silently ran nothing cannot record a
+      # green lane.
+      - name: Record journey execution into the rolling ledger (#2082)
+        if: always() && steps.journey.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-test-execution-ledger.sh
+          scripts/check-test-execution-ledger.sh \
+            --record app2/build/outputs/androidTest-results/connected/debug \
+            --tier journey
+          scripts/check-test-execution-ledger.sh \
+            --attendance \
+            --results-root app2/build/outputs/androidTest-results/connected/debug \
+            --selected-from app2-journey \
+            --require-class com.pocketshell.next.connect.J01ConnectAndTrustJourney \
+            --require-class com.pocketshell.next.terminal.J03AttachAndTypeJourney \
+            --report
+
+      - name: Collect Docker logs
+        if: always()
+        run: |
+          mkdir -p artifacts/docker
+          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt 2>&1 || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>&1 || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>&1 || true
+
+      # The actionable half of a red run: the per-class HTML report says WHICH
+      # journey failed, the raw gradle log and logcat say why, and the journey
+      # screenshots pulled off the device show what was on screen.
+      - name: Upload app2 journey reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app2-journey-reports
+          path: |
+            app2/build/reports/androidTests/
+            app2/build/outputs/androidTest-results/
+            app2/build/outputs/connected_android_test_additional_output/
+            artifacts/app2-journey/
+            artifacts/docker/
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Stop Docker fixtures
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Production-binding mutations (issue #1932, rolled up to #1671).
+  #
+  # Periodic, fail-closed, not a per-PR mutant run. The cheap Unit half
+  # (--self-test + --check-sites in tests.yml) only proves the harness can still
+  # go red and that every curated target still exists. This job applies one
+  # deterministic binding mutant at a time and requires the named
+  # production-wired proof to fail. A surviving mutant, a stale/unregistered
+  # target, or a truncated/over-budget run is RED.
+  #
+  # It lived in the deleted nightly-extensive.yml. It moved HERE rather than into
+  # tests.yml because this workflow is the one that now carries the periodic
+  # cadence (see the `schedule:` trigger above, decision D37) — and it is
+  # deliberately schedule/dispatch-only: it is JVM-only, independent of the
+  # emulator lane and of the 24h idle guard, so attendance stays visible even on
+  # a night when nothing merged. scripts/check-production-binding-mutations.py's
+  # own `validate_attendance` pins that this job still invokes `--run`.
+  binding-mutations:
+    name: Production-binding mutations (issue #1932)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + harness executable
+        run: chmod +x ./gradlew scripts/check-production-binding-mutations.py
+
+      - name: Run curated production-binding mutants
+        run: scripts/check-production-binding-mutations.py --run
+
+      - name: Publish binding-mutation summary
+        if: always()
+        run: |
+          if [[ -f artifacts/production-binding-mutations/summary.md ]]; then
+            cat artifacts/production-binding-mutations/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Production-binding mutations (#1932 / #1671)"
+              echo
+              echo "No summary was written (the harness aborted before evidence)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload binding-mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: production-binding-mutations
+          path: artifacts/production-binding-mutations/
+          if-no-files-found: error

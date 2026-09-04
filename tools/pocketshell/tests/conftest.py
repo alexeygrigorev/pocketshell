@@ -20,6 +20,11 @@ def _isolate_process_environment(tmp_path, monkeypatch):
         monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("POCKETSHELL_APLEXER", "0")
+    # Point tmux's socket directory at an empty tmp path so the schema-2
+    # tmux enrichment sweep (session_enum.collect_tmux_details) can never
+    # reach the developer's live tmux servers. A test that wants enrichment
+    # creates this directory and injects its own runner.
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmux"))
 
 
 @pytest.fixture

@@ -43,8 +43,8 @@ GRADLE_FLAGS="${GRADLE_FLAGS:-$(pocketshell_release_gate_gradle_flags)}"
 GATE_ISOLATED_WORKTREE="${GATE_ISOLATED_WORKTREE:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
-APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
-TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+APK_PATH="${APK_PATH:-app2/build/outputs/apk/debug/app2-debug.apk}"
+TEST_APK_PATH="${TEST_APK_PATH:-app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk}"
 APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
 APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS:-3}"
 # Issue #449: when an instrumentation attempt fails because the emulator's GL
@@ -61,65 +61,77 @@ CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
 PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save}"
 
-# Issue #749: the previous list referenced three test classes that were
-# DELETED in 006c9dd1 (the #684 dead raw-SSH SessionScreen harvest) —
-# `PromptComposerSmokeTest`, `SnippetTerminalE2eTest`, and
-# `InlineDictationUiTest`. The gate aborted at the first deleted selector with
-# `ClassNotFoundException` and never reached the substantive
-# `EmulatorDockerSshSmokeTest` proof. Each deleted walkthrough is remapped to
-# its CURRENT equivalent (behaviors moved during the composer rework):
-#   recordingAndTranscribingStatesAreVisible
-#     -> composer.PromptComposerVisualScreenshotTest#capturesAllFourComposerStates
-#        (asserts the recording waveform/timer + transcribing-spinner states and
-#         produces the walkthrough composer screenshots 05b/06/07/08)
-#   typedDraftSendEnterReachesDockerShell
-#     -> composer.PromptComposerSendDismissE2eTest#successfulSendDismissesComposerEveryTime
-#        (drives the real PromptComposerViewModel: type -> Send + ↵ -> dispatch;
-#         terminal arrival itself is covered by the EmulatorDockerSshSmokeTest
-#         walkthrough journey below)
-#   SnippetTerminalE2eTest#tappingCommandSnippetSendsInputToDockerShell
-#     -> snippets.SnippetPickerSendButtonsTest#tappingSendWithEnterChip_dispatchesSendWithEnter
-#        (the dispatch contract: chip tap -> onSnippetSend(snippet, withEnter=true))
-#        plus snippets.SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen
-#        (the on-device tmux-screen docker proof of the picker over a real session)
-#   InlineDictationUiTest#recordingStateShowsAmplitudeWaveformOnInlineMicSlot
-#     -> composer.PromptComposerCancelRecordingTest#discardIsHiddenInIdleAndVisibleInRecording
-#        (the recording-state surface: timer, live transcript, discard)
-#   InlineDictationUiTest#transcribingStateShowsSpinnerAndBlocksDuplicateTap
-#     -> composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess
-#        (the transcribing-state surface: queued send fires once, only after Whisper)
-# The selector-existence guard below (assert_app_walkthrough_selectors_exist)
-# hard-fails fast if any entry stops resolving so a future deletion can't
-# silently re-break this gate.
-APP_WALKTHROUGH_TESTS=(
-  "com.pocketshell.app.composer.PromptComposerVisualScreenshotTest#capturesAllFourComposerStates"
-  "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest#successfulSendDismissesComposerEveryTime"
-  "com.pocketshell.app.snippets.SnippetPickerSendButtonsTest#tappingSendWithEnterChip_dispatchesSendWithEnter"
-  "com.pocketshell.app.snippets.SnippetPickerTmuxZOrderDockerTest#snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen"
-  "com.pocketshell.app.composer.PromptComposerCancelRecordingTest#discardIsHiddenInIdleAndVisibleInRecording"
-  "com.pocketshell.app.composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess"
-  "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
-  "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
-  # Issue #1652 (#1610 #1539 #1632 #1633): the reconnect-storm LIVELOCK proof. The
-  # connection manager is the #1 dogfood blocker (D28) and this class has been
-  # closed-then-reopened four times (#1562 -> #1567 -> #1568 -> #1610), every time
-  # on a single-cycle / JVM proxy. This drives N>=5 consecutive passive-grace
-  # cycles on the production path against a stalled tail with a healthy dial (the
-  # maintainer's actual mechanism) and asserts no handshaken transport is killed,
-  # the attempt counter walks, and the machine terminates. It is wired HERE — not
-  # only into the main-push journey lane — because the #1640 audit found that lane
-  # has produced zero clean verdicts for days (INFRA -> neutral green), i.e. red
-  # there stops nothing. Red here fails the gate, so no release summary is
-  # produced and `push-release-tag.sh` cannot tag. That is the point.
-  #
-  # BOTH methods are listed explicitly: `assert_app_walkthrough_selectors_exist`
-  # requires `class#method` form, and a bare class name aborts the gate before it
-  # compiles anything. Round one registered the bare class, which would have failed
-  # EVERY release on a malformed selector while never running the journey at all —
-  # an always-red gate is the #1640 waiver generator this test exists to end.
-  "com.pocketshell.app.proof.ReconnectStormLivelockE2eTest#slowTailOnAProvenLinkNeitherKillsHandshakenTransportsNorSpinsForever"
-  "com.pocketshell.app.proof.ReconnectStormLivelockE2eTest#slowTailThatClearsHealsTheSameSessionWithoutKillingTheHandshakenTransport"
-)
+# Issue #2481 — the focused walkthrough SELECTOR LIST is gone; this gate now runs
+# app2's WHOLE instrumented set, unfiltered, in ONE instrumentation process.
+#
+# WHY THE LIST HAD TO GO. Every one of the eight selectors it named
+# (PromptComposerVisualScreenshotTest, PromptComposerSendDismissE2eTest,
+# SnippetPickerSendButtonsTest, SnippetPickerTmuxZOrderDockerTest,
+# PromptComposerCancelRecordingTest, PromptComposerSendWhileRecordingTest,
+# EmulatorDockerSshSmokeTest, ReconnectStormLivelockE2eTest) lived in
+# `app/src/androidTest`, which the rewrite's hard cut deleted along with the
+# whole module. The #749 selector-existence guard below would have hard-failed
+# this gate on the first selector — which is the guard working as designed, and
+# also means no release could be cut until this was repointed.
+#
+# WHY UNFILTERED, NOT A NEW LIST. Issue #2474 settled this for app2's suite:
+# every journey runs in a FRESH instrumentation process under a per-class
+# filter, so state one journey leaks into the next is structurally invisible —
+# that is exactly how #2477's cross-journey pollution was found. The CI lane
+# (`scripts/ci-app2-journey-suite.sh`, `.github/workflows/app2.yml`) therefore
+# runs `:app2:connectedDebugAndroidTest` with NO
+# `-Pandroid.testInstrumentationRunnerArguments.class=` filter, ever. The
+# release gate must not contradict its own journey lane, so it runs the same
+# set the same way — the difference being that the gate drives it through
+# `am instrument` against the EXACT validated APK pair it built and recorded
+# (issue #2064), rather than through a fresh Gradle build.
+#
+# The vacuity guard moved with it: `assert_app2_instrumented_suite_exists`
+# replaces the per-selector existence check and hard-fails when app2's
+# androidTest tree has no journeys left to run, so "unfiltered" can never
+# silently become "nothing".
+APP2_INSTRUMENTED_SUITE_LABEL="app2-instrumented-suite"
+
+# Issue #2435, repointed by #2481: `am instrument` produces NO host-side JUnit
+# XML — Gradle's connected task is what normally writes
+# build/outputs/androidTest-results/**/TEST-*.xml. That is an ACCOUNTING gap,
+# not a coverage gap, but the #2082 execution ledger reads JUnit XML and nothing
+# else, so every app2 journey this gate executes would report NEVER EXECUTED and
+# the release job could not conclude success (which is what made the #2356
+# `validated-rc` marker unreachable). The old callers of this helper lived in
+# scripts/release-emulator-validation.sh's real-agent and long-running branches;
+# both were deleted with the `app` module classes they drove, and the surviving
+# detached run is the unfiltered app2 suite below.
+#
+# THE `--require-class` PIN. The run is deliberately UNFILTERED (issue #2474) so
+# there is no single class it "was supposed to" credit — but converting without
+# a pin would let an all-skipped transcript become a ledger entry, which is the
+# exact laundering #2435 closed. J01 is the pin because it is the foundational
+# connect-and-trust journey: if it produced no non-skipped case, the run is not
+# credible release evidence whatever else it reported.
+# assert_app2_instrumented_suite_exists checks the class still exists, so the
+# pin cannot rot into a silent no-op.
+APP2_LEDGER_REQUIRED_CLASS="${APP2_LEDGER_REQUIRED_CLASS:-com.pocketshell.next.connect.J01ConnectAndTrustJourney}"
+DETACHED_INSTRUMENTATION_RESULTS_DIR="${DETACHED_INSTRUMENTATION_RESULTS_DIR:-$ROOT_DIR/build/outputs/androidTest-results/detached-instrumentation}"
+
+record_detached_instrumentation_junit_xml() {
+  local test_class="$1" instrumentation_log="$2"
+  local out="$DETACHED_INSTRUMENTATION_RESULTS_DIR/TEST-$test_class.xml"
+  if bash "$ROOT_DIR/scripts/instrumentation-log-to-junit-xml.sh" \
+    --log "$instrumentation_log" \
+    --out "$out" \
+    --suite "$test_class" \
+    --require-class "$test_class"; then
+    return 0
+  fi
+  # Not fatal on its own: the release job's ledger `--verify` is the backstop and
+  # will redden with "$test_class has NEVER executed". Turning a conversion
+  # hiccup into a second hard release blocker would add a failure mode without
+  # adding detection.
+  printf 'WARN: could not record ledger JUnit XML for %s from %s\n' \
+    "$test_class" "$instrumentation_log" >&2
+  return 0
+}
 
 usage() {
   cat <<'USAGE'
@@ -130,10 +142,11 @@ Usage: scripts/pre-release-confidence-gate.sh [--check-profile]
 
 Runs the local APK pre-release-confidence gate:
   - compile/unit checks
-  - deterministic Docker agent target
+  - deterministic Docker agent target (agents, agents-old-cli, network-fault-proxy)
   - emulator readiness with explicit Android SDK paths
   - shipped-v1 + #261 marker Room migration with post-launch data validation
-  - focused connected walkthrough tests using an explicit cold-reset package setup
+  - app2's WHOLE instrumented set, unfiltered, in one instrumentation process
+    against the validated APK pair, plus its journey screenshots
   - debug APK build and data-preserving update install sanity
 
 Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
@@ -162,8 +175,8 @@ USAGE
   cat <<'USAGE'
   GATE_ISOLATED_WORKTREE=1
   COMPOSE_FILE=tests/docker/docker-compose.yml
-  APK_PATH=app/build/outputs/apk/debug/app-debug.apk
-  TEST_APK_PATH=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+  APK_PATH=app2/build/outputs/apk/debug/app2-debug.apk
+  TEST_APK_PATH=app2/build/outputs/apk/androidTest/debug/app2-debug-androidTest.apk
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
   APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS=2
@@ -377,6 +390,10 @@ LEGACY_V1_DB_MIGRATION_STATUS="not_run"
 # timing red no longer front-gates the #1302 journey; its captured result is
 # folded into the final verdict after the downstream stages run.
 CONNECTED_TERMINAL_INPUT_STATUS="not_run"
+# Issue #2481: where the unfiltered app2 suite's JourneyScreenshots PNGs are
+# pulled to. Set for real just after the suite runs; declared here so a failure
+# before that point still writes a well-formed summary.
+APP2_JOURNEY_SCREENSHOT_DIR="not_collected"
 LEGACY_V1_DB_MIGRATION_LOGCAT="$RUN_DIR/legacy-v1-db-migration-logcat.log"
 STEP_NAMES=()
 STEP_STATUSES=()
@@ -397,7 +414,7 @@ UNIT_EVIDENCE_MODE="local"
 UNIT_EVIDENCE_DETAIL="local Gradle check graph (assembleDebug check -x lint -x lintDebug)"
 CI_UNIT_EVIDENCE_DIR="$RUN_DIR/ci-unit-evidence"
 APK_IDENTITY_FILE="$RUN_DIR/$POCKETSHELL_APK_IDENTITY_FILE_NAME"
-FOCUSED_SELECTORS=("${APP_WALKTHROUGH_TESTS[@]}")
+FOCUSED_SELECTORS=("$APP2_INSTRUMENTED_SUITE_LABEL")
 FOCUSED_STATUSES=()
 FOCUSED_LOGS=()
 FOCUSED_DIAGNOSTICS=()
@@ -495,6 +512,7 @@ write_summary() {
         "$(pocketshell_read_apk_identity_field "$APK_IDENTITY_FILE" test_apk_sha256 2>/dev/null || printf 'unknown')"
     fi
     printf 'Connected core-terminal burst proof (step 12, non-fatal — issue #1314): %s\n' "$CONNECTED_TERMINAL_INPUT_STATUS"
+    printf 'app2 journey screenshots: %s\n' "${APP2_JOURNEY_SCREENSHOT_DIR:-not_collected}"
     printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
     printf 'Legacy v1 database migration status: %s\n' "$LEGACY_V1_DB_MIGRATION_STATUS"
@@ -693,7 +711,7 @@ run_bash_step() {
 
 # Issue #2435: this step now runs :shared:ui-kit:connectedDebugAndroidTest
 # alongside :shared:core-terminal's. It is the ONLY lane that can execute
-# UiKitPrimitivesTest — nightly phase 1 is :app:connectedDebugAndroidTest, and
+# UiKitPrimitivesTest — app2's own journey lane is :app2:connectedDebugAndroidTest, and
 # the shared-module instrumented suites are already this gate's responsibility
 # (the 20 :shared:core-terminal instrumented classes are credited nowhere else
 # either). Until now UiKitPrimitivesTest executed on NO lane at all, so the
@@ -759,7 +777,7 @@ for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
     printf 'Core-terminal connected test produced UTP no-results/transport cleanup failure on attempt %s; retrying.\n' "\$attempt" >&2
     '$ADB' reconnect >/dev/null 2>&1 || true
     '$ADB' wait-for-device >/dev/null 2>&1 || true
-    for package in com.termux.view.test com.pocketshell.app.test com.pocketshell.app; do
+    for package in com.termux.view.test com.pocketshell.next.test com.pocketshell.next; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -924,49 +942,49 @@ require_command_or_executable() {
   fi
 }
 
-# Issue #749: selector-existence guard. Before doing any expensive work
-# (compile, emulator boot, APK install) verify that EVERY entry in
-# APP_WALKTHROUGH_TESTS resolves to a `fun <method>` in the matching
-# androidTest source file. A future deletion/rename of a referenced test must
-# fail this gate immediately with a clear, actionable message instead of
-# aborting deep into the run with a `ClassNotFoundException` on the device (the
-# #749 failure mode). Resolves against the androidTest source tree under the
-# current ROOT_DIR, which works both in the source workspace and in the
-# rsynced isolated worktree copy (app/src is preserved by the rsync).
-assert_app_walkthrough_selectors_exist() {
-  local androidtest_root="$ROOT_DIR/app/src/androidTest/java"
-  local missing=()
-  local selector class method relative_path
-  for selector in "${APP_WALKTHROUGH_TESTS[@]}"; do
-    if [[ "$selector" != *"#"* ]]; then
-      missing+=("$selector (not in 'class#method' form)")
-      continue
-    fi
-    class="${selector%%#*}"
-    method="${selector##*#}"
-    relative_path="$androidtest_root/${class//.//}.kt"
-    if [[ ! -f "$relative_path" ]]; then
-      missing+=("$selector (referenced test class not found: $relative_path)")
-      continue
-    fi
-    if ! grep -Eq "fun[[:space:]]+${method}[[:space:]]*\(" "$relative_path"; then
-      missing+=("$selector (referenced test method not found in $relative_path)")
-    fi
-  done
-
-  if [[ "${#missing[@]}" -gt 0 ]]; then
-    printf 'Selector existence guard failed for APP_WALKTHROUGH_TESTS:\n' >&2
-    local entry
-    for entry in "${missing[@]}"; do
-      printf '  - referenced test not found: %s\n' "$entry" >&2
-    done
-    printf 'Update APP_WALKTHROUGH_TESTS in %s to reference existing androidTest class#method selectors.\n' \
-      "${POCKETSHELL_GATE_SOURCE_ROOT:-$ROOT_DIR}/scripts/pre-release-confidence-gate.sh" >&2
-    fail "APP_WALKTHROUGH_TESTS references ${#missing[@]} test selector(s) that do not exist"
+# Issue #749, repointed by #2481: the VACUITY guard. Before doing any expensive
+# work (compile, emulator boot, APK install) prove that the unfiltered
+# instrumentation run below actually has journeys to execute.
+#
+# The old shape resolved a hardcoded `class#method` list against
+# `app/src/androidTest/java`; both the list and that source tree are gone (see
+# the note on APP2_INSTRUMENTED_SUITE_LABEL above). An unfiltered `am instrument`
+# has no selector that can go stale, but it has the OPPOSITE failure mode the
+# #749 guard existed to prevent: on an empty or filtered-to-nothing suite it
+# exits `INSTRUMENTATION_CODE: -1` with `OK (0 tests)` and the gate reports a
+# green over zero executed tests (docs/ci-pitfalls.md). So the guard now asserts
+# app2's instrumented tree is non-empty and still carries journey classes, and
+# the run script below separately refuses an `OK (0 tests)` result.
+#
+# Resolves against ROOT_DIR, which works both in the source workspace and in the
+# rsynced isolated worktree copy (app2/src is preserved by the rsync).
+assert_app2_instrumented_suite_exists() {
+  local androidtest_root="$ROOT_DIR/app2/src/androidTest/java"
+  if [[ ! -d "$androidtest_root" ]]; then
+    fail "app2 has no androidTest source tree at $androidtest_root; the unfiltered release journey run would execute nothing (issue #2481)"
   fi
 
-  printf 'Selector existence guard passed: all %s APP_WALKTHROUGH_TESTS selectors resolve to an androidTest class#method.\n' \
-    "${#APP_WALKTHROUGH_TESTS[@]}"
+  local test_sources journey_classes
+  test_sources="$(grep -rlE '^[[:space:]]*@Test\b' "$androidtest_root" --include='*.kt' 2>/dev/null | wc -l)"
+  journey_classes="$(find "$androidtest_root" -type f -name 'J*Journey.kt' 2>/dev/null | wc -l)"
+
+  if [[ "$test_sources" -lt 1 ]]; then
+    fail "no @Test-carrying source under $androidtest_root; the unfiltered release journey run would execute nothing (issue #2481)"
+  fi
+  if [[ "$journey_classes" -lt 1 ]]; then
+    fail "no J*Journey class under $androidtest_root; the release gate would run a suite with no user journey in it (issue #2481)"
+  fi
+
+  # The ledger `--require-class` pin must name a class that still exists, or the
+  # release run silently converts nothing and the ledger reports every app2
+  # journey as NEVER EXECUTED.
+  local ledger_pin_path="$androidtest_root/${APP2_LEDGER_REQUIRED_CLASS//.//}.kt"
+  if [[ ! -f "$ledger_pin_path" ]]; then
+    fail "the execution-ledger pin class $APP2_LEDGER_REQUIRED_CLASS does not exist at $ledger_pin_path; the release run would record no ledger JUnit XML (issue #2435/#2481)"
+  fi
+
+  printf 'app2 instrumented-suite guard passed: %s @Test source file(s), %s J*Journey class(es) under %s; ledger pin %s exists.\n' \
+    "$test_sources" "$journey_classes" "$androidtest_root" "$APP2_LEDGER_REQUIRED_CLASS"
 }
 
 cold_reset_app_packages_script() {
@@ -979,10 +997,10 @@ wait_package_manager_idle() {
   '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
   '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
 }
-for package in com.pocketshell.app.test com.pocketshell.app; do
+for package in com.pocketshell.next.test com.pocketshell.next; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
-for package in com.pocketshell.app.test com.pocketshell.app; do
+for package in com.pocketshell.next.test com.pocketshell.next; do
   if package_installed "\$package"; then
     printf 'COLD-RESET: clearing package data without uninstalling: %s\n' "\$package"
     '$ADB' shell pm clear "\$package" || true
@@ -991,7 +1009,7 @@ for package in com.pocketshell.app.test com.pocketshell.app; do
   fi
 done
 wait_package_manager_idle
-for package in com.pocketshell.app.test com.pocketshell.app; do
+for package in com.pocketshell.next.test com.pocketshell.next; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
 printf 'COLD-RESET: focused app walkthrough package state reset without package deletion\n'
@@ -1006,14 +1024,14 @@ wait_package_manager_idle() {
   '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
 }
 packages_present() {
-  for package in com.pocketshell.app com.pocketshell.app.test; do
+  for package in com.pocketshell.next com.pocketshell.next.test; do
     '$ADB' shell pm path "\$package" >/dev/null || return 1
   done
 }
 post_install_removal_seen() {
   '$ADB' logcat -d -v time -t 1000 2>/dev/null |
     grep -E 'PACKAGE_FULLY_REMOVED|PACKAGE_REMOVED|deletePackageX' |
-    grep -E 'com[.]pocketshell[.]app([.]test)?' >/dev/null
+    grep -E 'com[.]pocketshell[.]next([.]test)?' >/dev/null
 }
 uninstall_with_idle_wait() {
   local package="\$1"
@@ -1055,8 +1073,8 @@ install_or_fallback_uninstall() {
   exit "\$status"
 }
 install_pair() {
-  install_or_fallback_uninstall com.pocketshell.app '$APK_PATH'
-  install_or_fallback_uninstall com.pocketshell.app.test '$TEST_APK_PATH'
+  install_or_fallback_uninstall com.pocketshell.next '$APK_PATH'
+  install_or_fallback_uninstall com.pocketshell.next.test '$TEST_APK_PATH'
   wait_package_manager_idle
 }
 for attempt in {1..3}; do
@@ -1084,7 +1102,7 @@ for attempt in {1..3}; do
   fi
   printf 'Recent package removal context before reinstall:\n' >&2
   '$ADB' logcat -d -v time -t 500 |
-    grep -E 'PackageManager|PackageInstaller|PACKAGE_|deletePackageX|com[.]pocketshell[.]app' >&2 || true
+    grep -E 'PackageManager|PackageInstaller|PACKAGE_|deletePackageX|com[.]pocketshell[.]next' >&2 || true
   wait_package_manager_idle
   sleep 3
 done
@@ -1097,34 +1115,34 @@ quiesce_app_walkthrough_processes_script() {
   cat <<QUIESCE_SCRIPT
 set -euo pipefail
 packages_stopped() {
-  for package in com.pocketshell.app.test com.pocketshell.app; do
+  for package in com.pocketshell.next.test com.pocketshell.next; do
     if ! '$ADB' shell dumpsys package "\$package" 2>/dev/null | grep -q 'stopped=true'; then
       return 1
     fi
   done
 }
 processes_stopped() {
-  if ! '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]app(\$|:|[[:space:]])|com[.]pocketshell[.]app[.]test(\$|:|[[:space:]])' >/dev/null; then
+  if ! '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]next(\$|:|[[:space:]])|com[.]pocketshell[.]next[.]test(\$|:|[[:space:]])' >/dev/null; then
     return 0
   fi
   return 1
 }
 dump_quiesce_context() {
     printf 'Visible PocketShell processes:\n' >&2
-    '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]app(\$|:|[[:space:]])|com[.]pocketshell[.]app[.]test(\$|:|[[:space:]])' >&2 || true
+    '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]next(\$|:|[[:space:]])|com[.]pocketshell[.]next[.]test(\$|:|[[:space:]])' >&2 || true
     printf 'Package paths:\n' >&2
-    for package in com.pocketshell.app.test com.pocketshell.app; do
+    for package in com.pocketshell.next.test com.pocketshell.next; do
       '$ADB' shell pm path "\$package" >&2 || true
     done
     printf 'Package stopped state:\n' >&2
-    for package in com.pocketshell.app.test com.pocketshell.app; do
+    for package in com.pocketshell.next.test com.pocketshell.next; do
       '$ADB' shell dumpsys package "\$package" 2>/dev/null | grep 'stopped=' >&2 || true
     done
     printf 'Recent package manager and activity context:\n' >&2
-    '$ADB' logcat -d -v time -t 500 | grep -E 'PackageManager|PackageInstaller|PACKAGE_|ActivityManager.*com[.]pocketshell[.]app|Force stopping|deletePackageX' >&2 || true
+    '$ADB' logcat -d -v time -t 500 | grep -E 'PackageManager|PackageInstaller|PACKAGE_|ActivityManager.*com[.]pocketshell[.]next|Force stopping|deletePackageX' >&2 || true
 }
 for attempt in 1 2 3; do
-  for package in com.pocketshell.app.test com.pocketshell.app; do
+  for package in com.pocketshell.next.test com.pocketshell.next; do
     '$ADB' shell am force-stop "\$package" || true
   done
   '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -1194,7 +1212,7 @@ install_or_fallback_uninstall() {
   fi
   if printf '%s\n' "\$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
     printf 'LEGACY-V1: uninstall fallback for incompatible app package before migration setup\n'
-    '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true
+    '$ADB' uninstall com.pocketshell.next >/dev/null 2>&1 || true
     wait_package_manager_idle
     '$ADB' install -r -d -t '$APK_PATH'
     wait_package_manager_idle
@@ -1209,7 +1227,7 @@ adb_output_has_transport_drop_markers() {
 
 logcat_has_app_crash_signature() {
   [ -f "\$1" ] || return 1
-  grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app' "\$1"
+  grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next' "\$1"
 }
 
 logcat_has_adb_transport_drop_markers() {
@@ -1439,23 +1457,23 @@ run_migration_scenario() {
   migrated_db_dir_host='$RUN_DIR/migrated-'"\$scenario"'-database'
   migrated_db_host="\$migrated_db_dir_host/pocketshell.db"
 
-  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+  '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
   install_or_fallback_uninstall
   printf 'LEGACY-V1: clearing app data before injecting %s fixture\n' "\$scenario"
-  '$ADB' shell pm clear com.pocketshell.app
+  '$ADB' shell pm clear com.pocketshell.next
   wait_package_manager_idle
   '$ADB' push "\$source_db" "\$staged_db_device"
-  '$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$staged_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
+  '$ADB' shell run-as com.pocketshell.next sh -c "'mkdir -p databases && cp \$staged_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
   '$ADB' shell rm -f "\$staged_db_device" >/dev/null 2>&1 || true
 
   for attempt in \$(seq 1 '$LEGACY_V1_DB_MIGRATION_ATTEMPTS'); do
     attempt_logcat_file='$RUN_DIR/legacy-v1-'"\$scenario"'-attempt'"\$attempt"'.log'
     rm -f "\$attempt_logcat_file"
     '$ADB' logcat -c || true
-    '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+    '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
 
     set +e
-    start_output=\$('$ADB' shell am start -W -n com.pocketshell.app/.MainActivity 2>&1)
+    start_output=\$('$ADB' shell am start -W -n com.pocketshell.next/.MainActivity 2>&1)
     start_status=\$?
     set -e
     printf '%s\n' "\$start_output"
@@ -1467,7 +1485,7 @@ run_migration_scenario() {
     fi
 
     set +e
-    pid_output=\$('$ADB' shell pidof com.pocketshell.app 2>&1)
+    pid_output=\$('$ADB' shell pidof com.pocketshell.next 2>&1)
     pid_status=\$?
     set -e
     pid=""
@@ -1514,7 +1532,7 @@ run_migration_scenario() {
     break
   done
 
-  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+  '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
   '$ADB' shell sync >/dev/null 2>&1 || true
   mkdir -p "\$migrated_db_dir_host"
   rm -f \
@@ -1524,7 +1542,7 @@ run_migration_scenario() {
   for suffix in '' '-wal' '-shm'; do
     pulled_file="\$migrated_db_dir_host/pocketshell.db\$suffix"
     set +e
-    '$ADB' exec-out run-as com.pocketshell.app \
+    '$ADB' exec-out run-as com.pocketshell.next \
       cat "databases/pocketshell.db\$suffix" > "\$pulled_file" 2>/dev/null
     pull_status=\$?
     set -e
@@ -1683,10 +1701,13 @@ safe_step_name() {
   printf '%s' "$1" | tr '#.' '--'
 }
 
-run_app_walkthrough_script() {
-  local selector="$1"
-  local diagnostics_file="$2"
-  local full_logcat_file="$3"
+# Issue #2481: runs app2's WHOLE instrumented set through `am instrument` with
+# NO `-e class` filter, against the exact validated APK pair this gate installed
+# (issue #2064). One process for the whole set, matching the app2 journey lane's
+# deliberate shape (issue #2474) — see APP2_INSTRUMENTED_SUITE_LABEL above.
+run_app2_instrumented_suite_script() {
+  local diagnostics_file="$1"
+  local full_logcat_file="$2"
   cat <<RUN_SCRIPT
 set -euo pipefail
 
@@ -1697,13 +1718,13 @@ dump_instrumentation_diagnostics() {
   local reason="\$1"
   {
     printf 'Instrumentation failure reason: %s\n' "\$reason"
-    printf 'Selector: %s\n\n' '$selector'
+    printf 'Suite: %s (unfiltered app2 instrumented set)\n\n' '$APP2_INSTRUMENTED_SUITE_LABEL'
     printf '=== instrumentation output ===\n'
     printf '%s\n\n' "\${output:-<no instrumentation output captured>}"
     printf '=== filtered logcat crash context ===\n'
     if [ -f "\$full_logcat_file" ]; then
       grep -E -C 80 \
-        'AndroidRuntime|FATAL EXCEPTION|FATAL SIGNAL|Process: com[.]pocketshell[.]app|ActivityManager.*(Crash|Killing|Force stopping).*com[.]pocketshell[.]app|am_crash|TestRunner|AndroidJUnitRunner|Instrumentation' \
+        'AndroidRuntime|FATAL EXCEPTION|FATAL SIGNAL|Process: com[.]pocketshell[.]next|ActivityManager.*(Crash|Killing|Force stopping).*com[.]pocketshell[.]next|am_crash|TestRunner|AndroidJUnitRunner|Instrumentation' \
         "\$full_logcat_file" || true
     else
       printf 'Full logcat artifact was not created: %s\n' "\$full_logcat_file"
@@ -1718,11 +1739,18 @@ dump_instrumentation_diagnostics() {
 }
 
 instrumentation_output_has_failure_markers() {
-  printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
+  # STATUS_CODE -1/-2 (STATUS_ERROR/STATUS_FAILURE) are real failures.
+  # -3 (STATUS_IGNORED, an @Ignore'd/quarantined test per D36) and -4
+  # (STATUS_ASSUMPTION_FAILURE) are not: JUnit itself does not count either as
+  # a failure, and this suite carries deliberately-quarantined tests (#2478)
+  # whose whole point is to NOT gate anything. Matching every negative code
+  # made a clean "0 failed, 2 ignored" run indistinguishable from a real
+  # failure, which is exactly the false failure this run reproduced.
+  printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[12]$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
 }
 
 logcat_has_app_or_test_failure_markers() {
-  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "\$full_logcat_file"
+  grep -Eq 'Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|FATAL SIGNAL.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "\$full_logcat_file"
 }
 
 logcat_has_adb_transport_drop_markers() {
@@ -1774,7 +1802,7 @@ cold_reboot_emulator_for_gl_recovery() {
   else
     printf 'No EGL/101010-2 logcat marker in the captured window; recovering on the compose-hierarchy signature alone.\n' >&2
   fi
-  for package in com.pocketshell.app.test com.pocketshell.app; do
+  for package in com.pocketshell.next.test com.pocketshell.next; do
     '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
   done
   '$ADB' reboot >/dev/null 2>&1 || true
@@ -1822,7 +1850,7 @@ max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_tra
 while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   '$ADB' logcat -c || true
   set +e
-  output=\$('$ADB' shell am instrument -w -r -e class '$selector' com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
+  output=\$('$ADB' shell am instrument -w -r com.pocketshell.next.test/com.pocketshell.next.HiltNextTestRunner 2>&1)
   instrument_status=\$?
   set -e
   if [ "\$instrument_status" -ne 0 ]; then
@@ -1833,14 +1861,26 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   if [ "\$instrument_status" -eq 0 ] &&
     printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' &&
     ! instrumentation_output_has_failure_markers; then
+    # Issue #2481 / G3: an unfiltered run has no selector that can go stale, so
+    # the way it lies is 'OK (0 tests)' — a green over nothing
+    # (docs/ci-pitfalls.md). Refuse it here rather than let the gate publish it.
+    if printf '%s\n' "\$output" | grep -Eq '^OK \\(0 tests\\)'; then
+      dump_instrumentation_diagnostics "the app2 instrumented suite reported OK (0 tests): the run executed nothing, so it proves nothing"
+      exit 1
+    fi
+    if ! printf '%s\n' "\$output" | grep -Eq '^OK \\([1-9][0-9]* tests?\\)'; then
+      dump_instrumentation_diagnostics "the app2 instrumented suite did not report an 'OK (N tests)' summary with N >= 1"
+      exit 1
+    fi
+    printf '%s\n' "\$output" | grep -E '^OK \\([0-9]+ tests?\\)'
     exit 0
   fi
   if [ "\$attempt" -eq 1 ] &&
     { printf '%s\n' "\$output" | grep -q 'Process crashed'; } &&
-    grep -q 'Crash of app com[.]pocketshell[.]app running instrumentation' "\$full_logcat_file"; then
+    grep -q 'Crash of app com[.]pocketshell[.]next running instrumentation' "\$full_logcat_file"; then
     cp "\$full_logcat_file" "\$full_logcat_file.attempt1" || true
     printf 'Focused instrumentation crashed after external app force-stop; retrying selector once.\n' >&2
-    for package in com.pocketshell.app.test com.pocketshell.app; do
+    for package in com.pocketshell.next.test com.pocketshell.next; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -1857,7 +1897,7 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
     printf 'Focused instrumentation interrupted by adb transport drop on attempt %s; recovery %s/%s; retrying selector without treating it as an app/test retry.\n' "\$attempt" "\$transport_recovery_attempts" "\$max_transport_recovery_attempts" >&2
     '$ADB' reconnect >/dev/null 2>&1 || true
     timeout 60s '$ADB' wait-for-device >/dev/null 2>&1 || true
-    for package in com.pocketshell.app.test com.pocketshell.app; do
+    for package in com.pocketshell.next.test com.pocketshell.next; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -1963,10 +2003,10 @@ if ! [[ "$APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; t
   fail "APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS must be a positive integer"
 fi
 
-# Issue #749: cheap selector-existence guard runs before the heavy steps so a
-# deleted/renamed walkthrough test fails fast with a clear message instead of a
-# ClassNotFoundException deep inside the on-device instrumentation loop.
-assert_app_walkthrough_selectors_exist
+# Issue #749, repointed by #2481: the cheap vacuity guard runs before the heavy
+# steps so an emptied app2 androidTest tree fails fast with a clear message
+# instead of producing a green 'OK (0 tests)' deep inside the run.
+assert_app2_instrumented_suite_exists
 
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds
@@ -2012,12 +2052,12 @@ else
 fi
 
 run_bash_step "gradle-compile-unit" \
-  "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS $GATE_COMPILE_UNIT_TASKS --stacktrace"
+  "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app2:kspDebugKotlin :app2:kspReleaseKotlin :app2:kspDebugAndroidTestKotlin :app2:kspDebugUnitTestKotlin :app2:kspReleaseUnitTestKotlin :app2:hiltJavaCompileDebug :app2:hiltJavaCompileRelease :app2:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS $GATE_COMPILE_UNIT_TASKS --stacktrace"
 
 # Issue #2381 — stamp the `agents` fixture with the SAME versionName this gate
 # asserts a few lines below (docker-agents-pocketshell-version) and that the APK
 # it installs reports. Since #2356 the version is derived from git rather than a
-# literal in app/build.gradle.kts, so the fixture can no longer parse it out of
+# literal in app2/build.gradle.kts, so the fixture can no longer parse it out of
 # the build context; it is passed in through the environment instead (see
 # scripts/lib/agents-fixture-version.sh). Without this the fixture reports its
 # baked `0.0.0-dev`, this gate's own version assertion hard-fails on every
@@ -2050,15 +2090,33 @@ run_bash_step "docker-agents-ssh-sanity" \
 #     (the cold-start hydrate read fails — the exact CLI mismatch), AND
 #   * the host is otherwise live (`tmux` works), so a correct client MUST fall
 #     back to the live tree instead of hanging on "loading tree".
-# This is the deterministic Docker half of the #847 regression gate. The
-# end-to-end on-emulator proof that the APP itself connects + renders the live
-# tree on this old-CLI host is
-# `com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest` (run it
-# against this fixture with
-# `scripts/connected-test.sh --suffix iNNN :app:connectedDebugAndroidTest \
-#   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest`);
-# the always-runnable JVM backstop for the same property is
-# `FolderListViewModelOldCliHydrateTest` (per-push Unit job).
+# This is the deterministic Docker half of the #847 regression gate.
+#
+# Issue #2481: the on-emulator half used to be
+# `com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest`, deleted with
+# the `app` module. app2's successor for "the host CLI is too old" is the typed
+# `HostCliTooOld` rejection in :shared:core-hostapi (schema < 2), covered on the
+# per-push Unit lane, plus scripts/ci-verify-agents-old-cli-mismatch.sh in CI.
+# The FIXTURE assertion below is kept regardless of which client consumes it:
+# it is the only place that proves the 2238 host really is version-mismatched,
+# and a happy-only fixture set is exactly what let the v0.4.10 connect break
+# ship (D32/G10).
+# Issue #2481: app2's instrumented set is run UNFILTERED below, and it contains
+# J05ReconnectAfterDropJourney, which dials the fixture THROUGH the Toxiproxy
+# `network-fault-proxy` (see docs/testing.md and app2's ToxiproxyControl). The
+# old eight-selector list contained no fault journey, so the gate never needed
+# this service; running the whole set without it would fail the reconnect
+# journey as if the product were broken (issue #2128's exact symptom).
+#
+# `--no-deps` plus an API-version poll, not wait_for_container_healthy: the
+# toxiproxy image declares no compose `healthcheck:`, so the health helper would
+# block for its whole timeout and then fail on a perfectly live proxy. This is
+# the same readiness shape .github/workflows/app2.yml's `app2-journey` job uses.
+run_step "docker-network-fault-proxy-up" \
+  docker compose -f "$COMPOSE_FILE" up -d --no-deps network-fault-proxy
+run_bash_step "docker-network-fault-proxy-ready" \
+  "for attempt in \$(seq 1 30); do if curl --fail --silent --show-error http://127.0.0.1:8474/version; then exit 0; fi; sleep 1; done; docker compose -f '$COMPOSE_FILE' logs --no-color network-fault-proxy; exit 1"
+
 run_step "docker-agents-old-cli-up" docker compose -f "$COMPOSE_FILE" up -d --build agents-old-cli
 run_bash_step "docker-agents-old-cli-health" \
   "source '$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh' && wait_for_container_healthy '$COMPOSE_FILE' agents-old-cli '$RUN_DIR/docker-agents-old-cli-health.log' 60"
@@ -2093,14 +2151,14 @@ fi
 
 run_step "build-app-test-apks" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-app-test-apks" -- \
-  ./gradlew "${GRADLE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  ./gradlew "${GRADLE_ARGS[@]}" :app2:assembleDebug :app2:assembleDebugAndroidTest --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
 
 # Issue #2064: this is the ONE build of the release pair. Record its identity so
 # every downstream stage installs THESE bytes and publish_validated_apk ships
 # THESE bytes. Before this, terminal-lab / tmux-existing-session /
-# setup-detection / visual-audit each `rm -rf app/build` and rebuilt their own
+# setup-detection / visual-audit each `rm -rf app/build` and rebuilt their own  (all four stages are now deleted, issue #2481)
 # byte-different pair, so the journey evidence a tag rests on came from a binary
 # nothing else in the chain had validated.
 run_step "record-validated-apk-identity" \
@@ -2108,36 +2166,77 @@ run_step "record-validated-apk-identity" \
   "$(cd "$(dirname "$APK_PATH")" && pwd)/$(basename "$APK_PATH")" \
   "$(cd "$(dirname "$TEST_APK_PATH")" && pwd)/$(basename "$TEST_APK_PATH")"
 
+# Issue #2481: this proof is REPOINTED at app2, not deleted. app2 runs under its
+# own applicationId (`com.pocketshell.next`) today, so no real device has a
+# legacy `pocketshell.db` in its sandbox yet — but app2 reads the SAME schema
+# from :shared:core-storage and deliberately wires the whole migration array
+# (app2/src/main/java/com/pocketshell/next/di/AppModule.kt: "an install that
+# later becomes the primary app must open an existing v-N file rather than fail
+# Room's schema validation"). That claim is exactly what this step proves, and
+# it becomes load-bearing the moment rewrite task X-3 renames the applicationId
+# to `com.pocketshell.app` over the shipping client's existing database. Testing
+# it now, on every release, is the difference between finding a broken migration
+# chain here and finding it on the maintainer's phone at cutover.
 LEGACY_V1_DB_MIGRATION_STATUS="running"
 run_bash_step "migrate-legacy-v1-databases" "$(legacy_v1_database_migration_script)"
 
 run_bash_step "cold-reset-app-packages-before-app-walkthrough" "$(cold_reset_app_packages_script)"
 run_bash_step "cold-reset-install-app-walkthrough-apks" "$(cold_reset_install_app_walkthrough_apks_script)"
 
-for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
-  app_walkthrough_selector="${APP_WALKTHROUGH_TESTS[$app_walkthrough_index]}"
-  app_walkthrough_safe_name="$(safe_step_name "$app_walkthrough_selector")"
-  set_focused_status "$app_walkthrough_selector" "pending"
-  if ! run_bash_step "quiesce-app-walkthrough-processes-$app_walkthrough_safe_name" "$(quiesce_app_walkthrough_processes_script)"; then
-    set_focused_status "$app_walkthrough_selector" "blocked"
-    exit 1
-  fi
+# Issue #2481: ONE unfiltered instrumentation run of app2's whole set, against
+# the validated APK pair installed above. It replaces the eight-selector loop
+# that drove the deleted `app` module's androidTest classes; see
+# APP2_INSTRUMENTED_SUITE_LABEL for why unfiltered (issue #2474) rather than a
+# fresh selector list.
+app2_suite_label="$APP2_INSTRUMENTED_SUITE_LABEL"
+set_focused_status "$app2_suite_label" "pending"
+if ! run_bash_step "quiesce-app-walkthrough-processes-$app2_suite_label" "$(quiesce_app_walkthrough_processes_script)"; then
+  set_focused_status "$app2_suite_label" "blocked"
+  exit 1
+fi
 
-  app_walkthrough_step_index=$((STEP_INDEX + 1))
-  app_walkthrough_diagnostics_file="$(printf '%s/%02d-connected-app-walkthrough-%s-diagnostics.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
-  app_walkthrough_full_logcat_file="$(printf '%s/%02d-connected-app-walkthrough-%s-full-logcat.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
-  set_focused_status "$app_walkthrough_selector" "running" "" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
-  if run_bash_step "connected-app-walkthrough-$app_walkthrough_safe_name" "$(run_app_walkthrough_script "$app_walkthrough_selector" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file")"; then
-    set_focused_status "$app_walkthrough_selector" "passed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
-  else
-    set_focused_status "$app_walkthrough_selector" "failed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
-    FAILURE_DIAGNOSTICS_PATH="$app_walkthrough_diagnostics_file"
-    FAILURE_LOGCAT_PATH="$app_walkthrough_full_logcat_file"
-    exit 1
-  fi
-done
+app2_suite_step_index=$((STEP_INDEX + 1))
+app2_suite_diagnostics_file="$(printf '%s/%02d-connected-app-walkthrough-%s-diagnostics.log' "$RUN_DIR" "$app2_suite_step_index" "$app2_suite_label")"
+app2_suite_full_logcat_file="$(printf '%s/%02d-connected-app-walkthrough-%s-full-logcat.log' "$RUN_DIR" "$app2_suite_step_index" "$app2_suite_label")"
+set_focused_status "$app2_suite_label" "running" "" "$app2_suite_diagnostics_file" "$app2_suite_full_logcat_file"
+app2_suite_step_log="$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app2_suite_step_index" "$app2_suite_label")"
+if run_bash_step "connected-app-walkthrough-$app2_suite_label" "$(run_app2_instrumented_suite_script "$app2_suite_diagnostics_file" "$app2_suite_full_logcat_file")"; then
+  set_focused_status "$app2_suite_label" "passed" "$app2_suite_step_log" "$app2_suite_diagnostics_file" "$app2_suite_full_logcat_file"
+  # Re-encode the runner's own INSTRUMENTATION_STATUS stream where Gradle would
+  # have put it, so the #2082 execution ledger can credit the journeys that just
+  # ran. See record_detached_instrumentation_junit_xml above for why this exists
+  # and why it is pinned to J01.
+  record_detached_instrumentation_junit_xml \
+    "$APP2_LEDGER_REQUIRED_CLASS" "$app2_suite_step_log"
+else
+  set_focused_status "$app2_suite_label" "failed" "$app2_suite_step_log" "$app2_suite_diagnostics_file" "$app2_suite_full_logcat_file"
+  FAILURE_DIAGNOSTICS_PATH="$app2_suite_diagnostics_file"
+  FAILURE_LOGCAT_PATH="$app2_suite_full_logcat_file"
+  exit 1
+fi
 
-# Issue #2064: this step used to re-run `:app:assembleDebug` after
+# Issue #2481: the journey screenshots are the release VISUAL-AUDIT artifact now
+# that the `scripts/phone-walkthrough.sh visual-audit` stage is gone (it drove
+# three deleted `app` module screenshot tests: WalkthroughVisualScreenshotTest,
+# WalkthroughConversationScreenshotTest and PromptComposerVisualScreenshotTest —
+# and the conversation view itself is a cut feature, see
+# docs/rewrite-implementation-plan.md "Scope amendment"). app2's journeys write
+# PNGs through `JourneyScreenshots.capture` into the app's external files dir,
+# which is exactly what scripts/ci-app2-journey-suite.sh collects in CI.
+#
+# Best-effort on purpose: a missing screenshot must not redden a green suite, so
+# this is a `run_step` over a pull that cannot fail the gate, and the summary
+# records where they landed. The HARD per-journey assertion ("every journey
+# rendered at least one frame") lives in the standalone
+# scripts/capture-walkthrough-screenshots.sh, which is deliberately NOT a chain
+# stage: running it here would be a second full run of the set just executed.
+APP2_JOURNEY_SCREENSHOT_DIR="$RUN_DIR/journey-screenshots"
+mkdir -p "$APP2_JOURNEY_SCREENSHOT_DIR"
+run_step "pull-app2-journey-screenshots" bash -lc \
+  "'$ADB' pull /sdcard/Android/data/com.pocketshell.next/files '$APP2_JOURNEY_SCREENSHOT_DIR' >/dev/null 2>&1 || printf 'no journey screenshots were pulled (best effort)\\n'; find '$APP2_JOURNEY_SCREENSHOT_DIR' -type f -name '*.png' | sort" ||
+  printf 'WARN: journey screenshot collection failed; the suite result above is unaffected (issue #2481).\n' >&2
+
+# Issue #2064: this step used to re-run the app module's `assembleDebug` after
 # `build-app-test-apks` had already produced the APK — a fourth build of the
 # same binary inside a chain that was already building it four times. It is
 # replaced by the assertion that makes the redundancy unnecessary AND provable:

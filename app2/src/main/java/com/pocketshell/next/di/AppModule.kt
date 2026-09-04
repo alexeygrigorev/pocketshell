@@ -1,0 +1,303 @@
+package com.pocketshell.next.di
+
+import android.content.Context
+import androidx.room.Room
+import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
+import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.hostapi.HostCliClient
+import com.pocketshell.core.storage.dao.PortRemappingDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.dao.SentMessageDao
+import com.pocketshell.core.storage.dao.SshKeyDao
+import com.pocketshell.core.transport.AuthSecretResolver
+import com.pocketshell.core.transport.HostConnectionFactory
+import com.pocketshell.core.transport.RealHostConnectionFactory
+import com.pocketshell.core.transport.TrustStore
+import com.pocketshell.core.usage.PocketshellUsageJsonParser
+import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.composer.ComposerAttachmentStager
+import com.pocketshell.next.connect.RoomAuthSecretResolver
+import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.diagnostics.DiagnosticRecorder
+import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.hostcli.asRemoteExec
+import com.pocketshell.next.hosts.HostImporter
+import com.pocketshell.next.hosts.SshKeyStore
+import com.pocketshell.next.terminal.AndroidGraceServiceControl
+import com.pocketshell.next.terminal.ForegroundSignal
+import com.pocketshell.next.terminal.GraceCoordinator
+import com.pocketshell.next.terminal.GraceServiceControl
+import com.pocketshell.next.terminal.ProcessForegroundSignal
+import com.pocketshell.next.terminal.ReconnectController
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
+import java.io.File
+import javax.inject.Qualifier
+import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+
+/**
+ * Marks the shared IO dispatcher. Screens/ViewModels take it as a constructor
+ * parameter instead of touching [Dispatchers.IO] directly, so a unit test can
+ * substitute a deterministic scheduler.
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class IoDispatcher
+
+/**
+ * app2's only DI module so far (plan §U-1): the Room database and the DAOs the
+ * screens that exist actually consume, plus the IO dispatcher.
+ *
+ * The database file name matches the shipping client's (`pocketshell.db`) on
+ * purpose — app2 reads the very same schema and, once X-4 renames the
+ * `applicationId` to `com.pocketshell.app`, the very same file, so cutover is a
+ * rename rather than a data migration. Until then app2 runs under its own
+ * `applicationId` and therefore its own (initially empty) copy in its own
+ * sandbox; that is a property of Android app sandboxing, not of this module.
+ *
+ * The migration array is wired even though app2 only reads: an install that
+ * later becomes the primary app must open an existing v-N file rather than
+ * fail Room's schema validation.
+ *
+ * A DAO is added here when a screen consumes it, not preemptively — the old
+ * client's module provided nine and the rewrite's premise is that most of them
+ * are never needed again.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object AppModule {
+
+    private const val DATABASE_NAME: String = "pocketshell.db"
+
+    @Provides
+    @Singleton
+    fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
+        Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
+            .addMigrations(*APP_DATABASE_MIGRATIONS)
+            .build()
+
+    @Provides
+    fun provideHostDao(db: AppDatabase): HostDao = db.hostDao()
+
+    @Provides
+    fun provideSshKeyDao(db: AppDatabase): SshKeyDao = db.sshKeyDao()
+
+    // Task P-4. `forwarding_intent` is the aggregate "stop everything" statement
+    // behind the notification's Stop action; `port_remappings` carries the user's
+    // remote→local overrides into each forwarder.
+    @Provides
+    fun provideForwardingIntentDao(db: AppDatabase): ForwardingIntentDao = db.forwardingIntentDao()
+
+    @Provides
+    fun providePortRemappingDao(db: AppDatabase): PortRemappingDao = db.portRemappingDao()
+
+    // Task P-1: the composer's sent-message log. A read-only history the user
+    // taps to refill a draft — see `SentMessageEntity` for why it is not a
+    // queue and nothing ever re-sends from it.
+    @Provides
+    fun provideSentMessageDao(db: AppDatabase): SentMessageDao = db.sentMessageDao()
+
+    // Task P-6: per-host workspace-root shortcuts, managed from Settings.
+    @Provides
+    fun provideProjectRootDao(db: AppDatabase): ProjectRootDao = db.projectRootDao()
+
+    @Provides
+    @IoDispatcher
+    fun provideIoDispatcher(): CoroutineDispatcher = Dispatchers.IO
+
+    // -------------------------------------------------------------------------
+    // The composer (task P-1).
+
+    /**
+     * The attachment stager takes a [android.content.ContentResolver] rather
+     * than a `Context`: a picked file arrives as a SAF content URI, and the
+     * resolver is the only Android API involved in turning it into bytes. It
+     * writes through whatever [com.pocketshell.core.transport.SftpChannel] the
+     * ViewModel hands it, so nothing here holds a connection.
+     */
+    @Provides
+    @Singleton
+    fun provideComposerAttachmentStager(
+        @ApplicationContext context: Context,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): ComposerAttachmentStager = ComposerAttachmentStager(context.contentResolver, dispatcher)
+
+    // The recognizer behind the mic lives in `VoiceModule` (task P-2). It is a
+    // separate module so an instrumented journey can `@UninstallModules` the
+    // voice graph and script a dictation without also uninstalling the database
+    // and the connection stack.
+
+    // -------------------------------------------------------------------------
+    // Host management (task P-6): the key store the add/edit form picks from,
+    // and the QR importer that writes a scanned host.
+
+    /**
+     * Private keys live in `filesDir/ssh-keys`, the same path the shipping
+     * client used — so the X-3 `applicationId` rename finds existing keys where
+     * `ssh_keys.privateKeyPath` already says they are, instead of pointing at a
+     * directory that was never populated.
+     *
+     * The directory (not a `Context`) is what [SshKeyStore] takes, which is what
+     * keeps that class Android-free and testable against a temp folder.
+     */
+    @Provides
+    @Singleton
+    fun provideSshKeyStore(
+        @ApplicationContext context: Context,
+        sshKeyDao: SshKeyDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): SshKeyStore = SshKeyStore(File(context.filesDir, "ssh-keys"), sshKeyDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideHostImporter(
+        hostDao: HostDao,
+        sshKeyDao: SshKeyDao,
+        keyStore: SshKeyStore,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): HostImporter = HostImporter(hostDao, sshKeyDao, keyStore, dispatcher)
+
+    // -------------------------------------------------------------------------
+    // The connection stack (task U-2). Four bindings, each one an interface
+    // core-transport declares wired to the single implementation app2 has:
+    // trust lives on the host row, key material lives in `ssh_keys` + the file
+    // it points at, and the dial is sshj's.
+    //
+    // Every one of them is a @Singleton, and that is load-bearing for the
+    // registry: a second ConnectionsRegistry instance would be a second
+    // one-connection-per-host table, which is two connections per host — the
+    // exact failure the registry exists to make impossible.
+
+    @Provides
+    @Singleton
+    fun provideTrustStore(
+        hostDao: HostDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): TrustStore = RoomTrustStore(hostDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideAuthSecretResolver(
+        sshKeyDao: SshKeyDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): AuthSecretResolver = RoomAuthSecretResolver(sshKeyDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideHostConnectionFactory(
+        secrets: AuthSecretResolver,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): HostConnectionFactory = RealHostConnectionFactory(secrets, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideConnectionsRegistry(
+        factory: HostConnectionFactory,
+        trustStore: TrustStore,
+        hostDao: HostDao,
+        @IoDispatcher dispatcher: CoroutineDispatcher,
+    ): ConnectionsRegistry = ConnectionsRegistry(factory, trustStore, hostDao, dispatcher)
+
+    /**
+     * The host-CLI seam (task U-3). Deliberately NOT a `@Singleton` client: a
+     * `HostCliClient` is bound to one live [com.pocketshell.core.transport.HostConnection]
+     * and a connection is spent once its transport dies, so what is shared is
+     * the *recipe*, and each screen builds a client over whatever connection
+     * [ConnectionsRegistry] hands it at that moment.
+     *
+     * The binding itself is stateless, hence the singleton on the factory.
+     */
+    @Provides
+    @Singleton
+    fun provideHostCliClientFactory(): HostCliClientFactory =
+        HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) }
+
+    /**
+     * `PocketshellUsageJsonParser` (task P-5) has a plain no-arg constructor
+     * with no `@Inject` of its own — `core-usage` is a UI-framework-free
+     * shared module and stays that way. Provided here, stateless, rather than
+     * as a default constructor argument on [com.pocketshell.next.usage.UsageFetcher]:
+     * a default-valued `@Inject` constructor generates a second constructor at
+     * the bytecode level that Hilt refuses to bind (the same trap the
+     * pre-rewrite client's `UsageRemoteSource` hit).
+     */
+    @Provides
+    fun providePocketshellUsageJsonParser(): PocketshellUsageJsonParser = PocketshellUsageJsonParser()
+
+    // -------------------------------------------------------------------------
+    // Reconnect (task U-7).
+
+    /**
+     * The reconnect ladder. Provided rather than `@Inject`-annotated so the
+     * class stays exactly the plan's §C.3 shape — a plain constructor with a
+     * defaulted list, constructible by any test without a graph.
+     *
+     * Not a `@Singleton`: it is stateless (the attempt counter lives on the
+     * session), so sharing one buys nothing and would only invite state.
+     */
+    @Provides
+    fun provideReconnectController(): ReconnectController = ReconnectController()
+
+    /**
+     * A `@Singleton` because it registers a process-lifecycle observer: a
+     * second instance would be a second observer for a lifecycle there is only
+     * one of.
+     */
+    @Provides
+    @Singleton
+    fun provideForegroundSignal(signal: ProcessForegroundSignal): ForegroundSignal = signal
+
+    // -------------------------------------------------------------------------
+    // Background grace (task U-8, D21).
+
+    @Provides
+    @Singleton
+    fun provideGraceServiceControl(
+        @ApplicationContext context: Context,
+    ): GraceServiceControl = AndroidGraceServiceControl(context)
+
+    /**
+     * A `@Singleton`, and that is load-bearing twice over: it registers a
+     * process-lifecycle observer AND an activity-lifecycle callback, and it owns
+     * the pending grace handles. A second instance would arm a second delayed
+     * close on every connection and cancel only its own.
+     *
+     * Provided rather than `@Inject`-annotated so the class keeps the plan's
+     * §C.4 constructor — a clock and a grace default a test can substitute
+     * without a graph. [com.pocketshell.next.MainActivity] is what calls
+     * `register()`; nothing here starts anything eagerly.
+     */
+    @Provides
+    @Singleton
+    fun provideGraceCoordinator(
+        connections: ConnectionsRegistry,
+        service: GraceServiceControl,
+    ): GraceCoordinator = GraceCoordinator(connections = connections, service = service)
+
+    // -------------------------------------------------------------------------
+    // Diagnostics (task P-10): generic bounded event-log recorder. `crash/`
+    // (CrashReporter/CrashReportStore) records straight to its own on-disk
+    // store and does not go through this bean; this is only the
+    // `DiagnosticEvents`/`DiagnosticEventSink` bus `App.onCreate` installs.
+
+    /**
+     * A `@Singleton` provided here (like [provideGraceCoordinator]) rather than
+     * `@Inject`-constructor-annotated, so [DiagnosticRecorder] keeps a plain
+     * `(Context)` constructor a test can build directly without a Hilt graph —
+     * see `DiagnosticRecorderOffMainTest`/`DiagnosticRecorderTest`. A second
+     * instance would mean a second off-main JSONL store build and a second,
+     * independently-seeded sequence counter, so sharing this one instance is
+     * load-bearing.
+     */
+    @Provides
+    @Singleton
+    fun provideDiagnosticRecorder(@ApplicationContext context: Context): DiagnosticRecorder =
+        DiagnosticRecorder(context)
+}

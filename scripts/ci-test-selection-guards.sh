@@ -55,7 +55,6 @@ chmod +x scripts/select-test-areas.sh \
          scripts/check-test-execution-ledger-selftest.sh \
          scripts/check-test-execution-ledger-wiring.py \
          scripts/ci-record-test-execution-ledger.sh \
-         scripts/ci-nightly-execution-ledger.sh \
          scripts/dev-fast-gate-parity-selftest.sh \
          scripts/check-journey-quarantine-expiry.sh \
          scripts/test-journey-quarantine-non-blocking.sh

@@ -48,13 +48,13 @@ For connected-test review evidence, keep it open in a dedicated terminal:
 AVD_HOLD=1 scripts/start-local-avd.sh
 ```
 
-Then run `:app:connectedDebugAndroidTest` from another terminal through the
+Then run `:app2:connectedDebugAndroidTest` from another terminal through the
 scoped connected-test wrapper. It already runs Gradle in a sibling cgroup and
 serializes AVD access:
 
 ```bash
 scripts/connected-test.sh --suffix i123 \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney
 ```
 
 If the emulator exits after boot, the held helper records the failure in the
@@ -63,7 +63,7 @@ same run directory.
 For other heavy local reproduction commands, use the explicit cgroup wrapper:
 
 ```bash
-scripts/cgroup-run.sh -- ./gradlew --no-daemon :app:compileDebugKotlin
+scripts/cgroup-run.sh -- ./gradlew --no-daemon :app2:compileDebugKotlin
 POCKETSHELL_TEST_MEM=6G scripts/cgroup-run.sh --unit local-repro -- bash -lc '...'
 ```
 
@@ -301,114 +301,48 @@ Run focused connected checks:
 
 ```bash
 scripts/connected-test.sh --module shared:core-terminal --suffix terminal
-CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest"
+# app2's whole instrumented set, unfiltered in one process (the CI shape,
+# issue #2474) — this is what a bare invocation now runs:
+scripts/connected-test.sh --suffix smoke
+
+# ...or one journey, for an ad-hoc reproduction:
+CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney"
 scripts/connected-test.sh --suffix smoke \
   "$CLASS_ARG"
 ```
 
-Run the fast local phone-walkthrough reproduction harness on an already-booted
+Run the local visual pass (app2's journey screenshots) on an already-booted
 emulator:
 
 ```bash
-scripts/phone-walkthrough.sh terminal-lab
-scripts/phone-walkthrough.sh visual-audit
-scripts/phone-walkthrough.sh setup-detection
-scripts/phone-walkthrough.sh setup-detection:ready
+scripts/capture-walkthrough-screenshots.sh
 ```
 
-The harness starts/verifies the Docker `agents` target, checks emulator boot
-state with the explicit `adb` path, runs only the selected scenario, and writes
-screenshots, timings, logcat, instrumentation output, Docker logs, command
-logs, and crash diagnostics under `build/phone-walkthrough/<run-id>/`.
-`setup-detection` starts the `bootstrap-*` services on ports `2230` through
-`2236`; use `setup-detection:<profile>` to run one profile.
-`visual-audit` writes normalized reviewer screenshots under
-`build/phone-walkthrough/<run-id>/screenshots/visual-audit/` and raw pulled device
-output under
-`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
+It starts/verifies the Docker `agents` target and the `network-fault-proxy`,
+checks emulator boot state with the explicit `adb` path, installs app2's
+debug + androidTest APKs, runs the whole instrumented set unfiltered, and pulls
+the journey screenshots under
+`build/walkthrough-visual-pass/<run-id>/screenshots/files/<journey>/`. It fails
+unless every expected journey directory rendered at least one frame.
 
-Run the deterministic terminal reviewer workbench:
+**Issue #2481 deleted the harnesses this section used to document**, because
+every androidTest class behind them went with the `app` module in the rewrite's
+hard cut:
 
-```bash
-scripts/terminal-workbench.sh
-```
+| Deleted | Drove |
+|---|---|
+| `scripts/phone-walkthrough.sh` (`terminal-lab`, `tmux-existing-session`, `visual-audit`, `setup-detection[:<profile>]`) | `TerminalLabDockerTest`, `EmulatorDockerSshSmokeTest`, the three Walkthrough*ScreenshotTest classes, `HostBootstrapScenarioSuiteTest` |
+| `scripts/parallel-setup-detection.sh` | the same bootstrap matrix, sharded |
+| `scripts/terminal-workbench.sh`, `scripts/release-terminal-gate.sh`, `docs/release-terminal-gate.md` | `TerminalLabDockerTest`, `TmuxAttachPrefillDockerTest`, `TmuxExternalUpdateDockerTest`, `EmulatorDockerSshSmokeTest` |
+| `scripts/capture-terminal-lab.sh`, `scripts/tmux-attach-prefill.sh`, `scripts/tmux-issue303-toolbar-proof.sh`, `scripts/keyboard-stress.sh`, `scripts/reconnect-app-switch.sh`, `scripts/issue271-startup-connect-timing.sh` | one deleted per-issue androidTest class each |
+| `TERMINAL_RELEASE_GATE=1` / `LONG_RUNNING_TEST=1` release stages, and the `terminal_release_gate` workflow input | `RealAgentReleaseGateTest`, `LongRunningSessionStabilityTest` |
 
-Use a stable run ID when the artifact path will be cited in an issue comment:
-
-```bash
-RUN_ID=issue-<number>-review scripts/terminal-workbench.sh
-```
-
-The deterministic workbench starts or verifies the emulator, starts the Docker
-`agents` service on host port `2222`, waits for SSH readiness, runs
-`TerminalLabDockerTest#terminalWorkbenchKeepsDockerShellOpenForVisualIteration`,
-and writes:
-
-- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-viewport.png`
-  direct terminal viewport renders. These are authoritative for terminal
-  content.
-- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-visible-terminal.txt`
-  visible terminal text from the terminal emulator.
-- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-summary.txt` and
-  `build/terminal-workbench/<run-id>/artifact-summary.txt` with capture policy,
-  viewport hashes, visible-character counts, and advisory full-device/window
-  screenshot status.
-- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/timings.txt`.
-- `build/terminal-workbench/<run-id>/07-run-workbench.log`,
-  `docker-ssh-readiness.log`, `docker-agents.log`, `logcat.txt`, and
-  `final-screen.png`.
-
-Full-device or final-screen screenshots are advisory for terminal content unless
-the summary proves they agree with the direct `*-viewport.png` render and
-visible terminal text. Reviewers should reject stale, blank, contradictory, or
-missing authoritative viewport/text/timing/log artifacts.
-
-Run the real-agent CLI workbench only when the issue needs real provider CLI
-rendering rather than deterministic shims:
-
-```bash
-REAL_AGENTS=1 scripts/terminal-workbench.sh
-```
-
-This switches to `tests/docker/real-agent/compose.yml`, starts the
-`real-agents` service, uses SSH port `2240`, and runs
-`TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens`. The same
-artifact authority rules apply: direct `*-viewport.png` terminal renders and
-visible terminal text are authoritative; full-device screenshots are advisory.
-The script fails if authoritative viewport PNGs, visible-terminal sidecars,
-timings, summaries, PTY sizing evidence, or expected real-agent CLI screen text
-are missing. It also verifies every summary hash against the pulled PNG and
-rejects duplicate non-hold viewport hashes as stale capture evidence.
-
-For terminal-focused release confidence, run the guarded release validation
-with the optional terminal gate enabled:
-
-```bash
-TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
-```
-
-That command runs the normal pre-release confidence gate first, then runs the
-real-agent terminal workbench from the emulator over SSH into Docker, validates
-the artifact bundle, and continues with the standard phone-walkthrough and visual
-audit release evidence. The terminal gate is intentionally manual/optional and
-is not part of every local or CI release validation run unless
-`TERMINAL_RELEASE_GATE=1` is set or the matching GitHub Actions workflow input
-is enabled. Use it before release candidates that include terminal input,
-viewport rendering, SSH/PTY, or agent CLI usability changes.
-
-When the release also needs long-running terminal/tmux stability evidence, add
-the opt-in 10-minute hold:
-
-```bash
-TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
-```
-
-The long-running hold remains optional for unrelated small releases. Link
-`build/long-running-session/<run-id>-long-running/` from the release issue or
-PR, and inspect
-`artifacts/long-running-session/long-running-summary.txt` for `tick_count=6`,
-`reconnect_events=0`, memory growth below the recorded 50 MB budget, and a
-final visible transcript that still contains the last tick marker.
+Terminal, attach, reconnect and background-grace evidence comes from app2's own
+journeys now (`J03AttachAndTypeJourney`, `J05ReconnectAfterDropJourney`,
+`J06BackgroundGraceReturnJourney`), which run unfiltered in the `app2-journey`
+CI lane and inside the pre-release confidence gate. Real-agent CLI evidence has
+no successor: agent awareness is a cut feature
+(`docs/rewrite-implementation-plan.md`, "Scope amendment").
 
 For release tagging, use the guarded emulator-only wrapper from clean pushed
 `main`:
@@ -418,9 +352,10 @@ scripts/release-emulator-validation.sh
 scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md
 ```
 
-The wrapper runs the pre-release confidence gate, terminal-lab phone walkthrough,
-tmux existing-session phone walkthrough, the setup-detection matrix, and visual
-screenshot capture. Attach or link every artifact directory listed in
+The wrapper runs the nightly-fault guard and the pre-release confidence gate,
+which is now the whole emulator chain (build the one validated APK pair, install
+it, run app2's whole instrumented set against those exact bytes, pull the
+journey screenshots). Attach or link every artifact directory listed in
 `build/release-emulator-validation/<run-id>/summary.md` in the release issue
 and tag notes. Pass `--visual-audit-inspected` only after inspecting the
 visual-audit screenshots.
@@ -431,8 +366,8 @@ Choose the release branch or `main`; optionally provide a `run_id`. Read the
 job summary first, then download the
 `release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
 release summary. The tested debug APK is included inside that artifact at
-`release-emulator-validation/<run-id>/app-debug.apk`; locally, the same file is
-written under `build/release-emulator-validation/<run-id>/app-debug.apk`.
+`release-emulator-validation/<run-id>/app2-debug.apk`; locally, the same file is
+written under `build/release-emulator-validation/<run-id>/app2-debug.apk`.
 Inspect the visual-audit screenshots before using the artifact as release
 evidence. The manual workflow does not push the tag and does not relax the
 stable-main tag rule. A GitHub Actions summary is taggable only when its
@@ -582,14 +517,14 @@ The fast pre-release gate does all of the following:
      `SnippetTerminalE2eTest`, both `InlineDictationUiTest` methods,
      `VoiceCommandPlannerE2eTest`, and both `EmulatorDockerSshSmokeTest`
      methods.
-6. Rebuilds `app/build/outputs/apk/debug/app-debug.apk`.
+6. Rebuilds `app2/build/outputs/apk/debug/app2-debug.apk`.
 7. Runs the separate data-preserving update gate via
-   `scripts/install-update-apk.sh app/build/outputs/apk/debug/app-debug.apk`.
+   `scripts/install-update-apk.sh app2/build/outputs/apk/debug/app2-debug.apk`.
    That helper runs only `adb install -r` and never clears app data or
    uninstalls the package.
 
-Before the focused app instrumentation phase, the gate force-stops
-`com.pocketshell.app.test` and `com.pocketshell.app`, clears existing package
+Before the app2 instrumentation phase, the gate force-stops
+`com.pocketshell.next.test` and `com.pocketshell.next`, clears existing package
 data if either package is already installed, and waits for the package-manager
 handler queues to go idle. This is the cold-reset walkthrough path, not the user
 update path. It then replace-installs the app/test APKs once and waits for
@@ -694,15 +629,15 @@ docker compose -f tests/docker/docker-compose.yml up -d --build \
   bootstrap-fish-user-local-path
 ```
 
-Run the opt-in bootstrap suite:
-
-```bash
-BOOTSTRAP_ARG="-Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true"
-CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
-scripts/connected-test.sh --suffix bootstrap \
-  "$BOOTSTRAP_ARG" \
-  "$CLASS_ARG"
-```
+**No client-side suite drives these seven services any more (issue #2481).**
+`com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest` was deleted with
+the `app` module, and app2 has no guided host-setup sheet to exercise: the
+bootstrap scope is trimmed to the actionable "update the host CLI" error
+(`docs/rewrite-implementation-plan.md`, "Scope amendment"). The services are kept
+because they are cheap, deterministic, and the obvious fixtures for whoever
+builds an app2 setup-detection surface; the version-mismatch half is still
+asserted today, on the `agents-old-cli` fixture (port 2238), by the pre-release
+confidence gate and `scripts/ci-verify-agents-old-cli-mismatch.sh`.
 
 Cleanup:
 

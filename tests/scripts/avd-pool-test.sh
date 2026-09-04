@@ -188,7 +188,7 @@ reclaim_after_full_pool_run() {
     # Gradle must actually have run as a CHILD (the exec->child fix). If `exec`
     # were still used the trap couldn't fire; the marker also proves gradle ran.
     [[ -e "$marker" ]] || fail "stub gradlew did not run on pool run $run"
-    grep -q ':app:connectedDebugAndroidTest' "$args_file" \
+    grep -q ':app2:connectedDebugAndroidTest' "$args_file" \
       || fail "gradle was not invoked with the connected test task on run $run"
   done
 

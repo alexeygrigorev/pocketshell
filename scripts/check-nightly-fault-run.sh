@@ -5,8 +5,19 @@ set -euo pipefail
 #
 # The #848 test-reliability audit found the safety suites run in NO blocking
 # gate: the toxiproxy network-fault proofs + the bootstrap setup-scenario matrix
-# live ONLY in the nightly "Nightly Extensive Tests" workflow
-# (.github/workflows/nightly-extensive.yml).
+# live ONLY in the scheduled journey workflow — since the rewrite that is the
+# `app2 journey suite` job of .github/workflows/app2.yml. D37's cadence moved
+# there with the deleted nightly-extensive.yml, every phase of which targeted
+# the removed `:app` module.
+#
+# WHAT THE VERDICT IS NOW. The old nightly split its run into phases and
+# synthesised a `fault_verdict=` field from the network-fault + bootstrap phase
+# statuses. app2's lane (issue #2474) runs its whole instrumented set — the
+# toxiproxy network-fault journeys among them — in ONE unfiltered
+# instrumentation process, so there are no phases to combine: the JOB'S OWN
+# CONCLUSION is the verdict, and this guard already reads exactly that
+# (`jobConclusion`). The producer-side synthesiser was deleted with the suite;
+# the consumer below is unchanged in substance, only repointed.
 #
 # ISSUE #1201 — WHAT THIS GUARD NOW READS:
 # The extensive shard job mixes the ACTUAL fault suite (network-fault +
@@ -16,7 +27,7 @@ set -euo pipefail
 # so every recent release had to WAIVE this gate — a permanently-waived gate
 # protects nothing. The suite now emits a machine-readable fault verdict from
 # the network-fault + bootstrap phases ONLY, and the workflow exposes it as a
-# dedicated, NON-continue-on-error `Fault-injection safety verdict` job. This
+# dedicated, NON-continue-on-error `app2 journey suite` job. This
 # guard reads THAT job's conclusion, so it GREENs when the fault phases passed
 # even though an unrelated journey / expected-fail test is red, and REDs only
 # when a fault phase itself failed (or no verdict was produced — genuine
@@ -75,7 +86,7 @@ set -euo pipefail
 #      prints a PASS/BLOCK verdict + reason and returns 0 (pass) / 1 (block). No
 #      git, no gh, no I/O. The release HEAD ancestry is computed by the caller.
 #
-#   2. The `gh`/git fetch layer (main path) — queries the latest nightly run that
+#   2. The `gh`/git fetch layer (main path) — queries the latest scheduled run that
 #      ACTUALLY RAN the fault-verdict job (skips guard-skipped runs), extracts
 #      that job's conclusion, resolves ancestry against the release HEAD, then
 #      calls the pure function.
@@ -100,14 +111,14 @@ set -euo pipefail
 #                         output is then marked "[FIXTURE DRY RUN]", so a fixture
 #                         verdict can never be pasted into, or mistaken for, a
 #                         release summary.
-#   --workflow <file>     workflow file (default: nightly-extensive.yml).
-#   --job-needle <needle> substring identifying the fault-verdict job
-#                         (default: "Fault-injection safety verdict").
+#   --workflow <file>     workflow file (default: app2.yml).
+#   --job-needle <needle> substring identifying the journey job
+#                         (default: "app2 journey suite").
 #
 # --release-head <sha> overrides the release HEAD (default: `git rev-parse HEAD`).
 
-WORKFLOW="nightly-extensive.yml"
-JOB_NEEDLE="Fault-injection safety verdict"
+WORKFLOW="app2.yml"
+JOB_NEEDLE="app2 journey suite"
 FIXTURE=""
 RELEASE_HEAD_OVERRIDE=""
 FIXTURE_PREFIX=""
@@ -144,7 +155,7 @@ evaluate_nightly_fault_run() {
 
   # No run at all → the fault suite has never reported for this line. Block.
   if [[ -z "$run_head_sha" ]]; then
-    echo "BLOCK: no nightly fault/bootstrap run found for workflow '$WORKFLOW' — the safety suite has produced no signal to release on. Trigger 'Nightly Extensive Tests' (workflow_dispatch, force_run=true) on the release commit."
+    echo "BLOCK: no scheduled journey run found for workflow '$WORKFLOW' — the safety suite has produced no signal to release on. Trigger the 'app2' workflow (workflow_dispatch) on the release commit."
     return 1
   fi
 
@@ -158,25 +169,25 @@ evaluate_nightly_fault_run() {
   # Stale: the run tested an older line that does NOT contain the release HEAD.
   # Releasing on it would ship commits the fault suite never exercised.
   if [[ "$head_is_ancestor" != "yes" ]]; then
-    echo "BLOCK: latest nightly fault run tested headSha=$run_head_sha which does NOT contain the release HEAD ($release_head_sha) — the run is STALE for this release. Re-run 'Nightly Extensive Tests' on the release commit."
+    echo "BLOCK: latest journey run tested headSha=$run_head_sha which does NOT contain the release HEAD ($release_head_sha) — the run is STALE for this release. Re-run the 'app2' workflow on the release commit."
     return 1
   fi
 
-  # The load-bearing signal is the dedicated `Fault-injection safety verdict`
+  # The load-bearing signal is the dedicated `app2 journey suite`
   # JOB conclusion (issue #1201) — the network-fault + bootstrap verdict, with
   # the flaky journey suite and the #822 expected-fail lane excluded. Anything
   # other than `success` is a block.
   case "$job_conclusion" in
     success)
-      echo "PASS: nightly fault-injection safety verdict is green (fault-verdict job conclusion=success) and covers the release HEAD ($release_head_sha). The network-fault + bootstrap safety journeys passed on this line."
+      echo "PASS: journey fault-injection safety verdict is green (app2 journey job conclusion=success) and covers the release HEAD ($release_head_sha). The network-fault + bootstrap safety journeys passed on this line."
       return 0
       ;;
     cancelled)
-      echo "BLOCK: latest nightly fault-verdict job was CANCELLED (conclusion=cancelled) — the fault/bootstrap suite did not complete, so it proves nothing. Re-run 'Nightly Extensive Tests' on the release commit."
+      echo "BLOCK: latest journey job was CANCELLED (conclusion=cancelled) — the fault/bootstrap suite did not complete, so it proves nothing. Re-run the 'app2' workflow on the release commit."
       return 1
       ;;
     "")
-      echo "BLOCK: latest nightly run did not run the fault-verdict job (no job matching '$JOB_NEEDLE' — it was guard-skipped or never started). There is no fault signal. Force-run 'Nightly Extensive Tests' on the release commit."
+      echo "BLOCK: latest journey run did not run the journey job (no job matching '$JOB_NEEDLE' — it was guard-skipped or never started). There is no fault signal. Force-run the 'app2' workflow on the release commit."
       return 1
       ;;
     *)
@@ -283,7 +294,7 @@ self_test() {
   # must reach the "no fault signal" branch. Before the tab-split fix the empty
   # middle field shifted headSha into job_conclusion and databaseId into
   # run_head_sha, so this blocked as STALE with headSha=424242.
-  fixture_dry_run "fault-verdict-missing"         1 ""        "did not run the fault-verdict job"
+  fixture_dry_run "journey-job-missing"               1 ""        "did not run the journey job"
 
   echo
   if [[ "$failures" -eq 0 ]]; then

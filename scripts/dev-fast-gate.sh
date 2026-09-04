@@ -5,8 +5,17 @@
 # Maps the changed paths in this branch (vs the origin/main merge base) to a
 # MINIMAL set of emulator validation stages and runs only those, by calling the
 # EXISTING building blocks directly:
-#   - scripts/phone-walkthrough.sh <scenarios>   (incl. setup-detection:<profile>)
 #   - scripts/pre-release-confidence-gate.sh
+#   - scripts/capture-walkthrough-screenshots.sh   (the app2 journey visual pass)
+#
+# Issue #2481 shrank this list. It used to also call
+# `scripts/phone-walkthrough.sh <scenarios>` (terminal-lab, tmux-existing-session,
+# visual-audit, setup-detection[:<profile>]); that script was deleted with the
+# `app` module androidTest classes every one of its scenarios drove. The
+# confidence gate now runs app2's WHOLE instrumented set itself (issue #2474's
+# unfiltered shape), so a "terminal" or "bootstrap" scoped run is just the gate,
+# and the visual pass is the one block that adds something the gate does not
+# hard-assert (a rendered frame per journey).
 #
 # It is NOT a release gate. It deliberately:
 #   - never invokes scripts/release-emulator-validation.sh
@@ -17,14 +26,18 @@
 # When in doubt, it runs the FULL set of building blocks (fail-safe default).
 #
 # Usage:
-#   scripts/dev-fast-gate.sh [--dry-run] [--profile <name>]
+#   scripts/dev-fast-gate.sh [--dry-run]
 #
 #   --dry-run         Print the changed-area classification, the selected stage
 #                     set, and the exact commands that WOULD run, then exit 0
 #                     without touching the emulator/Docker.
-#   --profile <name>  Scope the setup-detection matrix to a single profile when
-#                     setup-detection is selected (passthrough to
-#                     phone-walkthrough.sh's setup-detection:<name>).
+#
+# `--profile <name>` is GONE with the setup-detection matrix it scoped (issue
+# #2481): the 7-profile bootstrap suite drove
+# com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest, and the guided
+# host-setup sheet it exercised is a cut feature — only the actionable "update
+# the host CLI" error survives (docs/rewrite-implementation-plan.md, "Scope
+# amendment").
 
 set -euo pipefail
 
@@ -36,7 +49,6 @@ cd "$ROOT_DIR"
 # build/release-emulator-validation/, so it can never produce a taggable summary.
 
 DRY_RUN=0
-PROFILE=""
 
 usage() {
   sed -n '3,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -46,15 +58,6 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
-      shift
-      ;;
-    --profile)
-      [[ "$#" -ge 2 ]] || { echo "error: --profile requires a value" >&2; exit 2; }
-      PROFILE="$2"
-      shift 2
-      ;;
-    --profile=*)
-      PROFILE="${1#--profile=}"
       shift
       ;;
     -h|--help)
@@ -232,7 +235,7 @@ main() {
     # The complete set of release-emulator-validation building blocks, run
     # directly (NOT via release-emulator-validation.sh, so no taggable summary).
     commands+=("scripts/pre-release-confidence-gate.sh")
-    commands+=("scripts/phone-walkthrough.sh terminal-lab tmux-existing-session $(setup_detection_arg) visual-audit")
+    commands+=("scripts/capture-walkthrough-screenshots.sh")
   else
     # Exactly one area.
     local only="${real_areas[0]}"
@@ -240,21 +243,19 @@ main() {
     echo
     case "$only" in
       ui)
-        commands+=("scripts/phone-walkthrough.sh visual-audit terminal-lab")
+        # The one area where the visual pass adds a distinct assertion.
+        commands+=("scripts/capture-walkthrough-screenshots.sh")
         ;;
-      bootstrap)
-        commands+=("scripts/phone-walkthrough.sh $(setup_detection_arg)")
-        ;;
-      terminal)
-        commands+=("scripts/phone-walkthrough.sh terminal-lab tmux-existing-session")
-        ;;
-      migration)
+      bootstrap|terminal|migration)
+        # All three are covered by the gate now: it runs app2's whole
+        # instrumented set (terminal + reconnect + tree journeys), the legacy-v1
+        # Room migration proof, and the old-CLI mismatch fixture.
         commands+=("scripts/pre-release-confidence-gate.sh")
         ;;
       *)
         echo "  internal error: unexpected area '$only' — running full set" >&2
         commands=("scripts/pre-release-confidence-gate.sh" \
-                  "scripts/phone-walkthrough.sh terminal-lab tmux-existing-session $(setup_detection_arg) visual-audit")
+                  "scripts/capture-walkthrough-screenshots.sh")
         ;;
     esac
   fi
@@ -277,15 +278,6 @@ main() {
     # shellcheck disable=SC2086
     bash $cmd
   done
-}
-
-# setup-detection scenario arg, scoped to --profile when provided.
-setup_detection_arg() {
-  if [[ -n "$PROFILE" ]]; then
-    printf 'setup-detection:%s' "$PROFILE"
-  else
-    printf 'setup-detection'
-  fi
 }
 
 main "$@"

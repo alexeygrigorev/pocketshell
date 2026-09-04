@@ -295,9 +295,23 @@ pocketshell_test_areas_is_test_path() {
 # vendored Termux terminal suite under shared/core-terminal is `*Test.java`,
 # and treating those 19 classes as "not tests" silently force-fulled them and
 # left them out of the ledger's registered set.
+#
+# `*Journey.kt` joined the convention with the rewrite (app2). app2's
+# instrumented set is a numbered journey suite — J01ConnectAndTrustJourney,
+# J02SessionTreeListJourney, … — and every one of them carries the
+# load-bearing assertion for its user journey. Leaving them outside the
+# convention is exactly the #1851 shape the guards exist to stop: they were
+# invisible to the class index, so no area resolved them, the ledger could not
+# account for them, and no Gradle `--tests` filter could name one. This is a
+# WIDENING of what counts as a test class, never a narrowing — a `*Journey.kt`
+# file previously fell into the "test-infrastructure (non-*Test file)"
+# force-full branch, so recognising it can only make it MORE precisely
+# attributed, and it is still bound by every downstream guard (area
+# resolution, ledger accounting, the unconventional-file check).
 pocketshell_test_areas_is_test_class_file() {
   case "$1" in
     *Test.kt|*Test.java|*Tests.kt|*Tests.java) return 0 ;;
+    *Journey.kt|*Journey.java) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -869,11 +883,31 @@ pocketshell_test_areas_build_index() {
   #    hardcoded so a future file-shaped row cannot be silently averaged away by
   #    its directory's answer. Everything here is fork-free on purpose: a
   #    command substitution per file is 3000 forks and dominates the runtime.
+  # ONE definition of "is this a test class file", not two. This used to be an
+  # inline `(Test|Tests)\.(kt|java)$` regex — a second copy of the convention that
+  # `pocketshell_test_areas_is_test_class_file` also defines — and the two
+  # promptly disagreed: when `*Journey.kt` joined the convention, the function
+  # accepted app2's 11 instrumented journeys while this regex did not, so they
+  # resolved to an area through `pocketshell_test_area_for_class` yet were absent
+  # from the class index, and every index-driven consumer (the execution ledger's
+  # registered set, the journey lane's selected set, I2/I7/I10) silently omitted
+  # them. That is the finding-B4 shape this file's own header warns about, so the
+  # filter now CALLS the definition instead of restating it.
   local -a test_files=()
-  mapfile -t test_files < <(
-    git -C "$root" ls-files 2>/dev/null |
-      grep -E '/src/(test|androidTest|integrationTest|testDebug|testRelease)/(java|kotlin)/.*(Test|Tests)\.(kt|java)$'
-  )
+  local _tf
+  while IFS= read -r _tf; do
+    [[ -z "$_tf" ]] && continue
+    case "$_tf" in
+      */src/test/*|*/src/androidTest/*|*/src/integrationTest/*|*/src/testDebug/*|*/src/testRelease/*) : ;;
+      *) continue ;;
+    esac
+    case "$_tf" in
+      */java/*|*/kotlin/*) : ;;
+      *) continue ;;
+    esac
+    pocketshell_test_areas_is_test_class_file "$_tf" || continue
+    test_files+=("$_tf")
+  done < <(git -C "$root" ls-files 2>/dev/null)
   local -A dir_area=() dir_exact=()
   local g rel pre srcset pa
   for f in "${test_files[@]}"; do

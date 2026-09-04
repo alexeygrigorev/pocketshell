@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release-variant manifest overlay: the empty host Activity that Robolectric's
+  `createComposeRule()` launches.
+
+  WHY THIS FILE EXISTS
+
+  19 of app2's host-JVM unit-test files drive real compositions through
+  `createComposeRule()`. That rule launches
+  `androidx.activity.ComponentActivity` via `ActivityScenario`, so the activity
+  must be resolvable in the merged manifest Robolectric is pointed at.
+
+  For a LIBRARY module (`:shared:ui-kit`, `:shared:core-terminal`) AGP builds a
+  dedicated unit-test manifest, `packaged_manifests/<variant>UnitTest/
+  process<Variant>UnitTestManifest/AndroidManifest.xml`, and merges the
+  `testImplementation` graph into it, so `ui-test-manifest` on the test
+  configuration is enough there.
+
+  An APPLICATION module gets NO such merge. `generate<Variant>UnitTestConfig`
+  writes `android_merged_manifest=build/intermediates/packaged_manifests/
+  <variant>/process<Variant>ManifestForPackage/AndroidManifest.xml`, the APP's
+  own manifest, built from `src/main` plus the build-type source set plus the
+  *main* variant's dependency graph. Nothing on `testImplementation` or
+  `testReleaseImplementation` can reach it. So the ONLY way the release unit
+  tests can resolve a host activity is for the release variant's own manifest
+  to declare one.
+
+  WHY NOT JUST `releaseImplementation(libs.compose.ui.test.manifest)`
+
+  That AAR declares the activity with `android:exported="true"`, which would
+  put an externally launchable empty activity into every shipped release APK.
+  Declaring it here instead keeps it `android:exported="false"`: the app never
+  starts it, no other app can, and it carries no intent filter, so it is inert
+  outside the Robolectric host-JVM runtime. `androidx.activity.ComponentActivity`
+  itself is already in the release APK, since `activity-compose` is an
+  `implementation` dependency, so this adds a manifest entry, not code.
+
+  WHY NOT DISABLE THE RELEASE UNIT-TEST VARIANT INSTEAD
+
+  `androidComponents.beforeVariants { enableUnitTest = false }` would silence
+  the failure by deleting the lane. The CI Unit lane is sharded by variant
+  (issue #2069) precisely so "union of the shards == the whole test graph";
+  dropping `:app2:testReleaseUnitTest` would break that invariant and force
+  matching exceptions into scripts/check-executed-test-counts.sh and the #2082
+  attendance selector, machinery whose whole job is to refuse exactly this kind
+  of silently unrun module. Declaring the activity keeps the invariant
+  mechanical and the shard honest.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+
+</manifest>

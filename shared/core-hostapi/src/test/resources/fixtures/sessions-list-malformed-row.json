@@ -1,0 +1,36 @@
+{
+  "schema": 2,
+  "managers": [
+    "tmux"
+  ],
+  "sessions": [
+    {
+      "name": "git-pocketshell",
+      "manager": "tmux",
+      "id": null,
+      "workspace": "/home/alexey/git/pocketshell",
+      "tag": null,
+      "engine": null,
+      "profile": null,
+      "agent_state": null,
+      "agent_state_source": null,
+      "attached": false,
+      "created_epoch": 1788159369,
+      "activity_epoch": 1788381055
+    },
+    {
+      "manager": "tmux",
+      "id": null,
+      "workspace": "/home/alexey",
+      "tag": null,
+      "engine": null,
+      "profile": null,
+      "agent_state": null,
+      "agent_state_source": null,
+      "attached": false,
+      "created_epoch": 1788330906,
+      "activity_epoch": 1788343144
+    }
+  ],
+  "errors": []
+}

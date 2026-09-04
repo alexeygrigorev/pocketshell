@@ -1,6 +1,6 @@
 package com.pocketshell.core.portfwd
 
-import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.transport.HostConnection
 
 /**
  * One listening TCP port discovered on the remote.
@@ -22,55 +22,56 @@ public data class RemotePort(
  * 3. `ss -tln` (no `-p`) — last resort; loses the process name but is the
  *    only thing guaranteed to work without root on stripped containers.
  *
- * Ported from `ssh-auto-forward-android/.../ssh/PortScanner.kt`. The JSch
- * `connection.executeCommand` is replaced with [SshSession.exec]; everything
- * else (the awk pipelines, the regex extraction) is identical to keep
- * behavioural parity with the existing UI tests.
+ * Ported from `ssh-auto-forward-android/.../ssh/PortScanner.kt`; rewired in task
+ * P-4 from the deleted `core-ssh` session onto [HostConnection.exec]. The awk
+ * pipelines and the regex extraction are unchanged — only the thing that runs
+ * the command moved, so the parsing behaviour stays exactly as tested.
  */
 public object PortScanner {
 
     /**
-     * Run a scan over [session] and return one [RemotePort] per discovered
+     * Run a scan over [connection] and return one [RemotePort] per discovered
      * listening port. Returns an empty list if every strategy fails — the
      * caller (the AutoForwarder loop) treats this as "scan failed, try
      * again next tick" rather than "no ports listening".
      */
-    public suspend fun scan(session: SshSession): List<RemotePort> {
-        return tryPrimary(session)
-            ?: tryFallback(session)
-            ?: tryLastResort(session)
+    public suspend fun scan(connection: HostConnection): List<RemotePort> {
+        return tryPrimary(connection)
+            ?: tryFallback(connection)
+            ?: tryLastResort(connection)
             ?: emptyList()
     }
 
-    private suspend fun tryPrimary(session: SshSession): List<RemotePort>? {
-        val out = runOrNull(session, "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'")
+    private suspend fun tryPrimary(connection: HostConnection): List<RemotePort>? {
+        val out = runOrNull(connection, "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'")
             ?: return null
         if (out.isBlank()) return null
         return parseSsOutput(out)
     }
 
-    private suspend fun tryFallback(session: SshSession): List<RemotePort>? {
+    private suspend fun tryFallback(connection: HostConnection): List<RemotePort>? {
         val out = runOrNull(
-            session,
+            connection,
             "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
         ) ?: return null
         if (out.isBlank()) return null
         return parseNetstatOutput(out)
     }
 
-    private suspend fun tryLastResort(session: SshSession): List<RemotePort>? {
-        val out = runOrNull(session, "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'")
+    private suspend fun tryLastResort(connection: HostConnection): List<RemotePort>? {
+        val out = runOrNull(connection, "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'")
             ?: return null
         if (out.isBlank()) return null
         return parsePortsOnly(out)
     }
 
-    private suspend fun runOrNull(session: SshSession, command: String): String? {
-        // exec doesn't throw on non-zero exits — we treat both "command not
-        // found" (non-zero exit, empty stdout) and a transport-level
-        // SshException as "this strategy didn't work, fall through".
+    private suspend fun runOrNull(connection: HostConnection, command: String): String? {
+        // exec doesn't throw on non-zero exits — we treat "command not found"
+        // (non-zero exit, empty stdout), an exec wall-clock timeout, and a
+        // transport-level IOException alike: this strategy didn't work, fall
+        // through to the next one.
         return try {
-            session.exec(command).stdout
+            connection.exec(command).stdout
         } catch (_: Throwable) {
             null
         }

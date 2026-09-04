@@ -211,219 +211,37 @@ grep -qP '\tpreflight\tsuite_start\t' "$tsv" \
 pass "(3) per-attempt bring-up timings are recorded with a preflight baseline"
 
 # ---------------------------------------------------------------------------
-# Sandbox repo for the end-to-end suite cases. `cp -a` (never symlinks — a
-# symlinked mutation root writes through into the tree under review, #2054).
-# ---------------------------------------------------------------------------
-# build_suite_sandbox <root> <failing-class> <wedges-the-fixture: 1|0> [on-fail-mode]
+# THE END-TO-END SUITE CASES (4)-(7), (9e), (9f) AND (9h) WERE HARD-CUT (D22).
 #
-# The wedging stub models REALITY: the class does not merely fail, it leaves the
-# SHARED fixture frozen behind it, exactly as the killed storm test left the tmux
-# server SIGSTOPped. Flipping the fixture to `wedged` before the suite starts
-# would instead be repaired by the preflight probe and never reach a class.
-build_suite_sandbox() {
-  local root="$1" failing_class="$2" wedges="${3:-0}" fail_mode="${4:-}"
-  rm -rf "$root"
-  mkdir -p "$root"
-  cp -a "$REPO_ROOT/scripts" "$root/scripts"
-  cat > "$root/gradlew" <<STUB
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "--stop" ]]; then exit 0; fi
-for arg in "\$@"; do
-  case "\$arg" in
-    *class=*$failing_class*)
-      if [[ "$wedges" == "1" && ! -f "\$FIXTURE_STATE/already-wedged" ]]; then
-        : > "\$FIXTURE_STATE/already-wedged"
-        printf 'wedged\n' > "\$FIXTURE_STATE/fixture-mode"
-      fi
-      if [[ -n "$fail_mode" ]]; then
-        printf '%s\n' "$fail_mode" > "\$FIXTURE_STATE/fixture-mode"
-      fi
-      exit 1
-      ;;
-  esac
-done
-exit 0
-STUB
-  chmod +x "$root/gradlew"
-  cat > "$root/scripts/connected-test.sh" <<'STUB'
-#!/usr/bin/env bash
-root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "$root_dir/gradlew" :app:connectedDebugAndroidTest "$@"
-STUB
-  chmod +x "$root/scripts/connected-test.sh"
-  # Narrow the class list to two entries so the run is fast and deterministic.
-  python3 - "$root/scripts/ci-journey-suite.sh" <<'PY'
-import sys
-p = sys.argv[1]
-lines = open(p).read().split('\n')
-start = next(i for i, l in enumerate(lines) if l.startswith('JOURNEY_CLASSES=('))
-end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip() == ')')
-lines[start:end + 1] = [
-    'JOURNEY_CLASSES=(',
-    '  "com.pocketshell.app.proof.SandboxWedgingClass"',
-    '  "com.pocketshell.app.proof.SandboxHealthyClass"',
-    ')',
-]
-# The core-terminal proofs are a separate cluster and irrelevant here.
-lines = [':' if l.strip() == 'run_core_terminal_proofs' else l for l in lines]
-open(p, 'w').write('\n'.join(lines))
-PY
-  # The harness refuses to continue when attempt-artifact capture comes back
-  # empty (#1840 isolation guard), so the adb stub must produce non-empty
-  # logcat / ps / dumpsys / screenshot exactly like the #835 guard's stub.
-  mkdir -p "$root/stubbin"
-  cat > "$root/stubbin/adb" <<'STUB'
-#!/usr/bin/env bash
-set -u
-emit_valid_png() {
-  printf '\211\120\116\107\015\012\032\012\000\000\000\015\111\110\104\122\000\000\000\001\000\000\000\001\010\006\000\000\000\037\025\304\211\000\000\000\015\111\104\101\124\170\234\143\140\140\140\370\017\000\001\004\001\000\137\345\303\113\000\000\000\000\111\105\116\104\256\102\140\202'
-}
-if [[ "${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\nemulator-5554\tdevice\n'
-  exit 0
-fi
-if [[ "${1:-}" == "-s" ]]; then shift 2; fi
-case "${1:-}" in
-  logcat)   [[ "${2:-}" == "-c" ]] || printf 'stub-device-logcat\n' ;;
-  exec-out) emit_valid_png ;;
-  shell)
-    case "${2:-}" in
-      ps)      printf 'PID NAME\n' ;;
-      dumpsys) printf 'stub dumpsys %s\n' "$*" ;;
-    esac
-    ;;
-esac
-exit 0
-STUB
-  chmod +x "$root/stubbin/adb"
-}
-
-run_suite_sandbox() {
-  local root="$1" out="$2"
-  ( cd "$root" && PATH="$root/stubbin:$PATH" \
-      JOURNEY_STEP_BUDGET_SECS=600 \
-      JOURNEY_CLASS_TIMEOUT_SECS=30 \
-      JOURNEY_NO_OUTPUT_TIMEOUT_SECS=25 \
-      JOURNEY_FIXTURE_HEALTH_TSV="$root/artifacts/ci-journey/fixture-health.tsv" \
-      bash "$root/scripts/ci-journey-suite.sh" ) > "$out" 2>&1
-  return $?
-}
-
+# They drove the gate through the REAL per-class journey suite: a sandbox repo
+# with a rewritten `JOURNEY_CLASSES=(...)` list, a stub gradle answering
+# `-Pandroid.testInstrumentationRunnerArguments.class=<FQCN>`, per-class
+# `JOURNEY_FIXTURE_SETUP_FAILURE` labelling, an `artifacts/ci-journey/summary.md`
+# with a "Shared SSH/tmux fixture was WEDGED during these classes" section, and
+# tests.yml's `verdict_reason_for()` mapping that section to
+# `shared_fixture_setup_failure`.
+#
+# EVERY ONE of those is gone. `scripts/ci-journey-suite.sh` and the
+# `emulator-journey` / `emulator-journey-verdict` jobs were deleted with the
+# per-class registry (see the note at the bottom of .github/workflows/tests.yml),
+# and their successor — `scripts/ci-app2-journey-suite.sh`, issue #2474 — is
+# deliberately ONE unfiltered `:app2:connectedDebugAndroidTest` run with no class
+# list, no per-class retry, no summary.md and no verdict classifier. There is no
+# per-class boundary left for a fixture-health gate to sit on, so these cases had
+# nothing to drive: the sandbox builder died on `JOURNEY_CLASSES=(` not existing.
+#
+# What survives is everything that exercises scripts/ci-journey-fixture-health.sh
+# DIRECTLY — probe classification (1), both repair rungs (2), the timing TSV (3),
+# the real-Docker case (8), and the whole #2145 no-server-vs-wedge reading
+# (9a)-(9d) with its (9g) mutation. Those are the mechanism; the deleted cases
+# were its wiring into a harness that no longer exists.
+#
+# KNOWN GAP, deliberately not papered over: with the per-class suite gone,
+# `journey_fixture_health_gate` has no production caller at all. Re-wiring a
+# fixture-health preflight into app2's single-run lane is a design call for that
+# lane's owner (where does the boundary go when there is one attempt?), not a
+# mechanical repoint, so it is NOT invented here.
 # ---------------------------------------------------------------------------
-# (4) end-to-end: a failure on a WEDGED fixture is classified as SETUP, and the
-#     retry runs against a REPAIRED fixture.
-# ---------------------------------------------------------------------------
-echo "== (4) end-to-end classification + retry on a repaired fixture =="
-WEDGE_ROOT="$SANDBOX/wedge"
-build_suite_sandbox "$WEDGE_ROOT" SandboxWedgingClass 1
-reset_logs
-set_mode healthy
-rm -f "$STATE/already-wedged"
-printf '1\n' > "$STATE/sigcont-restores"
-out4="$SANDBOX/wedge.log"
-run_suite_sandbox "$WEDGE_ROOT" "$out4"; rc4=$?
-
-[[ $rc4 -ne 0 ]] || { sed -n '1,40p' "$out4"; fail "(4) the suite must stay RED — the gate must never turn a failure green"; }
-grep -q 'JOURNEY_FIXTURE_WEDGED' "$out4" \
-  || { sed -n '1,60p' "$out4"; fail "(4) the wedged fixture was not detected"; }
-grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE: com.pocketshell.app.proof.SandboxWedgingClass' "$out4" \
-  || { sed -n '1,60p' "$out4"; fail "(4) the failing class was not classified as a fixture SETUP failure"; }
-summary4="$WEDGE_ROOT/artifacts/ci-journey/summary.md"
-[[ -f "$summary4" ]] || fail "(4) no summary.md"
-grep -q 'Shared SSH/tmux fixture was WEDGED during these classes' "$summary4" \
-  || { cat "$summary4"; fail "(4) summary.md has no fixture-setup-failure section"; }
-grep -q 'Failed BOTH attempts' "$summary4" \
-  || { cat "$summary4"; fail "(4) the class must STILL be listed as failed — the classification is additive, not a downgrade"; }
-# The load-bearing half: the RETRY must have run against a repaired fixture.
-tsv4="$WEDGE_ROOT/artifacts/ci-journey/fixture-health.tsv"
-[[ -s "$tsv4" ]] || fail "(4) no fixture-health.tsv from the suite run"
-statuses4="$(awk -F'\t' 'NR>1 {print $5}' "$tsv4" | tr '\n' ',')"
-[[ "$statuses4" == *"wedged_repaired,"* ]] \
-  || fail "(4) expected a wedged_repaired row; got: $statuses4"
-[[ "$statuses4" == *"wedged_repaired,ok"* ]] \
-  || fail "(4) the attempt AFTER the repair must probe ok — that is what makes the existing retry meaningful instead of a second run against a frozen fixture. Statuses: $statuses4"
-pass "(4) wedged fixture detected, repaired, classified as SETUP, still red, retry ran healthy"
-
-# ---------------------------------------------------------------------------
-# (5) SELECTIVITY — an ordinary failure on a HEALTHY fixture is NOT a setup failure
-# ---------------------------------------------------------------------------
-echo "== (5) selectivity on a healthy fixture =="
-HEALTHY_ROOT="$SANDBOX/healthy"
-build_suite_sandbox "$HEALTHY_ROOT" SandboxWedgingClass 0
-reset_logs
-set_mode healthy
-rm -f "$STATE/already-wedged"
-out5="$SANDBOX/healthy.log"
-run_suite_sandbox "$HEALTHY_ROOT" "$out5"; rc5=$?
-[[ $rc5 -ne 0 ]] || fail "(5) the failing class must still redden the suite"
-if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out5"; then
-  sed -n '1,60p' "$out5"
-  fail "(5) an ordinary assertion failure on a HEALTHY fixture was mislabelled a fixture setup failure — the classification would be decorative"
-fi
-summary5="$HEALTHY_ROOT/artifacts/ci-journey/summary.md"
-if grep -q 'Shared SSH/tmux fixture was WEDGED' "$summary5"; then
-  cat "$summary5"
-  fail "(5) the summary claimed a wedged fixture on a healthy run"
-fi
-grep -q 'Failed BOTH attempts' "$summary5" \
-  || { cat "$summary5"; fail "(5) the genuine failure must still be reported"; }
-pass "(5) a genuine failure on a healthy fixture is NOT reclassified"
-
-# ---------------------------------------------------------------------------
-# (6) the workflow's verdict attribution
-# ---------------------------------------------------------------------------
-echo "== (6) workflow verdict attribution =="
-verdict_fn="$(awk '/^ *verdict_reason_for\(\) \{/{f=1} f{print} f && /^ *\}$/{exit}' "$WORKFLOW")"
-[[ -n "$verdict_fn" ]] || fail "(6) could not extract verdict_reason_for from tests.yml"
-probe_reason() {
-  local summary_file="$1"
-  bash -c "
-    summary='$summary_file'
-    build_fail_attempts=0
-    build_phase_attempts=0
-    $verdict_fn
-    verdict_reason_for first_attempt_journey_failure
-  "
-}
-[[ "$(probe_reason "$summary4")" == "shared_fixture_setup_failure" ]] \
-  || fail "(6) a summary carrying JOURNEY_FIXTURE_SETUP_FAILURE must be attributed distinctly, got '$(probe_reason "$summary4")'"
-[[ "$(probe_reason "$summary5")" == "first_attempt_journey_failure" ]] \
-  || fail "(6) an ordinary failure must keep its ordinary reason, got '$(probe_reason "$summary5")'"
-grep -q 'write_verdict RED "\$(verdict_reason_for first_attempt_journey_failure)"' "$WORKFLOW" \
-  || fail "(6) the fixture-setup attribution must still write a RED verdict — it renames the reason, it does not downgrade the verdict"
-pass "(6) verdict reason is distinct for a fixture setup failure, and the verdict stays RED"
-
-# ---------------------------------------------------------------------------
-# (7) MUTATION — the gate must be load-bearing
-# ---------------------------------------------------------------------------
-echo "== (7) mutation: neuter the gate and require (4) to redden =="
-MUTANT_ROOT="$SANDBOX/mutant"
-build_suite_sandbox "$MUTANT_ROOT" SandboxWedgingClass 1
-# The mutation: the gate reports `ok` unconditionally and never repairs — i.e.
-# exactly the pre-#2143 world, where a wedged fixture was invisible.
-python3 - "$MUTANT_ROOT/scripts/ci-journey-fixture-health.sh" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-needle = 'journey_fixture_health_gate() {'
-assert needle in s, "mutation anchor missing — the mutant would be a no-op"
-s = s.replace(needle, needle + '\n  JOURNEY_FIXTURE_HEALTH_STATUS=ok; JOURNEY_FIXTURE_HEALTH_PROBE_MS=0; return 0', 1)
-open(p, 'w').write(s)
-PY
-grep -q 'JOURNEY_FIXTURE_HEALTH_STATUS=ok; JOURNEY_FIXTURE_HEALTH_PROBE_MS=0; return 0' \
-  "$MUTANT_ROOT/scripts/ci-journey-fixture-health.sh" \
-  || fail "(7) the mutant was not applied — a mutation that never happened is not a passing mutation test"
-reset_logs
-set_mode healthy
-rm -f "$STATE/already-wedged"
-out7="$SANDBOX/mutant.log"
-run_suite_sandbox "$MUTANT_ROOT" "$out7" || true
-if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out7"; then
-  fail "(7) the neutered gate STILL reported a fixture setup failure — case (4) does not depend on the gate and is decorative"
-fi
-grep -q 'Failed BOTH attempts' "$MUTANT_ROOT/artifacts/ci-journey/summary.md" \
-  || fail "(7) the mutant run should still have failed the class (the mutation must redden only the new check)"
-pass "(7) mutation confirmed: without the gate the setup failure is invisible, and only that check reddens"
 
 # ---------------------------------------------------------------------------
 # (9) issue #2145 — no-server-yet is not a wedge; a real wedge still is
@@ -483,75 +301,6 @@ fi
 [[ "${JOURNEY_FIXTURE_HEALTH_SERVER_SEEN:-0}" == "0" ]] \
   || fail "(9d) an idle-no-server probe must not mark the shard as having created a server"
 pass "(9d) observed CI phrasing (error connecting / No such file) is idle-no-server, not unavailable, not a wedge"
-
-# (9e) END-TO-END: a genuine product failure on a no-socket fixture
-# (the early-shard shape: TmuxSessionScreenArtVerify / ForwardingResume)
-# must stay RED and must NOT be attributed as a fixture setup failure.
-echo "== (9e) product failure on idle-no-server is not a setup failure =="
-NOSOCKET_ROOT="$SANDBOX/nosocket"
-build_suite_sandbox "$NOSOCKET_ROOT" SandboxWedgingClass 0
-reset_logs
-set_mode no_socket
-rm -f "$STATE/already-wedged"
-JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
-out9e="$SANDBOX/nosocket.log"
-run_suite_sandbox "$NOSOCKET_ROOT" "$out9e"; rc9e=$?
-[[ $rc9e -ne 0 ]] || fail "(9e) the suite must stay RED — the reading change must not turn a failure green"
-if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out9e"; then
-  sed -n '1,80p' "$out9e"
-  fail "(9e) a product failure while the fixture has no tmux server yet was mislabelled a fixture setup failure"
-fi
-summary9e="$NOSOCKET_ROOT/artifacts/ci-journey/summary.md"
-[[ -f "$summary9e" ]] || fail "(9e) no summary.md"
-if grep -q 'Shared SSH/tmux fixture was WEDGED' "$summary9e"; then
-  cat "$summary9e"
-  fail "(9e) the summary claimed a wedged fixture on an idle-no-server run"
-fi
-grep -q 'Failed BOTH attempts' "$summary9e" \
-  || { cat "$summary9e"; fail "(9e) the genuine failure must still be reported"; }
-[[ "$(probe_reason "$summary9e")" == "first_attempt_journey_failure" ]] \
-  || fail "(9e) verdict must stay a product failure, got '$(probe_reason "$summary9e")'"
-pass "(9e) product failure on idle-no-server stays RED and is not attributed to the fixture"
-
-# (9f) END-TO-END: unavailable AFTER a server has been seen IS a setup
-# failure — the fixture was answering, then became unreachable.
-echo "== (9f) unavailable after a server was seen is a setup failure =="
-AFTER_ROOT="$SANDBOX/after-server"
-# First class (SandboxWedgingClass) PASSES against a healthy listing;
-# the second class fails and flips the fixture to unreachable.
-build_suite_sandbox "$AFTER_ROOT" SandboxHealthyClass 0 unreachable
-reset_logs
-set_mode healthy
-rm -f "$STATE/already-wedged"
-JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
-out9f="$SANDBOX/after-server.log"
-run_suite_sandbox "$AFTER_ROOT" "$out9f"; rc9f=$?
-[[ $rc9f -ne 0 ]] || fail "(9f) the suite must stay RED"
-grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE: com.pocketshell.app.proof.SandboxHealthyClass' "$out9f" \
-  || { sed -n '1,80p' "$out9f"; fail "(9f) unavailable after a server was seen must be classified as a fixture SETUP failure"; }
-[[ "$(probe_reason "$AFTER_ROOT/artifacts/ci-journey/summary.md")" == "shared_fixture_setup_failure" ]] \
-  || fail "(9f) verdict must be shared_fixture_setup_failure, got '$(probe_reason "$AFTER_ROOT/artifacts/ci-journey/summary.md")'"
-pass "(9f) unavailable after a server was seen is still a fixture setup failure, still RED"
-
-# (9h) END-TO-END: unreachable BEFORE any server has been created is
-# benign — same status, opposite reading from (9f).
-echo "== (9h) unavailable before any server is not a setup failure =="
-BEFORE_ROOT="$SANDBOX/before-server"
-build_suite_sandbox "$BEFORE_ROOT" SandboxWedgingClass 0
-reset_logs
-set_mode unreachable
-rm -f "$STATE/already-wedged"
-JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
-out9h="$SANDBOX/before-server.log"
-run_suite_sandbox "$BEFORE_ROOT" "$out9h"; rc9h=$?
-[[ $rc9h -ne 0 ]] || fail "(9h) the suite must stay RED"
-if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out9h"; then
-  sed -n '1,80p' "$out9h"
-  fail "(9h) unavailable before any server has been created was mislabelled a fixture setup failure"
-fi
-[[ "$(probe_reason "$BEFORE_ROOT/artifacts/ci-journey/summary.md")" == "first_attempt_journey_failure" ]] \
-  || fail "(9h) verdict must stay a product failure, got '$(probe_reason "$BEFORE_ROOT/artifacts/ci-journey/summary.md")'"
-pass "(9h) unavailable before any server stays a product failure, still RED"
 
 # (9g) G6 MUTATION — restore the old unavailable=wedge mapping and
 # require (9a) to go red. A green (9a) that would stay green with the

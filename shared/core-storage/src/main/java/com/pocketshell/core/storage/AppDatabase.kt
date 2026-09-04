@@ -11,6 +11,7 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.AiApiCallEntry
@@ -20,10 +21,11 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.PortUsageEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 19
+const val APP_DATABASE_SCHEMA_VERSION = 20
 
 /**
  * The PocketShell Room database.
@@ -54,6 +56,7 @@ const val APP_DATABASE_SCHEMA_VERSION = 19
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
         CommandTemplateEntity::class,
+        SentMessageEntity::class,
     ],
     version = APP_DATABASE_SCHEMA_VERSION,
     exportSchema = true,
@@ -68,6 +71,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun aiApiCallLogDao(): AiApiCallLogDao
     abstract fun pendingTranscriptionDao(): PendingTranscriptionDao
     abstract fun commandTemplateDao(): CommandTemplateDao
+    abstract fun sentMessageDao(): SentMessageDao
 }
 
 val MIGRATION_2_8: Migration = legacyMigrationToVersionEight(2)
@@ -283,6 +287,33 @@ val MIGRATION_18_19: Migration = object : Migration(18, 19) {
     }
 }
 
+/**
+ * Rewrite task P-1: the composer's per-session sent-message log.
+ *
+ * Purely additive — one new table, no change to any existing one — so an
+ * upgrading install keeps every host, key and setting it had. See
+ * [SentMessageEntity] for why the table has no foreign key on `hosts`.
+ */
+val MIGRATION_19_20: Migration = object : Migration(19, 20) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS sent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                sessionKey TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sentAtMs INTEGER NOT NULL,
+                delivered INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_sent_messages_sessionKey_sentAtMs " +
+                "ON sent_messages(sessionKey, sentAtMs)",
+        )
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -302,6 +333,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_16_17,
     MIGRATION_17_18,
     MIGRATION_18_19,
+    MIGRATION_19_20,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

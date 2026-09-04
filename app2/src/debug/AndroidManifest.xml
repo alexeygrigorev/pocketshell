@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Task U-7 (journey J05): the reconnect journey cuts the link by driving the
+      Toxiproxy fixture's HTTP control API (`10.0.2.2:8474`), which is plain
+      HTTP on a loopback-forwarded port. Android blocks cleartext by default at
+      targetSdk >= 28, so the connected test could not reach it without this.
+
+      Debug source set only, so it never reaches a release build — the same
+      shape the pre-rewrite app module used for its network-fault proofs. The
+      app's own traffic is SSH, which is not affected either way.
+    -->
+    <application android:usesCleartextTraffic="true" />
+
+</manifest>

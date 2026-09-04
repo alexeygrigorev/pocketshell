@@ -184,7 +184,21 @@ Green means, for this candidate SHA:
   If you run `scripts/check-nightly-fault-run.sh` by hand, run it with no
   arguments (or `--release-head <sha>`): a run carrying `[FIXTURE DRY RUN]`
   came from `--fixture` and is a test dry run, not a release verdict.
-- Visual-audit screenshots were inspected.
+- Visual-audit screenshots were inspected. Since issue #2481 those are app2's
+  journey screenshots, pulled by the pre-release confidence gate into
+  `build/pre-release-confidence-gate/<run-id>-pre-release/journey-screenshots/`
+  and named in the release summary. To regenerate them on their own — with the
+  hard "every journey rendered a frame" assertion — run
+  `scripts/capture-walkthrough-screenshots.sh` (see `docs/testing.md`).
+
+The chain itself got shorter with the rewrite. `release-emulator-validation.sh`
+is now nightly-fault guard -> pre-release confidence gate -> publish; the four
+downstream walkthrough stages (terminal-lab, tmux-existing-session, the
+setup-detection matrix, visual-audit) and the optional `TERMINAL_RELEASE_GATE=1`
+/ `LONG_RUNNING_TEST=1` lanes were deleted with the `app` module androidTest
+classes they drove. The journeys did not go away: the confidence gate installs
+the one validated APK pair and runs app2's WHOLE instrumented set against those
+exact bytes, unfiltered in a single instrumentation process (issue #2474).
 
 Don't fake a PASS. Don't treat a cancelled or in-progress Tests run as green.
 Don't look for a way around the nightly fault gate — there isn't one.

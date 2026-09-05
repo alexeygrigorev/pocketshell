@@ -121,6 +121,32 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `voice silence persists as voice_silence_seconds and snaps to the 1s grid`() {
+        val repo = repository()
+        repo.setVoiceSilenceThresholdSeconds(8.4f)
+        assertEquals(8f, repo.settings.value.voiceSilenceThresholdSeconds, 0.01f)
+
+        val again = repository()
+        assertEquals(8f, again.settings.value.voiceSilenceThresholdSeconds, 0.01f)
+
+        repo.setVoiceSilenceThresholdSeconds(0.5f)
+        assertEquals(AppSettings.MIN_VOICE_SILENCE_SECONDS, repo.settings.value.voiceSilenceThresholdSeconds)
+        repo.setVoiceSilenceThresholdSeconds(99f)
+        assertEquals(AppSettings.MAX_VOICE_SILENCE_SECONDS, repo.settings.value.voiceSilenceThresholdSeconds)
+    }
+
+    @Test
+    fun `voice silence falls back to a v0_4 app_settings value`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("voice_silence_seconds", 12f)
+            .apply()
+
+        assertEquals(12f, repository().settings.value.voiceSilenceThresholdSeconds, 0.01f)
+    }
+
+    @Test
     fun `agentSubmitEnterDelay defaults to 150ms`() {
         val repo = repository()
         assertEquals(

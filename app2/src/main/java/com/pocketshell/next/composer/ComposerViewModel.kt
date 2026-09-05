@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.settings.AppSettings
 import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.voice.PendingTranscriptionDelivery
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -258,7 +259,17 @@ class ComposerViewModel @Inject constructor(
      * the host has no remote path yet, so sending now would send a message
      * referencing a file that is not there.
      */
-    fun send() = deliver(submit = true)
+    /**
+     * Sends the composed message. Returns true when the bytes left (the
+     * sheet should close); false when the draft was kept (undelivered or
+     * a no-op).
+     */
+    fun send(): Boolean {
+        val before = _state.value
+        if (!before.canSend || before.busy) return false
+        deliver(submit = true)
+        return !_state.value.undelivered
+    }
 
     /**
      * Writes the composed message to the PTY without submitting.
@@ -272,6 +283,10 @@ class ComposerViewModel @Inject constructor(
         val current = _state.value
         if (!current.canSend || current.busy) return
         val target = sink ?: return
+        // Insert/Send while the mic is live must not leave a recognizer
+        // writing partials into the draft we are about to clear. Silent
+        // release keeps the on-screen text (including the latest partial).
+        dictation.release()
 
         val body = ComposerText.compose(current.draft.trim(), current.attachments.map { it.remotePath })
         val delivered = target.isLive
@@ -363,7 +378,20 @@ class ComposerViewModel @Inject constructor(
 
     /** Mic tap: start dictating, or stop and transcribe. */
     fun onMicTap() {
-        if (dictation.isRecording) dictation.stop() else dictation.start()
+        if (dictation.isRecording) {
+            dictation.stop()
+        } else {
+            dictation.start(language = recognizerLanguage())
+        }
+    }
+
+    /**
+     * ISO-639 hint for the system recognizer, or null for auto-detect.
+     * Read per tap so a Settings change takes effect on the next dictation.
+     */
+    private fun recognizerLanguage(): String? {
+        val code = settings.settings.value.voiceLanguage
+        return code.takeUnless { it == AppSettings.VOICE_LANGUAGE_AUTO || it.isBlank() }
     }
 
     /** RECORD_AUDIO was denied. The recognizer is not started. */

@@ -26,6 +26,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.composer.ComposerViewModel
 import com.pocketshell.next.composer.MessageHistorySheet
+import com.pocketshell.next.composer.PromptComposerContent
 import com.pocketshell.next.composer.PromptComposerSheet
 import com.pocketshell.next.composer.SentMessage
 import com.pocketshell.next.composer.SessionSink
@@ -119,7 +120,7 @@ fun SessionRoute(
         onRetry = viewModel::retryNow,
         onHotkeySend = viewModel::sendBytes,
         onDraftChange = composerViewModel::onDraftChange,
-        onSend = composerViewModel::send,
+        onSend = { composerViewModel.send() },
         onInsert = composerViewModel::insert,
         onAttach = { picker.launch(arrayOf("*/*")) },
         onMicTap = composerViewModel::onMicTap,
@@ -168,7 +169,11 @@ fun SessionScreen(
     onRetry: () -> Unit,
     onHotkeySend: (ByteArray) -> Unit,
     onDraftChange: (String) -> Unit,
-    onSend: () -> Unit,
+    /**
+     * Production Send. Returns true when the message left (close the sheet);
+     * false when the draft was kept (undelivered — leave the sheet open).
+     */
+    onSend: () -> Boolean,
     onInsert: () -> Unit,
     onAttach: () -> Unit,
     onMicTap: () -> Unit,
@@ -184,6 +189,12 @@ fun SessionScreen(
     cellMetrics: TerminalCellMetrics = rememberTerminalCellMetrics(),
     initiallyShowComposer: Boolean = false,
     initiallyShowHotkeys: Boolean = false,
+    /**
+     * Test seam: Robolectric drops clicks on a `ModalBottomSheet`. Host-JVM
+     * tests that drive Insert/Send pass false so [PromptComposerContent] is
+     * composed in-place; production always uses the floating sheet.
+     */
+    embedComposerInWindow: Boolean = true,
 ) {
     var composerOpen by remember { mutableStateOf(initiallyShowComposer) }
     var hotkeysOpen by remember { mutableStateOf(initiallyShowHotkeys) }
@@ -321,22 +332,47 @@ fun SessionScreen(
     }
 
     if (composerOpen) {
-        PromptComposerSheet(
-            state = composerState,
-            onDismiss = { composerOpen = false },
-            onDraftChange = onDraftChange,
-            onSend = onSend,
-            onInsert = onInsert,
-            onAttach = onAttach,
-            onMicTap = onMicTap,
-            onCancelRecording = onCancelRecording,
-            onToggleHistory = onToggleHistory,
-            onTogglePreview = onTogglePreview,
-            onRemoveAttachment = onRemoveAttachment,
-            onDismissNotice = onDismissNotice,
-            onDiscard = onDiscardDraft,
-            onPermissionDenied = onPermissionDenied,
-        )
+        val sendAndMaybeDismiss: () -> Unit = {
+            if (onSend()) composerOpen = false
+        }
+        val dismiss = {
+            onCancelRecording()
+            composerOpen = false
+        }
+        if (embedComposerInWindow) {
+            PromptComposerSheet(
+                state = composerState,
+                onDismiss = dismiss,
+                onDraftChange = onDraftChange,
+                onSend = sendAndMaybeDismiss,
+                onInsert = onInsert,
+                onAttach = onAttach,
+                onMicTap = onMicTap,
+                onCancelRecording = onCancelRecording,
+                onToggleHistory = onToggleHistory,
+                onTogglePreview = onTogglePreview,
+                onRemoveAttachment = onRemoveAttachment,
+                onDismissNotice = onDismissNotice,
+                onDiscard = onDiscardDraft,
+                onPermissionDenied = onPermissionDenied,
+            )
+        } else {
+            PromptComposerContent(
+                state = composerState,
+                onClose = dismiss,
+                onDraftChange = onDraftChange,
+                onSend = sendAndMaybeDismiss,
+                onInsert = onInsert,
+                onAttach = onAttach,
+                onMicTap = onMicTap,
+                onCancelRecording = onCancelRecording,
+                onToggleHistory = onToggleHistory,
+                onTogglePreview = onTogglePreview,
+                onRemoveAttachment = onRemoveAttachment,
+                onDismissNotice = onDismissNotice,
+                onDiscard = onDiscardDraft,
+            )
+        }
     }
 
     if (hotkeysOpen) {

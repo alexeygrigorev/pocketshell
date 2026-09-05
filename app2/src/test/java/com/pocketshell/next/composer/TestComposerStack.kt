@@ -204,6 +204,7 @@ class GatedDispatcher : CoroutineDispatcher() {
 class FakeSpeechRecognitionProvider(var available: Boolean = true) : SpeechRecognitionProvider {
 
     var listener: SpeechRecognitionListener? = null
+    var lastLanguage: String? = null
     var stopped: Boolean = false
     var cancelled: Boolean = false
 
@@ -214,6 +215,7 @@ class FakeSpeechRecognitionProvider(var available: Boolean = true) : SpeechRecog
         listener: SpeechRecognitionListener,
     ): SpeechRecognitionSession? {
         if (!available) return null
+        lastLanguage = language
         this.listener = listener
         return object : SpeechRecognitionSession {
             override fun stopListening() {

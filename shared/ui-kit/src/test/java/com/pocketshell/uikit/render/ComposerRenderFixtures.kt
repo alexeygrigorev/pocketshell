@@ -25,20 +25,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.CommandChip
-import com.pocketshell.uikit.components.MicButton
-import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SheetHeader
-import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Issue #2521: Prompt Composer as a floating sheet — title, close, draft,
- * Insert, Send, mic. The real `PromptComposerSheet` lives in app2; this is
- * the ui-kit visual mirror `scripts/render.sh` can actually run.
+ * Issue #2529: Prompt Composer as a floating sheet — title, close, draft,
+ * and the v0.4.47 single action row: grouped 📎/`{}`/`/` pill, Insert,
+ * filled Send, 44dp mic. The real `PromptComposerSheet` lives in app2; this
+ * is the ui-kit visual mirror `scripts/render.sh` can actually run.
  */
 @Composable
 internal fun PromptComposerSheetRender() {
@@ -64,18 +61,7 @@ internal fun PromptComposerSheetRender() {
                 fontSize = 15.sp,
             )
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
-        ) {
-            PocketShellButton(text = "Recent", onClick = {}, variant = ButtonVariant.Text, compact = true)
-            PocketShellButton(text = "Preview", onClick = {}, variant = ButtonVariant.Text, compact = true)
-            Spacer(Modifier.weight(1f))
-            PocketShellButton(text = "Insert", onClick = {}, variant = ButtonVariant.Secondary, compact = true)
-            PocketShellButton(text = "Send", onClick = {}, compact = true)
-            MicButton(state = MicButtonState.Idle, onClick = {})
-        }
+        ComposerIdleControlsRow()
     }
 }
 
@@ -135,80 +121,88 @@ internal fun ComposerControlsRowRender() {
             )
         }
         Spacer(Modifier.height(14.dp))
-        // Controls row — the #701 focus.
+        ComposerIdleControlsRow()
+    }
+}
+
+/** v0.4.47 idle row (#2529): [📎  {}  /] .... [Insert] [Send ➤] [MIC]. */
+@Composable
+private fun ComposerIdleControlsRow() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .clip(RoundedCornerShape(22.dp))
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                .padding(horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            // Grouped left tools pill.
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                // Glyphs stand in for the Material AttachFile / DataObject
-                // icons (the icons-extended set isn't on the ui-kit render
-                // classpath); the real app row uses the proper icons.
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-                }
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "{ }",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                // Issue #787: the new `/` slash-command button — third in the
-                // 📎 / `{}` / `/` group, the single consolidated entry.
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "/",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
             }
-            Spacer(Modifier.weight(1f))
-            // Filled accent Send pill.
-            Row(
-                modifier = Modifier
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
+            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "Send",
-                    color = PocketShellColors.OnAccent,
-                    fontSize = 14.sp,
+                    text = "{}",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
-                Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
             }
-            Spacer(Modifier.width(8.dp))
-            // Cyan mic disc.
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(PocketShellColors.Accent, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
+            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "●",
-                    color = PocketShellColors.OnAccent,
-                    fontSize = 18.sp,
+                    text = "/",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
+        }
+        Spacer(Modifier.weight(1f))
+        Box(
+            modifier = Modifier
+                .height(44.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "Insert",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .height(44.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Text(
+                text = "Send",
+                color = PocketShellColors.OnAccent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+        }
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(PocketShellColors.Accent, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
         }
     }
 }

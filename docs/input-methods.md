@@ -19,16 +19,11 @@ For tmux operations (detach, switch sessions, etc.) PocketShell uses native UI c
 
 ### Engine
 
-Prompt Composer voice input has two selectable transcription providers:
+Prompt Composer dictation uses **Android built-in speech recognition** (`SpeechRecognizer`) only. A stored OpenAI API key does not select Whisper on this surface — that route crashed the phone after a v0.4.x upgrade restored the app id (#2520/#2521/#2529).
 
-- OpenAI Whisper via the Audio Transcriptions API. Existing `openai-transcribe` skill is the integration reference.
-- Android / Google Speech via the device's system `SpeechRecognizer`.
+Availability depends on the device image and installed speech service. Language support, offline packs, network use, and privacy handling are controlled by that service (often Google Speech Services on Play devices), not PocketShell. Partials stream into the draft while speaking; dictation is explicit-stop-only (tap the mic again).
 
-Trade-offs accepted:
-- Whisper: per-request cost (~$0.006/min), requires a saved OpenAI API key, uploads a complete recording, and usually handles technical content (code, paths, command names) better.
-- Android/system recognizer: no OpenAI key, can provide partial text while speaking, but availability depends on the device image and installed speech service. Language support, offline packs, network use, and privacy handling are controlled by that service (often Google Speech Services on Play devices), not PocketShell.
-
-Configuration: provider, API key, language, and silence threshold live in Settings. The OpenAI key is stored in Android Keystore. Future: support self-hosted `whisper.cpp` on one of the user's SSH hosts (out of v1 scope).
+Whisper / `AudioRecorder` is not started from the composer mic. Future: support self-hosted `whisper.cpp` on one of the user's SSH hosts (out of v1 scope).
 
 ### Prompt Composer (primary voice surface)
 
@@ -59,12 +54,14 @@ Configuration: provider, API key, language, and silence threshold live in Settin
 
 Behaviours:
 - Bottom sheet, modal over terminal (terminal dims behind)
-- Big mic button starts recording on tap and stops on the next tap. Whisper auto-stops after the configured silence window (30s default, adjustable from 2s to 60s); Android/system recognition uses the recognizer service's own endpointing.
-- Android/system recognition streams partial text into the recording panel when the service provides it. Whisper inserts the final transcript after the recording is complete.
+- Single idle control row: grouped 📎 / `{}` / `/` pill on the left; Insert, filled Send, 44dp mic disc on the right. `{}` opens message history; `/` seeds a leading `/` for slash autocomplete.
+- Mic tap requests `RECORD_AUDIO` if needed, then starts the system recognizer. Tap again to stop. The Android recognizer's own endpointing is treated as a pause, not the end of dictation (explicit-stop-only).
+- Partials stream into the draft (and the recording panel) while speaking.
 - Text area is editable — tap any word to fix before sending
-- `Insert` writes to PTY without submitting; `Send` submits with Enter; `Snippets` opens the saved-prompt library
+- `Insert` writes to PTY without submitting (sheet stays open). `Send` flushes the live field, hides the IME, submits with Enter, and dismisses the sheet so you are back on the terminal with the keyboard down. A send that cannot leave keeps the sheet, the draft, and the undelivered chip.
+- Keyboard up: the "Prompt Composer" title row hides; draft + action row sit on the IME. The title returns when the keyboard is down. IME inset is a flag — it is not subtracted from sheet height.
+- Recording: timer + waveform replace the editor; bottom row is `[Discard · Insert · Send]`. Attach / history / slash / mic hide mid-dictation.
 - Sheet dismissed = transcript preserved as draft per session
-- Recording state: mic fills with accent colour, inline waveform shows audio level, breadcrumb status dot pulses, haptic on start/stop
 
 ### Inline dictation (escape hatch)
 
@@ -210,7 +207,7 @@ Keyboard down:
 ## Settings
 
 Single "Input methods" settings screen with sub-pages:
-- Voice: transcription provider, Whisper API key, language, auto-stop silence threshold for Whisper (30s default, 2s-60s range)
+- Voice: language hint for the system recognizer, and the silence window (default 4s, floor 2s, max 60s; persisted as `voice_silence_seconds`). Dictation is explicit-stop-only — a pause ends a turn, not the recording.
 - Terminal hotkeys panel: which keys appear, ordering
 - Snippets: organize, share, per-host
 

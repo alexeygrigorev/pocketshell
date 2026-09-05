@@ -3,7 +3,7 @@ package com.pocketshell.next.settings
 /**
  * Every user-tunable preference app2 has (rewrite task P-6).
  *
- * ## Five fields, not sixteen
+ * ## Six fields, not sixteen
  *
  * The old client's `AppSettings` carried sixteen. Most of them configured
  * machinery the rewrite deleted, so porting them would have shipped a settings
@@ -20,7 +20,7 @@ package com.pocketshell.next.settings
  * | `conversationFontSizeSp`, `showSystemNotes`, `defaultAgentSessionView` | The conversation view (U-10) is cut by the scope amendment. |
  * | `hostDetailViewMode` | The tree/flat toggle: app2 has one session-tree presentation (U-3). |
  * | `defaultHostId` | The open-on-launch destination. app2 always starts on the host list; "startup" is not in P-6's KEEP list. |
- * | `voiceSilenceThresholdSeconds`, `voiceTranscriptionProvider` | Both belonged to the buffered-WAV → OpenAI Whisper path. app2 dictates through the system recognizer only, which auto-stops itself and needs no API key. |
+ * | `voiceTranscriptionProvider` | Whisper-vs-Android picker. Composer mic is Android `SpeechRecognizer` only (#2529). |
  *
  * `agentSubmitEnterDelayMs` was on that drop list (P-6: "agent surfaces are
  * cut") and is back: the composer is still the send path into those agents,
@@ -54,6 +54,12 @@ data class AppSettings(
      * why this is currently written but not yet read.
      */
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
+    /**
+     * Endpointer silence window in seconds for Android `SpeechRecognizer`
+     * (#590/#884/#2529). Persisted as `voice_silence_seconds` so a v0.4.x
+     * value survives upgrade. The provider clamps to a 2s floor.
+     */
+    val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
     /**
      * The percent at which the usage panel starts calling a provider quota
      * "approaching limit". Only the lower band is user-tunable; "critical"
@@ -106,6 +112,17 @@ data class AppSettings(
 
         /** "No language hint" — the recognizer detects it. */
         const val VOICE_LANGUAGE_AUTO: String = "auto"
+
+        /**
+         * Silence window for the Android recognizer extras. Floor 2s (#185);
+         * default 4s matches [com.pocketshell.next.voice.AndroidSpeechRecognitionProvider]
+         * `DEFAULT_COMPLETE_SILENCE_MS`. Max 60s. A stored v0.4.x 30s value
+         * is still in range.
+         */
+        const val MIN_VOICE_SILENCE_SECONDS: Float = 2f
+        const val MAX_VOICE_SILENCE_SECONDS: Float = 60f
+        const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 4f
+        const val VOICE_SILENCE_STEP_SECONDS: Float = 1f
 
         /**
          * The languages offered in Settings. Deliberately short: a recognizer

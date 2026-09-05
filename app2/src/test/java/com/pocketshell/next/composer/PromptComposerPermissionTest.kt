@@ -68,6 +68,63 @@ class PromptComposerPermissionTest {
     }
 
     @Test
+    fun `the title hides when the ime is up`() {
+        composeRule.setContent {
+            PocketShellTheme {
+                PromptComposerContent(
+                    state = ComposerUiState(draft = "hello", micAvailable = true),
+                    onClose = {},
+                    onDraftChange = {},
+                    onSend = {},
+                    onInsert = {},
+                    onAttach = {},
+                    onMicTap = {},
+                    onCancelRecording = {},
+                    onToggleHistory = {},
+                    onTogglePreview = {},
+                    onRemoveAttachment = {},
+                    onDismissNotice = {},
+                    onDiscard = {},
+                    imeVisible = true,
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `the title returns when the ime is down`() {
+        composeRule.setContent {
+            PocketShellTheme {
+                PromptComposerContent(
+                    state = ComposerUiState(draft = "hello", micAvailable = true),
+                    onClose = {},
+                    onDraftChange = {},
+                    onSend = {},
+                    onInsert = {},
+                    onAttach = {},
+                    onMicTap = {},
+                    onCancelRecording = {},
+                    onToggleHistory = {},
+                    onTogglePreview = {},
+                    onRemoveAttachment = {},
+                    onDismissNotice = {},
+                    onDiscard = {},
+                    imeVisible = false,
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+    }
+
+    @Test
     fun `decideMicTap requests permission only when starting without it`() {
         assertEquals(MicTapAction.RequestPermission, decideMicTap(hasRecordAudioPermission = false, recording = false))
         assertEquals(MicTapAction.StartOrStop, decideMicTap(hasRecordAudioPermission = true, recording = false))

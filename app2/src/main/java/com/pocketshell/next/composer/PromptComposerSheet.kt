@@ -5,12 +5,15 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.core.content.ContextCompat
 import com.pocketshell.uikit.components.SheetHeader
@@ -98,6 +101,7 @@ fun PromptComposerSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         modifier = modifier,
     ) {
+        val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
         PromptComposerContent(
             state = state,
             onClose = dismiss,
@@ -123,6 +127,7 @@ fun PromptComposerSheet(
             onRemoveAttachment = onRemoveAttachment,
             onDismissNotice = onDismissNotice,
             onDiscard = onDiscard,
+            imeVisible = imeVisible,
         )
     }
 }
@@ -147,15 +152,22 @@ fun PromptComposerContent(
     onDismissNotice: () -> Unit,
     onDiscard: () -> Unit,
     modifier: Modifier = Modifier,
+    imeVisible: Boolean = false,
 ) {
+    // IME inset is a FLAG (#801/#1622/#790): hide the title row while the
+    // keyboard is up. Do not subtract ime from sheet height and also
+    // imePadding() the same column — Material's sheet already sits on the
+    // keyboard.
     Column(modifier = modifier.navigationBarsPadding()) {
-        SheetHeader(
-            title = COMPOSER_SHEET_TITLE,
-            titleTestTag = COMPOSER_TITLE_TAG,
-            onClose = onClose,
-            closeContentDescription = "Close Prompt Composer",
-            closeTestTag = COMPOSER_CLOSE_TAG,
-        )
+        if (!imeVisible) {
+            SheetHeader(
+                title = COMPOSER_SHEET_TITLE,
+                titleTestTag = COMPOSER_TITLE_TAG,
+                onClose = onClose,
+                closeContentDescription = "Close Prompt Composer",
+                closeTestTag = COMPOSER_CLOSE_TAG,
+            )
+        }
         ComposerBar(
             state = state,
             onDraftChange = onDraftChange,

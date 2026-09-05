@@ -18,9 +18,8 @@ import com.pocketshell.next.voice.ConnectivityProbe
 import com.pocketshell.next.voice.MicCapture
 import com.pocketshell.next.voice.PendingTranscriptionDelivery
 import com.pocketshell.next.voice.PendingTranscriptionStore
-import com.pocketshell.next.voice.RoutingSpeechRecognitionProvider
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.voice.WhisperClientFactory
-import com.pocketshell.next.voice.WhisperSpeechRecognitionProvider
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -130,24 +129,22 @@ object VoiceModule {
     fun provideVoiceScope(): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * Composer mic is Android `SpeechRecognizer` only (#2529). A stored
+     * OpenAI key must not route this tap through Whisper / `AudioRecorder`.
+     * Whisper remains wired for the offline-queue delivery path, not for
+     * live dictation.
+     */
     @Provides
     @Singleton
     fun provideSpeechRecognitionProvider(
         @ApplicationContext context: Context,
-        mic: MicCapture,
-        whisper: WhisperClientFactory,
-        pending: PendingTranscriptionStore,
-        connectivity: ConnectivityProbe,
-        @VoiceScope scope: CoroutineScope,
-    ): SpeechRecognitionProvider = RoutingSpeechRecognitionProvider(
-        whisper = WhisperSpeechRecognitionProvider(
-            mic = mic,
-            whisper = whisper,
-            pending = pending,
-            connectivity = connectivity,
-            scope = scope,
-        ),
-        android = AndroidSpeechRecognitionProvider(context),
+        repository: SettingsRepository,
+    ): SpeechRecognitionProvider = AndroidSpeechRecognitionProvider(
+        context = context,
+        silenceWindowMsProvider = {
+            (repository.settings.value.voiceSilenceThresholdSeconds * 1000f).toLong()
+        },
     )
 
     @Provides

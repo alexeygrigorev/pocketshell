@@ -182,10 +182,11 @@ class J07ComposerSendJourney {
             squashed(pane).contains("echo$MARKER"),
         )
 
-        // A delivered send clears the composer — and leaves no chip.
+        // A delivered send dismisses the sheet (#695) — back on the terminal
+        // with the keyboard down. The host-pane oracle above is the send.
         compose.awaitIdle("after the send")
         compose.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertDoesNotExist()
-        compose.onNode(hasText(COMPOSER_PLACEHOLDER)).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
     }
 
     /**
@@ -252,6 +253,8 @@ class J07ComposerSendJourney {
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
         awaitTranscript("the sent history line") { it.contains(squashed(HISTORY_TEXT)) }
 
+        // Live Send dismisses the sheet (#695). Re-open to tap history.
+        openComposer()
         compose.onNodeWithTag(COMPOSER_HISTORY_TAG).performClick()
         awaitTag(COMPOSER_HISTORY_SHEET_TAG, "the history sheet")
         JourneyScreenshots.capture("04-history", JOURNEY)

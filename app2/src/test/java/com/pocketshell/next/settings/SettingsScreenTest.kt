@@ -55,6 +55,16 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun `the voice silence slider shows the current window`() {
+        setContent(settings = AppSettings(voiceSilenceThresholdSeconds = 8f))
+
+        composeRule.onNodeWithTag(SETTINGS_VOICE_SILENCE_SLIDER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_VOICE_SILENCE_VALUE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("8s").assertIsDisplayed()
+        composeRule.onNodeWithText("Silence window").assertIsDisplayed()
+    }
+
+    @Test
     fun `every voice language option reports its own code`() {
         var changedTo: String? = null
         setContent(onVoiceLanguageChange = { changedTo = it })
@@ -225,6 +235,7 @@ class SettingsScreenTest {
         onBack: () -> Unit = {},
         onTerminalTextSizeChange: (Int) -> Unit = {},
         onVoiceLanguageChange: (String) -> Unit = {},
+        onVoiceSilenceChange: (Float) -> Unit = {},
         onUsageWarnThresholdChange: (Int) -> Unit = {},
         onBackgroundGraceChange: (Long) -> Unit = {},
         onAgentSubmitEnterDelayChange: (Int) -> Unit = {},
@@ -242,6 +253,7 @@ class SettingsScreenTest {
                 onBack = onBack,
                 onTerminalTextSizeChange = onTerminalTextSizeChange,
                 onVoiceLanguageChange = onVoiceLanguageChange,
+                onVoiceSilenceChange = onVoiceSilenceChange,
                 onUsageWarnThresholdChange = onUsageWarnThresholdChange,
                 onBackgroundGraceChange = onBackgroundGraceChange,
                 onAgentSubmitEnterDelayChange = onAgentSubmitEnterDelayChange,

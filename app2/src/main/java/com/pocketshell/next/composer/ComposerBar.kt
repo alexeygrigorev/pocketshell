@@ -2,12 +2,14 @@ package com.pocketshell.next.composer
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,8 +28,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -61,6 +69,10 @@ const val COMPOSER_UNDELIVERED_TAG: String = "composer-undelivered"
 const val COMPOSER_NOTICE_TAG: String = "composer-notice"
 const val COMPOSER_STAGING_TAG: String = "composer-staging"
 const val COMPOSER_SLASH_TAG: String = "composer-slash"
+const val COMPOSER_SLASH_TRIGGER_TAG: String = "composer-slash-trigger"
+const val COMPOSER_TIMER_TAG: String = "composer-timer"
+const val COMPOSER_WAVEFORM_TAG: String = "composer-waveform"
+const val COMPOSER_CONTROLS_ROW_TAG: String = "composer-controls-row"
 
 fun composerSlashRowTag(command: String): String = "composer-slash-row:$command"
 
@@ -125,6 +137,17 @@ fun ComposerBar(
     val slashQuery = SlashCommandAutocomplete.queryFor(field)
     val slashRows = slashQuery?.let { SlashCommandAutocomplete.filter(it) }.orEmpty()
 
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val commitSend: () -> Unit = {
+        commitComposerSend(
+            flushDraft = { onDraftChange(field.text) },
+            clearFocus = { focusManager.clearFocus(force = true) },
+            hideKeyboard = { keyboardController?.hide() },
+            dispatch = onSend,
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -161,38 +184,50 @@ fun ComposerBar(
             )
         }
 
-        if (state.previewing) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = DRAFT_MIN_HEIGHT, max = DRAFT_MAX_HEIGHT)
-                    .verticalScroll(rememberScrollState())
-                    .background(color = PocketShellColors.SurfaceElev, shape = DRAFT_SHAPE)
-                    .border(width = 1.dp, color = PocketShellColors.Border, shape = DRAFT_SHAPE)
-                    .testTag(COMPOSER_PREVIEW_VIEW_TAG),
-            ) {
-                MarkdownView(blocks = MarkdownParser.parse(state.draft))
-            }
-        } else {
-            DraftField(
-                value = field,
-                onValueChange = { updated ->
-                    field = updated
-                    onDraftChange(updated.text)
-                },
+        when (state.recording) {
+            RecordingState.Recording -> RecordingSurface(
+                elapsedLabel = recordingElapsedLabel(),
+                amplitude = 0.45f,
+                capturing = true,
+                liveTranscript = state.draft.takeIf { it.isNotBlank() },
             )
+            RecordingState.Transcribing -> TranscribingSurface()
+            RecordingState.Idle -> if (state.previewing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = DRAFT_MIN_HEIGHT, max = DRAFT_MAX_HEIGHT)
+                        .verticalScroll(rememberScrollState())
+                        .background(color = PocketShellColors.SurfaceElev, shape = DRAFT_SHAPE)
+                        .border(width = 1.dp, color = PocketShellColors.Border, shape = DRAFT_SHAPE)
+                        .testTag(COMPOSER_PREVIEW_VIEW_TAG),
+                ) {
+                    MarkdownView(blocks = MarkdownParser.parse(state.draft))
+                }
+            } else {
+                DraftField(
+                    value = field,
+                    onValueChange = { updated ->
+                        field = updated
+                        onDraftChange(updated.text)
+                    },
+                )
+            }
         }
 
         ControlsRow(
             state = state,
-            onSend = onSend,
+            onSend = commitSend,
             onInsert = onInsert,
             onAttach = onAttach,
             onMicTap = onMicTap,
             onCancelRecording = onCancelRecording,
             onToggleHistory = onToggleHistory,
-            onTogglePreview = onTogglePreview,
-            onDiscard = onDiscard,
+            onSlashTap = {
+                val seeded = SlashCommandAutocomplete.insertText(field, "/")
+                field = seeded
+                onDraftChange(seeded.text)
+            },
         )
     }
 }
@@ -295,109 +330,246 @@ private fun ControlsRow(
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
     onToggleHistory: () -> Unit,
-    onTogglePreview: () -> Unit,
-    onDiscard: () -> Unit,
+    onSlashTap: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-        Row(
-        modifier = Modifier.fillMaxWidth(),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(COMPOSER_CONTROLS_ROW_TAG),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (state.recording == RecordingState.Recording) {
-            // Mid-dictation the editing tools are hidden: attach, history and
-            // preview are text-composition tools, not usable while the mic is
-            // live, and hiding them puts Discard next to the mic where the user
-            // is already looking.
-            PocketShellButton(
-                text = "Discard",
-                onClick = onCancelRecording,
-                variant = ButtonVariant.Secondary,
-                compact = true,
-                modifier = Modifier.testTag(COMPOSER_DISCARD_RECORDING_TAG),
-            )
-            Text(
-                text = "Listening…",
-                style = MaterialTheme.typography.labelMedium,
-                color = PocketShellColors.Accent,
-            )
-        } else {
-            PocketShellButton(
-                text = "📎",
-                onClick = onAttach,
-                variant = ButtonVariant.Text,
-                compact = true,
+        if (state.recording == RecordingState.Idle) {
+            ComposerEditingToolsGroup(
                 enabled = !state.busy,
-                modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+                onAttach = onAttach,
+                onHistory = onToggleHistory,
+                onSlashTap = onSlashTap,
             )
-            // A word, not a glyph: the emulator screenshot showed the clock
-            // pictograph rendering as a near-invisible hairline outline, which
-            // is not an affordance anybody would find.
-            PocketShellButton(
-                text = "Recent",
-                onClick = onToggleHistory,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(COMPOSER_HISTORY_TAG),
-            )
-            PocketShellButton(
-                text = if (state.previewing) "Edit" else "Preview",
-                onClick = onTogglePreview,
-                variant = ButtonVariant.Text,
-                compact = true,
-                enabled = state.draft.isNotBlank(),
-                modifier = Modifier.testTag(COMPOSER_PREVIEW_TAG),
-            )
-            if (state.canSend) {
-                PocketShellButton(
-                    text = "Clear",
-                    onClick = onDiscard,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(COMPOSER_DISCARD_TAG),
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        when (state.recording) {
+            RecordingState.Idle -> {
+                InsertButton(
+                    onClick = onInsert,
+                    enabled = state.canSend && !state.busy,
+                    modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
+                )
+                SendButton(
+                    onClick = onSend,
+                    enabled = state.canSend && !state.busy,
+                    modifier = Modifier.testTag(COMPOSER_SEND_TAG),
+                )
+                MicTriggerButton(
+                    onClick = onMicTap,
+                    enabled = state.micAvailable,
+                    modifier = Modifier.testTag(COMPOSER_MIC_TAG),
+                )
+            }
+            RecordingState.Recording -> {
+                DiscardRecordingButton(
+                    onClick = onCancelRecording,
+                    modifier = Modifier.testTag(COMPOSER_DISCARD_RECORDING_TAG),
+                )
+                InsertButton(
+                    onClick = onInsert,
+                    enabled = state.canSend && !state.busy,
+                    recording = true,
+                    modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
+                )
+                SendButton(
+                    onClick = onSend,
+                    enabled = state.canSend && !state.busy,
+                    recording = true,
+                    modifier = Modifier.testTag(COMPOSER_SEND_TAG),
+                )
+            }
+            RecordingState.Transcribing -> {
+                DiscardRecordingButton(
+                    onClick = onCancelRecording,
+                    label = "Cancel",
+                    modifier = Modifier.testTag(COMPOSER_DISCARD_RECORDING_TAG),
+                )
+                SendButton(
+                    onClick = onSend,
+                    enabled = state.canSend && !state.busy,
+                    recording = true,
+                    modifier = Modifier.testTag(COMPOSER_SEND_TAG),
                 )
             }
         }
-
-        Spacer(modifier = Modifier.weight(1f))
-
-        MicButton(
-            state = when {
-                state.recording == RecordingState.Recording -> MicButtonState.Recording
-                state.micAvailable && state.recording == RecordingState.Idle -> MicButtonState.Idle
-                else -> MicButtonState.Disabled
-            },
-            onClick = onMicTap,
-            modifier = Modifier.testTag(COMPOSER_MIC_TAG),
-        )
-    }
-
-    if (state.recording != RecordingState.Recording) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
-        ) {
-            Spacer(modifier = Modifier.weight(1f))
-            PocketShellButton(
-                text = "Insert",
-                onClick = onInsert,
-                enabled = state.canSend && !state.busy,
-                variant = ButtonVariant.Secondary,
-                compact = true,
-                modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
-            )
-            PocketShellButton(
-                text = "Send",
-                onClick = onSend,
-                enabled = state.canSend && !state.busy,
-                compact = true,
-                modifier = Modifier.testTag(COMPOSER_SEND_TAG),
-            )
-        }
-    }
     }
 }
+
+/**
+ * v0.4.47 left tools pill: 📎 attach, `{}` history, `/` slash (#701 / #787 / #2529).
+ */
+@Composable
+private fun ComposerEditingToolsGroup(
+    enabled: Boolean,
+    onAttach: () -> Unit,
+    onHistory: () -> Unit,
+    onSlashTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(22.dp))
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+            .padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        ToolGlyphButton(
+            glyph = "📎",
+            contentDescription = "Attach files",
+            onClick = onAttach,
+            enabled = enabled,
+            modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+        )
+        ToolGlyphButton(
+            glyph = "{}",
+            contentDescription = "Message history",
+            onClick = onHistory,
+            enabled = enabled,
+            modifier = Modifier.testTag(COMPOSER_HISTORY_TAG),
+        )
+        ToolGlyphButton(
+            glyph = "/",
+            contentDescription = "Slash commands",
+            onClick = onSlashTap,
+            enabled = enabled,
+            modifier = Modifier.testTag(COMPOSER_SLASH_TRIGGER_TAG),
+        )
+    }
+}
+
+@Composable
+private fun ToolGlyphButton(
+    glyph: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(COMPOSER_ACTION_ICON_BUTTON_SIZE)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = glyph,
+            color = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun SendButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    recording: Boolean = false,
+) {
+    val height = if (recording) ComposerRecordingPillHeight else ComposerIdlePillHeight
+    val containerColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
+    val contentColor = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted
+    Row(
+        modifier = modifier
+            .height(height)
+            .clip(ComposerActionPillShape)
+            .background(color = containerColor, shape = ComposerActionPillShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = if (recording) 16.dp else 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Text(
+            text = "Send",
+            color = contentColor,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(text = "➤", color = contentColor, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun InsertButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    recording: Boolean = false,
+) {
+    val height = if (recording) ComposerRecordingPillHeight else ComposerIdlePillHeight
+    Row(
+        modifier = modifier
+            .height(height)
+            .clip(ComposerActionPillShape)
+            .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
+            .border(1.dp, PocketShellColors.Border, ComposerActionPillShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Insert without submitting" }
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Insert",
+            color = if (enabled) PocketShellColors.Text else PocketShellColors.TextMuted,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun DiscardRecordingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    label: String = "Discard",
+) {
+    Row(
+        modifier = modifier
+            .height(ComposerRecordingPillHeight)
+            .clip(ComposerActionPillShape)
+            .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
+            .border(1.dp, PocketShellColors.Border, ComposerActionPillShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Discard recording without transcribing" }
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun MicTriggerButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    MicButton(
+        state = if (enabled) MicButtonState.Idle else MicButtonState.Disabled,
+        onClick = onClick,
+        modifier = modifier.size(ComposerIdlePillHeight),
+    )
+}
+
+private val ComposerActionPillRadius = 22.dp
+private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
+private val ComposerIdlePillHeight = 44.dp
+private val ComposerRecordingPillHeight = 48.dp
+private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp
 
 /**
  * The `/`-command list, rendered above the field so it never sits under the

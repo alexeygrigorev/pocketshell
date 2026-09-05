@@ -16,6 +16,7 @@ class AppSettingsTest {
 
         assertEquals(28, settings.terminalTextSizePx)
         assertEquals("auto", settings.voiceLanguage)
+        assertEquals(4f, settings.voiceSilenceThresholdSeconds)
         assertEquals(80, settings.usageWarnThresholdPercent)
         assertEquals(90_000L, settings.backgroundGraceMillis)
         assertEquals(150, settings.agentSubmitEnterDelayMs)

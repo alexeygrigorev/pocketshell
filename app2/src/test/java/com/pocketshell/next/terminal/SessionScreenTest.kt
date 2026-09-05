@@ -318,6 +318,58 @@ class SessionScreenTest {
         composeRule.onNodeWithText("kept text").assertIsDisplayed()
     }
 
+    @Test
+    fun `a live send dismisses the composer sheet`() {
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(draft = "hello", micAvailable = true),
+            initiallyShowComposer = true,
+            onSend = { true },
+            embedComposerInWindow = false,
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
+
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun `insert does not dismiss the composer sheet`() {
+        var inserts = 0
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(draft = "hello", micAvailable = true),
+            initiallyShowComposer = true,
+            onInsert = { inserts += 1 },
+            embedComposerInWindow = false,
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+
+        assertEquals(1, inserts)
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `an undelivered send keeps the composer sheet`() {
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(
+                draft = "kept text",
+                notice = ComposerNotice.Undelivered,
+            ),
+            initiallyShowComposer = true,
+            onSend = { false },
+            embedComposerInWindow = false,
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
+
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertIsDisplayed()
+    }
+
     private fun setContent(
         state: SessionUiState,
         composerState: ComposerUiState = ComposerUiState(),
@@ -327,8 +379,11 @@ class SessionScreenTest {
         onHotkeySend: (ByteArray) -> Unit = {},
         usagePillState: UsageGlancePillState? = null,
         onOpenUsage: () -> Unit = {},
+        onSend: () -> Boolean = { true },
+        onInsert: () -> Unit = {},
         initiallyShowComposer: Boolean = false,
         initiallyShowHotkeys: Boolean = false,
+        embedComposerInWindow: Boolean = true,
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -343,8 +398,8 @@ class SessionScreenTest {
                     onRetry = onRetry,
                     onHotkeySend = onHotkeySend,
                     onDraftChange = {},
-                    onSend = {},
-                    onInsert = {},
+                    onSend = onSend,
+                    onInsert = onInsert,
                     onAttach = {},
                     onMicTap = {},
                     onCancelRecording = {},
@@ -356,6 +411,7 @@ class SessionScreenTest {
                     onUseHistoryEntry = {},
                     initiallyShowComposer = initiallyShowComposer,
                     initiallyShowHotkeys = initiallyShowHotkeys,
+                    embedComposerInWindow = embedComposerInWindow,
                 )
             }
         }

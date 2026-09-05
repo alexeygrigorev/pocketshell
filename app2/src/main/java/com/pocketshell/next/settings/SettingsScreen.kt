@@ -59,6 +59,8 @@ const val SETTINGS_USAGE_WARN_SLIDER_TAG: String = "settings-usage-warn-slider"
 const val SETTINGS_USAGE_WARN_VALUE_TAG: String = "settings-usage-warn-value"
 const val SETTINGS_AGENT_SUBMIT_DELAY_SLIDER_TAG: String = "settings-agent-submit-delay-slider"
 const val SETTINGS_AGENT_SUBMIT_DELAY_VALUE_TAG: String = "settings-agent-submit-delay-value"
+const val SETTINGS_VOICE_SILENCE_SLIDER_TAG: String = "settings-voice-silence-slider"
+const val SETTINGS_VOICE_SILENCE_VALUE_TAG: String = "settings-voice-silence-value"
 const val SETTINGS_WORKSPACE_EMPTY_TAG: String = "settings-workspace-empty"
 const val SETTINGS_CRASH_REPORTS_TAG: String = "settings-crash-reports"
 const val SETTINGS_VERSION_TAG: String = "settings-version"
@@ -108,6 +110,7 @@ fun SettingsRoute(
         onBack = onBack,
         onTerminalTextSizeChange = viewModel::setTerminalTextSizePx,
         onVoiceLanguageChange = viewModel::setVoiceLanguage,
+        onVoiceSilenceChange = viewModel::setVoiceSilenceThresholdSeconds,
         onUsageWarnThresholdChange = viewModel::setUsageWarnThresholdPercent,
         onBackgroundGraceChange = viewModel::setBackgroundGraceMillis,
         onAgentSubmitEnterDelayChange = viewModel::setAgentSubmitEnterDelayMs,
@@ -180,6 +183,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onTerminalTextSizeChange: (Int) -> Unit,
     onVoiceLanguageChange: (String) -> Unit,
+    onVoiceSilenceChange: (Float) -> Unit,
     onUsageWarnThresholdChange: (Int) -> Unit,
     onBackgroundGraceChange: (Long) -> Unit,
     onAgentSubmitEnterDelayChange: (Int) -> Unit,
@@ -275,6 +279,20 @@ fun SettingsScreen(
                             testTag = voiceLanguageOptionTag(option.code),
                         )
                     }
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+                    StepperSlider(
+                        title = "Silence window",
+                        description = "How long the system recognizer waits after a pause " +
+                            "before ending a turn. Dictation still only stops when you tap Stop.",
+                        value = settings.voiceSilenceThresholdSeconds.roundToInt(),
+                        valueLabel = "${settings.voiceSilenceThresholdSeconds.roundToInt()}s",
+                        min = AppSettings.MIN_VOICE_SILENCE_SECONDS.roundToInt(),
+                        max = AppSettings.MAX_VOICE_SILENCE_SECONDS.roundToInt(),
+                        step = AppSettings.VOICE_SILENCE_STEP_SECONDS.roundToInt(),
+                        onChange = { onVoiceSilenceChange(it.toFloat()) },
+                        sliderTestTag = SETTINGS_VOICE_SILENCE_SLIDER_TAG,
+                        valueTestTag = SETTINGS_VOICE_SILENCE_VALUE_TAG,
+                    )
                 }
             }
 

@@ -810,12 +810,24 @@ def _create_on_aplexer(
     ``session_enum.aplexer_display_name``) so it round-trips with what
     `sessions list --json` shows.
     """
-    aplexer_path = _aplexer.which_a()
+    resolution = _aplexer.resolve_a()
+    aplexer_path = resolution.path
     if aplexer_path is None:
+        # #2543: this used to say "is not installed", which was actively
+        # misleading — the real cause was a RESOLUTION failure (a correctly
+        # installed `a` outside the app's non-interactive SSH PATH). aplexer
+        # now ships WITH this CLI as a pinned dependency, so an unresolvable
+        # `a` is a packaging-integrity problem, and the message names every
+        # candidate that was checked.
         raise _CreateError(
-            "pocketshell: `a` (aplexer) is not installed on this host, but "
-            "the backend routing selected it. Install aplexer or set "
-            "[backends] in ~/.config/pocketshell/config.toml back to tmux.",
+            _aplexer_unresolved_message(
+                resolution,
+                action=(
+                    "the backend routing selected it, so `sessions create` "
+                    "cannot run (or set [backends] in "
+                    "~/.config/pocketshell/config.toml back to tmux)"
+                ),
+            ),
             exit_code=127,
         )
     workspace = cwd or os.getcwd()
@@ -1040,15 +1052,37 @@ TMUX_PROBE_TIMEOUT_S = 2.0
 TMUX_SOCKET_SWEEP_BUDGET_S = 5.0
 
 
-def _resolve_aplexer_binary() -> Optional[str]:
-    """Locate the ``a`` (aplexer) CLI, honouring ``APLEXER_BIN``.
+def _resolve_aplexer() -> "_aplexer.AplexerResolution":
+    """Resolve the ``a`` CLI for attach/kill: ``APLEXER_BIN``, else bundled.
 
-    Wrapped rather than calling :func:`pocketshell.aplexer.which_a` inline so
+    Wrapped rather than calling :func:`pocketshell.aplexer.resolve_a` inline so
     the attach-time availability check has its own monkeypatch seam: patching
-    ``which_a`` itself would also silence the enumeration probe that produced
-    the aplexer rows in the first place.
+    ``resolve_a`` itself would also silence the enumeration probe that produced
+    the aplexer rows in the first place. Returns the full report, because the
+    failure message names every candidate it tried (#2543), and the callers
+    exec/run the RESOLVED path — never a bare ``a`` that execvp would look up
+    on PATH.
     """
-    return _aplexer.which_a()
+    return _aplexer.resolve_a()
+
+
+def _aplexer_unresolved_message(
+    resolution: "_aplexer.AplexerResolution", *, action: str
+) -> str:
+    """Explain an unresolvable ``a`` by NAMING the candidates (issue #2543).
+
+    The old wording — "`a` (aplexer) is not installed on this host" — was the
+    inverse of the truth in the reported failure: aplexer WAS installed, just
+    not where a bare PATH lookup could see it. aplexer now ships WITH this CLI
+    as a pinned dependency, so an unresolvable `a` is a packaging-integrity
+    problem with a concrete fix, and the message says which paths were checked.
+    """
+    return (
+        "pocketshell: could not resolve the `a` (aplexer) binary; "
+        f"{action}. aplexer ships with the pocketshell CLI, so reinstalling "
+        "normally fixes this (`uv tool install --force pocketshell`); "
+        "otherwise set APLEXER_BIN. Tried: " + "; ".join(resolution.tried)
+    )
 
 
 def _exec(argv: list[str]) -> None:
@@ -1231,15 +1265,21 @@ def sessions_attach(ctx: click.Context, name: str, hide_status: bool) -> None:
 
     row = matches[0]
     if row.manager == _session_enum.MANAGER_APLEXER:
-        if _resolve_aplexer_binary() is None:
+        # Resolve ONCE and exec that exact path (#2543). A bare "a" here would
+        # be an execvp PATH lookup — the separate-install mode this CLI no
+        # longer supports, and a way to run a different copy than the one the
+        # availability check just approved.
+        resolution = _resolve_aplexer()
+        if resolution.path is None:
             click.echo(
-                "pocketshell: `a` (aplexer) is not installed on this host; "
-                f"cannot attach to {row.name!r}.",
+                _aplexer_unresolved_message(
+                    resolution, action=f"cannot attach to {row.name!r}"
+                ),
                 err=True,
             )
             ctx.exit(ATTACH_EXIT_NO_BINARY)
             return
-        _exec(["a", "attach", str(row.aplexer_id)])
+        _exec([resolution.path, "attach", str(row.aplexer_id)])
         return
 
     if shutil.which("tmux") is None:
@@ -1398,11 +1438,13 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
 
     row = matches[0]
     if row.manager == _session_enum.MANAGER_APLEXER:
-        if _resolve_aplexer_binary() is None:
+        resolution = _resolve_aplexer()
+        if resolution.path is None:
             _emit_kill_failure(
                 ctx,
-                "pocketshell: `a` (aplexer) is not installed on this host; "
-                f"cannot kill {row.name!r}.",
+                _aplexer_unresolved_message(
+                    resolution, action=f"cannot kill {row.name!r}"
+                ),
                 exit_code=ATTACH_EXIT_NO_BINARY,
                 as_json=as_json,
             )
@@ -1416,7 +1458,8 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
                 as_json=as_json,
             )
             return
-        argv = ["a", "kill", str(aplexer_id)]
+        # The resolved path, not a bare "a" on PATH (#2543).
+        argv = [resolution.path, "kill", str(aplexer_id)]
         try:
             completed = _run_session_kill(argv)
         except subprocess.TimeoutExpired:
@@ -1430,7 +1473,7 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
         except OSError as exc:
             _emit_kill_failure(
                 ctx,
-                "pocketshell: `a` (aplexer) is not installed on this host; "
+                f"pocketshell: `{resolution.path} kill` could not run; "
                 f"cannot kill {row.name!r}: {exc}",
                 exit_code=ATTACH_EXIT_NO_BINARY,
                 as_json=as_json,

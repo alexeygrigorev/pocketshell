@@ -151,6 +151,13 @@ def use_aplexer_backend(
     start: AplexerStub,
     snapshot: Any = None,
 ) -> None:
+    monkeypatch.setattr(
+        sessions._aplexer,
+        "resolve_a",
+        lambda env=None: sessions._aplexer.AplexerResolution(
+            path="/fake/a", source="bundled", worker="/fake/aplexer"
+        ),
+    )
     monkeypatch.setattr(sessions._aplexer, "which_a", lambda env=None: "/fake/a")
     monkeypatch.setattr(sessions, "_aplexer_snapshot", lambda: snapshot)
     monkeypatch.setattr(sessions, "_run_aplexer", start)
@@ -563,10 +570,24 @@ def test_malformed_config_human_path_writes_stderr(
     assert "not valid TOML" in result.stderr
 
 
+def _unresolvable_aplexer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sessions._aplexer,
+        "resolve_a",
+        lambda env=None: sessions._aplexer.AplexerResolution(
+            tried=(
+                "APLEXER_BIN (unset)",
+                "/opt/venv/bin/a (bundled, missing)",
+                "PATH=/usr/bin:/bin (no `a`)",
+            )
+        ),
+    )
+
+
 def test_missing_aplexer_binary_json_error_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sessions._aplexer, "which_a", lambda env=None: None)
+    _unresolvable_aplexer(monkeypatch)
 
     result = CliRunner().invoke(
         sessions_group, ["create", "work", "--backend", "aplexer", "--json"]
@@ -574,6 +595,29 @@ def test_missing_aplexer_binary_json_error_envelope(
 
     assert result.exit_code == 127
     assert "aplexer" in envelope(result)["error"]
+
+
+def test_unresolvable_aplexer_error_names_candidate_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2543 AC: the aplexer-missing error names the candidates it tried.
+
+    The old message claimed aplexer "is not installed on this host" even when
+    it WAS installed and merely off the non-interactive SSH PATH — the exact
+    inversion of the truth the maintainer hit. It must now report what was
+    checked, and must not assert a bare "not installed".
+    """
+    _unresolvable_aplexer(monkeypatch)
+
+    result = CliRunner().invoke(
+        sessions_group, ["create", "work", "--backend", "aplexer", "--json"]
+    )
+
+    message = envelope(result)["error"]
+    assert "is not installed on this host" not in message
+    assert "APLEXER_BIN (unset)" in message
+    assert "/opt/venv/bin/a (bundled, missing)" in message
+    assert "PATH=/usr/bin:/bin (no `a`)" in message
 
 
 # ----- aplexer arm ----------------------------------------------------

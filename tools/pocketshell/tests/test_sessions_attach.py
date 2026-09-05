@@ -28,6 +28,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from pocketshell import aplexer as _aplexer
 from pocketshell.sessions import sessions_group
 
 FAKE_TMUXCTL = "/fake/tmuxctl"
@@ -139,7 +140,7 @@ def _invoke(
 
 
 def test_attach_aplexer_display_name_execs_a_attach(install_fake_a, socket_dir) -> None:
-    install_fake_a(
+    script = install_fake_a(
         snapshot=[
             {
                 "id": "sess-abc12345",
@@ -155,11 +156,12 @@ def test_attach_aplexer_display_name_execs_a_attach(install_fake_a, socket_dir) 
     result = _invoke(harness, ["attach", "toyaikit:codex"])
 
     assert result.exit_code == 0, result.output
-    assert harness.exec_calls == [["a", "attach", "sess-abc12345"]]
+    # #2543: the RESOLVED binary is exec'd, not a bare "a" from PATH.
+    assert harness.exec_calls == [[str(script), "attach", "sess-abc12345"]]
 
 
 def test_attach_aplexer_id_prefix_execs_a_attach(install_fake_a, socket_dir) -> None:
-    install_fake_a(
+    script = install_fake_a(
         snapshot=[
             {
                 "id": "abcdef0123456789",
@@ -173,7 +175,7 @@ def test_attach_aplexer_id_prefix_execs_a_attach(install_fake_a, socket_dir) -> 
     result = _invoke(harness, ["attach", "abcdef01"])
 
     assert result.exit_code == 0, result.output
-    assert harness.exec_calls == [["a", "attach", "abcdef0123456789"]]
+    assert harness.exec_calls == [[str(script), "attach", "abcdef0123456789"]]
 
 
 def test_attach_short_id_prefix_is_not_a_match(install_fake_a, socket_dir) -> None:
@@ -207,11 +209,15 @@ def test_attach_missing_a_binary_exits_127(install_fake_a, socket_dir) -> None:
     )
     harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
 
-    with patch("pocketshell.sessions._resolve_aplexer_binary", return_value=None):
+    unresolved = _aplexer.AplexerResolution(
+        tried=("APLEXER_BIN (unset)", "/opt/venv/bin/a (bundled, missing)")
+    )
+    with patch("pocketshell.sessions._resolve_aplexer", return_value=unresolved):
         result = _invoke(harness, ["attach", "toyaikit:codex"])
 
     assert result.exit_code == 127, result.output
-    assert "`a` (aplexer) is not installed" in result.output
+    assert "could not resolve the `a` (aplexer) binary" in result.output
+    assert "/opt/venv/bin/a (bundled, missing)" in result.output
     assert harness.exec_calls == []
 
 

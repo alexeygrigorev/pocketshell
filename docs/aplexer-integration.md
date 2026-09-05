@@ -30,6 +30,124 @@ inherits Phase A the same day the helper does.
 
 ---
 
+## Shipping: aplexer is part of the pocketshell CLI (#2543)
+
+aplexer is **not installed separately**. `tools/pocketshell/pyproject.toml`
+carries a pinned, Linux-marked hard dependency:
+
+```toml
+"aplexer==0.1.2; sys_platform == 'linux'"
+```
+
+so the documented host install — `uv tool install pocketshell` — also delivers
+the `a` CLI **and** the `aplexer` worker binary as console-scripts in the same
+`bin` directory as the pocketshell interpreter. There is no separate build, no
+copy step, and no PATH surgery. The published wheels bundle both native
+binaries (x86_64 + aarch64); the `sys_platform == 'linux'` marker is
+load-bearing because aplexer publishes no sdist and no macOS/Windows wheels,
+so an unmarked hard dependency would make `pip install pocketshell`
+unresolvable off Linux.
+
+**glibc floor (flagged, not solved).** aplexer 0.1.1 shipped `manylinux_2_17`
+wheels; 0.1.2 ships `manylinux_2_28`, raising the minimum glibc from 2.17 to
+2.28. Now that aplexer is a *hard* dependency, that floor applies to
+`pip install pocketshell` / `uv tool install pocketshell` as a whole, not just
+to the aplexer backend: a Linux host older than glibc 2.28 (CentOS 7,
+Ubuntu 18.04, Debian 9) can no longer install the CLI at all. Combined with
+the existing wheel-only, glibc-only surface, the install matrix is now
+"glibc >= 2.28, x86_64 or aarch64" — musl/Alpine and 32-bit Linux were already
+out (PEP 508 has no libc marker to express that). Every current PocketShell
+host is well past 2.28 (the maintainer's box is 2.39), so nothing is broken
+today; widening the matrix would mean an aplexer-side manylinux target change
+or making the dependency optional again, both out of scope for #2543.
+
+### Binary resolution (`pocketshell/aplexer.py::resolve_a`)
+
+Exactly two candidates, highest first:
+
+1. `APLEXER_BIN` — the single explicit override. A debug/test knob (the unit
+   suite points it at stub `a` scripts), not an install path.
+2. The **bundled** copy next to `sys.executable` — the interpreter's own `bin`
+   dir first, then the resolved dir, mirroring
+   `usage.py::_resolve_quse_binary` for the pinned `quse`. Console-scripts sit
+   next to the *unresolved* `sys.executable`, because a venv / `uv tool`
+   `bin/python` is a symlink into a shared interpreter dir that holds no
+   console-scripts.
+
+There is **no `PATH` lookup**. `shutil.which("a")` was deleted (D22 hard cut,
+not put behind a condition): a host-level or locally-built `a` must not shadow
+the pinned copy, and "a binary that only exists on `PATH`" is exactly the
+separate-install mode this change removes. An unresolvable `a` is a
+packaging-integrity error that fails loud — `sessions.py::_create_on_aplexer`
+names every candidate it tried and points at
+`uv tool install --force pocketshell`, instead of the old message that claimed
+aplexer "is not installed on this host" while it was in fact installed and
+merely off the app's non-interactive SSH `PATH`.
+
+Every call site uses the RESOLVED path. `sessions attach` and `sessions kill`
+used to `execvp` / `subprocess.run` a bare `"a"` — a PATH lookup by another
+name, and a way to run a different copy than the availability check just
+approved; they now exec `resolution.path` (#2543).
+
+The worker matters as much as the CLI: `aplexer/src/lib.rs::worker_executable`
+resolves the `aplexer` worker as a sibling of `current_exe`, so a hand-copied
+`a` with no sibling worker finds the CLI and still cannot start a session. The
+wheel always ships both into the same dir, and `AplexerResolution.worker`
+reports the sibling that was found.
+
+### Version coupling, and why the version string is not the contract
+
+The pin is enforced by the exact `==` specifier, the committed
+`tools/pocketshell/uv.lock`, and `tools/pocketshell/tests/test_aplexer_contract.py`.
+It deliberately does **not** get a release-time guard:
+`scripts/check-pypi-version.sh` couples pocketshell's own package version to
+the release tag and says nothing about `quse` or `tmuxctl` either.
+
+The version string alone is **not** sufficient, and #2543 is the proof. The
+first attempt pinned `aplexer==0.1.1`, the newest published wheel at the time.
+aplexer's `main` was 143 commits past the `v0.1.1` tag and *still* reported
+`a --version` as `0.1.1`, so the published wheel and the build every host
+actually ran were indistinguishable by version. Under the hard cut above the
+bundled wheel is the ONLY `a` the CLI can run, so that pin would have silently
+downgraded every host past two fixes the real create-agent path depends on:
+
+| aplexer commit | What 0.1.1 does instead |
+| --- | --- |
+| `ee4b957` — profile `executable` override (argv[0]) | Accepts the key, ignores it. `[profiles.zcodex] engine="codex", executable="zcodex"` resolves argv[0] to `codex`, so `sessions create --backend aplexer --engine codex --profile zcodex` dies with `a: command is not executable or was not found in PATH: codex`. |
+| `d13ecb2` — preserve provider env for `shell` launches | Unsets 71 provider vars for every plain shell session. |
+
+Hence `test_aplexer_contract.py`: it drives the **bundled** binary (never a
+host copy, never PATH) against its own throwaway `APLEXER_CONFIG` fixture — so
+it is not hostage to the maintainer's personal profiles — and asserts the
+BEHAVIOUR the CLI depends on:
+
+- a profile `executable` override reaches argv[0], in `a --json launch-spec`
+  **and** in a real `a start` whose fixture engine command deliberately does
+  not exist (the reported symptom, reproduced);
+- `a --json profiles` exposes the `executable` field;
+- `launch-spec --engine shell` strips nothing, while an agent engine still
+  strips the provider keys;
+- every subcommand + flag this CLI passes (`start --workspace/--tag/--engine/
+  --profile`, `snapshot`, `list`, `engines`, `profiles`,
+  `launch-spec --engine/--cwd/--profile/--no-skip-permissions`,
+  `attach`, `kill`) exists in the bundled build.
+
+Those assertions were verified to fail against published 0.1.1 and pass
+against 0.1.2. **Re-run that file whenever the pin moves** — it is what a bump
+has to re-verify, in place of a version check that cannot see the difference.
+
+### Lock cutoff
+
+`[tool.uv] exclude-newer` in `tools/pocketshell/pyproject.toml` (mirrored in
+`uv.lock`'s `[options]`) is a project-local reproducibility cutoff, and a
+package uploaded *after* it is simply invisible to `uv lock` — which looks
+like a broken index rather than a stale cutoff. So it moves in lock-step with
+every new pin: past quse 0.0.15 (#2293), now past aplexer 0.1.2's
+2026-09-05T22:38:08Z upload (its `aplexer-client` runtime dependency landed at
+22:38:04Z). Bump both places together, or `uv lock --check` fails.
+
+---
+
 ## Readiness (fair assessment, 2026-08-26)
 
 | Phase | Ready? | Meaning |
@@ -79,8 +197,9 @@ names, `@ps_*` options stay.
 
 Issue: #2341.
 
-In `profiles.py`, probe `a profiles --json` when `a` is on PATH (or
-`$APLEXER_BIN`). Map entries onto `Profile` objects. Log divergence
+In `profiles.py`, probe `a profiles --json` when `a` resolves (the bundled
+copy shipped with the CLI, or `$APLEXER_BIN` — never PATH, see "Shipping"
+above). Map entries onto `Profile` objects. Log divergence
 against native discovery. **Prefer mapped siblings**; keep native
 `Claude`/`Codex` defaults. Native discovery is the fallback. Kill
 switches: `POCKETSHELL_APLEXER=0` / `POCKETSHELL_APLEXER_PROFILES=0`.

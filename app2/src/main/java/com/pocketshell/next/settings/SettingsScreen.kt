@@ -3,6 +3,7 @@ package com.pocketshell.next.settings
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,9 +30,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.next.release.ReleaseCheckResult
+import com.pocketshell.next.release.ReleaseInfo
+import com.pocketshell.next.release.UpdateCheckViewModel
+import com.pocketshell.next.release.launchUpdateUrl
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.NavigationChevron
@@ -56,6 +62,9 @@ const val SETTINGS_AGENT_SUBMIT_DELAY_VALUE_TAG: String = "settings-agent-submit
 const val SETTINGS_WORKSPACE_EMPTY_TAG: String = "settings-workspace-empty"
 const val SETTINGS_CRASH_REPORTS_TAG: String = "settings-crash-reports"
 const val SETTINGS_VERSION_TAG: String = "settings-version"
+const val SETTINGS_UPDATE_CHECK_TAG: String = "settings-update-check"
+const val SETTINGS_UPDATE_CHECK_LABEL_TAG: String = "settings-update-check-label"
+const val SETTINGS_UPDATE_CHECK_DETAIL_TAG: String = "settings-update-check-detail"
 
 fun backgroundGraceOptionTag(millis: Long): String = "settings-grace-$millis"
 
@@ -82,11 +91,15 @@ fun SettingsRoute(
     onOpenCrashReports: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
+    updateCheckViewModel: UpdateCheckViewModel? = null,
 ) {
     val settings by viewModel.state.collectAsState()
     val hosts by viewModel.hosts.collectAsState()
     val context = LocalContext.current
     val buildInfo = remember(context) { readBuildInfo(context) }
+    val checking by (updateCheckViewModel?.checking ?: rememberIdleFalse()).collectAsState()
+    val lastResult by (updateCheckViewModel?.lastResult ?: rememberIdleResult()).collectAsState()
+    val updateCheckState = settingsUpdateCheckState(checking, lastResult)
 
     SettingsScreen(
         settings = settings,
@@ -101,7 +114,38 @@ fun SettingsRoute(
         onOpenWorkspaceRoots = onOpenWorkspaceRoots,
         onOpenCrashReports = onOpenCrashReports,
         modifier = modifier,
+        updateCheckState = updateCheckState,
+        onCheckForUpdates = { updateCheckViewModel?.refreshNow() },
+        onDownloadUpdate = { info -> launchUpdateUrl(context, info.apkUrl) },
     )
+}
+
+@Composable
+private fun rememberIdleFalse(): kotlinx.coroutines.flow.StateFlow<Boolean> =
+    remember { kotlinx.coroutines.flow.MutableStateFlow(false) }
+
+@Composable
+private fun rememberIdleResult(): kotlinx.coroutines.flow.StateFlow<ReleaseCheckResult?> =
+    remember { kotlinx.coroutines.flow.MutableStateFlow(null) }
+
+internal fun settingsUpdateCheckState(
+    checking: Boolean,
+    lastResult: ReleaseCheckResult?,
+): SettingsUpdateCheckState = when {
+    checking -> SettingsUpdateCheckState.Checking
+    lastResult is ReleaseCheckResult.UpdateAvailable ->
+        SettingsUpdateCheckState.UpdateAvailable(lastResult.info)
+    lastResult is ReleaseCheckResult.UpToDate -> SettingsUpdateCheckState.UpToDate
+    lastResult is ReleaseCheckResult.Failed -> SettingsUpdateCheckState.Failed(lastResult.reason)
+    else -> SettingsUpdateCheckState.Idle
+}
+
+sealed interface SettingsUpdateCheckState {
+    data object Idle : SettingsUpdateCheckState
+    data object Checking : SettingsUpdateCheckState
+    data object UpToDate : SettingsUpdateCheckState
+    data class UpdateAvailable(val info: ReleaseInfo) : SettingsUpdateCheckState
+    data class Failed(val reason: String) : SettingsUpdateCheckState
 }
 
 /**
@@ -121,7 +165,8 @@ fun SettingsRoute(
  *  5. **Diagnostics** — the local crash-report browser (issue #2476). It sits
  *     next to About because both answer "what build am I on and what went
  *     wrong with it", which is the question a user has when reporting a bug.
- *  6. **About** — the installed build, as a footer.
+ *  6. **About** — the installed build, plus **Check for updates** (issue
+ *     #2531): Up to date / Available+date / Failed+Retry.
  *
  * Stateless: every value comes in, every change goes out. See [AppSettings] for
  * the table of ported-away fields, and [SettingsRepository] for which of the
@@ -141,6 +186,9 @@ fun SettingsScreen(
     onOpenWorkspaceRoots: (Long) -> Unit,
     onOpenCrashReports: () -> Unit,
     modifier: Modifier = Modifier,
+    updateCheckState: SettingsUpdateCheckState = SettingsUpdateCheckState.Idle,
+    onCheckForUpdates: () -> Unit = {},
+    onDownloadUpdate: (ReleaseInfo) -> Unit = {},
 ) {
     Column(
         modifier = modifier
@@ -292,7 +340,14 @@ fun SettingsScreen(
                 }
             }
 
-            item { AboutFooter(buildInfo) }
+            item {
+                AboutFooter(
+                    buildInfo = buildInfo,
+                    updateCheckState = updateCheckState,
+                    onCheckForUpdates = onCheckForUpdates,
+                    onDownloadUpdate = onDownloadUpdate,
+                )
+            }
         }
     }
 }
@@ -427,15 +482,17 @@ private fun RadioMark(selected: Boolean) {
 }
 
 /**
- * The installed build, at the bottom.
- *
- * A footer, not a section, and deliberately without the old client's
- * check-for-updates row: that row drove the self-distribution update notifier
- * the scope amendment cut, and it is the only part of About that needed the
- * network.
+ * The installed build, at the bottom, plus the Check for updates row
+ * (issue #2531). The row is the Settings-side of the same GitHub poll the
+ * host-list banner uses — tapping it bypasses the 6h throttle.
  */
 @Composable
-private fun AboutFooter(buildInfo: AppBuildInfo) {
+private fun AboutFooter(
+    buildInfo: AppBuildInfo,
+    updateCheckState: SettingsUpdateCheckState,
+    onCheckForUpdates: () -> Unit,
+    onDownloadUpdate: (ReleaseInfo) -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -454,6 +511,79 @@ private fun AboutFooter(buildInfo: AppBuildInfo) {
             style = PocketShellType.labelMono,
             modifier = Modifier.testTag(SETTINGS_VERSION_TAG),
         )
+        Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+        SettingsUpdateCheckRow(
+            state = updateCheckState,
+            onCheckForUpdates = onCheckForUpdates,
+            onDownloadUpdate = onDownloadUpdate,
+        )
+    }
+}
+
+@Composable
+private fun SettingsUpdateCheckRow(
+    state: SettingsUpdateCheckState,
+    onCheckForUpdates: () -> Unit,
+    onDownloadUpdate: (ReleaseInfo) -> Unit,
+) {
+    val (label, detail) = when (state) {
+        SettingsUpdateCheckState.Idle ->
+            "Check for updates" to "Ask GitHub for the latest APK."
+        SettingsUpdateCheckState.Checking ->
+            "Checking..." to "Contacting GitHub releases."
+        SettingsUpdateCheckState.UpToDate ->
+            "Up to date" to "This APK is the latest release."
+        is SettingsUpdateCheckState.UpdateAvailable -> {
+            val date = state.info.publishedDateLabel
+            val detail = if (date.isBlank()) {
+                "New APK available."
+            } else {
+                "Published $date"
+            }
+            "Download ${state.info.tagName}" to detail
+        }
+        is SettingsUpdateCheckState.Failed ->
+            "Retry update check" to "Couldn't check for updates: ${state.reason}"
+    }
+    val enabled = state != SettingsUpdateCheckState.Checking
+    val click = {
+        when (state) {
+            is SettingsUpdateCheckState.UpdateAvailable -> onDownloadUpdate(state.info)
+            SettingsUpdateCheckState.Checking -> Unit
+            else -> onCheckForUpdates()
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.md)
+            .then(
+                if (enabled) {
+                    Modifier.clickable(role = Role.Button, onClick = click)
+                } else {
+                    Modifier
+                },
+            )
+            .testTag(SETTINGS_UPDATE_CHECK_TAG)
+            .padding(vertical = PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            Text(
+                text = label,
+                color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(SETTINGS_UPDATE_CHECK_LABEL_TAG),
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = detail,
+                color = PocketShellColors.TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag(SETTINGS_UPDATE_CHECK_DETAIL_TAG),
+            )
+        }
     }
 }
 

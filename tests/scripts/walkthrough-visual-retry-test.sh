@@ -76,11 +76,23 @@ fi
 pass_case "instrumentation crash result marker was treated as retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
-printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.next\n' > "$classification_logcat"
+printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.app\n' > "$classification_logcat"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "app crash marker was treated as retryable"
 fi
 pass_case "app crash marker was treated as retryable"
+
+printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.app\n' > "$classification_logcat"
+if ! visual_audit_logcat_has_app_or_test_failure_markers "$classification_logcat"; then
+  fail "Process: com.pocketshell.app was not classified as an app crash marker"
+fi
+pass_case "Process: com.pocketshell.app is an app crash marker"
+
+printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.next\n' > "$classification_logcat"
+if visual_audit_logcat_has_app_or_test_failure_markers "$classification_logcat"; then
+  fail "Process: com.pocketshell.next was still classified as the shipping install id"
+fi
+pass_case "Process: com.pocketshell.next is not the shipping install id"
 
 printf 'INSTRUMENTATION_CODE: -1\nOK (1 test)\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 I adbd    : offline\n' > "$classification_logcat"
@@ -152,8 +164,8 @@ chmod +x "$fake_adb"
 RUN_DIR="$tmpdir/run"
 ADB="$fake_adb"
 DEVICE_OUTPUT_DIR="/sdcard/fake-output"
-TEST_PACKAGE="com.pocketshell.next.test"
-APP_PACKAGE="com.pocketshell.next"
+TEST_PACKAGE="com.pocketshell.app.test"
+APP_PACKAGE="com.pocketshell.app"
 INSTRUMENTATION_ATTEMPTS=2
 FAKE_ADB_STATE="$tmpdir/adb-state"
 export FAKE_ADB_STATE
@@ -175,5 +187,5 @@ pass_case "canonical instrumentation log did not contain final success"
 # Issue #2113: a harness that exits 0 having run nothing is the vacuous green
 # process.md catalogues. The count line is what makes the JVM assertion about
 # behaviour rather than about bash's exit status.
-(( CASES == 14 )) || fail "expected 14 cases to run, saw $CASES"
+(( CASES == 16 )) || fail "expected 16 cases to run, saw $CASES"
 printf 'PASS: walkthrough visual retry helper (%s cases)\n' "$CASES"

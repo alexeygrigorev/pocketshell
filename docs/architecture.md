@@ -61,13 +61,13 @@ See [testing.md](testing.md).
 ## App identity
 
 - Display name: PocketShell
-- `applicationId` / namespace: **`com.pocketshell.next`**
+- `applicationId`: **`com.pocketshell.app`** (same as v0.4.x — upgrades in place)
+- Kotlin `namespace`: `com.pocketshell.next`
 - minSdk 26, targetSdk 35, compileSdk 36
 
-`com.pocketshell.next` is the rewrite's side-by-side id, kept so the new client
-could be installed next to the old one. Renaming it back to
-`com.pocketshell.app` (with a Room data carry-over for the maintainer's
-existing install) is task X-3 and **has not happened yet**.
+Room opens `pocketshell.db` in that sandbox, so an upgrade from v0.4.47 keeps
+hosts and keys (`MIGRATION_19_20`). The Kotlin package name is not the
+install id.
 
 Two activities (`MainActivity`, `ShareActivity`) and two foreground services
 (`GraceService`, `ForwardService`). Everything else is Compose.
@@ -528,8 +528,8 @@ one-unfiltered-run rule and the whole suite is too expensive per PR.
 
 Stated plainly so nobody reads a plan as a description:
 
-- **X-3 is unfinished.** `applicationId` is still `com.pocketshell.next`; the
-  rename to `com.pocketshell.app` plus the Room data carry-over is pending.
+- **X-3 applicationId rename is done.** `applicationId` is `com.pocketshell.app`
+  (issue #2519). Room still uses `pocketshell.db` with `MIGRATION_19_20`.
 - **X-1, the lean-core release gate, has not been declared passed.** The target
   is a tagged minor release once the confirmed-core feature set holds up in daily
   use.

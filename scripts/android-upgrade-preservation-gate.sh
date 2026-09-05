@@ -35,22 +35,13 @@ pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 PYTHON3="${PYTHON3:-python3}"
-# Issue #2481: no default OLD_REF any more. The old default (`v0.3.2`) is a tag
-# on the pre-rewrite `app` module, whose applicationId is `com.pocketshell.app`
-# — a DIFFERENT package from app2's `com.pocketshell.next`, so `adb install -r`
-# over it is not an upgrade at all and this gate would assert nothing. There is
-# also no tagged app2 release to compare against yet. Supply an explicit
-# `OLD_REF` on `stable`'s lineage (a commit that already contains `app2/`), or
-# an `OLD_APK_PATH`, and the gate does its real job: prove a Room database
-# survives `adb install -r`.
-#
-# The pre-rewrite -> app2 case (`com.pocketshell.app` data opened by a renamed
-# app2) is rewrite task X-3's applicationId rename + data migration, not
-# something this gate can express while the two packages differ. See
-# docs/rewrite-implementation-plan.md (X-3) and issue #2471.
+# Issue #2519: app2's applicationId is `com.pocketshell.app`, same as v0.4.x,
+# so `adb install -r` of a new APK over an old one IS an upgrade and this
+# gate can prove Room data survives. Supply OLD_REF (a v0.4.x tag or any
+# commit that builds an APK with this package) or OLD_APK_PATH.
 OLD_REF="${OLD_REF:-}"
-PACKAGE_NAME="${PACKAGE_NAME:-com.pocketshell.next}"
-ACTIVITY_NAME="${ACTIVITY_NAME:-com.pocketshell.next/.MainActivity}"
+PACKAGE_NAME="${PACKAGE_NAME:-com.pocketshell.app}"
+ACTIVITY_NAME="${ACTIVITY_NAME:-com.pocketshell.app/com.pocketshell.next.MainActivity}"
 NEW_APK_PATH="${NEW_APK_PATH:-$ROOT_DIR/app2/build/outputs/apk/debug/app2-debug.apk}"
 OLD_APK_PATH="${OLD_APK_PATH:-}"
 BUILD_NEW_APK="${BUILD_NEW_APK:-1}"
@@ -116,7 +107,7 @@ if [[ -z "$OLD_APK_PATH" ]]; then
     exit 1
   fi
   if [[ -z "$OLD_REF" ]]; then
-    printf 'OLD_REF is required when OLD_APK_PATH is empty (issue #2481: there is no safe default — a pre-rewrite ref builds com.pocketshell.app, not app2'"'"'s com.pocketshell.next, so the install would not be an upgrade).\n' >&2
+    printf 'OLD_REF is required when OLD_APK_PATH is empty.\n' >&2
     exit 1
   fi
   old_worktree="$RUN_DIR/old-$OLD_REF"

@@ -48,6 +48,6 @@ include(":shared:ui-kit")
 // settle-pump, consumed via `testImplementation` only — never ships in the APK.
 include(":shared:test-support")
 
-// The rewrite's application module (task M-1), applicationId
-// `com.pocketshell.next` so it installs side by side with the old client.
+// The rewrite's application module (task M-1). applicationId is
+// `com.pocketshell.app` so a 0.5.0 install upgrades the existing client.
 include(":app2")

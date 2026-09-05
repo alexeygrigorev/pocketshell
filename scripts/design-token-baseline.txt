@@ -3,6 +3,5 @@
 # regenerate with: scripts/check-design-tokens.sh --update
 # lower numbers are better — re-baseline after migrating a screen.
 app2/src/main/java/com/pocketshell/next/composer/ComposerAttachmentTiles.kt 1
-app2/src/main/java/com/pocketshell/next/composer/ComposerBar.kt 2
 app2/src/main/java/com/pocketshell/next/crash/CrashReportsScreen.kt 2
 app2/src/main/java/com/pocketshell/next/files/MarkdownRenderer.kt 3

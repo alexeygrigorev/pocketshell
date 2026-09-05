@@ -305,7 +305,7 @@ private fun DraftField(value: TextFieldValue, onValueChange: (TextFieldValue) ->
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
-            textStyle = TextStyle(color = PocketShellColors.Text, fontSize = 15.sp),
+            textStyle = TextStyle(color = PocketShellColors.Text, fontSize = ComposerDraftFontSize),
             cursorBrush = SolidColor(PocketShellColors.Accent),
             modifier = Modifier
                 .fillMaxWidth()
@@ -313,7 +313,11 @@ private fun DraftField(value: TextFieldValue, onValueChange: (TextFieldValue) ->
                 .testTag(COMPOSER_DRAFT_TAG),
             decorationBox = { inner ->
                 if (value.text.isEmpty()) {
-                    Text(text = COMPOSER_PLACEHOLDER, color = PocketShellColors.TextMuted, fontSize = 15.sp)
+                    Text(
+                        text = COMPOSER_PLACEHOLDER,
+                        color = PocketShellColors.TextMuted,
+                        fontSize = ComposerDraftFontSize,
+                    )
                 }
                 inner()
             },
@@ -414,8 +418,8 @@ private fun ComposerEditingToolsGroup(
 ) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(22.dp))
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+            .clip(ComposerActionPillShape)
+            .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
             .padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -565,8 +569,11 @@ private fun MicTriggerButton(
     )
 }
 
+/** v0.4.47 tools-pill radius — between medium (14) and large (20) is too small; 22 matches the old chrome. */
 private val ComposerActionPillRadius = 22.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
+/** Draft sits between bodyMedium (14) and titleMedium (16); the old field used 15. */
+private val ComposerDraftFontSize = 15.sp
 private val ComposerIdlePillHeight = 44.dp
 private val ComposerRecordingPillHeight = 48.dp
 private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp

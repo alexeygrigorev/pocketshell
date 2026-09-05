@@ -650,6 +650,26 @@ class DesignRenders {
     }
 
     /**
+     * Issue #2534: usage panel default — compact strip only (plus last-sync /
+     * counts). The real screen is app-only; this mirrors the shared chrome so
+     * `scripts/render.sh usageScreenCollapsed` can snapshot the new default.
+     */
+    @Test
+    fun usageScreenCollapsed() = render("usage-screen-collapsed") {
+        UsageScreenCollapsedRender()
+    }
+
+    /**
+     * Issue #2534: the same strip with the existing Codex card expanded after
+     * that compact row is tapped. Compact Codex percent stays the most-constrained
+     * window (60% used).
+     */
+    @Test
+    fun usageScreenCodexExpanded() = render("usage-screen-codex-expanded") {
+        UsageScreenCodexExpandedRender()
+    }
+
+    /**
      * Issue #1531 (audit RC1): the docked composer launcher's unsent-queue badge.
      * The real `ComposerLauncherButton` is an app-module PRIVATE composable, so
      * this MIRRORS its geometry (the `>_` glyph box) with the shared ui-kit [Badge]

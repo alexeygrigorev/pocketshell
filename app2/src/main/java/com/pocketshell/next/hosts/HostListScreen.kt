@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
@@ -13,9 +15,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.next.release.UpdateCheckViewModel
+import com.pocketshell.next.release.launchUpdateUrl
+import com.pocketshell.next.release.updateAvailableBannerText
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
@@ -26,6 +35,8 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Stable test tags. The list container plus one tag per row, keyed by host id,
@@ -35,6 +46,12 @@ const val HOST_LIST_TAG: String = "host-list"
 const val HOST_LIST_ADD_TAG: String = "host-list-add"
 const val HOST_LIST_SCAN_TAG: String = "host-list-scan"
 const val HOST_LIST_SETTINGS_TAG: String = "host-list-settings"
+const val HOST_LIST_UPDATE_BANNER_TAG: String = "host-list-update-banner"
+const val HOST_LIST_UPDATE_DOWNLOAD_TAG: String = "host-list-update-download"
+const val HOST_LIST_UPDATE_NOTES_TAG: String = "host-list-update-notes"
+const val HOST_LIST_UPDATE_DISMISS_TAG: String = "host-list-update-dismiss"
+const val HOST_LIST_UPDATE_RETRY_TAG: String = "host-list-update-retry"
+const val HOST_LIST_UPDATE_FAILURE_TAG: String = "host-list-update-failure"
 
 fun hostRowTag(hostId: Long): String = "host-row-$hostId"
 
@@ -57,8 +74,26 @@ fun HostListRoute(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
+    updateCheckViewModel: UpdateCheckViewModel? = null,
 ) {
     val state by viewModel.state.collectAsState()
+    val available by collectOrNull(updateCheckViewModel?.available)
+    val failed by collectOrNull(updateCheckViewModel?.failed)
+    val context = LocalContext.current
+    val info = available
+    val failure = failed
+    val notice = when {
+        info != null -> HostListUpdateNotice.Available(
+            text = updateAvailableBannerText(
+                info,
+                updateCheckViewModel?.installedVersionLabel() ?: "",
+            ),
+            apkUrl = info.apkUrl,
+            htmlUrl = info.htmlUrl,
+        )
+        failure != null -> HostListUpdateNotice.Failed(failure)
+        else -> null
+    }
     HostListScreen(
         state = state,
         onOpenHost = onOpenHost,
@@ -68,7 +103,29 @@ fun HostListRoute(
         onOpenSettings = onOpenSettings,
         onDeleteHost = viewModel::delete,
         modifier = modifier,
+        updateNotice = notice,
+        onDownloadUpdate = { url -> launchUpdateUrl(context, url) },
+        onOpenReleaseNotes = { url -> launchUpdateUrl(context, url) },
+        onDismissUpdate = { updateCheckViewModel?.dismissUpdate() },
+        onRetryUpdateCheck = { updateCheckViewModel?.refreshNow() },
+        onDismissUpdateFailure = { updateCheckViewModel?.dismissFailure() },
     )
+}
+
+@Composable
+private fun <T> collectOrNull(flow: StateFlow<T?>?): androidx.compose.runtime.State<T?> {
+    val fallback = remember { MutableStateFlow(null as T?) }
+    return (flow ?: fallback).collectAsState()
+}
+
+/** In-app update surface on the host list (issue #2531). */
+sealed interface HostListUpdateNotice {
+    data class Available(
+        val text: String,
+        val apkUrl: String,
+        val htmlUrl: String,
+    ) : HostListUpdateNotice
+    data class Failed(val reason: String) : HostListUpdateNotice
 }
 
 /**
@@ -99,6 +156,12 @@ fun HostListScreen(
     onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    updateNotice: HostListUpdateNotice? = null,
+    onDownloadUpdate: (apkUrl: String) -> Unit = {},
+    onOpenReleaseNotes: (htmlUrl: String) -> Unit = {},
+    onDismissUpdate: () -> Unit = {},
+    onRetryUpdateCheck: () -> Unit = {},
+    onDismissUpdateFailure: () -> Unit = {},
 ) {
     var pendingDelete by remember { mutableStateOf<HostRow?>(null) }
 
@@ -137,6 +200,21 @@ fun HostListScreen(
                 }
             },
         )
+
+        when (val notice = updateNotice) {
+            is HostListUpdateNotice.Available -> UpdateAvailableBanner(
+                notice = notice,
+                onDownload = { onDownloadUpdate(notice.apkUrl) },
+                onNotes = { onOpenReleaseNotes(notice.htmlUrl) },
+                onDismiss = onDismissUpdate,
+            )
+            is HostListUpdateNotice.Failed -> UpdateCheckFailedBanner(
+                reason = notice.reason,
+                onRetry = onRetryUpdateCheck,
+                onDismiss = onDismissUpdateFailure,
+            )
+            null -> Unit
+        }
 
         when {
             // Nothing painted until Room's first emission: showing the empty
@@ -202,5 +280,93 @@ fun HostListScreen(
             },
             onDismiss = { pendingDelete = null },
         )
+    }
+}
+
+@Composable
+private fun UpdateAvailableBanner(
+    notice: HostListUpdateNotice.Available,
+    onDownload: () -> Unit,
+    onNotes: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm)
+            .testTag(HOST_LIST_UPDATE_BANNER_TAG),
+    ) {
+        Banner(
+            text = notice.text,
+            role = BannerRole.Info,
+            maxLines = 3,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PocketShellButton(
+                text = "Download",
+                onClick = onDownload,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_DOWNLOAD_TAG),
+            )
+            PocketShellButton(
+                text = "Notes",
+                onClick = onNotes,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_NOTES_TAG),
+            )
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_DISMISS_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun UpdateCheckFailedBanner(
+    reason: String,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm)
+            .testTag(HOST_LIST_UPDATE_FAILURE_TAG),
+    ) {
+        Banner(
+            text = "Couldn't check for updates ($reason)",
+            role = BannerRole.Error,
+            maxLines = 3,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PocketShellButton(
+                text = "Retry",
+                onClick = onRetry,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_RETRY_TAG),
+            )
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_DISMISS_TAG),
+            )
+        }
     }
 }

@@ -117,12 +117,15 @@ class J12UsagePanelJourney {
 
     /**
      * Opening a session shows a live glance pill, and tapping it opens a panel
-     * with one card per provider the fixture's canned response reported — each
-     * card at the severity its numbers actually imply (task P-5 accept: "J12
-     * green; glance pill renders in session screen").
+     * whose first paint is the compact strip only (issue #2534). Tapping a
+     * compact row mounts that provider's existing card — windows, reset credits,
+     * severity pill — and tapping again collapses it. Other providers stay
+     * collapsed unless tapped. Severity is still DERIVED from the fixture's
+     * numbers (task P-5 accept: "J12 green; glance pill renders in session
+     * screen").
      */
     @Test
-    fun theGlancePillOpensThePanelAndRendersOneCardPerProvider() {
+    fun theGlancePillOpensThePanelAndExpandsACardOnCompactRowTap() {
         awaitTag(hostRowTag(hostId))
         compose.onNodeWithTag(hostRowTag(hostId)).performClick()
         awaitTag(SESSION_TREE_TAG)
@@ -139,28 +142,42 @@ class J12UsagePanelJourney {
 
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel")
+        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
+        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
+        awaitTag(usageSummaryRowTag("Claude Code"), "the Claude compact row")
+        awaitTag(usageSummaryRowTag("GitHub Copilot"), "the Copilot compact row")
+        JourneyScreenshots.capture("02-panel-collapsed", JOURNEY)
 
-        awaitTag(usageProviderCardTag("codex"), "the codex provider card")
-        awaitTag(usageProviderCardTag("claude"), "the claude provider card")
-        awaitTag(usageProviderCardTag("copilot"), "the copilot provider card")
-        JourneyScreenshots.capture("02-panel", JOURNEY)
+        // First paint is the compact list. Full cards stay unmounted until the
+        // matching row is tapped — the screenshot that filed #2534.
+        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
 
-        // Scroll each card into view before asserting: the panel is a single
-        // scrollable column (summary strip + one card per provider), so a
-        // card further down the fixture's three is off-screen until scrolled
-        // — exactly like a real phone screen, not a tag-existence check.
+        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
+        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
         compose.onNodeWithTag(usageProviderCardTag("codex")).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag(usageProviderCardTag("claude")).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag(usageProviderCardTag("copilot")).performScrollTo().assertIsDisplayed()
-
-        // Each card's severity is DERIVED from the fixture's numbers, not just
-        // "a card exists": codex is healthy, claude is hard-blocked, copilot is
-        // approaching its limit — three different states from one fetch, which
-        // is what proves the real threshold ladder ran end to end rather than
-        // three copies of the same placeholder card. `Pill` renders its label
-        // uppercased, so the oracle text matches that.
+        compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).performScrollTo().assertIsDisplayed()
         assertCardHasDescendant(usageProviderCardTag("codex"), "OK")
+        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        JourneyScreenshots.capture("03-codex-expanded", JOURNEY)
+
+        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performScrollTo().performClick()
+        compose.awaitIdle("after collapsing Codex")
+        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).assertDoesNotExist()
+
+        // Expand the other two to keep the P-5 severity proof: claude is
+        // hard-blocked, copilot is approaching. Each tap is independent — Codex
+        // stays collapsed unless tapped again.
+        compose.onNodeWithTag(usageSummaryRowTag("Claude Code")).performScrollTo().performClick()
+        awaitTag(usageProviderCardTag("claude"), "the Claude provider card")
         assertCardHasDescendant(usageProviderCardTag("claude"), "EXCEEDED")
+        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+
+        compose.onNodeWithTag(usageSummaryRowTag("GitHub Copilot")).performScrollTo().performClick()
+        awaitTag(usageProviderCardTag("copilot"), "the Copilot provider card")
         assertCardHasDescendant(usageProviderCardTag("copilot"), "WARN")
     }
 

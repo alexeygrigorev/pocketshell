@@ -30,7 +30,6 @@ import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
 import com.pocketshell.next.hosts.HostListRoute
-
 import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
@@ -164,6 +163,7 @@ fun AppNavHost(
             onEditHost = actions.onEditHost,
             onScanQr = actions.onScanQr,
             onOpenSettings = actions.onOpenSettings,
+            updateCheckViewModel = hiltViewModel(),
         )
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
@@ -221,6 +221,7 @@ fun AppNavHost(
             onBack = onBack,
             onOpenWorkspaceRoots = onOpenWorkspaceRoots,
             onOpenCrashReports = onOpenCrashReports,
+            updateCheckViewModel = hiltViewModel(),
         )
     },
     workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =

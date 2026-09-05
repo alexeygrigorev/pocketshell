@@ -202,7 +202,7 @@ class SettingsNavigationTest {
                 navController = controller,
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
-                treeScreen = { hostId, _, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 settingsScreen = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
                     SettingsRoute(
                         onBack = onBack,

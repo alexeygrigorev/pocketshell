@@ -80,6 +80,7 @@ class SessionTreeRouteTest {
                 SessionTreeRoute(
                     onOpenSession = { opened += it },
                     onOpenFiles = {},
+                    onOpenPorts = {},
                     viewModel = viewModel,
                 )
             }

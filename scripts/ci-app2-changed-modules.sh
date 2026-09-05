@@ -4,10 +4,12 @@
 # Per-JOB path filtering for .github/workflows/app2.yml.
 #
 # GitHub's `on.<event>.paths:` filter is WORKFLOW-level: it decides whether the
-# whole run happens, not which jobs inside it do. app2.yml wants the finer
-# grain ("only the touched module's lane runs"), so this script computes one
-# boolean per new module from the push/PR diff and writes them to
-# $GITHUB_OUTPUT for the downstream jobs' `if:` guards.
+# whole run happens, not which jobs inside it do. app2.yml used to carry that
+# filter; issue #2509 removed it because it is the #2354 required-check footgun
+# and empirically suppressed the D37 `schedule:` cadence. Per-job selection
+# stays here: this script computes one boolean per new module from the push/PR
+# diff and writes them to $GITHUB_OUTPUT for the downstream jobs' `if:` guards.
+# A schedule/dispatch run passes an empty --base and fail-opens every lane.
 #
 # Deliberately a script, not an inline `run:` block or a third-party
 # paths-filter action:
@@ -67,10 +69,9 @@ declare -a SHARED_PREFIXES=(
   "scripts/ci-app2-changed-modules.sh"
   "scripts/check-app2-lane-execution.py"
   # Issue #2474: the app2-journey lane's runner. It is app2-only in effect, but
-  # listing it here rather than under the app2 module keeps this list identical
-  # to app2.yml's trigger-level `paths:` union — the two must not drift, or a
-  # change to the runner triggers the workflow while every lane inside it
-  # deselects itself.
+  # listing it here rather than under the app2 module means a runner change
+  # fail-opens every lane instead of starting a run whose every job deselects
+  # itself (the runner path is not under app2/).
   "scripts/ci-app2-journey-suite.sh"
 )
 
@@ -229,10 +230,9 @@ self_test() {
   commit_file ".github/workflows/app2.yml"
   check "the workflow itself (shared)" true true true true
 
-  # Issue #2474: the journey lane's runner. app2.yml's trigger-level `paths:`
-  # starts a run when it changes, so this list must select a lane for it — an
-  # entry present in one place and missing in the other yields a run whose every
-  # job deselects itself.
+  # Issue #2474: the journey lane's runner. A change to it always starts a run
+  # (no trigger-level `paths:` — issue #2509); this list must still select lanes
+  # so the run is not an empty skip-fest.
   git -C "$tmp" reset -q --hard "$base"
   commit_file "scripts/ci-app2-journey-suite.sh"
   check "the journey runner (shared)" true true true true

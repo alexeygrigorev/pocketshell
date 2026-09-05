@@ -96,19 +96,23 @@ class HostCliClient(
      * [engine] additionally asks the HOST to start that agent in the new
      * session (server-side `send-keys`), so the phone never types a launch
      * line; [profile] selects a named host profile for it (see
-     * [listProfiles]).
+     * [listProfiles]). [backend] is `tmux` or `aplexer` and becomes
+     * `--backend`; omitting it leaves the host's `[backends]` config in
+     * charge (explicit flag beats that config).
      */
     suspend fun createSession(
         name: String,
         cwd: String? = null,
         engine: String? = null,
         profile: String? = null,
+        backend: String? = null,
     ): Result<CreatedSession> {
         val command = buildString {
             append(binary).append(" sessions create --json")
             if (cwd != null) append(" --cwd ").append(shellSingleQuote(cwd))
             if (engine != null) append(" --engine ").append(shellSingleQuote(engine))
             if (profile != null) append(" --profile ").append(shellSingleQuote(profile))
+            if (backend != null) append(" --backend ").append(shellSingleQuote(backend))
             append(" -- ").append(shellSingleQuote(name))
         }
         val outcome = capture(command, CREATE_TIMEOUT_MS).getOrElse { return Result.failure(it) }

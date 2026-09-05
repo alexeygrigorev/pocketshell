@@ -154,7 +154,7 @@ fun SessionTreeScreen(
     onOpenPorts: () -> Unit = {},
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
-    onSubmitCreate: (name: String, cwd: String?) -> Unit = { _, _ -> },
+    onSubmitCreate: (CreateSessionRequest) -> Unit = {},
     onDismissCreate: () -> Unit = {},
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {

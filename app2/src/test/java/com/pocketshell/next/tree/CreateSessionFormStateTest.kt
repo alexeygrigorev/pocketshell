@@ -1,5 +1,7 @@
 package com.pocketshell.next.tree
 
+import com.pocketshell.core.hostapi.EngineInfo
+import com.pocketshell.core.hostapi.ProfileInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -91,4 +93,107 @@ class CreateSessionFormStateTest {
         form.onFolderChange("  /home/a/git/pocketshell ")
         assertEquals("/home/a/git/pocketshell", form.submittedCwd)
     }
+
+    /**
+     * Issue #2439 / #2522: the Agent chips are enabled+available only.
+     * A dropped-row regression (hiding a working engine) or a shown-row
+     * regression (offering a disabled/missing one) both redden here.
+     */
+    @Test
+    fun `disabled and unavailable engines are hidden, enabled plus available is shown`() {
+        val rows = availableEnginesForCreate(
+            listOf(
+                testEngine("claude", enabled = true, available = true),
+                testEngine("codex", enabled = true, available = true),
+                testEngine("opencode", enabled = true, available = false, availableForCreate = false),
+                testEngine("disabled", enabled = false, available = true, availableForCreate = false),
+                testEngine("not-createable", enabled = true, available = true, availableForCreate = false),
+                testEngine("shell", enabled = true, available = true),
+            ),
+        )
+
+        assertEquals(listOf("claude", "codex"), rows.map { it.id })
+        assertFalse(rows.any { it.id == "opencode" })
+        assertFalse(rows.any { it.id == "disabled" })
+        assertFalse(rows.any { it.id == "not-createable" })
+        assertFalse(rows.any { it.id == "shell" })
+    }
+
+    @Test
+    fun `a shell create with the host default backend omits engine profile and backend`() {
+        val form = CreateSessionFormState("/home/a/git/pocketshell")
+
+        assertEquals(
+            CreateSessionRequest(name = "pocketshell", cwd = "/home/a/git/pocketshell"),
+            form.toRequest(listOf(testEngine("claude")), emptyList()),
+        )
+    }
+
+    @Test
+    fun `an agent create forwards the selected engine and an explicit backend`() {
+        val form = CreateSessionFormState("/home/a/git/pocketshell")
+        form.onKindChange(CreateSessionKind.Agent)
+        form.onEngineChange("codex")
+        form.onBackendChange(CreateSessionBackend.Aplexer)
+
+        val request = form.toRequest(
+            engines = listOf(testEngine("claude"), testEngine("codex"), testEngine("opencode", available = false)),
+            profiles = emptyList(),
+        )
+
+        assertEquals("codex", request.engine)
+        assertNull(request.profile)
+        assertEquals("aplexer", request.backend)
+        assertEquals("pocketshell", request.name)
+    }
+
+    @Test
+    fun `an agent create forwards a profile only after the user picks one`() {
+        val form = CreateSessionFormState("/srv")
+        form.onKindChange(CreateSessionKind.Agent)
+        form.onEngineChange("claude")
+        form.onProfileChange("Claude (Z.AI)")
+
+        val request = form.toRequest(
+            engines = listOf(testEngine("claude")),
+            profiles = listOf(
+                ProfileInfo("Claude", "claude", null, isDefault = true),
+                ProfileInfo("Claude (Z.AI)", "claude", "/home/a/.zlaude", isDefault = false),
+            ),
+        )
+
+        assertEquals("claude", request.engine)
+        assertEquals("Claude (Z.AI)", request.profile)
+    }
+
+    @Test
+    fun `switching to shell drops a previously chosen engine from the request`() {
+        val form = CreateSessionFormState("/srv")
+        form.onKindChange(CreateSessionKind.Agent)
+        form.onEngineChange("claude")
+        form.onKindChange(CreateSessionKind.Shell)
+
+        val request = form.toRequest(listOf(testEngine("claude")), emptyList())
+        assertNull(request.engine)
+        assertNull(request.profile)
+    }
 }
+
+internal fun testEngine(
+    id: String,
+    label: String = id.replaceFirstChar { it.uppercase() },
+    enabled: Boolean = true,
+    available: Boolean = true,
+    availableForCreate: Boolean = enabled && available,
+): EngineInfo = EngineInfo(
+    id = id,
+    label = label,
+    family = id,
+    harness = id,
+    providerMark = "",
+    usageProvider = null,
+    enabled = enabled,
+    available = available,
+    availableForCreate = availableForCreate,
+    unavailableReason = if (availableForCreate) null else "unavailable",
+)

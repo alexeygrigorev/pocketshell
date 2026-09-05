@@ -88,7 +88,9 @@ class SessionTreeRouteTest {
         composeRule.waitForIdle()
         assertEquals("nothing opens before a create", emptyList<String>(), opened)
 
-        composeRule.runOnIdle { viewModel.createSession(name = "reviews", cwd = "/srv/reviews") }
+        composeRule.runOnIdle {
+            viewModel.createSession(CreateSessionRequest(name = "reviews", cwd = "/srv/reviews"))
+        }
         composeRule.waitUntil(timeoutMillis = 5_000) { opened.isNotEmpty() }
         composeRule.waitForIdle()
 

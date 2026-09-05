@@ -255,6 +255,159 @@ internal fun NewWindowTypePickerRender() {
     }
 }
 
+/**
+ * Issue #2522: 0.5.0 New session sheet, Shell state. The real
+ * `CreateSessionSheet` lives in `:app2`, which this ui-kit harness cannot
+ * import, so this fixture reconstructs it from the same primitives
+ * (`SheetHeader`, `SectionHeader`, cyan-fill `SegmentedToggle`, action row).
+ */
+@Composable
+internal fun CreateSessionSheetShellRender() {
+    CreateSessionSheetRender(
+        kindIndex = 0,
+        showAgent = false,
+    )
+}
+
+/**
+ * Issue #2522: the same sheet with Agent selected — host engines, a profile
+ * picker, and the tmux vs aplexer backend override.
+ */
+@Composable
+internal fun CreateSessionSheetAgentRender() {
+    CreateSessionSheetRender(
+        kindIndex = 1,
+        showAgent = true,
+    )
+}
+
+@Composable
+private fun CreateSessionSheetRender(
+    kindIndex: Int,
+    showAgent: Boolean,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "New session",
+            color = PocketShellColors.Text,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "The session starts detached in this folder. Leave the folder blank to use the host's default.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SectionHeader(label = "Folder")
+            CreateSessionFieldRender("/home/alexey/git/pocketshell")
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SectionHeader(label = "Session name")
+            CreateSessionFieldRender("pocketshell")
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SectionHeader(label = "Session type")
+            SegmentedToggle(
+                labels = listOf("Shell", "Agent"),
+                selectedIndex = kindIndex,
+                onSelected = {},
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                fillSegments = true,
+            )
+        }
+
+        if (showAgent) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Agent engine")
+                SegmentedToggle(
+                    labels = listOf("Claude", "Codex", "Grok"),
+                    selectedIndex = 0,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+                Text(
+                    text = "The engine will auto-start in the new pane.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionHeader(label = "Profile")
+                SegmentedToggle(
+                    labels = listOf("Claude", "Claude (Z.AI)"),
+                    selectedIndex = 0,
+                    onSelected = {},
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    fillSegments = true,
+                )
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SectionHeader(label = "Backend")
+            SegmentedToggle(
+                labels = listOf("Default", "tmux", "aplexer"),
+                selectedIndex = 0,
+                onSelected = {},
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                fillSegments = true,
+            )
+            Text(
+                text = "Default uses the host's [backends] config.",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, PocketShellColors.BorderSoft)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PocketShellButton(text = "Cancel", onClick = {}, variant = ButtonVariant.Text)
+            Spacer(modifier = Modifier.width(8.dp))
+            PocketShellButton(text = "Create", onClick = {}, variant = ButtonVariant.Primary)
+        }
+    }
+}
+
+@Composable
+private fun CreateSessionFieldRender(value: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = value,
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 internal fun HostDetailOverflowMenuRender() {
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {

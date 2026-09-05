@@ -371,7 +371,9 @@ class SessionTreeViewModelTest {
             viewModel.openCreateSheet()
             assertTrue(viewModel.state.value.create.visible)
 
-            viewModel.createSession(name = "demo", cwd = "/home/testuser/git/pocketshell")
+            viewModel.createSession(
+                CreateSessionRequest(name = "demo", cwd = "/home/testuser/git/pocketshell"),
+            )
             advanceUntilIdle()
 
             val create = viewModel.state.value.create
@@ -382,7 +384,8 @@ class SessionTreeViewModelTest {
             assertEquals("demo", create.openRequest)
 
             // The command is the host CLI's own, with --cwd quoted and the name
-            // after `--`, and engine/profile ABSENT (the picker is cut).
+            // after `--`. A Shell create with the host-default backend omits
+            // --engine / --profile / --backend.
             val createCommand = connection().executedCommands.single { "create" in it }
             assertEquals(
                 "pocketshell sessions create --json --cwd '/home/testuser/git/pocketshell' -- 'demo'",
@@ -410,7 +413,7 @@ class SessionTreeViewModelTest {
         val viewModel = viewModel(hostId)
 
         viewModel.openCreateSheet()
-        viewModel.createSession(name = "claude-main", cwd = null)
+        viewModel.createSession(CreateSessionRequest(name = "claude-main", cwd = null))
         advanceUntilIdle()
 
         val create = viewModel.state.value.create
@@ -449,7 +452,7 @@ class SessionTreeViewModelTest {
         viewModel.refresh()
         advanceUntilIdle()
         viewModel.openCreateSheet()
-        viewModel.createSession(name = "demo", cwd = "/nope")
+        viewModel.createSession(CreateSessionRequest(name = "demo", cwd = "/nope"))
         advanceUntilIdle()
 
         val create = viewModel.state.value.create
@@ -472,7 +475,7 @@ class SessionTreeViewModelTest {
         viewModel.refresh()
         advanceUntilIdle()
         viewModel.openCreateSheet()
-        viewModel.createSession(name = "   ", cwd = "/home/testuser")
+        viewModel.createSession(CreateSessionRequest(name = "   ", cwd = "/home/testuser"))
         advanceUntilIdle()
 
         assertEquals(BLANK_NAME_MESSAGE, viewModel.state.value.create.failure)
@@ -491,7 +494,7 @@ class SessionTreeViewModelTest {
         answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
         val viewModel = viewModel(hostId)
 
-        viewModel.createSession(name = "demo", cwd = "   ")
+        viewModel.createSession(CreateSessionRequest(name = "demo", cwd = "   "))
         advanceUntilIdle()
 
         assertEquals(
@@ -506,7 +509,7 @@ class SessionTreeViewModelTest {
         answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
         val viewModel = viewModel(hostId)
 
-        viewModel.createSession(name = "demo", cwd = null)
+        viewModel.createSession(CreateSessionRequest(name = "demo", cwd = null))
         advanceUntilIdle()
         assertEquals("demo", viewModel.state.value.create.openRequest)
 
@@ -525,11 +528,11 @@ class SessionTreeViewModelTest {
         val viewModel = viewModel(hostId)
 
         viewModel.openCreateSheet()
-        viewModel.createSession(name = "demo", cwd = null)
+        viewModel.createSession(CreateSessionRequest(name = "demo", cwd = null))
         // Not advanced: the create is queued but has not answered yet.
         assertTrue(viewModel.state.value.create.submitting)
 
-        viewModel.createSession(name = "demo-2", cwd = null)
+        viewModel.createSession(CreateSessionRequest(name = "demo-2", cwd = null))
         viewModel.dismissCreateSheet()
         assertTrue("a submitting sheet must stay on screen", viewModel.state.value.create.visible)
         advanceUntilIdle()
@@ -550,7 +553,7 @@ class SessionTreeViewModelTest {
             val viewModel = viewModel(hostId)
 
             viewModel.openCreateSheet()
-            viewModel.createSession(name = "", cwd = null)
+            viewModel.createSession(CreateSessionRequest(name = "", cwd = null))
             assertEquals(BLANK_NAME_MESSAGE, viewModel.state.value.create.failure)
 
             viewModel.dismissCreateSheet()
@@ -560,9 +563,70 @@ class SessionTreeViewModelTest {
             assertFalse(create.visible)
             assertNull(create.failure)
             assertNull(create.openRequest)
-            // Nothing was ever sent — a blank name is answered locally, so the
-            // host was not even dialled.
-            assertEquals(0, stack.factory.dialCount)
+            // A blank name is answered locally: `sessions create` is never sent.
+            assertTrue(
+                "a blank name must never reach sessions create",
+                stack.factory.connections.flatMap { it.executedCommands }
+                    .none { "create" in it },
+            )
+        }
+
+    @Test
+    fun `an agent create forwards engine profile and backend on the argv`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+        val viewModel = viewModel(hostId)
+
+        viewModel.createSession(
+            CreateSessionRequest(
+                name = "demo",
+                cwd = "/home/testuser/git/pocketshell",
+                engine = "claude",
+                profile = "Claude (Z.AI)",
+                backend = "aplexer",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "pocketshell sessions create --json " +
+                "--cwd '/home/testuser/git/pocketshell' " +
+                "--engine 'claude' " +
+                "--profile 'Claude (Z.AI)' " +
+                "--backend 'aplexer' " +
+                "-- 'demo'",
+            connection().executedCommands.single { "create" in it },
+        )
+        assertEquals("demo", viewModel.state.value.create.openRequest)
+    }
+
+    @Test
+    fun `opening the sheet loads engines including ones the picker will hide`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
+            val viewModel = viewModel(hostId)
+
+            viewModel.openCreateSheet()
+            advanceUntilIdle()
+
+            val create = viewModel.state.value.create
+            assertEquals(
+                listOf("claude", "codex", "opencode", "disabled"),
+                create.engines.map { it.id },
+            )
+            assertFalse(create.enginesLoading)
+            assertNull(create.enginesFailure)
+            assertEquals(
+                listOf("pocketshell engines list --json", "pocketshell profiles list --json"),
+                connection().executedCommands.filter { "engines" in it || "profiles" in it },
+            )
+            // The hide rule is the sheet's: the VM keeps the host's full list
+            // so a dropped-row regression is a picker bug, not a missing fetch.
+            assertEquals(
+                listOf("claude", "codex"),
+                availableEnginesForCreate(create.engines).map { it.id },
+            )
         }
 
     /**
@@ -653,6 +717,14 @@ class SessionTreeViewModelTest {
                 "pocketshell sessions create",
                 ExecResult(exitCode = 0, stdout = createJson, stderr = "", timedOut = false),
             )
+            connection.onExecPrefix(
+                "pocketshell engines list",
+                ExecResult(exitCode = 0, stdout = ENGINES_LISTING, stderr = "", timedOut = false),
+            )
+            connection.onExecPrefix(
+                "pocketshell profiles list",
+                ExecResult(exitCode = 0, stdout = PROFILES_LISTING, stderr = "", timedOut = false),
+            )
         }
     }
 
@@ -710,6 +782,29 @@ class SessionTreeViewModelTest {
               ],
               "errors": []
             }
+        """.trimIndent()
+
+        val ENGINES_LISTING = """
+            {"engines":[
+              {"id":"claude","label":"Claude","available_for_create":true,
+               "enabled":true,"available":true},
+              {"id":"codex","label":"Codex","available_for_create":true,
+               "enabled":true,"available":true},
+              {"id":"opencode","label":"OpenCode","available_for_create":false,
+               "enabled":true,"available":false,
+               "unavailable_reason":"`opencode` is not installed on this host (not on PATH)."},
+              {"id":"disabled","label":"Disabled","available_for_create":false,
+               "enabled":false,"available":true,
+               "unavailable_reason":"disabled in the host registry"}
+            ]}
+        """.trimIndent()
+
+        val PROFILES_LISTING = """
+            {"profiles":[
+              {"name":"Claude","engine":"claude","config_dir":null,"default":true},
+              {"name":"Claude (Z.AI)","engine":"claude","config_dir":"/home/a/.zlaude","default":false},
+              {"name":"Codex","engine":"codex","default":true}
+            ]}
         """.trimIndent()
 
         val PARTIAL_LISTING = """

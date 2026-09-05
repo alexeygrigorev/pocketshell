@@ -788,6 +788,25 @@ class DesignRenders {
     }
 
     /**
+     * Issue #2522: New session sheet in the Shell state (the J04 default).
+     * The real sheet lives in `:app2`; this fixture is the same ui-kit
+     * primitives it composes. See [CreateSessionSheetShellRender].
+     */
+    @Test
+    fun createSessionSheetShell() = render("create-session-sheet-shell") {
+        CreateSessionSheetShellRender()
+    }
+
+    /**
+     * Issue #2522: New session sheet in the Agent state — engines, profile,
+     * and tmux vs aplexer. See [CreateSessionSheetAgentRender].
+     */
+    @Test
+    fun createSessionSheetAgent() = render("create-session-sheet-agent") {
+        CreateSessionSheetAgentRender()
+    }
+
+    /**
      * Issue #678: the `+ window` shell-vs-agent picker. It reuses the exact
      * same [com.pocketshell.app.projects.SessionTypePickerSheet] as the new
      * SESSION flow — the only visible difference is the heading ("New window"

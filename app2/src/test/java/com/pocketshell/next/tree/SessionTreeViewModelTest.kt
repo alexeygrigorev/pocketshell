@@ -7,6 +7,7 @@ import com.pocketshell.core.hostapi.AgentStateSource
 import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.ExecOutcome
 import com.pocketshell.core.hostapi.HostCliClient
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.transport.ExecResult
 import com.pocketshell.core.transport.FakeHostConnection
 import com.pocketshell.next.connect.TestConnectStack
@@ -65,7 +66,7 @@ class SessionTreeViewModelTest {
     }
 
     @Test
-    fun `a healthy listing groups every session by workspace`() = runTest(dispatcher) {
+    fun `a healthy listing groups every session into root then folder`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         answerSessions(HEALTHY_LISTING)
         val viewModel = viewModel(hostId)
@@ -80,26 +81,23 @@ class SessionTreeViewModelTest {
         assertFalse(state.loading)
         assertFalse(state.refreshing)
 
-        // Two named workspaces plus the "other" bucket, most-recent first.
-        assertEquals(
-            listOf("/home/testuser/git/pocketshell", "/home/testuser/git/aplexer", OTHER_WORKSPACE_LABEL),
-            state.groups.map { it.label },
-        )
-        assertEquals(
-            listOf("claude-main", "codex"),
-            state.groups[0].rows.map { it.name },
-        )
-        assertEquals(listOf("aplexer-follow:yolo"), state.groups[1].rows.map { it.name })
-        assertEquals(listOf("opencode-lab"), state.groups[2].rows.map { it.name })
+        // One inferred `~/git` root (pocketshell + aplexer folders) plus `other`.
+        // Creation order: aplexer (1788350000) is older than pocketshell (1788370000).
+        assertEquals(listOf("~/git", OTHER_ROOT_LABEL), state.roots.map { it.headerLabel })
+        assertEquals(listOf("aplexer", "pocketshell"), state.roots[0].folders.map { it.label })
+        assertEquals(listOf("aplexer-follow:yolo"), state.roots[0].folders[0].rows.map { it.name })
+        assertEquals(listOf("codex", "claude-main"), state.roots[0].folders[1].rows.map { it.name })
+        assertEquals(listOf("opencode-lab"), state.roots[1].folders.single().rows.map { it.name })
+        assertTrue(state.roots[1].folders.single().untracked)
         assertEquals(4, state.sessionCount)
 
         // The parsed detail the screen renders actually survived the round trip.
-        val claude = state.groups[0].rows.first()
+        val claude = state.roots[0].folders[1].rows.single { it.name == "claude-main" }
         assertEquals(Backend.TMUX, claude.backend)
         assertEquals(AgentState.WORKING, claude.agentState)
         assertEquals(AgentStateSource.REPORTED, claude.agentStateSource)
         assertTrue(claude.attached)
-        val aplexer = state.groups[1].rows.single()
+        val aplexer = state.roots[0].folders[0].rows.single()
         assertEquals(Backend.APLEXER, aplexer.backend)
         assertEquals("codex", aplexer.engine)
         assertEquals("yolo", aplexer.tag)
@@ -110,6 +108,32 @@ class SessionTreeViewModelTest {
             connection().executedCommands,
         )
     }
+
+    @Test
+    fun `registered workspace roots become the root list and unmatched go to other`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.db.projectRootDao().insert(
+                ProjectRootEntity(hostId = hostId, label = "tmp", path = "~/tmp", createdAt = 1),
+            )
+            stack.db.projectRootDao().insert(
+                ProjectRootEntity(hostId = hostId, label = "git", path = "~/git", createdAt = 2),
+            )
+            answerSessions(HEALTHY_LISTING)
+            val viewModel = viewModel(hostId)
+
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            val state = viewModel.state.value
+            // Registration order (tmp then git), not recency, and the unmatched
+            // workspace-less session lands in `other`.
+            assertEquals(listOf("~/tmp", "~/git", OTHER_ROOT_LABEL), state.roots.map { it.headerLabel })
+            assertEquals(0, state.roots[0].sessionCount)
+            assertTrue(state.roots[0].configured)
+            assertEquals(listOf("aplexer", "pocketshell"), state.roots[1].folders.map { it.label })
+            assertEquals(listOf("opencode-lab"), state.roots[2].folders.single().rows.map { it.name })
+        }
 
     @Test
     fun `an UNKNOWN manager row is still rendered rather than dropped`() = runTest(dispatcher) {
@@ -125,7 +149,7 @@ class SessionTreeViewModelTest {
         assertEquals(2, state.sessionCount)
         assertTrue(
             "a manager this build does not know must survive as UNKNOWN",
-            state.groups.flatMap { it.rows }.any { it.backend == Backend.UNKNOWN },
+            state.roots.flatMap { it.folders }.flatMap { it.rows }.any { it.backend == Backend.UNKNOWN },
         )
     }
 
@@ -165,7 +189,7 @@ class SessionTreeViewModelTest {
         val state = viewModel.state.value
         assertTrue(state.isEmptyAndHealthy)
         assertNull(state.failure)
-        assertEquals(emptyList<WorkspaceGroup>(), state.groups)
+        assertEquals(emptyList<SessionRoot>(), state.roots)
     }
 
     @Test
@@ -695,6 +719,7 @@ class SessionTreeViewModelTest {
         registry = stack.registry,
         // The production binding, verbatim (see AppModule.provideHostCliClientFactory).
         clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
+        projectRootDao = stack.db.projectRootDao(),
     )
 
     private fun answerSessions(json: String) {

@@ -1,5 +1,6 @@
 package com.pocketshell.next.tree
 
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -38,47 +39,66 @@ class SessionTreeScreenTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `sections render in group order with their sessions underneath`() {
+    fun `sections render as root then folder then session`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(
-                    row("claude-main", "/home/a/git/pocketshell", activity = NOW - 120),
-                    row("codex", "/home/a/git/pocketshell", activity = NOW - 4_000),
-                    row("aplexer-follow:yolo", "/home/a/git/aplexer", activity = NOW - 30),
+                    row("claude-main", "/home/a/git/pocketshell", activity = NOW - 120, created = 2),
+                    row("codex", "/home/a/git/pocketshell", activity = NOW - 4_000, created = 1),
+                    row("aplexer-follow:yolo", "/home/a/git/aplexer", activity = NOW - 30, created = 3),
                 ),
             ),
         )
 
-        composeRule.onNodeWithTag(workspaceHeaderTag("/home/a/git/aplexer")).assertIsDisplayed()
-        composeRule.onNodeWithTag(workspaceHeaderTag("/home/a/git/pocketshell")).assertIsDisplayed()
+        composeRule.onNodeWithTag(rootHeaderTag("~/git")).assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/pocketshell")).assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("codex")).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("aplexer-follow:yolo")).assertIsDisplayed()
+        composeRule.onNodeWithText("pocketshell").assertIsDisplayed()
+        composeRule.onNodeWithText("aplexer").assertIsDisplayed()
 
-        // Header counts the whole listing.
-        composeRule.onNodeWithText("3 sessions · 2 workspaces").assertIsDisplayed()
+        // Header counts the whole listing. Both folders sit under one root.
+        composeRule.onNodeWithText("3 sessions · 1 root").assertIsDisplayed()
     }
 
     @Test
-    fun `a workspace-less session renders under the other heading`() {
+    fun `a 1-to-1 folder still draws the folder row above the session`() {
+        setContent(
+            state(
+                loaded = true,
+                sessions = listOf(row("git-aplexer", "/home/a/git/aplexer", activity = NOW, created = 1)),
+            ),
+        )
+
+        composeRule.onNodeWithTag(rootHeaderTag("~/git")).assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
+        composeRule.onNodeWithTag(sessionRowTag("git-aplexer")).assertIsDisplayed()
+        composeRule.onNodeWithText("aplexer").assertIsDisplayed()
+    }
+
+    @Test
+    fun `a workspace-less session renders under the other heading with no folder`() {
         setContent(
             state(loaded = true, sessions = listOf(row("homeless", workspace = null, activity = NOW))),
         )
 
-        composeRule.onNodeWithTag(workspaceHeaderTag(OTHER_WORKSPACE_LABEL)).assertIsDisplayed()
+        composeRule.onNodeWithTag(rootHeaderTag(OTHER_ROOT_KEY)).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("homeless")).assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag(UNTRACKED_PATH)).assertDoesNotExist()
     }
 
     @Test
-    fun `a row shows its manager, tag and relative activity`() {
+    fun `a row shows relative activity and never engine, tag or manager text`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(
                     row(
                         "aplexer-follow:yolo",
-                        "/w",
+                        "/home/a/git/aplexer",
                         activity = NOW - 7_200,
                         backend = Backend.APLEXER,
                         tag = "yolo",
@@ -88,49 +108,64 @@ class SessionTreeScreenTest {
             ),
         )
 
-        composeRule.onNodeWithText("aplexer · yolo · 2h ago").assertIsDisplayed()
-        // The engine, not the manager, owns the badge when the host named one.
-        composeRule.onNodeWithContentDescription("codex").assertIsDisplayed()
+        composeRule.onNodeWithText("2h ago").assertIsDisplayed()
+        composeRule.onNodeWithText("aplexer · yolo · 2h ago").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("codex").assertDoesNotExist()
     }
 
     @Test
-    fun `an unknown manager row is rendered and labelled, never hidden`() {
+    fun `an unknown manager row is rendered, never hidden, and carries no manager badge`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(
-                    row("from-the-future", "/w", activity = NOW, backend = Backend.UNKNOWN),
+                    row("from-the-future", "/home/a/git/w", activity = NOW, backend = Backend.UNKNOWN),
                 ),
             ),
         )
 
         composeRule.onNodeWithTag(sessionRowTag("from-the-future")).assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("unknown manager").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("unknown manager").assertDoesNotExist()
     }
 
+    /**
+     * Issue #2530: the tree must not show which engine/agent is running.
+     * Attached is the green dot only.
+     */
     @Test
-    fun `an agent state renders a chip and no state renders nothing`() {
+    fun `the tree has no agent badge or chip and an attached row keeps its green dot`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(
                     row(
                         "waiting-agent",
-                        "/w",
+                        "/home/a/git/w",
                         activity = NOW,
+                        engine = "claude",
+                        attached = true,
                         agentState = AgentState.WAITING,
                         agentStateSource = AgentStateSource.REPORTED,
                     ),
-                    row("plain-shell", "/w", activity = NOW - 1),
+                    row(
+                        "working-codex",
+                        "/home/a/git/w",
+                        activity = NOW - 1,
+                        engine = "codex",
+                        agentState = AgentState.WORKING,
+                        agentStateSource = AgentStateSource.REPORTED,
+                    ),
                 ),
             ),
         )
 
-        // The chip is an icon with an explicit state description; the shell row
-        // must contribute no second one.
-        composeRule.onNodeWithContentDescription("Waiting for input").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Waiting for input").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Idle (finished)").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Working").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("claude").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("codex").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription(ATTACHED_DESCRIPTION).assertIsDisplayed()
+        composeRule.onNodeWithTag(sessionRowTag("waiting-agent")).assertIsDisplayed()
     }
 
     @Test
@@ -228,6 +263,24 @@ class SessionTreeScreenTest {
         assertEquals(listOf("my project:review"), opened)
     }
 
+    @Test
+    fun `root and folder headers are not attach targets`() {
+        val opened = mutableListOf<String>()
+        setContent(
+            state(
+                loaded = true,
+                sessions = listOf(
+                    row("git-aplexer", "/home/a/git/aplexer", activity = NOW, created = 1),
+                ),
+            ),
+            onOpenSession = { opened += it },
+        )
+
+        composeRule.onNodeWithTag(rootHeaderTag("~/git")).assertHasNoClickAction()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertHasNoClickAction()
+        assertEquals(emptyList<String>(), opened)
+    }
+
     // --- create affordance (task U-6) --------------------------------------
 
     @Test
@@ -321,7 +374,7 @@ class SessionTreeScreenTest {
     ) = SessionTreeUiState(
         hostId = 7,
         loaded = loaded,
-        groups = groupSessionsByWorkspace(sessions),
+        roots = groupSessionsIntoRoots(sessions),
         errors = errors,
         failure = failure,
     )
@@ -336,6 +389,7 @@ class SessionTreeScreenTest {
         attached: Boolean = false,
         agentState: AgentState? = null,
         agentStateSource: AgentStateSource? = null,
+        created: Long? = null,
     ) = SessionRow(
         name = name,
         backend = backend,
@@ -347,7 +401,7 @@ class SessionTreeScreenTest {
         agentState = agentState,
         agentStateSource = agentStateSource,
         attached = attached,
-        createdEpoch = null,
+        createdEpoch = created,
         activityEpoch = activity,
     )
 

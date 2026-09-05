@@ -185,7 +185,8 @@ class J12UsagePanelJourney {
     /**
      * Issue #2532: Usage is a host-scoped action on the session tree, not only
      * a glance pill inside a session. Tapping Usage on the tree must open the
-     * same panel.
+     * same panel. First paint is the compact strip (#2534) — the expanded
+     * provider card is unmounted until the matching row is tapped.
      */
     @Test
     fun tappingUsageOnTheTreeOpensThePanel() {
@@ -197,7 +198,11 @@ class J12UsagePanelJourney {
 
         compose.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel from the tree")
-        awaitTag(usageProviderCardTag("codex"), "the codex provider card")
+        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
+        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
+        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
+        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
         JourneyScreenshots.capture("04-panel-from-tree", JOURNEY)
     }
 

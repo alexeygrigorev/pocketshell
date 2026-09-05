@@ -25,9 +25,59 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+
+/**
+ * Issue #2521: Prompt Composer as a floating sheet — title, close, draft,
+ * Insert, Send, mic. The real `PromptComposerSheet` lives in app2; this is
+ * the ui-kit visual mirror `scripts/render.sh` can actually run.
+ */
+@Composable
+internal fun PromptComposerSheetRender() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        SheetHeader(title = "Prompt Composer", onClose = {})
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(96.dp)
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+        ) {
+            Text(
+                text = "check the deploy log and tell me what failed",
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+        ) {
+            PocketShellButton(text = "Recent", onClick = {}, variant = ButtonVariant.Text, compact = true)
+            PocketShellButton(text = "Preview", onClick = {}, variant = ButtonVariant.Text, compact = true)
+            Spacer(Modifier.weight(1f))
+            PocketShellButton(text = "Insert", onClick = {}, variant = ButtonVariant.Secondary, compact = true)
+            PocketShellButton(text = "Send", onClick = {}, compact = true)
+            MicButton(state = MicButtonState.Idle, onClick = {})
+        }
+    }
+}
 
 @Composable
 internal fun ComposerControlsRowRender() {

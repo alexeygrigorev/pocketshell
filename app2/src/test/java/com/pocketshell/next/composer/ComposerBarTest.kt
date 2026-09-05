@@ -37,6 +37,7 @@ class ComposerBarTest {
 
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
     }
 
     /**
@@ -62,6 +63,24 @@ class ComposerBarTest {
         setContent(ComposerUiState(draft = "something"))
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsEnabled()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsEnabled()
+    }
+
+    @Test
+    fun `insert and send are separate taps`() {
+        var inserts = 0
+        var sends = 0
+        setContent(
+            ComposerUiState(draft = "something"),
+            onInsert = { inserts += 1 },
+            onSend = { sends += 1 },
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
+
+        assertEquals(1, inserts)
+        assertEquals(1, sends)
     }
 
     /** An attachment on its own is a complete message. */
@@ -137,6 +156,7 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -195,6 +215,7 @@ class ComposerBarTest {
         state: ComposerUiState,
         onDraftChange: (String) -> Unit = {},
         onSend: () -> Unit = {},
+        onInsert: () -> Unit = {},
         onRemoveAttachment: (String) -> Unit = {},
         onToggleHistory: () -> Unit = {},
     ) {
@@ -204,6 +225,7 @@ class ComposerBarTest {
                     state = state,
                     onDraftChange = onDraftChange,
                     onSend = onSend,
+                    onInsert = onInsert,
                     onAttach = {},
                     onMicTap = {},
                     onCancelRecording = {},

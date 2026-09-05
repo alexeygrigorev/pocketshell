@@ -41,7 +41,7 @@ import org.robolectric.annotation.GraphicsMode
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class SessionScreenRenders {
 
-    /** Attaching, with the key bar and composer already docked so the layout cannot jump. */
+    /** Attaching, with the compact launcher already docked so the layout cannot jump. */
     @Test
     fun sessionAttaching() = render("u5-session-attaching") {
         SessionScreen(
@@ -51,9 +51,10 @@ class SessionScreenRenders {
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
-            onKeyBarSend = {},
+            onHotkeySend = {},
             onDraftChange = {},
             onSend = {},
+            onInsert = {},
             onAttach = {},
             onMicTap = {},
             onCancelRecording = {},
@@ -66,7 +67,7 @@ class SessionScreenRenders {
         )
     }
 
-    /** Attached: the four-slot bar and the composer under a full-bleed terminal. */
+    /** Attached: compact Prompt Composer + ⌨ launcher under a full-bleed terminal. */
     @Test
     fun sessionLiveWithKeyBar() = render("u5-session-key-bar") {
         SessionScreen(
@@ -76,9 +77,10 @@ class SessionScreenRenders {
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
-            onKeyBarSend = {},
+            onHotkeySend = {},
             onDraftChange = {},
             onSend = {},
+            onInsert = {},
             onAttach = {},
             onMicTap = {},
             onCancelRecording = {},
@@ -103,9 +105,10 @@ class SessionScreenRenders {
             onBack = {},
             onResized = { _, _ -> },
             onRetry = {},
-            onKeyBarSend = {},
+            onHotkeySend = {},
             onDraftChange = {},
             onSend = {},
+            onInsert = {},
             onAttach = {},
             onMicTap = {},
             onCancelRecording = {},

@@ -27,6 +27,7 @@ import com.pocketshell.uikit.components.HotkeyLongPressAction
 import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SessionLauncherBar
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.components.TerminalHotkeysPage
@@ -35,6 +36,28 @@ import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
+
+@Composable
+internal fun SessionCompactLauncherBarRender() {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(560.dp)
+                .background(PocketShellColors.Background),
+        ) {
+            Text(
+                text = "terminal stays full-size underneath",
+                color = PocketShellColors.TextMuted,
+                modifier = Modifier.padding(16.dp),
+            )
+        }
+        SessionLauncherBar(
+            onOpenComposer = {},
+            onOpenHotkeys = {},
+        )
+    }
+}
 
 @Composable
 internal fun TerminalHotkeysPanelRender() {

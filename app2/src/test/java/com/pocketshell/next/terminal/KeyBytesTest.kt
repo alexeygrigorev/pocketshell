@@ -184,4 +184,45 @@ class KeyBytesTest {
             assertEquals(1, controlBytes(codePoint)?.size)
         }
     }
+
+    // --- #1662 hotkeys-panel catalog ---------------------------------------
+
+    @Test
+    fun `arrows send CSI cursor sequences`() {
+        assertArrayEquals(byteArrayOf(0x1B, '['.code.toByte(), 'D'.code.toByte()), keyBarBytes("←"))
+        assertArrayEquals(byteArrayOf(0x1B, '['.code.toByte(), 'A'.code.toByte()), keyBarBytes("↑"))
+        assertArrayEquals(byteArrayOf(0x1B, '['.code.toByte(), 'B'.code.toByte()), keyBarBytes("↓"))
+        assertArrayEquals(byteArrayOf(0x1B, '['.code.toByte(), 'C'.code.toByte()), keyBarBytes("→"))
+    }
+
+    @Test
+    fun `shift-tab sends CSI Z`() {
+        assertArrayEquals(
+            byteArrayOf(0x1B, '['.code.toByte(), 'Z'.code.toByte()),
+            keyBarBytes(KEY_LABEL_SHIFT_TAB),
+        )
+    }
+
+    @Test
+    fun `caret-X is the cancel byte`() {
+        assertArrayEquals(byteArrayOf(0x18), keyBarBytes("^X"))
+    }
+
+    @Test
+    fun `long-press interrupt and eof send two bytes`() {
+        assertArrayEquals(byteArrayOf(0x03, 0x03), keyBarBytes(KEY_LABEL_INTERRUPT_X2))
+        assertArrayEquals(byteArrayOf(0x04, 0x04), keyBarBytes(KEY_LABEL_EOF_X2))
+    }
+
+    @Test
+    fun `caret labels on the ctrl page map the whole alphabet`() {
+        ('A'..'Z').forEachIndexed { index, letter ->
+            assertArrayEquals(
+                "Ctrl+$letter",
+                byteArrayOf((index + 1).toByte()),
+                keyBarBytes("^$letter"),
+            )
+        }
+        assertArrayEquals(byteArrayOf(0x1C), keyBarBytes("^\\"))
+    }
 }

@@ -191,6 +191,36 @@ class ComposerViewModelTest {
         }
 
     @Test
+    fun `insert on a live session puts the text on the wire without a carriage return`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("run the tests")
+            advanceUntilIdle()
+
+            viewModel.insert()
+            advanceUntilIdle()
+
+            assertEquals(listOf("run the tests"), sink.sentText())
+            assertEquals("", viewModel.state.value.draft)
+        }
+
+    @Test
+    fun `insert with the session offline keeps the draft and shows the chip`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("this should survive")
+            advanceUntilIdle()
+            sink.isLive = false
+
+            viewModel.insert()
+            advanceUntilIdle()
+
+            assertTrue("nothing may reach a dead session", sink.sent.isEmpty())
+            assertEquals("this should survive", viewModel.state.value.draft)
+            assertEquals(ComposerNotice.Undelivered, viewModel.state.value.notice)
+        }
+
+    @Test
     fun `a delivered send clears the draft and the persisted copy`() = runTest(dispatcher) {
         val viewModel = bound()
         viewModel.onDraftChange("ship it")
@@ -818,6 +848,21 @@ class ComposerViewModelTest {
         assertEquals(RecordingState.Idle, viewModel.state.value.recording)
         assertTrue(viewModel.state.value.notice is ComposerNotice.Problem)
     }
+
+    @Test
+    fun `a denied record-audio permission surfaces a notice and does not start dictation`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+
+            viewModel.surfacePermissionDenied()
+            advanceUntilIdle()
+
+            assertEquals(RecordingState.Idle, viewModel.state.value.recording)
+            assertEquals(
+                ComposerNotice.Problem(COMPOSER_RECORD_AUDIO_DENIED_TEXT),
+                viewModel.state.value.notice,
+            )
+        }
 
     // ------------------------------------------------ offline-queued dictation
 

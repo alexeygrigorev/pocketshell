@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive launcher icon (API 26+). PocketShell's minSdk is 26
+    (see app2/build.gradle.kts), so this single adaptive entry covers
+    every supported device — no pre-26 PNG fallbacks shipped.
+    See app2 launcher assets for the rationale.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <!-- Android 13+ themed-icon silhouette (issue #612). -->
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

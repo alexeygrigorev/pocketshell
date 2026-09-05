@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    PocketShell monochrome launcher layer for issue #612.
+
+    Android 13+ "Themed icons" (Material You) tint a single-color
+    <monochrome> silhouette with the user's wallpaper-derived palette. We
+    supply the brand `>_` shell-prompt mark (the same chevron + cursor as the
+    "C1" foreground in ic_launcher_foreground.xml) as a flat single-color
+    silhouette so the themed icon stays on-brand instead of falling back to a
+    generic system default.
+
+    The plate from the full-color foreground is intentionally DROPPED — a
+    monochrome layer is a single-color silhouette of the mark, and the system
+    draws its own circular/themed backdrop. Keeping only the `>_` glyph gives a
+    clean, recognizable silhouette under the system tint.
+
+    Color: the fill is white (#FFFFFF). The platform replaces it with the
+    themed monochrome tint at draw time, so the literal color only matters for
+    opacity (solid = fully painted silhouette).
+
+    Like the foreground, every painted element is kept inside the conservative
+    inner safe box (viewport coords 32..76 on X, 30..80 on Y) that
+    LauncherIconVectorTest enforces, so the silhouette never clips under OEM
+    masks. The chevron + cursor are bold filled polygons (no thin strokes) so
+    they stay crisp after the mask scales the artwork down.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Bold prompt chevron `>`. Same geometry as the C1 foreground mark. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M43,43 L50,43 L63,57 L50,71 L43,71 L56,57 Z" />
+
+    <!-- Cursor block `_` at the bottom-right, echoing the C1 cursor. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M58,65 L66,65 Q68,65 68,67 L68,69 Q68,71 66,71 L58,71 Q56,71 56,69 L56,67 Q56,65 58,65 Z" />
+</vector>

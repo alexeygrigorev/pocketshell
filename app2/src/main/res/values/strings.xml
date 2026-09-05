@@ -1,5 +1,5 @@
 <resources>
-    <!-- Distinct from the old client's label so both installs are tellable
-         apart on one device during the rewrite. Renamed at cutover (X-4). -->
-    <string name="app_name">PocketShell Next</string>
+    <!-- User-visible launcher name. This is PocketShell, not a rebrand.
+         applicationId stays com.pocketshell.next until X-3. -->
+    <string name="app_name">PocketShell</string>
 </resources>

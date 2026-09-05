@@ -29,6 +29,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
 import com.pocketshell.core.usage.UsageProviderRecord
@@ -84,15 +87,17 @@ fun UsageRoute(
 }
 
 /**
- * The provider quota panel: one card per provider per connected host.
+ * The provider quota panel: compact strip first, full card on tap.
  *
- * Ported from the pre-rewrite `usage/UsageScreen.kt`, minus everything that
- * described the deleted server-side capture cache (the per-card
- * "showing cached from HH:mm" provenance line and the screen-level
- * stale/refreshing ladder) and minus the surfaces that belonged to screens app2
- * does not have yet (the host-list dashboard strip, the Settings → Usage
- * provider list, the dismissible per-provider warning banner). Those come back
- * with the screens that host them, not here.
+ * Default paint is the cross-host summary (one line per provider) plus last-sync,
+ * counts, and the reset banner. Tapping a compact row mounts that provider's
+ * existing [UsageProviderCard]; tapping again collapses it. Other providers stay
+ * collapsed unless tapped. [initiallyExpandedProviders] is the render/test seam
+ * for a first-paint expanded card; production always starts collapsed.
+ *
+ * Ported from the pre-rewrite `usage/UsageScreen.kt`, minus the deleted
+ * server-side capture cache and the surfaces that belonged to screens app2
+ * does not have yet.
  */
 @Composable
 fun UsageScreen(
@@ -101,7 +106,9 @@ fun UsageScreen(
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
     now: Instant = Instant.now(),
+    initiallyExpandedProviders: Set<String> = emptySet(),
 ) {
+    var expandedProviders by remember { mutableStateOf(initiallyExpandedProviders) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -115,15 +122,26 @@ fun UsageScreen(
 
             state.resetBanner?.let { banner -> UsageResetBanner(state = banner) }
 
-            // The cross-host summary first: one line per provider, worst window,
-            // soonest reset. It answers "am I close to anything?" without
-            // scrolling the cards, which is the whole reason the maintainer
-            // opens this screen.
-            UsageDashboardStrip(rows = state.dashboardRows(), now = now)
+            // The cross-host summary is the primary list: one line per provider,
+            // worst window, soonest reset. Full cards stay unmounted until the
+            // matching compact row is tapped (#2534).
+            UsageDashboardStrip(
+                rows = state.dashboardRows(),
+                now = now,
+                onRowClick = { provider ->
+                    expandedProviders = if (provider in expandedProviders) {
+                        expandedProviders - provider
+                    } else {
+                        expandedProviders + provider
+                    }
+                },
+            )
 
             state.hosts.forEach { host ->
                 host.records.forEach { record ->
-                    UsageProviderCard(record = record, now = now)
+                    if (record.displayName in expandedProviders) {
+                        UsageProviderCard(record = record, now = now)
+                    }
                 }
             }
 
@@ -216,7 +234,8 @@ private fun UsageMeta(state: UsageScreenState) {
 
 /**
  * The cross-host summary strip: one row per provider, tinted by its threshold
- * state, with the soonest reset on the right.
+ * state, with the soonest reset on the right. Each row is tappable and toggles
+ * that provider's full card below the strip.
  *
  * Ported from the pre-rewrite host-list strip. It lives INSIDE the panel here
  * rather than on the host list, because app2's host list is a pre-connection
@@ -225,6 +244,7 @@ private fun UsageMeta(state: UsageScreenState) {
 @Composable
 internal fun UsageDashboardStrip(
     rows: List<UsageDashboardRow>,
+    onRowClick: (String) -> Unit,
     modifier: Modifier = Modifier,
     now: Instant = Instant.now(),
 ) {
@@ -259,6 +279,7 @@ internal fun UsageDashboardStrip(
                         style = PocketShellType.labelMono,
                     )
                 },
+                onClick = { onRowClick(row.provider) },
             )
         }
     }

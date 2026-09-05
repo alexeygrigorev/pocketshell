@@ -14,7 +14,12 @@
 # multi-worker) and must not silently pick up the release-gate
 # --no-daemon/--no-build-cache/--max-workers=1 flags. Cheap, no Gradle.
 #
-# These two guards live in one script (rather than inline `run:` blocks) because
+# Issue #2515: the tag-triggered Build workflow must rename/upload/release the
+# app2 APK (`app2/build/outputs/apk/debug/app2-debug.apk`), not the deleted
+# `app` module output. v0.5.0's Build died on `mv app-debug.apk`. Cheap grep
+# of .github/workflows/build.yml, no Gradle.
+#
+# These guards live in one script (rather than inline `run:` blocks) because
 # tests.yml is held under the 128 KiB file-size hygiene threshold with 1 KiB of
 # required headroom; see scripts/check-file-size-hygiene.sh.
 set -euo pipefail
@@ -22,7 +27,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh \
-  scripts/assemble-debug.sh scripts/test-assemble-debug.sh
+  scripts/assemble-debug.sh scripts/test-assemble-debug.sh \
+  scripts/test-build-workflow-apk-path.sh
 
 scripts/test-ci-ndk-retry.sh
 scripts/test-assemble-debug.sh
+scripts/test-build-workflow-apk-path.sh --self-test
+scripts/test-build-workflow-apk-path.sh

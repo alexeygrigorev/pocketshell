@@ -79,13 +79,13 @@ jobs:
       - name: Rename APK
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          mv app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/pocketshell-${VERSION}-debug.apk"
+          mv app2/build/outputs/apk/debug/app2-debug.apk "app2/build/outputs/apk/debug/pocketshell-${VERSION}-debug.apk"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
           name: pocketshell-${{ steps.version.outputs.version }}-debug.apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app2/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
       - name: Create Release
@@ -93,7 +93,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            app/build/outputs/apk/debug/*.apk
+            app2/build/outputs/apk/debug/*.apk
           generate_release_notes: true
 
   publish-pypi:

@@ -151,6 +151,38 @@ class HostCliCommandStringTest {
     }
 
     @Test
+    fun `createSession forwards backend when set`() {
+        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+
+        runSuspending {
+            HostCliClient(exec).createSession(name = "work", backend = "aplexer")
+        }
+
+        assertEquals(
+            "pocketshell sessions create --json --backend 'aplexer' -- 'work'",
+            exec.command,
+        )
+    }
+
+    @Test
+    fun `createSession forwards engine and backend together`() {
+        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+
+        runSuspending {
+            HostCliClient(exec).createSession(
+                name = "work",
+                engine = "claude",
+                backend = "tmux",
+            )
+        }
+
+        assertEquals(
+            "pocketshell sessions create --json --engine 'claude' --backend 'tmux' -- 'work'",
+            exec.command,
+        )
+    }
+
+    @Test
     fun `a custom binary is used by the run verbs too`() {
         val exec = RecordingExec.ok(fixture("sessions-list-real.json"))
 

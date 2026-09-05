@@ -4,7 +4,9 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.hostapi.BackendError
+import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.HostCliError
+import com.pocketshell.core.hostapi.ProfileInfo
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
@@ -101,6 +103,14 @@ data class CreateSessionState(
     val notice: String? = null,
     /** The session name the screen should open next, once. */
     val openRequest: String? = null,
+    /** Host `engines list --json`, unfiltered; the sheet hides disabled/unavailable. */
+    val engines: List<EngineInfo> = emptyList(),
+    /** Host `profiles list --json`; the sheet filters these to the selected engine. */
+    val profiles: List<ProfileInfo> = emptyList(),
+    /** True while the first engines/profiles read for this sheet opening is in flight. */
+    val enginesLoading: Boolean = false,
+    /** Why engines could not be listed. Agent create is unavailable; Shell still works. */
+    val enginesFailure: String? = null,
 )
 
 /**
@@ -156,6 +166,7 @@ class SessionTreeViewModel @Inject constructor(
 
     private var inFlight: Job? = null
     private var createInFlight: Job? = null
+    private var pickerInFlight: Job? = null
 
     /**
      * Re-reads the host's session list. Safe to call from `ON_START` and from
@@ -176,7 +187,17 @@ class SessionTreeViewModel @Inject constructor(
 
     /** Raises the create sheet, with no stale failure or notice on it. */
     fun openCreateSheet() {
-        updateCreate { it.copy(visible = true, failure = null, notice = null) }
+        updateCreate {
+            it.copy(
+                visible = true,
+                failure = null,
+                notice = null,
+                enginesLoading = true,
+                enginesFailure = null,
+            )
+        }
+        pickerInFlight?.cancel()
+        pickerInFlight = viewModelScope.launch { loadPickerOptions() }
     }
 
     /**
@@ -186,22 +207,32 @@ class SessionTreeViewModel @Inject constructor(
      */
     fun dismissCreateSheet() {
         updateCreate { current ->
-            if (current.submitting) current else current.copy(visible = false, failure = null)
+            if (current.submitting) {
+                current
+            } else {
+                pickerInFlight?.cancel()
+                current.copy(visible = false, failure = null, enginesLoading = false)
+            }
         }
     }
 
     /**
-     * `pocketshell sessions create --json` for [name] in [cwd], then refresh
-     * the listing and ask the screen to open it.
+     * `pocketshell sessions create --json` for [request], then refresh the
+     * listing and ask the screen to open it.
      *
      * A session that already existed comes back `created == false`, which is a
      * SUCCESS: the sheet closes, the tree refreshes and the screen opens that
      * session, with a notice saying it was already there. A FAILURE leaves the
      * sheet open with its text intact so the user can fix the folder and retry.
+     *
+     * [CreateSessionRequest.engine] / [CreateSessionRequest.profile] /
+     * [CreateSessionRequest.backend] are forwarded when set and omitted when
+     * null, so a Shell create with the host-default backend is still
+     * `sessions create --json -- NAME`.
      */
-    fun createSession(name: String, cwd: String?) {
+    fun createSession(request: CreateSessionRequest) {
         if (createInFlight?.isActive == true) return
-        val trimmedName = name.trim()
+        val trimmedName = request.name.trim()
         if (trimmedName.isEmpty()) {
             // The host CLI takes NAME as a required positional argument, so a
             // blank name is answered here rather than sent for the host to
@@ -211,7 +242,13 @@ class SessionTreeViewModel @Inject constructor(
         }
         updateCreate { it.copy(submitting = true, failure = null, notice = null) }
         createInFlight = viewModelScope.launch {
-            runCreate(trimmedName, cwd?.trim()?.takeIf { it.isNotEmpty() })
+            runCreate(
+                name = trimmedName,
+                cwd = request.cwd?.trim()?.takeIf { it.isNotEmpty() },
+                engine = request.engine?.trim()?.takeIf { it.isNotEmpty() },
+                profile = request.profile?.trim()?.takeIf { it.isNotEmpty() },
+                backend = request.backend?.trim()?.takeIf { it.isNotEmpty() },
+            )
         }
     }
 
@@ -223,16 +260,54 @@ class SessionTreeViewModel @Inject constructor(
         updateCreate { it.copy(openRequest = null) }
     }
 
-    private suspend fun runCreate(name: String, cwd: String?) {
+    private suspend fun loadPickerOptions() {
+        val connection = when (val outcome = resolveConnection()) {
+            is ConnectionOutcome.Ready -> outcome.connection
+            is ConnectionOutcome.Unavailable -> {
+                updateCreate {
+                    it.copy(enginesLoading = false, enginesFailure = outcome.message)
+                }
+                return
+            }
+        }
+        val client = clients.create(connection)
+        val engines = client.listEngines()
+        val profiles = client.listProfiles()
+        updateCreate { current ->
+            if (!current.visible) {
+                current
+            } else {
+                current.copy(
+                    enginesLoading = false,
+                    engines = engines.getOrDefault(emptyList()),
+                    profiles = profiles.getOrDefault(emptyList()),
+                    enginesFailure = engines.exceptionOrNull()?.let { error ->
+                        userMessage(error, "Could not list engines on the host: ")
+                    },
+                )
+            }
+        }
+    }
+
+    private suspend fun runCreate(
+        name: String,
+        cwd: String?,
+        engine: String?,
+        profile: String?,
+        backend: String?,
+    ) {
         val connection = when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> outcome.connection
             is ConnectionOutcome.Unavailable -> return failCreate(outcome.message)
         }
         clients.create(connection)
-            // engine/profile are deliberately always null: the rewrite's scope
-            // amendment cut agent launching from the client, so this is a plain
-            // shell session (docs/rewrite-implementation-plan.md).
-            .createSession(name = name, cwd = cwd, engine = null, profile = null)
+            .createSession(
+                name = name,
+                cwd = cwd,
+                engine = engine,
+                profile = profile,
+                backend = backend,
+            )
             .fold(
                 onSuccess = { created ->
                     updateCreate {

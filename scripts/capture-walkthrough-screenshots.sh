@@ -53,7 +53,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/walkthrough-visual-pass}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
-APP_PACKAGE="com.pocketshell.next"
+APP_PACKAGE="com.pocketshell.app"
 TEST_PACKAGE="$APP_PACKAGE.test"
 # JourneyScreenshots writes to getExternalFilesDir(null)/<journey>/<name>.png.
 DEVICE_OUTPUT_DIR="/sdcard/Android/data/$APP_PACKAGE/files"
@@ -281,7 +281,7 @@ visual_audit_instrumentation_log_has_failure_markers() {
 
 visual_audit_logcat_has_app_or_test_failure_markers() {
   local logcat_file="$1"
-  grep -Eq 'Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|FATAL SIGNAL.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
 }
 
 visual_audit_instrumentation_log_has_transport_drop_markers() {

@@ -423,7 +423,7 @@ for arg in "$@"; do
     -PpocketshellAppIdSuffix=*) suffix="${arg#*=}" ;;
   esac
 done
-package="com.pocketshell.next${suffix:+.$suffix}"
+package="com.pocketshell.app${suffix:+.$suffix}"
 printf '%s\n' "$serial" > "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.serial"
 printf '%s\n' "$*" > "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.gradle-args"
 
@@ -461,7 +461,7 @@ guard="$FAKE_DEVICE_STATE/mutating-$serial"
 if ! mkdir "$guard" 2>/dev/null; then
   printf '%s overlap %s\n' "$FAKE_RUN_ID" "$serial" >> "$FAKE_DEVICE_STATE/events"
   touch "$FAKE_DEVICE_STATE/overlap"
-  for active in "$FAKE_DEVICE_STATE"/active-com.pocketshell.next*; do
+  for active in "$FAKE_DEVICE_STATE"/active-com.pocketshell.app*; do
     [[ -e "$active" ]] || continue
     victim="${active##*/active-}"
     touch "$FAKE_DEVICE_STATE/killed-$victim"
@@ -656,7 +656,7 @@ assert_mixed_order_serialises() {
 
   [[ ! -e "$sandbox/device-state/overlap" ]] \
     || fail "pool/legacy mutation windows overlapped"
-  [[ ! -e "$sandbox/device-state/killed-com.pocketshell.next.i1737a" ]] \
+  [[ ! -e "$sandbox/device-state/killed-com.pocketshell.app.i1737a" ]] \
     || fail "first instrumentation package was killed"
   grep -q '^first instrumentation-survived emulator-5554 ' "$sandbox/device-state/events" \
     || fail "first instrumentation survival was not recorded"
@@ -939,7 +939,7 @@ holder_loss_at_gradle_boundary_fails_before_mutation() {
 assert_holder_loss_at_cleanup_boundary_fails_closed() {
   local sandbox="$1" run_id="$2" ignore_term="$3"
   make_sandbox "$sandbox"
-  printf 'com.pocketshell.next.i1737stale\n' \
+  printf 'com.pocketshell.app.i1737stale\n' \
     > "$sandbox/device-state/packages-emulator-5554"
 
   local cleanup_pid contender_pid cleanup_rc ignore_term_run_id=""

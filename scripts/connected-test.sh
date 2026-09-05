@@ -12,13 +12,13 @@ set -euo pipefail
 #      Distinct emulators retain independent locks and run concurrently.
 #   2. Threads the per-worktree applicationIdSuffix (option 2) into the gradle
 #      invocation so each worktree's DEBUG apk installs under a distinct
-#      applicationId (e.g. com.pocketshell.next.i672) and multiple test apps
+#      applicationId (e.g. com.pocketshell.app.i672) and multiple test apps
 #      coexist on ONE emulator without uninstalling each other.
 #
 # THE DEFAULT MODULE IS `app2` (issue #2481). The rewrite's hard cut deleted the
 # old `app` module, so `:app:connectedDebugAndroidTest` cannot even be
 # configured; the application module in this build is `:app2`, applicationId
-# `com.pocketshell.next` (app2/build.gradle.kts, which implements the same
+# `com.pocketshell.app` (app2/build.gradle.kts, which implements the same
 # `-PpocketshellAppIdSuffix` contract). `--module` still redirects at a
 # `shared:*` module. There is deliberately no "try app2, fall back to app"
 # branch (D22): the old module is gone, not deprecated.
@@ -36,7 +36,7 @@ set -euo pipefail
 #     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.terminal.core.CodexOutputBurstImeMainThreadProofTest
 #
 #   scripts/connected-test.sh --cleanup-suffixes   # uninstall leftover
-#                                                   # com.pocketshell.next.i* apps
+#                                                   # com.pocketshell.app.i* apps
 #
 # NOTE on class filters: CI's app2 journey lane runs the WHOLE instrumented set
 # unfiltered in ONE process on purpose (issue #2474 — cross-journey state
@@ -47,7 +47,7 @@ set -euo pipefail
 # Contention hardening (issue #776): even WITHOUT --pool, when more than one
 # emulator is online the wrapper now (P1) claims + pins a single FREE serial so
 # AGP can't fan the install onto every device (sibling SIGKILL), and (P0) sweeps
-# a leftover base com.pocketshell.next[.test] off the pinned device before
+# a leftover base com.pocketshell.app[.test] off the pinned device before
 # installing a suffixed APK so it can't hijack the suffixed MainActivity launch.
 # Journey/E2e/Docker classes auto-default to --pool when >1 emulator is online
 # (P2); pass --no-pool to opt out.
@@ -102,7 +102,7 @@ set -euo pipefail
 #   --no-pool            Force the legacy single-lane path even for a journey/E2e
 #                        class that would otherwise auto-default to --pool (P2).
 #                        Still honours the P0/P1 base-sweep + serial-pin hygiene.
-#   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.next.i*
+#   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i*
 #                        (and .test) package from the target device, then exit.
 #                        Prevents install pile-up across worktrees.
 #
@@ -192,7 +192,7 @@ Flags:
   --pool               Lane pool mode: claim an isolated (emulator, agents-port)
                        lane for parallel journey testing (issues #674 + #724).
   --no-pool            Force the legacy single-lane path.
-  --cleanup-suffixes   Uninstall every accumulated com.pocketshell.next.i* package
+  --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i* package
                        from the target device, then exit.
   --help, -h           Print this help and exit.
 
@@ -931,7 +931,7 @@ connected_test_validate_report() {
 
 cleanup_suffixed_packages() {
   # Optional first arg:
-  #   --include-base   ALSO uninstall the base com.pocketshell.next[.test] and
+  #   --include-base   ALSO uninstall the base com.pocketshell.app[.test] and
   #                    every suffixed sibling that is NOT this run's $SUFFIX.
   #                    Used as a pre-run hygiene sweep on a suffixed lane (P0,
   #                    issue #776) so a leftover base install can't hijack the
@@ -962,10 +962,10 @@ cleanup_suffixed_packages() {
   fi
   local pkg removed=0 cleanup_rc=0
   # The default (no --include-base) match: the per-worktree convention
-  # com.pocketshell.next.i<token> (and its .test sibling) ONLY. This deliberately
+  # com.pocketshell.app.i<token> (and its .test sibling) ONLY. This deliberately
   # excludes:
-  #   * the base package        com.pocketshell.next
-  #   * the base test package   com.pocketshell.next.test
+  #   * the base package        com.pocketshell.app
+  #   * the base test package   com.pocketshell.app.test
   # so the sweep can never nuke a normal (non-suffixed) install's test app.
   # Worktree suffixes follow the `i<N>` convention (e.g. i672), so the token
   # must start with `i`.
@@ -976,15 +976,15 @@ cleanup_suffixed_packages() {
   # both $SUFFIX is non-empty AND $ANDROID_SERIAL is pinned (see the pre-run
   # call site), so it can only touch the one targeted emulator and never a bare
   # non-suffixed manual install on some other device.
-  local match_re='^com\.pocketshell\.next\.i[A-Za-z0-9._]*(\.test)?$'
+  local match_re='^com\.pocketshell\.app\.i[A-Za-z0-9._]*(\.test)?$'
   if [[ "$include_base" == "1" ]]; then
-    match_re='^com\.pocketshell\.next(\.i[A-Za-z0-9._]*)?(\.test)?$'
+    match_re='^com\.pocketshell\.app(\.i[A-Za-z0-9._]*)?(\.test)?$'
   fi
   # Packages belonging to THIS run's suffix, which --include-base must skip.
   local self_pkg="" self_test_pkg=""
   if [[ -n "$SUFFIX" ]]; then
-    self_pkg="com.pocketshell.next.$SUFFIX"
-    self_test_pkg="com.pocketshell.next.$SUFFIX.test"
+    self_pkg="com.pocketshell.app.$SUFFIX"
+    self_test_pkg="com.pocketshell.app.$SUFFIX.test"
   fi
   while IFS= read -r pkg; do
     pkg="${pkg#package:}"
@@ -1039,7 +1039,7 @@ fi
 
 # P0 (issue #776) — pre-run hygiene sweep on a SUFFIXED, SERIAL-PINNED lane.
 # Before installing this lane's suffixed APK, uninstall the base
-# com.pocketshell.next[.test] AND any stale suffixed sibling that is NOT this
+# com.pocketshell.app[.test] AND any stale suffixed sibling that is NOT this
 # run's $SUFFIX, on the pinned emulator. A leftover base install shares the
 # IDENTICAL MAIN/LAUNCHER + VIEW pocketshell://import intent filters with every
 # suffixed package, so with two installed a launcher/VIEW launch is ambiguous
@@ -1059,9 +1059,9 @@ fi
 GRADLE_SUFFIX_ARGS=()
 if [[ -n "$SUFFIX" ]]; then
   GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$SUFFIX")
-  printf 'Running %s as com.pocketshell.next.%s\n' "$CONNECTED_TASK" "$SUFFIX" >&2
+  printf 'Running %s as com.pocketshell.app.%s\n' "$CONNECTED_TASK" "$SUFFIX" >&2
 else
-  printf 'Running %s as com.pocketshell.next (no suffix)\n' "$CONNECTED_TASK" >&2
+  printf 'Running %s as com.pocketshell.app (no suffix)\n' "$CONNECTED_TASK" >&2
 fi
 
 # Issue #724: thread the claimed (or caller-preset) agents fixture port into the

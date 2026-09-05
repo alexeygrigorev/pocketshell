@@ -48,7 +48,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 GRADLE_CMD="${POCKETSHELL_APP2_JOURNEY_GRADLE:-./gradlew}"
 ARTIFACT_DIR="${POCKETSHELL_APP2_JOURNEY_ARTIFACTS:-artifacts/app2-journey}"
-APP_ID="${POCKETSHELL_APP2_JOURNEY_APP_ID:-com.pocketshell.next}"
+APP_ID="${POCKETSHELL_APP2_JOURNEY_APP_ID:-com.pocketshell.app}"
 ADB="${ADB:-adb}"
 
 # The one task this lane runs. Kept in a named variable so the self-test can

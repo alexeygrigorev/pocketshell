@@ -777,7 +777,7 @@ for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
     printf 'Core-terminal connected test produced UTP no-results/transport cleanup failure on attempt %s; retrying.\n' "\$attempt" >&2
     '$ADB' reconnect >/dev/null 2>&1 || true
     '$ADB' wait-for-device >/dev/null 2>&1 || true
-    for package in com.termux.view.test com.pocketshell.next.test com.pocketshell.next; do
+    for package in com.termux.view.test com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -997,10 +997,10 @@ wait_package_manager_idle() {
   '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
   '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
 }
-for package in com.pocketshell.next.test com.pocketshell.next; do
+for package in com.pocketshell.app.test com.pocketshell.app; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
-for package in com.pocketshell.next.test com.pocketshell.next; do
+for package in com.pocketshell.app.test com.pocketshell.app; do
   if package_installed "\$package"; then
     printf 'COLD-RESET: clearing package data without uninstalling: %s\n' "\$package"
     '$ADB' shell pm clear "\$package" || true
@@ -1009,7 +1009,7 @@ for package in com.pocketshell.next.test com.pocketshell.next; do
   fi
 done
 wait_package_manager_idle
-for package in com.pocketshell.next.test com.pocketshell.next; do
+for package in com.pocketshell.app.test com.pocketshell.app; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
 printf 'COLD-RESET: focused app walkthrough package state reset without package deletion\n'
@@ -1024,14 +1024,14 @@ wait_package_manager_idle() {
   '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
 }
 packages_present() {
-  for package in com.pocketshell.next com.pocketshell.next.test; do
+  for package in com.pocketshell.app com.pocketshell.app.test; do
     '$ADB' shell pm path "\$package" >/dev/null || return 1
   done
 }
 post_install_removal_seen() {
   '$ADB' logcat -d -v time -t 1000 2>/dev/null |
     grep -E 'PACKAGE_FULLY_REMOVED|PACKAGE_REMOVED|deletePackageX' |
-    grep -E 'com[.]pocketshell[.]next([.]test)?' >/dev/null
+    grep -E 'com[.]pocketshell[.]app([.]test)?' >/dev/null
 }
 uninstall_with_idle_wait() {
   local package="\$1"
@@ -1073,8 +1073,8 @@ install_or_fallback_uninstall() {
   exit "\$status"
 }
 install_pair() {
-  install_or_fallback_uninstall com.pocketshell.next '$APK_PATH'
-  install_or_fallback_uninstall com.pocketshell.next.test '$TEST_APK_PATH'
+  install_or_fallback_uninstall com.pocketshell.app '$APK_PATH'
+  install_or_fallback_uninstall com.pocketshell.app.test '$TEST_APK_PATH'
   wait_package_manager_idle
 }
 for attempt in {1..3}; do
@@ -1102,7 +1102,7 @@ for attempt in {1..3}; do
   fi
   printf 'Recent package removal context before reinstall:\n' >&2
   '$ADB' logcat -d -v time -t 500 |
-    grep -E 'PackageManager|PackageInstaller|PACKAGE_|deletePackageX|com[.]pocketshell[.]next' >&2 || true
+    grep -E 'PackageManager|PackageInstaller|PACKAGE_|deletePackageX|com[.]pocketshell[.]app' >&2 || true
   wait_package_manager_idle
   sleep 3
 done
@@ -1115,34 +1115,34 @@ quiesce_app_walkthrough_processes_script() {
   cat <<QUIESCE_SCRIPT
 set -euo pipefail
 packages_stopped() {
-  for package in com.pocketshell.next.test com.pocketshell.next; do
+  for package in com.pocketshell.app.test com.pocketshell.app; do
     if ! '$ADB' shell dumpsys package "\$package" 2>/dev/null | grep -q 'stopped=true'; then
       return 1
     fi
   done
 }
 processes_stopped() {
-  if ! '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]next(\$|:|[[:space:]])|com[.]pocketshell[.]next[.]test(\$|:|[[:space:]])' >/dev/null; then
+  if ! '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]app(\$|:|[[:space:]])|com[.]pocketshell[.]app[.]test(\$|:|[[:space:]])' >/dev/null; then
     return 0
   fi
   return 1
 }
 dump_quiesce_context() {
     printf 'Visible PocketShell processes:\n' >&2
-    '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]next(\$|:|[[:space:]])|com[.]pocketshell[.]next[.]test(\$|:|[[:space:]])' >&2 || true
+    '$ADB' shell ps -A | grep -E 'com[.]pocketshell[.]app(\$|:|[[:space:]])|com[.]pocketshell[.]app[.]test(\$|:|[[:space:]])' >&2 || true
     printf 'Package paths:\n' >&2
-    for package in com.pocketshell.next.test com.pocketshell.next; do
+    for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell pm path "\$package" >&2 || true
     done
     printf 'Package stopped state:\n' >&2
-    for package in com.pocketshell.next.test com.pocketshell.next; do
+    for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell dumpsys package "\$package" 2>/dev/null | grep 'stopped=' >&2 || true
     done
     printf 'Recent package manager and activity context:\n' >&2
-    '$ADB' logcat -d -v time -t 500 | grep -E 'PackageManager|PackageInstaller|PACKAGE_|ActivityManager.*com[.]pocketshell[.]next|Force stopping|deletePackageX' >&2 || true
+    '$ADB' logcat -d -v time -t 500 | grep -E 'PackageManager|PackageInstaller|PACKAGE_|ActivityManager.*com[.]pocketshell[.]app|Force stopping|deletePackageX' >&2 || true
 }
 for attempt in 1 2 3; do
-  for package in com.pocketshell.next.test com.pocketshell.next; do
+  for package in com.pocketshell.app.test com.pocketshell.app; do
     '$ADB' shell am force-stop "\$package" || true
   done
   '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -1212,7 +1212,7 @@ install_or_fallback_uninstall() {
   fi
   if printf '%s\n' "\$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
     printf 'LEGACY-V1: uninstall fallback for incompatible app package before migration setup\n'
-    '$ADB' uninstall com.pocketshell.next >/dev/null 2>&1 || true
+    '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true
     wait_package_manager_idle
     '$ADB' install -r -d -t '$APK_PATH'
     wait_package_manager_idle
@@ -1227,7 +1227,7 @@ adb_output_has_transport_drop_markers() {
 
 logcat_has_app_crash_signature() {
   [ -f "\$1" ] || return 1
-  grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next' "\$1"
+  grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app' "\$1"
 }
 
 logcat_has_adb_transport_drop_markers() {
@@ -1457,23 +1457,23 @@ run_migration_scenario() {
   migrated_db_dir_host='$RUN_DIR/migrated-'"\$scenario"'-database'
   migrated_db_host="\$migrated_db_dir_host/pocketshell.db"
 
-  '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
+  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
   install_or_fallback_uninstall
   printf 'LEGACY-V1: clearing app data before injecting %s fixture\n' "\$scenario"
-  '$ADB' shell pm clear com.pocketshell.next
+  '$ADB' shell pm clear com.pocketshell.app
   wait_package_manager_idle
   '$ADB' push "\$source_db" "\$staged_db_device"
-  '$ADB' shell run-as com.pocketshell.next sh -c "'mkdir -p databases && cp \$staged_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
+  '$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$staged_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
   '$ADB' shell rm -f "\$staged_db_device" >/dev/null 2>&1 || true
 
   for attempt in \$(seq 1 '$LEGACY_V1_DB_MIGRATION_ATTEMPTS'); do
     attempt_logcat_file='$RUN_DIR/legacy-v1-'"\$scenario"'-attempt'"\$attempt"'.log'
     rm -f "\$attempt_logcat_file"
     '$ADB' logcat -c || true
-    '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
+    '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
 
     set +e
-    start_output=\$('$ADB' shell am start -W -n com.pocketshell.next/.MainActivity 2>&1)
+    start_output=\$('$ADB' shell am start -W -n com.pocketshell.app/com.pocketshell.next.MainActivity 2>&1)
     start_status=\$?
     set -e
     printf '%s\n' "\$start_output"
@@ -1485,7 +1485,7 @@ run_migration_scenario() {
     fi
 
     set +e
-    pid_output=\$('$ADB' shell pidof com.pocketshell.next 2>&1)
+    pid_output=\$('$ADB' shell pidof com.pocketshell.app 2>&1)
     pid_status=\$?
     set -e
     pid=""
@@ -1532,7 +1532,7 @@ run_migration_scenario() {
     break
   done
 
-  '$ADB' shell am force-stop com.pocketshell.next >/dev/null 2>&1 || true
+  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
   '$ADB' shell sync >/dev/null 2>&1 || true
   mkdir -p "\$migrated_db_dir_host"
   rm -f \
@@ -1542,7 +1542,7 @@ run_migration_scenario() {
   for suffix in '' '-wal' '-shm'; do
     pulled_file="\$migrated_db_dir_host/pocketshell.db\$suffix"
     set +e
-    '$ADB' exec-out run-as com.pocketshell.next \
+    '$ADB' exec-out run-as com.pocketshell.app \
       cat "databases/pocketshell.db\$suffix" > "\$pulled_file" 2>/dev/null
     pull_status=\$?
     set -e
@@ -1724,7 +1724,7 @@ dump_instrumentation_diagnostics() {
     printf '=== filtered logcat crash context ===\n'
     if [ -f "\$full_logcat_file" ]; then
       grep -E -C 80 \
-        'AndroidRuntime|FATAL EXCEPTION|FATAL SIGNAL|Process: com[.]pocketshell[.]next|ActivityManager.*(Crash|Killing|Force stopping).*com[.]pocketshell[.]next|am_crash|TestRunner|AndroidJUnitRunner|Instrumentation' \
+        'AndroidRuntime|FATAL EXCEPTION|FATAL SIGNAL|Process: com[.]pocketshell[.]app|ActivityManager.*(Crash|Killing|Force stopping).*com[.]pocketshell[.]app|am_crash|TestRunner|AndroidJUnitRunner|Instrumentation' \
         "\$full_logcat_file" || true
     else
       printf 'Full logcat artifact was not created: %s\n' "\$full_logcat_file"
@@ -1750,7 +1750,7 @@ instrumentation_output_has_failure_markers() {
 }
 
 logcat_has_app_or_test_failure_markers() {
-  grep -Eq 'Process: com[.]pocketshell[.]next|FATAL EXCEPTION.*com[.]pocketshell[.]next|FATAL SIGNAL.*com[.]pocketshell[.]next|AndroidRuntime.*com[.]pocketshell[.]next|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "\$full_logcat_file"
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "\$full_logcat_file"
 }
 
 logcat_has_adb_transport_drop_markers() {
@@ -1802,7 +1802,7 @@ cold_reboot_emulator_for_gl_recovery() {
   else
     printf 'No EGL/101010-2 logcat marker in the captured window; recovering on the compose-hierarchy signature alone.\n' >&2
   fi
-  for package in com.pocketshell.next.test com.pocketshell.next; do
+  for package in com.pocketshell.app.test com.pocketshell.app; do
     '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
   done
   '$ADB' reboot >/dev/null 2>&1 || true
@@ -1850,7 +1850,7 @@ max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_tra
 while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   '$ADB' logcat -c || true
   set +e
-  output=\$('$ADB' shell am instrument -w -r com.pocketshell.next.test/com.pocketshell.next.HiltNextTestRunner 2>&1)
+  output=\$('$ADB' shell am instrument -w -r com.pocketshell.app.test/com.pocketshell.next.HiltNextTestRunner 2>&1)
   instrument_status=\$?
   set -e
   if [ "\$instrument_status" -ne 0 ]; then
@@ -1877,10 +1877,10 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   fi
   if [ "\$attempt" -eq 1 ] &&
     { printf '%s\n' "\$output" | grep -q 'Process crashed'; } &&
-    grep -q 'Crash of app com[.]pocketshell[.]next running instrumentation' "\$full_logcat_file"; then
+    grep -q 'Crash of app com[.]pocketshell[.]app running instrumentation' "\$full_logcat_file"; then
     cp "\$full_logcat_file" "\$full_logcat_file.attempt1" || true
     printf 'Focused instrumentation crashed after external app force-stop; retrying selector once.\n' >&2
-    for package in com.pocketshell.next.test com.pocketshell.next; do
+    for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -1897,7 +1897,7 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
     printf 'Focused instrumentation interrupted by adb transport drop on attempt %s; recovery %s/%s; retrying selector without treating it as an app/test retry.\n' "\$attempt" "\$transport_recovery_attempts" "\$max_transport_recovery_attempts" >&2
     '$ADB' reconnect >/dev/null 2>&1 || true
     timeout 60s '$ADB' wait-for-device >/dev/null 2>&1 || true
-    for package in com.pocketshell.next.test com.pocketshell.next; do
+    for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -2167,7 +2167,7 @@ run_step "record-validated-apk-identity" \
   "$(cd "$(dirname "$TEST_APK_PATH")" && pwd)/$(basename "$TEST_APK_PATH")"
 
 # Issue #2481: this proof is REPOINTED at app2, not deleted. app2 runs under its
-# own applicationId (`com.pocketshell.next`) today, so no real device has a
+# own applicationId (`com.pocketshell.app`) today, so no real device has a
 # legacy `pocketshell.db` in its sandbox yet — but app2 reads the SAME schema
 # from :shared:core-storage and deliberately wires the whole migration array
 # (app2/src/main/java/com/pocketshell/next/di/AppModule.kt: "an install that
@@ -2233,7 +2233,7 @@ fi
 APP2_JOURNEY_SCREENSHOT_DIR="$RUN_DIR/journey-screenshots"
 mkdir -p "$APP2_JOURNEY_SCREENSHOT_DIR"
 run_step "pull-app2-journey-screenshots" bash -lc \
-  "'$ADB' pull /sdcard/Android/data/com.pocketshell.next/files '$APP2_JOURNEY_SCREENSHOT_DIR' >/dev/null 2>&1 || printf 'no journey screenshots were pulled (best effort)\\n'; find '$APP2_JOURNEY_SCREENSHOT_DIR' -type f -name '*.png' | sort" ||
+  "'$ADB' pull /sdcard/Android/data/com.pocketshell.app/files '$APP2_JOURNEY_SCREENSHOT_DIR' >/dev/null 2>&1 || printf 'no journey screenshots were pulled (best effort)\\n'; find '$APP2_JOURNEY_SCREENSHOT_DIR' -type f -name '*.png' | sort" ||
   printf 'WARN: journey screenshot collection failed; the suite result above is unaffected (issue #2481).\n' >&2
 
 # Issue #2064: this step used to re-run the app module's `assembleDebug` after

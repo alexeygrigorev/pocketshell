@@ -56,16 +56,12 @@ annotation class IoDispatcher
  * app2's only DI module so far (plan §U-1): the Room database and the DAOs the
  * screens that exist actually consume, plus the IO dispatcher.
  *
- * The database file name matches the shipping client's (`pocketshell.db`) on
- * purpose — app2 reads the very same schema and, once X-4 renames the
- * `applicationId` to `com.pocketshell.app`, the very same file, so cutover is a
- * rename rather than a data migration. Until then app2 runs under its own
- * `applicationId` and therefore its own (initially empty) copy in its own
- * sandbox; that is a property of Android app sandboxing, not of this module.
+ * The database file name matches the shipping client's (`pocketshell.db`) and
+ * `applicationId` is `com.pocketshell.app`, so an upgrade from v0.4.x opens the
+ * same sandbox file. Schema bumps go through [APP_DATABASE_MIGRATIONS].
  *
- * The migration array is wired even though app2 only reads: an install that
- * later becomes the primary app must open an existing v-N file rather than
- * fail Room's schema validation.
+ * The migration array is wired so an upgraded v0.4.x install opens its
+ * existing v-N file rather than failing Room's schema validation.
  *
  * A DAO is added here when a screen consumes it, not preemptively — the old
  * client's module provided nine and the rewrite's premise is that most of them

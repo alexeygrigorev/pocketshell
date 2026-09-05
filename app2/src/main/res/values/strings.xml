@@ -1,5 +1,4 @@
 <resources>
-    <!-- User-visible launcher name. This is PocketShell, not a rebrand.
-         applicationId stays com.pocketshell.next until X-3. -->
+    <!-- User-visible launcher name. This is PocketShell, not a rebrand. -->
     <string name="app_name">PocketShell</string>
 </resources>

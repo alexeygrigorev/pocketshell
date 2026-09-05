@@ -159,10 +159,10 @@ android {
     }
 
     defaultConfig {
-        // Distinct from the old client's `com.pocketshell.app` so both can be
-        // installed side by side during the rewrite. X-4 renames this to
-        // `com.pocketshell.app` at cutover.
-        applicationId = "com.pocketshell.next"
+        // Same install identity as v0.4.x so an update replaces the existing
+        // PocketShell (same signature: debug.keystore). Kotlin namespace stays
+        // `com.pocketshell.next`; only the Play/package id is `com.pocketshell.app`.
+        applicationId = "com.pocketshell.app"
         minSdk = 26
         targetSdk = 35
         // Issue #2356: tag-derived, see derivePocketshellVersion() above. The
@@ -186,11 +186,11 @@ android {
 
             // Issue #672 scheme, adopted for app2 by task U-2: let each parallel
             // worktree install its DEBUG apk under a distinct applicationId
-            // (e.g. `com.pocketshell.next.iapp2`) so two app2 worktrees running
+            // (e.g. `com.pocketshell.app.iapp2`) so two app2 worktrees running
             // connected tests on the ONE shared emulator do not uninstall each
             // other. `scripts/connected-test.sh --suffix <token>` passes the
             // property; with no property this is byte-for-byte the plain
-            // `com.pocketshell.next` build, and the release type is untouched.
+            // `com.pocketshell.app` build, and the release type is untouched.
             //
             // Only `[A-Za-z0-9._]` is accepted (a package-segment token) so a
             // stray value cannot produce an invalid applicationId.

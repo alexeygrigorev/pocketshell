@@ -8,11 +8,25 @@ import org.junit.Test
 import org.w3c.dom.Element
 
 /**
- * Pins the shipping launcher identity (issue #2517): this is PocketShell,
- * not a "Next" rebrand. The rewrite's side-by-side `applicationId` is a
- * package-name cutover (X-3), not a new product name or icon.
+ * Pins the shipping launcher identity (issue #2517) and install id
+ * (issue #2519): this is PocketShell under `com.pocketshell.app`, so an
+ * upgrade replaces the v0.4.x install (same signature). Kotlin namespace
+ * stays `com.pocketshell.next`.
  */
 class LauncherBrandingTest {
+
+    @Test
+    fun shippingApplicationIdIsTheOriginalPackage() {
+        val gradle = locate("app2/build.gradle.kts").readText()
+        assertTrue(
+            "applicationId must be com.pocketshell.app so adb install -r upgrades v0.4.x",
+            Regex("""applicationId\s*=\s*"com\.pocketshell\.app"""").containsMatchIn(gradle),
+        )
+        assertTrue(
+            "applicationId must not be the rewrite side-by-side id",
+            !Regex("""applicationId\s*=\s*"com\.pocketshell\.next"""").containsMatchIn(gradle),
+        )
+    }
 
     @Test
     fun launcherLabelIsPocketShellNotNext() {

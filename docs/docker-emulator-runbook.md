@@ -524,7 +524,7 @@ The fast pre-release gate does all of the following:
    uninstalls the package.
 
 Before the app2 instrumentation phase, the gate force-stops
-`com.pocketshell.next.test` and `com.pocketshell.next`, clears existing package
+`com.pocketshell.app.test` and `com.pocketshell.app`, clears existing package
 data if either package is already installed, and waits for the package-manager
 handler queues to go idle. This is the cold-reset walkthrough path, not the user
 update path. It then replace-installs the app/test APKs once and waits for

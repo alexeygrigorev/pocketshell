@@ -227,7 +227,6 @@ class AddEditHostNavigationTest {
                         onOpenHost = actions.onOpenHost,
                         onAddHost = actions.onAddHost,
                         onEditHost = actions.onEditHost,
-                        onShareHost = actions.onShareHost,
                         onScanQr = actions.onScanQr,
                         onOpenSettings = actions.onOpenSettings,
                         viewModel = hostList,

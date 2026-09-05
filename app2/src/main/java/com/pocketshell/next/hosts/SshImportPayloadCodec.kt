@@ -34,11 +34,9 @@ sealed interface SshImportAuth {
  * ## Security stance (preserved from the old client, deliberately)
  *
  * Decoding accepts both auth shapes, because a desktop emitter's whole job is
- * to hand over a key the phone does not have yet. **Encoding for share-out uses
- * [SshImportAuth.KeyReference] only** ([HostQrShareViewModel]): a QR displayed
- * on a phone screen is a visible secret, and there is no reason for
- * PocketShell's own export to put a private key on it — the receiving device
- * needs the key imported by a path the user controls.
+ * to hand over a key the phone does not have yet. In-app export of a host as a
+ * QR was removed (issue #2523); `pocketshell qr-share` on the host is the
+ * remaining generator, and Scan is the remaining importer.
  *
  * ## Difference from the old codec
  *

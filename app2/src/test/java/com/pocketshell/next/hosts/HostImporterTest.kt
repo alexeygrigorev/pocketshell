@@ -25,10 +25,10 @@ import org.robolectric.annotation.Config
  * The full QR export → import round trip, and the ways a scanned payload is
  * refused.
  *
- * This is the acceptance for "QR export/import round-trip": a host is encoded
- * exactly the way [HostQrShareViewModel] encodes it (payload codec + chunk
- * envelope), then fed to [HostImporter] the way the scanner feeds it, and the
- * host that comes out the other end is compared field by field.
+ * This is the acceptance for "QR import round-trip": a host is encoded with
+ * the payload codec + chunk envelope, then fed to [HostImporter] the way the
+ * scanner feeds it, and the host that comes out the other end is compared
+ * field by field.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -247,7 +247,7 @@ class HostImporterTest {
         assertTrue(db.hostDao().getAll().first().isEmpty())
     }
 
-    /** Exactly what [HostQrShareViewModel] does, so the round trip is the real one. */
+    /** Payload + chunk envelope the scanner feeds to [HostImporter]. */
     private fun encodeLikeTheShareScreen(host: HostEntity, keyName: String): List<String> =
         QrChunkCodec.encode(
             SshImportPayloadCodec.encode(

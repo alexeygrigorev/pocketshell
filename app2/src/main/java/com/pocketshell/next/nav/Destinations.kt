@@ -25,7 +25,7 @@ import java.nio.charset.StandardCharsets
  * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
- * routes task P-6 adds ([HostForm], [SshKeys], [HostQr], [QrScan]), plus
+ * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus
  * [CrashReports] (task P-10's local crash-report browser, reached from
  * Settings → Diagnostics). A new screen is a new object here, never an ad-hoc
  * string at a call site.
@@ -131,11 +131,6 @@ sealed class Destination(val pattern: String) {
         fun route(): String = pattern
     }
 
-    /** Render one host as a QR code for another device to scan (task P-6). */
-    data object HostQr : Destination("host-qr/{$ARG_HOST_ID}") {
-        fun route(hostId: Long): String = "host-qr/$hostId"
-    }
-
     /** Scan a QR to import a host (task P-6). */
     data object QrScan : Destination("qr-scan") {
         fun route(): String = pattern
@@ -194,7 +189,7 @@ sealed class Destination(val pattern: String) {
         val all: List<Destination>
             get() = listOf(
                 Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
-                HostForm, SshKeys, HostQr, QrScan, WorkspaceRoots, CrashReports,
+                HostForm, SshKeys, QrScan, WorkspaceRoots, CrashReports,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

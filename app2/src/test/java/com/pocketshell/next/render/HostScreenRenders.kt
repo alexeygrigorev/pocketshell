@@ -11,15 +11,9 @@ import com.pocketshell.next.hosts.HostFormErrors
 import com.pocketshell.next.hosts.HostFormState
 import com.pocketshell.next.hosts.HostListScreen
 import com.pocketshell.next.hosts.HostListUiState
-import com.pocketshell.next.hosts.HostQrShareScreen
-import com.pocketshell.next.hosts.HostQrShareUiState
 import com.pocketshell.next.hosts.HostRow
-import com.pocketshell.next.hosts.QrChunkCodec
 import com.pocketshell.next.hosts.QrScannerViewModel
 import com.pocketshell.next.hosts.QrScannerScreen
-import com.pocketshell.next.hosts.SshImportAuth
-import com.pocketshell.next.hosts.SshImportConfig
-import com.pocketshell.next.hosts.SshImportPayloadCodec
 import com.pocketshell.next.hosts.SshKeyRow
 import com.pocketshell.next.hosts.SshKeysScreen
 import com.pocketshell.next.hosts.SshKeysUiState
@@ -62,7 +56,6 @@ class HostScreenRenders {
             onOpenHost = {},
             onAddHost = {},
             onEditHost = {},
-            onShareHost = {},
             onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
@@ -83,7 +76,6 @@ class HostScreenRenders {
             onOpenHost = {},
             onAddHost = {},
             onEditHost = {},
-            onShareHost = {},
             onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
@@ -175,31 +167,6 @@ class HostScreenRenders {
             onPickFile = {},
             onDelete = {},
             onDismissMessage = {},
-        )
-    }
-
-    /** The exported QR, including the "no private key" caption. */
-    @Test
-    fun hostQrShare() = render("p6-host-qr-share") {
-        HostQrShareScreen(
-            state = HostQrShareUiState(
-                hostName = "hetzner",
-                hostSubtitle = "alexey@135.181.114.209:2222",
-                parts = QrChunkCodec.encode(
-                    SshImportPayloadCodec.encode(
-                        SshImportConfig(
-                            name = "hetzner",
-                            host = "135.181.114.209",
-                            port = 2222,
-                            username = "alexey",
-                            auth = SshImportAuth.KeyReference("hetzner-key"),
-                        ),
-                    ),
-                ),
-            ),
-            onBack = {},
-            onNext = {},
-            onPrevious = {},
         )
     }
 

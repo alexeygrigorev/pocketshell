@@ -53,7 +53,6 @@ fun HostListRoute(
     onOpenHost: (Long) -> Unit,
     onAddHost: () -> Unit,
     onEditHost: (Long) -> Unit,
-    onShareHost: (Long) -> Unit,
     onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -65,7 +64,6 @@ fun HostListRoute(
         onOpenHost = onOpenHost,
         onAddHost = onAddHost,
         onEditHost = onEditHost,
-        onShareHost = onShareHost,
         onScanQr = onScanQr,
         onOpenSettings = onOpenSettings,
         onDeleteHost = viewModel::delete,
@@ -86,11 +84,10 @@ fun HostListRoute(
  *   is the only screen a fresh install ever sees. A **Settings** affordance sits
  *   alongside them — the only place in the app that reaches [SettingsScreen]
  *   (deliberately not a mid-session terminal menu action, plan §P-6).
- * - A per-row [Kebab] with Edit / Share QR / Delete. It sits in the trailing
- *   slot the navigation chevron used to occupy: the row's own tap still dials
- *   the host, and a menu tap does not (an inner clickable consumes it), so one
- *   row carries the primary action and the management actions without a
- *   long-press users have to discover.
+ * - A per-row [Kebab] with Edit / Delete. It sits in the trailing slot the
+ *   navigation chevron used to occupy: the row's own tap still dials the host,
+ *   and a menu tap does not (an inner clickable consumes it). Share QR was
+ *   removed (issue #2523); Scan in the header still imports.
  */
 @Composable
 fun HostListScreen(
@@ -98,7 +95,6 @@ fun HostListScreen(
     onOpenHost: (Long) -> Unit,
     onAddHost: () -> Unit,
     onEditHost: (Long) -> Unit,
-    onShareHost: (Long) -> Unit,
     onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
@@ -179,7 +175,6 @@ fun HostListScreen(
                                 Kebab(
                                     items = listOf(
                                         KebabItem(label = "Edit", onClick = { onEditHost(host.id) }),
-                                        KebabItem(label = "Share QR", onClick = { onShareHost(host.id) }),
                                         KebabItem(label = "Delete", onClick = { pendingDelete = host }),
                                     ),
                                     triggerTestTag = hostRowMenuTag(host.id),

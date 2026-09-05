@@ -864,6 +864,27 @@ class ComposerViewModelTest {
             )
         }
 
+    @Test
+    fun `dictation passes the settings language hint to the recognizer`() = runTest(dispatcher) {
+        stack.settings.setVoiceLanguage("ru")
+        val viewModel = bound()
+
+        viewModel.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals("ru", stack.speech.lastLanguage)
+    }
+
+    @Test
+    fun `auto language is passed as a null hint`() = runTest(dispatcher) {
+        val viewModel = bound()
+
+        viewModel.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(null, stack.speech.lastLanguage)
+    }
+
     // ------------------------------------------------ offline-queued dictation
 
     /**

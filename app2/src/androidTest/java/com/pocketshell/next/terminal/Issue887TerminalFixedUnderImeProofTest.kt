@@ -222,7 +222,7 @@ class Issue887TerminalFixedUnderImeProofTest {
                 onRetry = {},
                 onHotkeySend = {},
                 onDraftChange = {},
-                onSend = {},
+                onSend = { true },
                 onInsert = {},
                 onAttach = {},
                 onMicTap = {},

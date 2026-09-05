@@ -54,6 +54,9 @@ class SettingsViewModel @Inject constructor(
 
     fun setVoiceLanguage(code: String) = repository.setVoiceLanguage(code)
 
+    fun setVoiceSilenceThresholdSeconds(seconds: Float) =
+        repository.setVoiceSilenceThresholdSeconds(seconds)
+
     fun setUsageWarnThresholdPercent(percent: Int) =
         repository.setUsageWarnThresholdPercent(percent)
 

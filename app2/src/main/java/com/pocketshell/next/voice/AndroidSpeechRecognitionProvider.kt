@@ -71,6 +71,14 @@ internal class AndroidSpeechRecognitionProvider(
         SpeechRecognizer.createSpeechRecognizer(appCtx)
     },
     /**
+     * Seam so unit tests can make [SpeechRecognizer.startListening] throw
+     * (SecurityException / service-missing) without subclassing the
+     * package-private recognizer constructor.
+     */
+    private val listeningInvoker: ListeningInvoker = ListeningInvoker { recognizer, intent ->
+        recognizer.startListening(intent)
+    },
+    /**
      * Per-recording silence window (ms) the endpointer extras request. Read
      * lazily on each [start] so a Settings → Voice change takes effect on the
      * next mic tap. Defaults to [DEFAULT_COMPLETE_SILENCE_MS] when no settings
@@ -87,6 +95,11 @@ internal class AndroidSpeechRecognitionProvider(
         fun create(context: Context): SpeechRecognizer
     }
 
+    /** Seam so unit tests can throw from [SpeechRecognizer.startListening]. */
+    internal fun interface ListeningInvoker {
+        fun startListening(recognizer: SpeechRecognizer, intent: Intent)
+    }
+
     override fun isAvailable(): Boolean = SpeechRecognizer.isRecognitionAvailable(appContext)
 
     /**
@@ -101,16 +114,21 @@ internal class AndroidSpeechRecognitionProvider(
         language: String?,
         listener: SpeechRecognitionListener,
     ): SpeechRecognitionSession? {
-        if (!isAvailable()) return null
+        return try {
+            if (!isAvailable()) return null
 
-        val intent = buildRecognizerIntent(language)
-        val session = Session(
-            appContext = appContext,
-            recognizerFactory = recognizerFactory,
-            intent = intent,
-            listener = listener,
-        )
-        return if (session.startFirstTurn()) session else null
+            val intent = buildRecognizerIntent(language)
+            val session = Session(
+                appContext = appContext,
+                recognizerFactory = recognizerFactory,
+                listeningInvoker = listeningInvoker,
+                intent = intent,
+                listener = listener,
+            )
+            if (session.startFirstTurn()) session else null
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /**
@@ -164,6 +182,7 @@ internal class AndroidSpeechRecognitionProvider(
     internal class Session(
         private val appContext: Context,
         private val recognizerFactory: RecognizerFactory,
+        private val listeningInvoker: ListeningInvoker,
         private val intent: Intent,
         private val listener: SpeechRecognitionListener,
         /** Elapsed-time source; overridable so tests can simulate turn duration. */
@@ -208,6 +227,9 @@ internal class AndroidSpeechRecognitionProvider(
 
         @RequiresPermission(Manifest.permission.RECORD_AUDIO)
         private fun startTurn(): Boolean {
+            // Destroy any previous recognizer before creating another — a
+            // leaked instance is a crash path on some OEMs (#2529).
+            destroyRecognizer()
             val recognizer = try {
                 recognizerFactory.create(appContext)
             } catch (_: Throwable) {
@@ -219,7 +241,7 @@ internal class AndroidSpeechRecognitionProvider(
             currentTurnHadSpeech = false
             currentTurnStartedAtMs = elapsedRealtimeMs()
             return try {
-                recognizer.startListening(intent)
+                listeningInvoker.startListening(recognizer, intent)
                 true
             } catch (_: Throwable) {
                 runCatching { recognizer.destroy() }

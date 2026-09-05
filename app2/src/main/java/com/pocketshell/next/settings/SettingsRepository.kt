@@ -45,9 +45,10 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * ## Fields that are stored but not yet read
  *
- * [AppSettings.voiceLanguage] is written here and read by nothing yet: app2's
- * dictation calls the recognizer with no language hint until task P-2 lands the
- * voice stack, which owns that call site. [AppSettings.usageWarnThresholdPercent]
+ * [AppSettings.voiceLanguage] is read by the composer mic tap as the
+ * recognizer language hint. [AppSettings.voiceSilenceThresholdSeconds] is
+ * sampled lazily by [com.pocketshell.next.voice.AndroidSpeechRecognitionProvider]
+ * on each start. [AppSettings.usageWarnThresholdPercent]
  * is likewise the usage panel's (task P-5) to read. Each is a settings-surface
  * value its owning task consumes; the alternative — landing the screen without
  * them and editing it three more times — is worse. They are called out here so
@@ -96,6 +97,17 @@ class SettingsRepository @Inject constructor(
         if (_settings.value.voiceLanguage == normalised) return
         write { putString(KEY_VOICE_LANGUAGE, normalised) }
         _settings.value = _settings.value.copy(voiceLanguage = normalised)
+    }
+
+    /**
+     * Android recognizer silence window (seconds). Same key as v0.4.x so a
+     * stored value survives the package-id restore.
+     */
+    fun setVoiceSilenceThresholdSeconds(seconds: Float) {
+        val snapped = snapVoiceSilence(seconds)
+        if (_settings.value.voiceSilenceThresholdSeconds == snapped) return
+        write { putFloat(KEY_VOICE_SILENCE_SECONDS, snapped) }
+        _settings.value = _settings.value.copy(voiceSilenceThresholdSeconds = snapped)
     }
 
     /** "Approaching limit" percent for the usage panel, snapped to the grid. */
@@ -158,6 +170,7 @@ class SettingsRepository @Inject constructor(
         voiceLanguage = normaliseVoiceLanguage(
             prefs.safeString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO),
         ),
+        voiceSilenceThresholdSeconds = snapVoiceSilence(readVoiceSilenceSeconds(prefs)),
         usageWarnThresholdPercent = snapUsageWarnThreshold(
             prefs.safeInt(KEY_USAGE_WARN_THRESHOLD, AppSettings.DEFAULT_USAGE_WARN_PERCENT),
         ),
@@ -208,6 +221,42 @@ class SettingsRepository @Inject constructor(
         )
     }
 
+    private fun snapVoiceSilence(seconds: Float): Float {
+        val clamped = seconds.coerceIn(
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            AppSettings.MAX_VOICE_SILENCE_SECONDS,
+        )
+        val step = AppSettings.VOICE_SILENCE_STEP_SECONDS
+        val snapped = (kotlin.math.round(clamped / step) * step)
+        return snapped.coerceIn(
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            AppSettings.MAX_VOICE_SILENCE_SECONDS,
+        )
+    }
+
+    /**
+     * Prefer `next_settings`; if this install has never written the key,
+     * read v0.4.x `app_settings` so an upgraded silence window survives.
+     */
+    private fun readVoiceSilenceSeconds(prefs: SharedPreferences): Float {
+        if (prefs.contains(KEY_VOICE_SILENCE_SECONDS)) {
+            return prefs.safeFloat(
+                KEY_VOICE_SILENCE_SECONDS,
+                AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+            )
+        }
+        val legacy = runCatching {
+            appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+        }.getOrNull() ?: return AppSettings.DEFAULT_VOICE_SILENCE_SECONDS
+        if (!legacy.contains(KEY_VOICE_SILENCE_SECONDS)) {
+            return AppSettings.DEFAULT_VOICE_SILENCE_SECONDS
+        }
+        return legacy.safeFloat(
+            KEY_VOICE_SILENCE_SECONDS,
+            AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+        )
+    }
+
     private fun normaliseVoiceLanguage(code: String?): String {
         val trimmed = code?.trim()?.lowercase().orEmpty()
         return AppSettings.VOICE_LANGUAGE_OPTIONS
@@ -244,6 +293,9 @@ class SettingsRepository @Inject constructor(
     private fun SharedPreferences.safeLong(key: String, default: Long): Long =
         runCatching { getLong(key, default) }.getOrElse { drop(key); default }
 
+    private fun SharedPreferences.safeFloat(key: String, default: Float): Float =
+        runCatching { getFloat(key, default) }.getOrElse { drop(key); default }
+
     private fun SharedPreferences.safeString(key: String, default: String): String =
         runCatching { getString(key, default) ?: default }.getOrElse { drop(key); default }
 
@@ -259,9 +311,11 @@ class SettingsRepository @Inject constructor(
          * inherits a file full of settings for deleted machinery.
          */
         const val PREFS_NAME = "next_settings"
+        const val LEGACY_PREFS_NAME = "app_settings"
 
         const val KEY_TERMINAL_TEXT_SIZE_PX = "terminal_text_size_px"
         const val KEY_VOICE_LANGUAGE = "voice_language"
+        const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"

@@ -32,8 +32,14 @@ class RoutingSpeechRecognitionProviderTest {
         override fun cancel() {}
     }
 
+    /**
+     * #2529 reproduce-first: a stored OpenAI key used to select Whisper
+     * (`whisper.isAvailable()` was the routing question). Composer dictation
+     * must stay on the Android `SpeechRecognizer` even when a key survives
+     * from a v0.4.x install.
+     */
     @Test
-    fun `routes to whisper when whisper is available`() {
+    fun `a stored openai key still starts the android arm`() {
         val whisper = FakeArm(available = true)
         val android = FakeArm(available = true)
         val routing = RoutingSpeechRecognitionProvider(whisper, android)
@@ -41,8 +47,8 @@ class RoutingSpeechRecognitionProviderTest {
         assertTrue(routing.isAvailable())
         routing.start(language = null, listener = noopListener())
 
-        assertEquals(1, whisper.startCalls)
-        assertEquals(0, android.startCalls)
+        assertEquals(0, whisper.startCalls)
+        assertEquals(1, android.startCalls)
     }
 
     @Test
@@ -69,7 +75,19 @@ class RoutingSpeechRecognitionProviderTest {
     }
 
     @Test
-    fun `re-evaluates the route on every tap`() {
+    fun `whisper-only is not enough — android availability is the mic`() {
+        val whisper = FakeArm(available = true)
+        val android = FakeArm(available = false)
+        val routing = RoutingSpeechRecognitionProvider(whisper, android)
+
+        assertFalse(routing.isAvailable())
+        assertEquals(null, routing.start(language = null, listener = noopListener()))
+        assertEquals(0, whisper.startCalls)
+        assertEquals(1, android.startCalls)
+    }
+
+    @Test
+    fun `storing a key mid-session does not flip the route off android`() {
         val whisper = FakeArm(available = false)
         val android = FakeArm(available = true)
         val routing = RoutingSpeechRecognitionProvider(whisper, android)
@@ -77,11 +95,10 @@ class RoutingSpeechRecognitionProviderTest {
         routing.start(language = null, listener = noopListener())
         assertEquals(1, android.startCalls)
 
-        // Storing an API key mid-session flips the route on the very next tap.
         whisper.available = true
         routing.start(language = null, listener = noopListener())
-        assertEquals(1, whisper.startCalls)
-        assertEquals(1, android.startCalls)
+        assertEquals(0, whisper.startCalls)
+        assertEquals(2, android.startCalls)
     }
 
     private fun noopListener(): SpeechRecognitionListener = object : SpeechRecognitionListener {
@@ -92,10 +109,10 @@ class RoutingSpeechRecognitionProviderTest {
 
     // Sanity: the session returned really is the arm's, not a routing wrapper.
     @Test
-    fun `returns the selected arm's own session`() {
+    fun `returns the android arm's own session even when whisper is available`() {
         val session = FakeSession()
-        val whisper = FakeArm(available = true, session = session)
-        val android = FakeArm(available = true)
+        val whisper = FakeArm(available = true)
+        val android = FakeArm(available = true, session = session)
         val routing = RoutingSpeechRecognitionProvider(whisper, android)
 
         val result = routing.start(language = null, listener = noopListener())

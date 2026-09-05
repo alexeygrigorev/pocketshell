@@ -280,7 +280,7 @@ class SessionKeyBarTest {
                     onRetry = {},
                     onHotkeySend = onSend,
                     onDraftChange = {},
-                    onSend = {},
+                    onSend = { true },
                     onInsert = {},
                     onAttach = {},
                     onMicTap = {},

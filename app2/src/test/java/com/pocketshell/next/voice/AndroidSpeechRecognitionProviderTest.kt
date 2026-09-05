@@ -466,4 +466,48 @@ class AndroidSpeechRecognitionProviderTest {
         assertEquals("just one phrase", listener.finalText)
         assertNull(listener.error)
     }
+
+    // ---- #2529: create / startListening / missing permission must not crash --
+
+    @Test
+    fun factoryThrow_returnsNullInsteadOfEscaping() {
+        val provider = AndroidSpeechRecognitionProvider(
+            context = context,
+            recognizerFactory = { throw SecurityException("RECORD_AUDIO") },
+        )
+        val listener = RecordingListener()
+
+        val session = provider.start(language = "en-US", listener = listener)
+
+        assertNull(session)
+        assertNull(listener.finalText)
+    }
+
+    @Test
+    fun startListeningThrow_returnsNullInsteadOfEscaping() {
+        val provider = AndroidSpeechRecognitionProvider(
+            context = context,
+            listeningInvoker = { _, _ -> throw SecurityException("RECORD_AUDIO") },
+        )
+        val listener = RecordingListener()
+
+        val session = provider.start(language = "en-US", listener = listener)
+
+        assertNull(session)
+        assertNull(listener.finalText)
+    }
+
+    @Test
+    fun missingPermission_doesNotEscapeAsUncaught() {
+        val provider = AndroidSpeechRecognitionProvider(
+            context = context,
+            recognizerFactory = { throw SecurityException("Microphone permission denied") },
+        )
+        val listener = RecordingListener()
+
+        val session = provider.start(language = null, listener = listener)
+
+        assertNull(session)
+        assertTrue(listener.error == null || listener.error!!.contains("permission", ignoreCase = true))
+    }
 }

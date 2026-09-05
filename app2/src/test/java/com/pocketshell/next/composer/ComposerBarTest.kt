@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -152,11 +153,14 @@ class ComposerBarTest {
         setContent(ComposerUiState(recording = RecordingState.Recording, micAvailable = true))
 
         composeRule.onNodeWithTag(COMPOSER_DISCARD_RECORDING_TAG).assertIsDisplayed()
-        // Attach / history / preview are text tools, not usable mid-dictation.
+        // Attach / history / slash / mic are text-composition tools, not
+        // usable mid-dictation. Insert and Send stay on the recording row.
         composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
     }
 
     @Test
@@ -191,10 +195,11 @@ class ComposerBarTest {
     }
 
     @Test
-    fun `preview is unavailable with nothing to preview`() {
+    fun `preview is not on the idle control row`() {
         setContent(ComposerUiState())
 
-        composeRule.onNodeWithTag(COMPOSER_PREVIEW_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithText("Preview").assertDoesNotExist()
     }
 
     @Test
@@ -205,6 +210,68 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).performClick()
 
         assertEquals(1, toggled)
+    }
+
+    /**
+     * #2529 reproduce-first: idle chrome is ONE control row. The rewrite
+     * shipped Insert/Send on a second row with Recent/Preview/Clear on the
+     * mic row. This fails on that two-row occupancy and passes when Insert,
+     * Send, and the mic share a row and the rewrite text tools are gone.
+     */
+    @Test
+    fun `idle controls sit on one row with grouped tools insert send and mic`() {
+        setContent(ComposerUiState(draft = "hello", micAvailable = true))
+
+        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
+
+        composeRule.onNodeWithText("Recent").assertDoesNotExist()
+        composeRule.onNodeWithText("Preview").assertDoesNotExist()
+        composeRule.onNodeWithText("Clear").assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_DISCARD_TAG).assertDoesNotExist()
+
+        assertSameRow(COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_ATTACH_TAG, COMPOSER_HISTORY_TAG, COMPOSER_SLASH_TRIGGER_TAG, COMPOSER_MIC_TAG)
+    }
+
+    /**
+     * #2529 reproduce-first: recording chrome is timer+waveform plus one
+     * right-aligned [Discard · Insert · Send] row. The rewrite hid Insert/Send
+     * and left the mic on the listening row.
+     */
+    @Test
+    fun `recording shows timer waveform and discard insert send on one row`() {
+        setContent(ComposerUiState(recording = RecordingState.Recording, micAvailable = true))
+
+        composeRule.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_WAVEFORM_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_DISCARD_RECORDING_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+
+        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertDoesNotExist()
+
+        assertSameRow(COMPOSER_DISCARD_RECORDING_TAG, COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG)
+    }
+
+    @Test
+    fun `the slash trigger seeds a leading slash and opens autocomplete`() {
+        var draft = ""
+        setContent(ComposerUiState(), onDraftChange = { draft = it })
+
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).performClick()
+
+        assertEquals("/", draft)
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).assertIsDisplayed()
     }
 
     // --------------------------------------------------------------- helpers
@@ -236,6 +303,28 @@ class ComposerBarTest {
                     onDiscard = {},
                 )
             }
+        }
+    }
+
+    /**
+     * Two nodes share a row when their bounds overlap vertically. Tops can
+     * disagree when heights differ (a 44dp mic next to a 48dp pill) as long
+     * as they sit in the same [androidx.compose.foundation.layout.Row].
+     */
+    private fun assertSameRow(vararg tags: String) {
+        require(tags.size >= 2)
+        val bounds = tags.associateWith { tag ->
+            composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+        }
+        val firstTag = tags.first()
+        val first = bounds.getValue(firstTag)
+        tags.drop(1).forEach { tag ->
+            val other = bounds.getValue(tag)
+            assertTrue(
+                "$tag (top=${other.top} bottom=${other.bottom}) must share a row with " +
+                    "$firstTag (top=${first.top} bottom=${first.bottom})",
+                first.top < other.bottom && other.top < first.bottom,
+            )
         }
     }
 

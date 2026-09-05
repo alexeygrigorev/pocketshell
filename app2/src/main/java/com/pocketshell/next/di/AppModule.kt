@@ -25,6 +25,7 @@ import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.hosts.HostImporter
 import com.pocketshell.next.hosts.SshKeyStore
+import com.pocketshell.next.release.ReleaseChecker
 import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.terminal.AndroidGraceServiceControl
 import com.pocketshell.next.terminal.ForegroundSignal
@@ -322,4 +323,14 @@ object AppModule {
     @Singleton
     fun provideDiagnosticRecorder(@ApplicationContext context: Context): DiagnosticRecorder =
         DiagnosticRecorder(context)
+
+    // -------------------------------------------------------------------------
+    // GitHub Releases update check (issue #2531). Provided rather than
+    // `@Inject`-constructor-annotated because [ReleaseChecker] takes defaulted
+    // test seams (URL, backoff, HTTP client, zone) that Hilt would try to
+    // bind as missing types.
+
+    @Provides
+    @Singleton
+    fun provideReleaseChecker(): ReleaseChecker = ReleaseChecker()
 }

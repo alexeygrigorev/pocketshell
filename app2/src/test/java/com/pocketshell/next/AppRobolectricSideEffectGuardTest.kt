@@ -2,6 +2,7 @@ package com.pocketshell.next
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.robolectric.annotation.Config
@@ -63,5 +64,18 @@ class AppRobolectricSideEffectGuardTest {
         // Restore whatever was installed before this test touched the Application,
         // so a sibling test in the same JVM worker never observes this test's state.
         Thread.setDefaultUncaughtExceptionHandler(previous)
+    }
+
+    @Test
+    fun `App onCreate does not attach the update-check lifecycle observer under Robolectric`() {
+        val app = ApplicationProvider.getApplicationContext<App>()
+
+        assertFalse(
+            "App.onCreate() must not observe ProcessLifecycleOwner under Robolectric — " +
+                "that would fire a GitHub poll from every JVM unit test and leak a " +
+                "process-lifecycle observer across the suite",
+            app.updateCheckScheduler.lifecycleObserverAttached,
+        )
+        assertEquals(0L, app.updateCheckScheduler.checkCount)
     }
 }

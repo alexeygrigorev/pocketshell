@@ -340,6 +340,70 @@ class SessionTreeScreenTest {
         composeRule.onNodeWithTag(SESSION_TREE_CREATE_NOTICE_TAG).assertDoesNotExist()
     }
 
+    // --- Stop session (issue #2535) ----------------------------------------
+
+    @Test
+    fun `row kebab Stop session asks to stop that name and does not open it`() {
+        val opened = mutableListOf<String>()
+        val requested = mutableListOf<String>()
+        setContent(
+            state(
+                loaded = true,
+                sessions = listOf(
+                    row("first", "/w", activity = NOW),
+                    row("api", "/w", activity = NOW - 10),
+                ),
+            ),
+            onOpenSession = { opened += it },
+            onRequestStop = { requested += it },
+        )
+
+        composeRule.onNodeWithTag(sessionRowMenuTag("api")).performClick()
+        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).assertIsDisplayed()
+        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).performClick()
+
+        assertEquals(listOf("api"), requested)
+        assertEquals("the kebab must not also open the session", emptyList<String>(), opened)
+        composeRule.onNodeWithText(STOP_SESSION_TITLE).assertDoesNotExist()
+    }
+
+    @Test
+    fun `confirming Stop invokes the callback and names the session`() {
+        var confirmed = 0
+        var cancelled = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("api", "/w", activity = NOW)))
+                .copy(pendingStop = "api"),
+            onConfirmStop = { confirmed += 1 },
+            onCancelStop = { cancelled += 1 },
+        )
+
+        composeRule.onNodeWithTag(STOP_SESSION_TITLE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
+        composeRule.onNodeWithText(stopSessionMessage("api")).assertIsDisplayed()
+        composeRule.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
+
+        assertEquals(1, confirmed)
+        assertEquals(0, cancelled)
+    }
+
+    @Test
+    fun `cancelling Stop does not invoke confirm`() {
+        var confirmed = 0
+        var cancelled = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("api", "/w", activity = NOW)))
+                .copy(pendingStop = "api"),
+            onConfirmStop = { confirmed += 1 },
+            onCancelStop = { cancelled += 1 },
+        )
+
+        composeRule.onNodeWithTag(STOP_SESSION_CANCEL_TAG).performClick()
+
+        assertEquals(0, confirmed)
+        assertEquals(1, cancelled)
+    }
+
     private fun setContent(
         state: SessionTreeUiState,
         onRefresh: () -> Unit = {},
@@ -347,6 +411,9 @@ class SessionTreeScreenTest {
         onCreateSession: () -> Unit = {},
         onOpenFiles: () -> Unit = {},
         onOpenPorts: () -> Unit = {},
+        onRequestStop: (String) -> Unit = {},
+        onConfirmStop: () -> Unit = {},
+        onCancelStop: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -357,6 +424,9 @@ class SessionTreeScreenTest {
                     onCreateSession = onCreateSession,
                     onOpenFiles = onOpenFiles,
                     onOpenPorts = onOpenPorts,
+                    onRequestStop = onRequestStop,
+                    onConfirmStop = onConfirmStop,
+                    onCancelStop = onCancelStop,
                     nowSec = NOW,
                 )
             }

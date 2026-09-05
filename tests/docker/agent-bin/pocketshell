@@ -522,22 +522,23 @@ case "${1:-}" in
     ;;
   sessions)
     shift
-    if [ "${1:-}" = "create" ]; then
-      # Rewrite task U-6 (journey J04): `sessions create` is the ONE verb whose
-      # contract the phone cannot fake — idempotency (`created:false` for a name
-      # that already exists), the JSON error envelope on stdout, and the
-      # backend routing all live in the real implementation. So this arm
-      # delegates to the repository's real host CLI (same idiom as the `send`
-      # arm, issue #2240, and the `engines` arm, issue #2276) instead of
+    if [ "${1:-}" = "create" ] || [ "${1:-}" = "kill" ]; then
+      # Rewrite task U-6 (journey J04) and issue #2535: `sessions create` and
+      # `sessions kill` are the verbs whose contract the phone cannot fake —
+      # exact `=` tmux match, aplexer `a kill <id>`, and the JSON error
+      # envelope all live in the real implementation. So this arm delegates
+      # to the repository's real host CLI (same idiom as the `send` arm,
+      # issue #2240, and the `engines` arm, issue #2276) instead of
       # re-implementing them in shell, where the fixture could agree with a
       # broken client.
       #
-      # It creates a REAL detached tmux session through the fixture `tmuxctl`
-      # (on that session's own `tmuxctl-<name>` socket), so the session the
-      # journey just created is then enumerated by `sessions list --json` for
-      # real rather than being announced and never seen.
+      # Create makes a REAL detached tmux session through the fixture
+      # `tmuxctl` (on that session's own `tmuxctl-<name>` socket). Kill
+      # destroys that same session with `tmux -S <socket> kill-session -t
+      # '=NAME'`, so the journey's follow-up `sessions list --json` no
+      # longer contains it.
       if [ ! -d /opt/pocketshell-real/src ]; then
-        printf 'pocketshell sessions create fixture needs /opt/pocketshell-real/src\n' >&2
+        printf 'pocketshell sessions %s fixture needs /opt/pocketshell-real/src\n' "${1:-}" >&2
         exit 64
       fi
       exec /usr/local/bin/pocketshell-real-send sessions "$@"
@@ -626,7 +627,7 @@ case "${1:-}" in
       exec /usr/bin/tmux.real -S "$attach_socket" \
         attach-session -t "=${attach_name}"
     fi
-    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json], attach NAME [--hide-status]\n' >&2
+    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json], attach NAME [--hide-status], create NAME, kill NAME\n' >&2
     exit 64
     ;;
   jobs)

@@ -2,6 +2,7 @@ package com.pocketshell.next.terminal
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.transport.CloseReason
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
@@ -162,6 +163,18 @@ class SessionViewModel @Inject constructor(
     val uiState: StateFlow<SessionUiState> = _uiState.asStateFlow()
 
     /**
+     * One-shot: the host accepted the kill, so the screen should pop back to
+     * the tree rather than sit on a dead PTY. Cleared by
+     * [consumeLeaveAfterStop] before the navigation runs.
+     */
+    private val _leaveAfterStop = MutableStateFlow(false)
+    val leaveAfterStop: StateFlow<Boolean> = _leaveAfterStop.asStateFlow()
+
+    /** Why the last Stop failed, if it did. Null when there is nothing to say. */
+    private val _stopFailure = MutableStateFlow<String?>(null)
+    val stopFailure: StateFlow<String?> = _stopFailure.asStateFlow()
+
+    /**
      * Owns the two bridge pumps. Separate from [viewModelScope] because the
      * output pump parks on a blocking queue write and the input pump on a
      * blocking queue read: both need [dispatcher] (an IO pool), not the main
@@ -172,6 +185,7 @@ class SessionViewModel @Inject constructor(
     private var attachJob: Job? = null
     private var reconnectJob: Job? = null
     private var watchJob: Job? = null
+    private var stopJob: Job? = null
     private var bridge: TerminalPtyBridge? = null
     private var channel: PtyChannel? = null
 
@@ -319,6 +333,23 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
+     * `pocketshell sessions kill -- NAME` for the session this screen is
+     * attached to. On success the route pops back to the tree; on failure a
+     * short banner is shown and the terminal stays.
+     */
+    fun stopSession() {
+        if (stopJob?.isActive == true) return
+        val name = sessionLabel ?: return
+        _stopFailure.value = null
+        stopJob = viewModelScope.launch { runStop(name) }
+    }
+
+    /** Clears the one-shot leave signal. Called by the route BEFORE it pops. */
+    fun consumeLeaveAfterStop() {
+        _leaveAfterStop.value = false
+    }
+
+    /**
      * Reports the terminal's real size in character cells.
      *
      * Called by the screen whenever the vendored view recomputes its geometry —
@@ -388,6 +419,8 @@ class SessionViewModel @Inject constructor(
         reconnectJob = null
         watchJob?.cancel()
         watchJob = null
+        stopJob?.cancel()
+        stopJob = null
         bridge?.stop()
         bridge = null
         connection = null
@@ -700,6 +733,35 @@ class SessionViewModel @Inject constructor(
 
     private fun fail(message: String) {
         _uiState.value = SessionUiState.Failed(message)
+    }
+
+    private suspend fun runStop(name: String) {
+        val host = hostId ?: return
+        val connection = when (val result = registry.getOrConnect(host)) {
+            is ConnectResult.Connected -> result.connection
+            is ConnectResult.NeedsTrust -> {
+                _stopFailure.value =
+                    "This host's key still needs to be confirmed. Open it from the host " +
+                        "list to review the key."
+                return
+            }
+            is ConnectResult.Failed -> {
+                _stopFailure.value = result.message
+                return
+            }
+        }
+        clients.create(connection).killSession(name).fold(
+            onSuccess = {
+                _stopFailure.value = null
+                _leaveAfterStop.value = true
+            },
+            onFailure = { error ->
+                _stopFailure.value = when (error) {
+                    is HostCliError -> error.userMessage
+                    else -> "Could not stop the session on the host: " + describe(error)
+                }
+            },
+        )
     }
 
     /**

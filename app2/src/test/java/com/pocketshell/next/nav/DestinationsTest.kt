@@ -38,10 +38,11 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 14 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
-        // the five routes task P-6 added (the four host-management ones and
-        // WorkspaceRoots), and CrashReports (issue #2476).
-        assertEquals(14, patterns.size)
+        // 13 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
+        // the four remaining P-6 routes (HostForm, SshKeys, QrScan,
+        // WorkspaceRoots; HostQr share was removed in issue #2523), and
+        // CrashReports (issue #2476).
+        assertEquals(13, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -62,7 +63,6 @@ class DestinationsTest {
             Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
-        assertMatchesPattern(Destination.HostQr.pattern, Destination.HostQr.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route())
         assertMatchesPattern(

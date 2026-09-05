@@ -9,8 +9,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The rendered QR itself: a host encoded exactly the way [HostQrShareScreen]
- * encodes it, painted to a bitmap, and read back out of that bitmap.
+ * The rendered QR itself: a payload painted to a bitmap and read back out.
  *
  * This is the one hop the codec tests cannot cover — everything else asserts on
  * strings, and a QR that encodes a string the decoder cannot recover is still a

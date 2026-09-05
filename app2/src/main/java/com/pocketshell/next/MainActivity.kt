@@ -28,7 +28,7 @@ import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
 import com.pocketshell.next.hosts.HostListRoute
-import com.pocketshell.next.hosts.HostQrShareRoute
+
 import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
@@ -120,7 +120,6 @@ data class HostListActions(
     val onOpenHost: (Long) -> Unit,
     val onAddHost: () -> Unit,
     val onEditHost: (Long) -> Unit,
-    val onShareHost: (Long) -> Unit,
     val onScanQr: () -> Unit,
     val onOpenSettings: () -> Unit,
 )
@@ -132,7 +131,7 @@ data class HostListActions(
  * The `*Screen` / `connectViewModel` parameters are seams, not feature flags:
  * the real screens (host list, connect gate, session tree, terminal,
  * port-forward panel, file explorer, file viewer, host add/edit form, SSH
- * keys, host QR share/scan, crash reports) resolve their ViewModels through
+ * keys, QR scan, crash reports) resolve their ViewModels through
  * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
  * Robolectric `createComposeRule()` composition could not host them. The
  * parameters let a test supply the same screen / the same ViewModel built by
@@ -149,7 +148,6 @@ fun AppNavHost(
             onOpenHost = actions.onOpenHost,
             onAddHost = actions.onAddHost,
             onEditHost = actions.onEditHost,
-            onShareHost = actions.onShareHost,
             onScanQr = actions.onScanQr,
             onOpenSettings = actions.onOpenSettings,
         )
@@ -198,9 +196,6 @@ fun AppNavHost(
     sshKeysScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         SshKeysRoute(onBack = onBack)
     },
-    hostQrScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
-        HostQrShareRoute(onBack = onBack)
-    },
     qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
     settingsScreen: @Composable (
@@ -241,15 +236,12 @@ fun AppNavHost(
                         onOpenHost = onOpenHost,
                         // Task P-6: the management routes are plain
                         // navigations, deliberately NOT gated by the connect
-                        // gate — editing or sharing a host must work while the
-                        // host is unreachable, which is exactly when a user
-                        // goes looking for the form.
+                        // gate — editing a host must work while the host is
+                        // unreachable, which is exactly when a user goes
+                        // looking for the form.
                         onAddHost = { navController.navigate(Destination.HostForm.route()) },
                         onEditHost = { hostId ->
                             navController.navigate(Destination.HostForm.route(hostId))
-                        },
-                        onShareHost = { hostId ->
-                            navController.navigate(Destination.HostQr.route(hostId))
                         },
                         onScanQr = { navController.navigate(Destination.QrScan.route()) },
                         // Task P-6 fast-follow: the only UI entry point into
@@ -281,12 +273,6 @@ fun AppNavHost(
         }
         composable(Destination.SshKeys.pattern) {
             sshKeysScreen { navController.popBackStack() }
-        }
-        composable(
-            route = Destination.HostQr.pattern,
-            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
-        ) {
-            hostQrScreen { navController.popBackStack() }
         }
         composable(Destination.QrScan.pattern) {
             qrScanScreen({ navController.popBackStack() }, { navController.popBackStack() })

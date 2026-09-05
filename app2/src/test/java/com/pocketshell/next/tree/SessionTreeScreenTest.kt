@@ -184,6 +184,29 @@ class SessionTreeScreenTest {
         composeRule.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
     }
 
+    /**
+     * Issue #2505: Destination.Ports is registered but nothing in the shipping
+     * UI navigates to it. The header action next to Files is the caller; this
+     * test is RED until that action exists and fires `onOpenPorts`.
+     */
+    @Test
+    fun `tapping Ports in the header opens port forwarding`() {
+        var files = 0
+        var ports = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
+            onOpenFiles = { files += 1 },
+            onOpenPorts = { ports += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_FILES_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).performClick()
+
+        assertEquals(1, ports)
+        assertEquals("Files must stay independent of Ports", 0, files)
+    }
+
     @Test
     fun `tapping a row opens that session by its own name`() {
         val opened = mutableListOf<String>()
@@ -269,6 +292,8 @@ class SessionTreeScreenTest {
         onRefresh: () -> Unit = {},
         onOpenSession: (String) -> Unit = {},
         onCreateSession: () -> Unit = {},
+        onOpenFiles: () -> Unit = {},
+        onOpenPorts: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -277,6 +302,8 @@ class SessionTreeScreenTest {
                     onRefresh = onRefresh,
                     onOpenSession = onOpenSession,
                     onCreateSession = onCreateSession,
+                    onOpenFiles = onOpenFiles,
+                    onOpenPorts = onOpenPorts,
                     nowSec = NOW,
                 )
             }

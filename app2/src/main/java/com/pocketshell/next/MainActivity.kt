@@ -159,8 +159,13 @@ fun AppNavHost(
         hostId: Long,
         onOpenSession: (String) -> Unit,
         onOpenFiles: () -> Unit,
-    ) -> Unit = { _, onOpenSession, onOpenFiles ->
-        SessionTreeRoute(onOpenSession = onOpenSession, onOpenFiles = onOpenFiles)
+        onOpenPorts: () -> Unit,
+    ) -> Unit = { _, onOpenSession, onOpenFiles, onOpenPorts ->
+        SessionTreeRoute(
+            onOpenSession = onOpenSession,
+            onOpenFiles = onOpenFiles,
+            onOpenPorts = onOpenPorts,
+        )
     },
     sessionScreen: @Composable (
         hostId: Long,
@@ -305,6 +310,9 @@ fun AppNavHost(
                 // The plan's terminal kebab will later navigate to this same
                 // route WITH the session's workspace path.
                 { navController.navigate(Destination.Files.route(hostId)) },
+                // Task P-4: the host's port-forward panel. Same host-scoped
+                // rationale as Files — forwarding is not a per-session action.
+                { navController.navigate(Destination.Ports.route(hostId)) },
             )
         }
         composable(

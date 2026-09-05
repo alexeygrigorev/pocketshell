@@ -63,6 +63,9 @@ const val SESSION_TREE_CREATE_LABEL: String = "New session"
 /** The header action that opens this host's file explorer (task P-3a). */
 const val SESSION_TREE_FILES_TAG: String = "session-tree-files"
 
+/** The header action that opens this host's port-forward panel (task P-4). */
+const val SESSION_TREE_PORTS_TAG: String = "session-tree-ports"
+
 fun sessionRowTag(name: String): String = "session-row-$name"
 
 fun workspaceHeaderTag(label: String): String = "workspace-header-$label"
@@ -81,6 +84,7 @@ fun workspaceHeaderTag(label: String): String = "workspace-header-$label"
 fun SessionTreeRoute(
     onOpenSession: (String) -> Unit,
     onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionTreeViewModel = hiltViewModel(),
 ) {
@@ -107,6 +111,7 @@ fun SessionTreeRoute(
         onSubmitCreate = viewModel::createSession,
         onDismissCreate = viewModel::dismissCreateSheet,
         onOpenFiles = onOpenFiles,
+        onOpenPorts = onOpenPorts,
         modifier = modifier,
     )
 }
@@ -146,6 +151,7 @@ fun SessionTreeScreen(
     onRefresh: () -> Unit,
     onOpenSession: (String) -> Unit,
     onOpenFiles: () -> Unit = {},
+    onOpenPorts: () -> Unit = {},
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (name: String, cwd: String?) -> Unit = { _, _ -> },
@@ -158,6 +164,7 @@ fun SessionTreeScreen(
             onRefresh = onRefresh,
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
+            onOpenPorts = onOpenPorts,
             nowSec = nowSec,
         )
 
@@ -200,6 +207,7 @@ private fun SessionTreeBody(
     onRefresh: () -> Unit,
     onOpenSession: (String) -> Unit,
     onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
     nowSec: Long,
 ) {
     Column(
@@ -210,11 +218,9 @@ private fun SessionTreeBody(
         ScreenHeader(
             title = "Sessions",
             subtitle = headerSubtitle(state),
-            // Task P-3a: the host's file browser. It lives in the header rather
-            // than behind a menu because this is the app's ONLY way to reach the
-            // explorer until U-4's terminal chrome lands, and browsing a host's
-            // files is a first-class job the maintainer does regularly — not a
-            // secondary action to bury.
+            // Tasks P-3a / P-4: Files and Ports are host-scoped, so they live
+            // in this header rather than behind a menu. ScreenHeader.trailing
+            // already lays its children out as a compact row.
             trailing = {
                 PocketShellButton(
                     text = "Files",
@@ -222,6 +228,13 @@ private fun SessionTreeBody(
                     variant = ButtonVariant.Text,
                     compact = true,
                     modifier = Modifier.testTag(SESSION_TREE_FILES_TAG),
+                )
+                PocketShellButton(
+                    text = "Ports",
+                    onClick = onOpenPorts,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(SESSION_TREE_PORTS_TAG),
                 )
             },
         )

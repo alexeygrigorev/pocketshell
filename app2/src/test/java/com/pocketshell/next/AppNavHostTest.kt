@@ -151,7 +151,7 @@ class AppNavHostTest {
                 // resolves its ViewModel through `hiltViewModel()`. The
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
-                treeScreen = { hostId, _, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 // Same rationale again for U-4's terminal: the real screen
                 // resolves `SessionViewModel` through `hiltViewModel()` AND
                 // dials a host. The stand-in echoes both route arguments, which

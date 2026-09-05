@@ -24,13 +24,16 @@ name: app2
 #     reason full-suite-notify.yml (#2353) was
 #     were split out.
 #
-# NOT A REQUIRED CHECK. Registering a workflow that carries trigger-level
-# `paths:` as a required status check is the #2354 footgun: GitHub never starts
-# a run for a non-matching PR, so the required context sits at "Expected"
-# forever with no admin bypass short of dropping the requirement. If these jobs
-# are ever promoted to required, the trigger-level `paths:` below must be
-# removed first and ALL selection moved into the `changes` job (which already
-# does the per-job half and reports a skipped-but-present job either way).
+# NOT A REQUIRED CHECK (#2354). Do not register these jobs as required
+# branch-protection checks. Trigger-level `paths:` / `paths-ignore` were
+# removed (issue #2509): GitHub's `on.push.paths` is the #2354 footgun
+# (non-matching PRs never start a run, required contexts sit at Expected
+# forever) AND empirically suppressed this file's `schedule:` cadence —
+# `gh run list --workflow app2.yml --event schedule` stayed empty while
+# tests.yml's schedule the same morning fired. Per-job selection stays in
+# the `changes` job (empty/unknown base → ALL lanes, which is what
+# schedule/dispatch pass). A skipped-but-present job is the honest signal;
+# a workflow GitHub never started is not.
 #
 # TWO LAYERS OF androidTest PROTECTION.
 #   * `app2-unit` COMPILES the androidTest source set on every run — cheap, no
@@ -46,45 +49,15 @@ name: app2
 #     decisions.
 
 on:
+  # No workflow-level `paths:` / `paths-ignore` (issue #2509 / D37). GitHub's
+  # own filter decides whether the WHOLE run happens; pinning it here is how
+  # the scheduled cadence silently never started. Per-JOB selection is the
+  # `changes` job's business, and it already fail-opens on empty/unknown base.
   push:
     branches:
       - main
       - stable
-    paths:
-      # The UNION of every job's filter below. Per-JOB selection is the
-      # `changes` job's business — GitHub's own `paths:` is workflow-level.
-      - "app2/**"
-      - "shared/core-transport/**"
-      - "shared/core-portfwd/**"
-      - "shared/core-hostapi/**"
-      - "gradle/**"
-      - "settings.gradle.kts"
-      - "build.gradle.kts"
-      - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
-      - "tests/docker/**"
-      - ".github/workflows/app2.yml"
-      - "scripts/ci-app2-changed-modules.sh"
-      - "scripts/check-app2-lane-execution.py"
-      - "scripts/ci-app2-journey-suite.sh"
   pull_request:
-    paths:
-      - "app2/**"
-      - "shared/core-transport/**"
-      - "shared/core-portfwd/**"
-      - "shared/core-hostapi/**"
-      - "gradle/**"
-      - "settings.gradle.kts"
-      - "build.gradle.kts"
-      - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
-      - "tests/docker/**"
-      - ".github/workflows/app2.yml"
-      - "scripts/ci-app2-changed-modules.sh"
-      - "scripts/check-app2-lane-execution.py"
-      - "scripts/ci-app2-journey-suite.sh"
   workflow_dispatch:
   # NIGHTLY CADENCE (decision D37). D37 requires the fault/journey release gate
   # to run on a scheduled cadence with no off switch; it used to be satisfied by
@@ -92,9 +65,9 @@ on:
   # the `:app` module every one of its five Gradle invocations targeted. This
   # lane is that gate's successor, so it takes the cadence too — 02:17 UTC, the
   # slot the old nightly held, kept rather than moved so the off-hours window is
-  # unchanged. `schedule` runs no `paths:` filter, and the `changes` job's
-  # selector fail-opens on a non-push event (no diff base -> ALL lanes), so a
-  # scheduled run exercises the whole suite rather than whatever a diff picked.
+  # unchanged. The `changes` job's selector fail-opens on a non-push event (no
+  # diff base -> ALL lanes), so a scheduled/dispatched run exercises the whole
+  # suite rather than whatever a diff picked.
   schedule:
     - cron: "17 2 * * *"
 

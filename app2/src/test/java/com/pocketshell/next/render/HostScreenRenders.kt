@@ -11,6 +11,7 @@ import com.pocketshell.next.hosts.HostFormErrors
 import com.pocketshell.next.hosts.HostFormState
 import com.pocketshell.next.hosts.HostListScreen
 import com.pocketshell.next.hosts.HostListUiState
+import com.pocketshell.next.hosts.HostListUpdateNotice
 import com.pocketshell.next.hosts.HostRow
 import com.pocketshell.next.hosts.QrScannerViewModel
 import com.pocketshell.next.hosts.QrScannerScreen
@@ -59,6 +60,31 @@ class HostScreenRenders {
             onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
+        )
+    }
+
+    /** Issue #2531: the GitHub-Releases update banner on the host list. */
+    @Test
+    fun hostListUpdateBanner() = render("host-list-update-banner") {
+        HostListScreen(
+            state = HostListUiState(
+                loaded = true,
+                hosts = listOf(
+                    HostRow(1, "hetzner", "alexey@135.181.114.209"),
+                    HostRow(2, "builder", "root@10.0.0.7"),
+                ),
+            ),
+            onOpenHost = {},
+            onAddHost = {},
+            onEditHost = {},
+            onScanQr = {},
+            onOpenSettings = {},
+            onDeleteHost = {},
+            updateNotice = HostListUpdateNotice.Available(
+                text = "v0.5.1 is available — you are on v0.5.0 · 5 Sep 2026",
+                apkUrl = "https://example.com/pocketshell-0.5.1.apk",
+                htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v0.5.1",
+            ),
         )
     }
 

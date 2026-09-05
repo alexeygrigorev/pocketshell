@@ -6,7 +6,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.release.ReleaseCheckResult
+import com.pocketshell.next.release.ReleaseInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -133,6 +137,84 @@ class SettingsScreenTest {
         assertEquals(1, backCount)
     }
 
+    @Test
+    fun `idle check-for-updates row runs immediately when tapped`() {
+        var checks = 0
+        setContent(onCheckForUpdates = { checks++ })
+
+        composeRule.onNodeWithText("Ask GitHub for the latest APK.").assertIsDisplayed()
+        composeRule.onNodeWithText("Ask GitHub for the latest APK.").performClick()
+        assertEquals(1, checks)
+    }
+
+    @Test
+    fun `up-to-date state is distinct from failed`() {
+        setContent(updateCheckState = SettingsUpdateCheckState.UpToDate)
+
+        composeRule.onNodeWithText("Up to date").assertIsDisplayed()
+        composeRule.onNodeWithText("Retry update check").assertDoesNotExist()
+        composeRule.onNodeWithText("Couldn't check for updates", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun `available state shows tag and date without a clock time`() {
+        val info = ReleaseInfo(
+            tagName = "v0.5.1",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v0.5.1",
+            apkUrl = "https://example.com/pocketshell-0.5.1.apk",
+            publishedDateLabel = "5 Sep 2026",
+        )
+        var downloaded: ReleaseInfo? = null
+        setContent(
+            updateCheckState = SettingsUpdateCheckState.UpdateAvailable(info),
+            onDownloadUpdate = { downloaded = it },
+        )
+
+        composeRule.onNodeWithText("Download v0.5.1").assertIsDisplayed()
+        composeRule.onNodeWithText("Published 5 Sep 2026").assertIsDisplayed()
+        assertFalse("date leaked a clock time", info.publishedDateLabel.contains(":"))
+        composeRule.onNodeWithTag(SETTINGS_UPDATE_CHECK_TAG).performClick()
+        assertEquals(info, downloaded)
+    }
+
+    @Test
+    fun `failed state is not up to date and retries`() {
+        var checks = 0
+        setContent(
+            updateCheckState = SettingsUpdateCheckState.Failed("rate-limited, try again later"),
+            onCheckForUpdates = { checks++ },
+        )
+
+        composeRule.onNodeWithText("Retry update check").assertIsDisplayed()
+        composeRule.onNodeWithText("Couldn't check for updates: rate-limited, try again later")
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Up to date").assertDoesNotExist()
+        composeRule.onNodeWithTag(SETTINGS_UPDATE_CHECK_TAG).performClick()
+        assertEquals(1, checks)
+    }
+
+    @Test
+    fun settingsUpdateCheckState_mapsTheThreeWayResult() {
+        assertEquals(
+            SettingsUpdateCheckState.Idle,
+            settingsUpdateCheckState(checking = false, lastResult = null),
+        )
+        assertEquals(
+            SettingsUpdateCheckState.Checking,
+            settingsUpdateCheckState(checking = true, lastResult = null),
+        )
+        assertEquals(
+            SettingsUpdateCheckState.UpToDate,
+            settingsUpdateCheckState(checking = false, lastResult = ReleaseCheckResult.UpToDate),
+        )
+        val failed = settingsUpdateCheckState(
+            checking = false,
+            lastResult = ReleaseCheckResult.Failed("no network connection"),
+        )
+        assertTrue(failed is SettingsUpdateCheckState.Failed)
+        assertFalse(failed is SettingsUpdateCheckState.UpToDate)
+    }
+
     private fun setContent(
         settings: AppSettings = AppSettings(),
         hosts: List<SettingsHostRow> = emptyList(),
@@ -145,6 +227,9 @@ class SettingsScreenTest {
         onAgentSubmitEnterDelayChange: (Int) -> Unit = {},
         onOpenWorkspaceRoots: (Long) -> Unit = {},
         onOpenCrashReports: () -> Unit = {},
+        updateCheckState: SettingsUpdateCheckState = SettingsUpdateCheckState.Idle,
+        onCheckForUpdates: () -> Unit = {},
+        onDownloadUpdate: (ReleaseInfo) -> Unit = {},
     ) {
         composeRule.setContent {
             SettingsScreen(
@@ -159,6 +244,9 @@ class SettingsScreenTest {
                 onAgentSubmitEnterDelayChange = onAgentSubmitEnterDelayChange,
                 onOpenWorkspaceRoots = onOpenWorkspaceRoots,
                 onOpenCrashReports = onOpenCrashReports,
+                updateCheckState = updateCheckState,
+                onCheckForUpdates = onCheckForUpdates,
+                onDownloadUpdate = onDownloadUpdate,
             )
         }
     }

@@ -19,14 +19,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import com.pocketshell.core.hostapi.AgentState
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.SessionRow
-import com.pocketshell.uikit.components.AgentKindBadge
-import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -37,8 +35,8 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
-import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
@@ -68,7 +66,9 @@ const val SESSION_TREE_PORTS_TAG: String = "session-tree-ports"
 
 fun sessionRowTag(name: String): String = "session-row-$name"
 
-fun workspaceHeaderTag(label: String): String = "workspace-header-$label"
+fun rootHeaderTag(key: String): String = "root-header-$key"
+
+fun folderHeaderTag(key: String): String = "folder-header-$key"
 
 /**
  * Route-level entry point: binds the Hilt-provided [SessionTreeViewModel] to
@@ -121,12 +121,14 @@ fun SessionTreeRoute(
  *
  * ## What it draws, and what it deliberately does not
  *
- * One section per workspace the host reported, each holding that workspace's
- * sessions. There is no collapse state, no drag reordering, no persisted node
- * registry, and no per-row action menu — the old client's tree had all four and
- * they are the machinery the rewrite is removing, not features being deferred.
- * A tap opens the session and the FAB creates one (U-6); that is the screen's
- * whole interaction budget (swipe actions are out of scope entirely).
+ * A three-level tree: root (`~/git`) → folder (cwd basename) → session. Root
+ * and folder rows are headers, not attach targets; only a session row tap
+ * opens the session. There is no collapse state, no drag reordering, no
+ * persisted node registry, and no per-row action menu — the old client's tree
+ * had all four and they are the machinery the rewrite is removing, not
+ * features being deferred. A 1-session folder still draws its folder row
+ * (collapsing it is the "grouping doesn't work" failure). The FAB creates a
+ * session (U-6); that plus a row tap is the screen's whole interaction budget.
  *
  * ## The partial-list banner is the point of the screen, not decoration
  *
@@ -138,8 +140,11 @@ fun SessionTreeRoute(
  * arrive are real and usable.
  *
  * Built from ui-kit primitives ([ScreenHeader], [SectionHeader], [ListRow],
- * [Banner], [EmptyState], [StatusDot], [AgentKindBadge], [AgentStateChip]) so
- * the row density, tap-target floor and status vocabulary are the shared ones.
+ * [Banner], [EmptyState], [StatusDot]) so the row density, tap-target floor and
+ * status vocabulary are the shared ones. Agent/engine chrome is deliberately
+ * absent (rewrite U-9 stays cut): no [com.pocketshell.uikit.components.AgentKindBadge],
+ * no [com.pocketshell.uikit.components.AgentStateChip], no engine/profile/backend
+ * in the subtitle. Attached is the green [StatusDot] only.
  *
  * Stateless: everything it paints comes from [state], so it renders identically
  * from a journey, a Robolectric test and a design render.
@@ -317,23 +322,40 @@ private fun SessionTreeBody(
                         .testTag(SESSION_TREE_LIST_TAG),
                     contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
                 ) {
-                    state.groups.forEach { group ->
-                        item(key = "workspace:${group.label}") {
+                    state.roots.forEach { root ->
+                        item(key = "root:${root.key}") {
                             SectionHeader(
-                                label = group.label,
-                                count = group.rows.size,
-                                modifier = Modifier.testTag(workspaceHeaderTag(group.label)),
+                                label = root.headerLabel,
+                                count = root.sessionCount,
+                                modifier = Modifier.testTag(rootHeaderTag(root.key)),
                             )
                         }
-                        items(
-                            count = group.rows.size,
-                            key = { index -> "session:${group.label}:${group.rows[index].name}" },
-                        ) { index ->
-                            SessionTreeRow(
-                                row = group.rows[index],
-                                nowSec = nowSec,
-                                onClick = { onOpenSession(group.rows[index].name) },
-                            )
+                        root.folders.forEach { folder ->
+                            if (!folder.untracked) {
+                                item(key = "folder:${root.key}:${folder.key}") {
+                                    SectionHeader(
+                                        label = folder.label,
+                                        count = folder.rows.size.takeIf { it >= 2 },
+                                        modifier = Modifier
+                                            .padding(start = PocketShellDensity.treeIndent)
+                                            .testTag(folderHeaderTag(folder.key)),
+                                    )
+                                }
+                            }
+                            items(
+                                count = folder.rows.size,
+                                key = { index ->
+                                    "session:${root.key}:${folder.key}:${folder.rows[index].name}"
+                                },
+                            ) { index ->
+                                val row = folder.rows[index]
+                                SessionTreeRow(
+                                    row = row,
+                                    nowSec = nowSec,
+                                    indentLevels = if (folder.untracked) 1 else 2,
+                                    onClick = { onOpenSession(row.name) },
+                                )
+                            }
                         }
                     }
                 }
@@ -343,46 +365,47 @@ private fun SessionTreeBody(
 }
 
 /**
- * One session row: attach dot, name, "backend · tag · last activity", the
- * engine/manager monogram and the agent-state glyph.
+ * One session row: attach dot, session name, optional relative activity.
  *
- * The leading dot is always drawn (green when attached, muted when not) rather
- * than drawn-only-when-attached, so every row's title starts at the same x and
- * a column of rows scans as a column.
+ * No engine/agent chrome — U-9 stays cut. The leading dot is always drawn
+ * (green when attached, muted when not) rather than drawn-only-when-attached,
+ * so every row's title starts at the same x and a column of rows scans as a
+ * column.
  */
 @Composable
 private fun SessionTreeRow(
     row: SessionRow,
     nowSec: Long,
+    indentLevels: Int,
     onClick: () -> Unit,
 ) {
     ListRow(
         title = row.name,
-        subtitle = rowSubtitle(row, nowSec),
+        subtitle = relativeActivityLabel(row.activityEpoch, nowSec),
         leading = {
             StatusDot(
                 status = if (row.attached) ConnectionStatus.Connected else ConnectionStatus.Idle,
             )
         },
-        trailing = {
-            AgentStateChip(state = row.agentState.toUiState())
-            val badge = row.badge()
-            AgentKindBadge(
-                monogram = badge.monogram,
-                label = badge.label,
-                isAgent = badge.isAgent,
-            )
-        },
         onClick = onClick,
-        modifier = Modifier.testTag(sessionRowTag(row.name)),
+        modifier = Modifier
+            .padding(start = PocketShellDensity.treeIndent * indentLevels)
+            .testTag(sessionRowTag(row.name))
+            .then(
+                if (row.attached) {
+                    Modifier.semantics { contentDescription = ATTACHED_DESCRIPTION }
+                } else {
+                    Modifier
+                },
+            ),
     )
 }
 
-/** `4 sessions · 2 workspaces`, or a quieter line before the first listing. */
+/** `4 sessions · 2 roots`, or a quieter line before the first listing. */
 private fun headerSubtitle(state: SessionTreeUiState): String = when {
     !state.loaded -> "host ${state.hostId}"
     else -> "${state.sessionCount} " + plural(state.sessionCount, "session") +
-        " · ${state.groups.size} " + plural(state.groups.size, "workspace")
+        " · ${state.roots.size} " + plural(state.roots.size, "root")
 }
 
 private fun plural(count: Int, noun: String): String = if (count == 1) noun else "${noun}s"
@@ -391,72 +414,4 @@ private fun plural(count: Int, noun: String): String = if (count == 1) noun else
 private fun partialManagers(state: SessionTreeUiState): String =
     state.errors.map { it.manager }.distinct().joinToString(", ")
 
-/**
- * `tmux · reviews · 5m ago`. Every part is optional: a plain tmux session with
- * no tag and no reported activity renders just `tmux`.
- */
-private fun rowSubtitle(row: SessionRow, nowSec: Long): String = listOfNotNull(
-    row.backend.label(),
-    row.tag,
-    relativeActivityLabel(row.activityEpoch, nowSec),
-).joinToString(" · ")
-
-private fun Backend.label(): String = when (this) {
-    Backend.TMUX -> Backend.WIRE_TMUX
-    Backend.APLEXER -> Backend.WIRE_APLEXER
-    // A manager this build does not know about. Named rather than hidden: the
-    // row is real, the app just cannot say what runs it.
-    Backend.UNKNOWN -> "unknown manager"
-}
-
-/**
- * The badge slot: the ENGINE when the host named one (that is the useful
- * identity — "which agent is in here"), otherwise the manager.
- *
- * `isAgent` drives the accent colour, so an agent session's monogram reads
- * differently from a plain shell's at a glance.
- */
-private data class RowBadge(val monogram: String, val label: String, val isAgent: Boolean)
-
-private fun SessionRow.badge(): RowBadge {
-    val engine = this.engine?.takeIf { it.isNotBlank() }
-    if (engine != null) {
-        return RowBadge(monogram = monogram(engine), label = engine, isAgent = true)
-    }
-    return when (backend) {
-        Backend.TMUX -> RowBadge("TM", "tmux session", isAgent = false)
-        Backend.APLEXER -> RowBadge("AP", "aplexer session", isAgent = false)
-        Backend.UNKNOWN -> RowBadge("?", "unknown manager", isAgent = false)
-    }
-}
-
-/**
- * Two-letter monogram for an engine name — its first two alphanumerics, so
- * `claude` → `CL`, `codex` → `CO`, `opencode` → `OP`, `grok` → `GR`.
- *
- * A rule rather than a lookup table on purpose: `engines list` is the HOST's to
- * define, so a phone that only badges names it knows would render `?` for an
- * engine the user added last week. The rule collides (`claude`/`clyde` both
- * `CL`), which is acceptable — the badge is a glance-level hint and the full
- * name is on the row's accessibility description.
- */
-private fun monogram(engine: String): String {
-    val letters = engine.filter { it.isLetterOrDigit() }
-    return when {
-        letters.isEmpty() -> "?"
-        letters.length == 1 -> letters.uppercase()
-        else -> letters.take(2).uppercase()
-    }
-}
-
-/**
- * `core-hostapi`'s reported state → the ui-kit chip vocabulary. `null` (the
- * host has no opinion) maps to [SessionAgentState.Unknown], which renders
- * NOTHING — absent, never a wrong chip.
- */
-private fun AgentState?.toUiState(): SessionAgentState = when (this) {
-    AgentState.IDLE -> SessionAgentState.Idle
-    AgentState.WAITING -> SessionAgentState.WaitingForInput
-    AgentState.WORKING -> SessionAgentState.Working
-    null -> SessionAgentState.Unknown
-}
+internal const val ATTACHED_DESCRIPTION: String = "Attached"

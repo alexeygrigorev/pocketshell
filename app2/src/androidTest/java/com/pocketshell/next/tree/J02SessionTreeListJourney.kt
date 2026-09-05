@@ -226,17 +226,18 @@ class J02SessionTreeListJourney {
         }
         JourneyScreenshots.capture("01-session-tree", JOURNEY)
 
-        // Grouped by the workspace the host reported — including the "other"
-        // bucket for the session it reported with none.
-        compose.onNodeWithTag(workspaceHeaderTag(WORKSPACE_MAIN)).assertIsDisplayed()
-        compose.onNodeWithTag(workspaceHeaderTag(WORKSPACE_APLEXER)).assertIsDisplayed()
-        compose.onNodeWithTag(workspaceHeaderTag(OTHER_WORKSPACE_LABEL)).assertIsDisplayed()
+        // Root → folder → session: both Docker workspaces sit under `~/git`,
+        // and the session the host reported with no cwd lands in `other`.
+        compose.onNodeWithTag(rootHeaderTag("~/git")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderTag("~/git/pocketshell")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
+        compose.onNodeWithTag(rootHeaderTag(OTHER_ROOT_KEY)).assertIsDisplayed()
 
-        // The aplexer row carries its engine badge, so BOTH managers are really
-        // rendered rather than the tmux half only.
-        compose.onNodeWithContentDescription("codex").assertIsDisplayed()
-        // And the reported agent state became a chip.
-        compose.onNodeWithContentDescription("Working").assertIsDisplayed()
+        // No engine/agent chrome — the tree names the session, not the engine.
+        compose.onNodeWithContentDescription("codex").assertDoesNotExist()
+        compose.onNodeWithContentDescription("claude").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Working").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Waiting for input").assertDoesNotExist()
 
         // The happy path raises NO banner. A partial-listing banner here would
         // mean a backend silently failed and the list is short.

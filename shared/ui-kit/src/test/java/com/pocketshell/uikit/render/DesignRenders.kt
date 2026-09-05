@@ -104,6 +104,17 @@ import org.robolectric.annotation.GraphicsMode
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class DesignRenders {
 
+    /**
+     * Issue #2530: desktop-style session tree — `~/git` / `other` roots, folder
+     * rows even at 1:1, session leaves with a status dot and no agent badge.
+     * `SessionTreeScreen` is app-module private, so this mirrors the primitives
+     * it composes; the emulator journey is the acceptance.
+     */
+    @Test
+    fun sessionTree() = render("session-tree") {
+        SessionTreeDesktopStyleRender()
+    }
+
     /** Issue #2521: closed-session compact launcher (Prompt Composer + ⌨). */
     @Test
     fun sessionCompactLauncherBar() = render("session-compact-launcher-bar") {

@@ -5,6 +5,7 @@ import android.graphics.Typeface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import com.pocketshell.next.settings.LocalAppSettings
 import kotlin.math.ceil
 
 /**
@@ -59,11 +60,26 @@ import kotlin.math.ceil
  *   reserves above the first row's baseline. Subtracted from the viewport
  *   height before dividing, so a viewport exactly N rows tall reports N rows
  *   rather than N + a sliver.
+ * @param textSizePx raw-pixel text size these metrics were measured at. Kept
+ *   so a host-JVM test can tell a 40 px measurement from a 28 px one even
+ *   when Robolectric's `Paint` reports the same 1 px glyph for both.
  */
 data class TerminalCellMetrics(
     val cellWidthPx: Float,
     val lineHeightPx: Int,
     val lineSpacingAndAscentPx: Int,
+    /**
+     * Raw-pixel text size these metrics were measured at.
+     *
+     * Recorded (not re-derived from [cellWidthPx]) because Robolectric's
+     * `Paint` reports a 1 px glyph at every size, so the only way a host-JVM
+     * test can tell a 40 px measurement from a 28 px one is to keep the input.
+     * Production still measures at this size; the field is how the wiring test
+     * proves [rememberTerminalCellMetrics] used the Settings value and not the
+     * [TERMINAL_TEXT_SIZE_RAW_PX] literal. Defaults to the shipped size so
+     * fixtures that stand in for "28 px on a device" stay as they were.
+     */
+    val textSizePx: Int = TERMINAL_TEXT_SIZE_RAW_PX,
 )
 
 /** A terminal size in character cells. */
@@ -109,21 +125,27 @@ fun terminalCells(
 
 /**
  * The metrics of the face the terminal actually renders with, measured once
- * per context.
+ * per context and text size.
  *
  * A `@Composable` rather than a plain function so the session screen can take
  * it as a defaulted parameter — the same seam shape `AppNavHost` uses for its
  * screens. That matters for more than tidiness: Robolectric's `Paint` reports
  * a 1 px glyph with zero ascent and descent, so a host-JVM test that could not
  * substitute real metrics could never see the size-reporting path run at all.
+ *
+ * The size is [LocalAppSettings]'s `terminalTextSizePx`, not the
+ * [TERMINAL_TEXT_SIZE_RAW_PX] literal: that constant is only the fresh-install
+ * default, and measuring at a different size than [TerminalHostView] paints
+ * would make the geometry estimate disagree with the glyphs (issue #2512).
  */
 @Composable
 fun rememberTerminalCellMetrics(): TerminalCellMetrics {
     val context = LocalContext.current
-    return remember(context) {
+    val textSizePx = LocalAppSettings.current.terminalTextSizePx
+    return remember(context, textSizePx) {
         measureTerminalCellMetrics(
             typeface = terminalTypeface(context),
-            textSizePx = TERMINAL_TEXT_SIZE_RAW_PX,
+            textSizePx = textSizePx,
         )
     }
 }
@@ -152,6 +174,7 @@ fun measureTerminalCellMetrics(typeface: Typeface, textSizePx: Int): TerminalCel
         cellWidthPx = paint.measureText("X"),
         lineHeightPx = lineHeight,
         lineSpacingAndAscentPx = lineHeight + ascent,
+        textSizePx = textSizePx,
     )
 }
 

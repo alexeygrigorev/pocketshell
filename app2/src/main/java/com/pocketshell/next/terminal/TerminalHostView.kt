@@ -10,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pocketshell.next.settings.LocalAppSettings
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -21,7 +22,7 @@ import com.termux.view.TerminalViewClient
 const val SESSION_TERMINAL_TAG: String = "session-terminal"
 
 /**
- * Terminal glyph size in RAW DEVICE PIXELS.
+ * Default terminal glyph size in RAW DEVICE PIXELS.
  *
  * Upstream's `setTextSize` javadoc says "density-independent pixels" and is
  * wrong about its own code: the value goes straight to `Paint.setTextSize`,
@@ -29,9 +30,12 @@ const val SESSION_TERMINAL_TAG: String = "session-terminal"
  * 28 is the size the pre-rewrite client shipped — big enough to read on a phone,
  * small enough to leave a usable column count at 1080 px wide.
  *
- * Internal rather than private because the session screen measures the SAME
- * face at the SAME size to estimate the terminal's geometry before a view
- * exists (task U-5, [measureTerminalCellMetrics]); a second literal would be a
+ * The live size is [com.pocketshell.next.settings.LocalAppSettings]'s
+ * `terminalTextSizePx`, whose fresh-install default equals this constant
+ * ([com.pocketshell.next.settings.AppSettings.DEFAULT_TERMINAL_TEXT_SIZE_PX]).
+ * [TerminalHostView] applies it on the vendored view and
+ * [rememberTerminalCellMetrics] measures the same face at that same size so
+ * the geometry estimate and the glyphs agree. A second literal would be a
  * second answer to "how big is a cell".
  */
 internal const val TERMINAL_TEXT_SIZE_RAW_PX: Int = 28
@@ -142,6 +146,14 @@ fun TerminalHostView(
         keyInput.onControlBytes = onControlBytes
     }
 
+    // Settings stepper (issue #2512). Read here so a change recomposes this
+    // host and `AndroidView`'s `update` can push it onto the already-built
+    // view. `setTextSize` rebuilds the renderer and fires `onEmulatorSet`, so
+    // calling it on every ctrlArmed recomposition would SIGWINCH the PTY —
+    // the applied-size box is what skips the no-op.
+    val textSizePx = LocalAppSettings.current.terminalTextSizePx
+    val appliedTextSizePx = remember { intArrayOf(-1) }
+
     DisposableEffect(session) {
         session.updateTerminalSessionClient(repaintClient)
         onDispose {
@@ -178,7 +190,8 @@ fun TerminalHostView(
                 // null emulator — a permanently blank terminal with nothing in
                 // the log. `setTypeface` then reads `mRenderer.mTextSize`, so it
                 // has to come after `setTextSize`.
-                setTextSize(TERMINAL_TEXT_SIZE_RAW_PX)
+                setTextSize(textSizePx)
+                appliedTextSizePx[0] = textSizePx
                 setTypeface(terminalTypeface(context))
                 setDefaultBackgroundColor(TERMINAL_BACKGROUND_ARGB)
                 attachSession(session)
@@ -186,6 +199,10 @@ fun TerminalHostView(
             }
         },
         update = { view ->
+            if (appliedTextSizePx[0] != textSizePx) {
+                view.setTextSize(textSizePx)
+                appliedTextSizePx[0] = textSizePx
+            }
             repaintClient.view = view
             if (view.currentSession !== session) {
                 view.attachSession(session)

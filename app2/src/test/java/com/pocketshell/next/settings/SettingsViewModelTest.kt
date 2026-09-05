@@ -73,11 +73,13 @@ class SettingsViewModelTest {
         vm.setVoiceLanguage("de")
         vm.setUsageWarnThresholdPercent(90)
         vm.setBackgroundGraceMillis(AppSettings.BACKGROUND_GRACE_30_SECONDS_MS)
+        vm.setAgentSubmitEnterDelayMs(300)
 
         val snapshot = repository.settings.value
         assertEquals("de", snapshot.voiceLanguage)
         assertEquals(90, snapshot.usageWarnThresholdPercent)
         assertEquals(AppSettings.BACKGROUND_GRACE_30_SECONDS_MS, snapshot.backgroundGraceMillis)
+        assertEquals(300, snapshot.agentSubmitEnterDelayMs)
     }
 
     @Test

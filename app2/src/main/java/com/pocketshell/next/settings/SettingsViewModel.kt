@@ -59,6 +59,8 @@ class SettingsViewModel @Inject constructor(
 
     fun setBackgroundGraceMillis(millis: Long) = repository.setBackgroundGraceMillis(millis)
 
+    fun setAgentSubmitEnterDelayMs(delayMs: Int) = repository.setAgentSubmitEnterDelayMs(delayMs)
+
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L
 

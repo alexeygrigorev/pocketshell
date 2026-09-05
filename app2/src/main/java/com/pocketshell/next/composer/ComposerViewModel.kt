@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.voice.PendingTranscriptionDelivery
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -29,7 +30,10 @@ import kotlinx.coroutines.launch
  * Build the text, ask the session whether it is attached, and act on the
  * answer:
  *
- *  - attached → write `body + "\r"` through [SessionSink], clear the draft;
+ *  - attached → write the body through [SessionSink], wait the configured
+ *    agent-submit delay, then write `\r` as a second PTY write, clear the
+ *    draft. Concatenating body+Enter into one write is the race agents
+ *    treat as a newline (#2526);
  *  - anything else → KEEP the draft and show a "not delivered" chip.
  *
  * That is the whole delivery story. There is no queue, no retry loop, no
@@ -59,6 +63,7 @@ class ComposerViewModel @Inject constructor(
     private val stager: ComposerAttachmentStager,
     private val queuedDictations: PendingTranscriptionDelivery,
     speech: SpeechRecognitionProvider,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ComposerUiState())
@@ -260,7 +265,7 @@ class ComposerViewModel @Inject constructor(
 
         val body = ComposerText.compose(current.draft.trim(), current.attachments.map { it.remotePath })
         val delivered = target.isLive
-        if (delivered) target.sendBytes(ComposerText.wireBytes(body))
+        if (delivered) deliver(target, body)
         record(body, delivered)
 
         if (delivered) {
@@ -419,6 +424,25 @@ class ComposerViewModel @Inject constructor(
         }
         homeDir = resolved
         return resolved
+    }
+
+    /**
+     * Body, then the configured delay, then Enter — two PTY writes.
+     *
+     * The delay is read HERE, at send time, off [SettingsRepository]'s live
+     * snapshot rather than captured in the constructor. ComposerViewModel is
+     * not a process-lifetime singleton, but a value read at Hilt construction
+     * is still stale the moment the user moves Settings → Terminal without
+     * leaving the session (same lesson as #2488). Zero is still two writes:
+     * concatenating body+CR is the race even when the wait is nothing.
+     */
+    private fun deliver(target: SessionSink, body: String) {
+        target.sendBytes(ComposerText.bodyBytes(body))
+        val delayMs = settings.settings.value.agentSubmitEnterDelayMs.toLong()
+        viewModelScope.launch {
+            delay(delayMs)
+            target.sendBytes(ComposerText.enterBytes())
+        }
     }
 
     private fun record(body: String, delivered: Boolean) {

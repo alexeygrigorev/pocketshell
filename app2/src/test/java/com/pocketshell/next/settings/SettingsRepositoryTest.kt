@@ -117,5 +117,50 @@ class SettingsRepositoryTest {
         assertEquals(60, snapshot.usageWarnThresholdPercent)
         assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, snapshot.voiceLanguage)
         assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snapshot.backgroundGraceMillis)
+        assertEquals(AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS, snapshot.agentSubmitEnterDelayMs)
+    }
+
+    @Test
+    fun `agentSubmitEnterDelay defaults to 150ms`() {
+        val repo = repository()
+        assertEquals(
+            AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+        assertEquals(150, repo.settings.value.agentSubmitEnterDelayMs)
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs persists and round-trips`() {
+        repository().setAgentSubmitEnterDelayMs(300)
+        assertEquals(300, repository().settings.value.agentSubmitEnterDelayMs)
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs clamps below minimum and above maximum`() {
+        val repo = repository()
+
+        repo.setAgentSubmitEnterDelayMs(-50)
+        assertEquals(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+
+        repo.setAgentSubmitEnterDelayMs(5000)
+        assertEquals(
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs snaps to the 50ms slider grid`() {
+        val repo = repository()
+
+        repo.setAgentSubmitEnterDelayMs(170)
+        assertEquals(150, repo.settings.value.agentSubmitEnterDelayMs)
+
+        repo.setAgentSubmitEnterDelayMs(180)
+        assertEquals(200, repo.settings.value.agentSubmitEnterDelayMs)
     }
 }

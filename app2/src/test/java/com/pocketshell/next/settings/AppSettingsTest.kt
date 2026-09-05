@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins the four fields' defaults and the fixed option lists — plain data, no
+ * Pins the five fields' defaults and the fixed option lists — plain data, no
  * Android dependency.
  */
 class AppSettingsTest {
@@ -18,6 +18,7 @@ class AppSettingsTest {
         assertEquals("auto", settings.voiceLanguage)
         assertEquals(80, settings.usageWarnThresholdPercent)
         assertEquals(90_000L, settings.backgroundGraceMillis)
+        assertEquals(150, settings.agentSubmitEnterDelayMs)
     }
 
     /**
@@ -66,5 +67,15 @@ class AppSettingsTest {
     fun `the terminal text size range brackets the default`() {
         assertTrue(AppSettings.MIN_TERMINAL_TEXT_SIZE_PX < AppSettings.DEFAULT_TERMINAL_TEXT_SIZE_PX)
         assertTrue(AppSettings.DEFAULT_TERMINAL_TEXT_SIZE_PX < AppSettings.MAX_TERMINAL_TEXT_SIZE_PX)
+    }
+
+    @Test
+    fun `agent submit delay defaults to 150ms and the range brackets it`() {
+        assertEquals(150, AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS)
+        assertEquals(0, AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS)
+        assertEquals(1000, AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS)
+        assertEquals(50, AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS)
+        assertTrue(AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS < AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS)
+        assertTrue(AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS < AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS)
     }
 }

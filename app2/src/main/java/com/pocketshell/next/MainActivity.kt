@@ -1,8 +1,10 @@
 package com.pocketshell.next
 
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBars
@@ -74,19 +76,31 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         grace.register(application)
+        // #887/#2533: after edge-to-edge, SOFT_INPUT_ADJUST_NOTHING so the OS
+        // neither resizes nor pans the window when the keyboard shows.
+        // enableEdgeToEdge already sets setDecorFitsSystemWindows(false), which
+        // left the default ADJUST_UNSPECIFIED resolving to PAN — the black-top
+        // / empty-void screenshot. ADJUST_NOTHING keeps the window FIXED: the
+        // keyboard overlays the terminal. Because decorFitsSystemWindows is
+        // still false, the IME inset is STILL dispatched to Compose as
+        // WindowInsets.ime, so sheets/forms that opt into imePadding keep
+        // working. The session column must not consume those insets.
+        enableEdgeToEdge()
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         setContent {
             PocketShellTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    // The window draws edge to edge (targetSdk 35 makes that
-                    // non-optional), so content must be inset out from under
-                    // the status/navigation bars or the first row of any
-                    // screen renders under the clock — which is exactly what
-                    // the placeholder scaffold hid by centring its one label.
-                    // IME insets stay a screen concern (task U-5 owns the
-                    // terminal's keyboard behaviour); this is bars only.
+                    // The window draws edge to edge (enableEdgeToEdge above;
+                    // targetSdk 35 also makes that non-optional), so content
+                    // must be inset out from under the status/navigation bars
+                    // or the first row of any screen renders under the clock.
+                    // IME insets are deliberately NOT consumed here: the
+                    // session column stays full-bleed under the keyboard
+                    // (#887/#2533); sheets and forms that need lifting apply
+                    // their own imePadding.
                     //
                     // Task P-6: the settings snapshot is collected ONCE here and
                     // provided through `LocalAppSettings` (see that file's class

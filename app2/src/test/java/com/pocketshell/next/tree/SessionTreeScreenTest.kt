@@ -13,6 +13,9 @@ import com.pocketshell.core.hostapi.AgentStateSource
 import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.BackendError
 import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -242,6 +245,69 @@ class SessionTreeScreenTest {
         assertEquals("Files must stay independent of Ports", 0, files)
     }
 
+    /**
+     * Issue #2532: Hosts → Sessions was a one-way door. The tree is a popped
+     * screen, so it must carry a visible Back (the word, not a hairline `‹`)
+     * that fires `onBack`.
+     */
+    @Test
+    fun `tapping Back in the header fires onBack`() {
+        var backs = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
+            onBack = { backs += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_TREE_BACK_TAG).performClick()
+
+        assertEquals(1, backs)
+    }
+
+    /**
+     * Issue #2532: the tree is where the maintainer spends most of the day, and
+     * it had Files/Ports but no way to open Usage. The header action is the
+     * caller; this test is RED until that action exists and fires `onOpenUsage`.
+     */
+    @Test
+    fun `tapping Usage in the header opens the usage panel`() {
+        var usage = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
+            onOpenUsage = { usage += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
+
+        assertEquals(1, usage)
+    }
+
+    @Test
+    fun `a glance pill sits beside Usage when a reading exists and also opens the panel`() {
+        var usage = 0
+        setContent(
+            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
+            onOpenUsage = { usage += 1 },
+            usagePillState = UsageGlancePillState(
+                percent = 72,
+                provider = "Codex",
+                window = "7d",
+                kind = PillKind.Warn,
+                stale = false,
+                fetchedClock = "13:40",
+            ),
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
+
+        assertEquals(1, usage)
+    }
+
     @Test
     fun `tapping a row opens that session by its own name`() {
         val opened = mutableListOf<String>()
@@ -347,6 +413,9 @@ class SessionTreeScreenTest {
         onCreateSession: () -> Unit = {},
         onOpenFiles: () -> Unit = {},
         onOpenPorts: () -> Unit = {},
+        onBack: () -> Unit = {},
+        onOpenUsage: () -> Unit = {},
+        usagePillState: UsageGlancePillState? = null,
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -357,6 +426,9 @@ class SessionTreeScreenTest {
                     onCreateSession = onCreateSession,
                     onOpenFiles = onOpenFiles,
                     onOpenPorts = onOpenPorts,
+                    onBack = onBack,
+                    onOpenUsage = onOpenUsage,
+                    usagePillState = usagePillState,
                     nowSec = NOW,
                 )
             }

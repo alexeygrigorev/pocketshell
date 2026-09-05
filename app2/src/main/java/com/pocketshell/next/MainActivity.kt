@@ -172,11 +172,16 @@ fun AppNavHost(
         onOpenSession: (String) -> Unit,
         onOpenFiles: () -> Unit,
         onOpenPorts: () -> Unit,
-    ) -> Unit = { _, onOpenSession, onOpenFiles, onOpenPorts ->
+        onBack: () -> Unit,
+        onOpenUsage: () -> Unit,
+    ) -> Unit = { _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
         SessionTreeRoute(
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
+            onBack = onBack,
+            onOpenUsage = onOpenUsage,
+            usageGlanceViewModel = hiltViewModel(),
         )
     },
     sessionScreen: @Composable (
@@ -192,7 +197,9 @@ fun AppNavHost(
             onOpenUsage = onOpenUsage,
         )
     },
-    portsScreen: @Composable () -> Unit = { PortForwardRoute() },
+    portsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        PortForwardRoute(onBack = onBack)
+    },
     filesScreen: @Composable (
         hostId: Long,
         path: String?,
@@ -313,6 +320,11 @@ fun AppNavHost(
                 // Task P-4: the host's port-forward panel. Same host-scoped
                 // rationale as Files — forwarding is not a per-session action.
                 { navController.navigate(Destination.Ports.route(hostId)) },
+                { navController.popBackStack() },
+                // Issue #2532: Usage is a host-scoped panel, same as Files/Ports,
+                // so the tree header is an entry point — not only the session
+                // glance pill.
+                { navController.navigate(Destination.Usage.route()) },
             )
         }
         composable(
@@ -380,7 +392,7 @@ fun AppNavHost(
             // Task P-4: the real port-forward panel. Like the tree, the ViewModel
             // reads the hostId from its own SavedStateHandle, so the screen keeps
             // working under process death without navigation re-supplying it.
-            portsScreen()
+            portsScreen { navController.popBackStack() }
         }
         composable(Destination.Settings.pattern) {
             // Task P-6: the real settings screen. Workspace roots is a

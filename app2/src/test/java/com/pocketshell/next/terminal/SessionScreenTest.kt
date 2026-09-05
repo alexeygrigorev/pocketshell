@@ -13,7 +13,10 @@ import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
 import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
 import com.pocketshell.next.composer.ComposerNotice
 import com.pocketshell.next.composer.ComposerUiState
+import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
+import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
+import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -68,9 +71,53 @@ class SessionScreenTest {
         var backs = 0
         setContent(SessionUiState.Connecting, onBack = { backs += 1 })
 
+        composeRule.onNodeWithTag(SESSION_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_BACK_TAG).performClick()
 
         assertEquals(1, backs)
+    }
+
+    /**
+     * Issue #2532: a failed/empty usage fetch omitted the glance pill, which
+     * was the ONLY way into the usage panel from the terminal. Loading and
+     * error belong on that screen, not as a missing button.
+     */
+    @Test
+    fun `usage is reachable when the glance pill has no reading`() {
+        var opened = 0
+        setContent(SessionUiState.Connecting, onOpenUsage = { opened += 1 })
+
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Usage").assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).performClick()
+
+        assertEquals(1, opened)
+    }
+
+    @Test
+    fun `the glance pill is the usage tap target when a reading exists`() {
+        var opened = 0
+        setContent(
+            SessionUiState.Connecting,
+            usagePillState = UsageGlancePillState(
+                percent = 72,
+                provider = "Codex",
+                window = "7d",
+                kind = PillKind.Warn,
+                stale = false,
+                fetchedClock = "13:40",
+            ),
+            onOpenUsage = { opened += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
+
+        assertEquals(1, opened)
     }
 
     @Test
@@ -278,6 +325,8 @@ class SessionScreenTest {
         onResized: (Int, Int) -> Unit = { _, _ -> },
         onRetry: () -> Unit = {},
         onHotkeySend: (ByteArray) -> Unit = {},
+        usagePillState: UsageGlancePillState? = null,
+        onOpenUsage: () -> Unit = {},
         initiallyShowComposer: Boolean = false,
         initiallyShowHotkeys: Boolean = false,
     ) {
@@ -288,6 +337,8 @@ class SessionScreenTest {
                     composerState = composerState,
                     sessionName = SESSION,
                     onBack = onBack,
+                    usagePillState = usagePillState,
+                    onOpenUsage = onOpenUsage,
                     onResized = onResized,
                     onRetry = onRetry,
                     onHotkeySend = onHotkeySend,

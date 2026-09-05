@@ -233,7 +233,7 @@ class AddEditHostNavigationTest {
                     )
                 },
                 connectViewModel = { stack.viewModel },
-                treeScreen = { hostId, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 hostFormScreen = { hostId, onDone, onAddKey ->
                     AddEditHostRoute(hostId = hostId, onDone = onDone, onAddKey = onAddKey, viewModel = formViewModel)
                 },

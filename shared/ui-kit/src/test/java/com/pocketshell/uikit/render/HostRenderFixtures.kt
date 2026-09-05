@@ -26,8 +26,10 @@ import com.pocketshell.uikit.components.AgentKindBadge
 import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
@@ -341,4 +343,59 @@ private fun ResumeLastSessionRowFacsimile(sessionName: String) {
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * Issue #2532: session-tree header with a visible Back (top-left) and Usage
+ * next to Files/Ports. The real [com.pocketshell.next.tree.SessionTreeScreen]
+ * is app-only, so this mirrors its [ScreenHeader] slots with the same
+ * ui-kit primitives.
+ */
+@Composable
+internal fun SessionTreeHeaderBackAndUsageRender() {
+    ScreenHeader(
+        title = "Sessions",
+        subtitle = "3 sessions · 2 workspaces",
+        leading = {
+            PocketShellButton(
+                text = "Back",
+                onClick = {},
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+        trailing = {
+            PocketShellButton(text = "Files", onClick = {}, variant = ButtonVariant.Text, compact = true)
+            PocketShellButton(text = "Ports", onClick = {}, variant = ButtonVariant.Text, compact = true)
+            PocketShellButton(text = "Usage", onClick = {}, variant = ButtonVariant.Text, compact = true)
+        },
+    )
+}
+
+/**
+ * Issue #2532: session terminal header with Back and a Usage affordance
+ * (text button when the glance pill has no reading — the missing-button bug).
+ */
+@Composable
+internal fun SessionHeaderBackAndUsageRender() {
+    ScreenHeader(
+        title = "git-pocketshell",
+        subtitle = "attaching",
+        leading = {
+            PocketShellButton(
+                text = "Back",
+                onClick = {},
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+        trailing = {
+            PocketShellButton(
+                text = "Usage",
+                onClick = {},
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+    )
 }

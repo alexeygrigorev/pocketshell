@@ -56,6 +56,7 @@ import com.pocketshell.uikit.theme.PocketShellType
 const val PORT_TABLE_TAG: String = "port_forward_table"
 const val FORWARDING_TOGGLE_TAG: String = "port_forward_toggle"
 const val SHOW_ALL_PORTS_TAG: String = "port_forward_show_all_ports"
+const val PORT_FORWARD_BACK_TAG: String = "port-forward-back"
 
 fun portRowTag(remotePort: Int): String = "port-row-$remotePort"
 
@@ -75,6 +76,7 @@ fun portRowTag(remotePort: Int): String = "port-row-$remotePort"
  */
 @Composable
 fun PortForwardRoute(
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: PortForwardViewModel = hiltViewModel(),
 ) {
@@ -88,6 +90,7 @@ fun PortForwardRoute(
         onSetEnabled = viewModel::setEnabled,
         onTogglePort = viewModel::togglePort,
         onSetShowAllPorts = viewModel::setShowAllPorts,
+        onBack = onBack,
         modifier = modifier,
     )
 }
@@ -111,6 +114,7 @@ fun PortForwardScreen(
     onSetEnabled: (Boolean) -> Unit,
     onTogglePort: (Int) -> Unit,
     onSetShowAllPorts: (Boolean) -> Unit,
+    onBack: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -121,7 +125,19 @@ fun PortForwardScreen(
         ScreenHeader(
             title = state.hostName,
             subtitle = state.hostSubtitle.ifBlank { state.connection.label },
-            leading = { StatusDot(status = state.connection.toConnectionStatus(state.enabled)) },
+            leading = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PocketShellButton(
+                        text = "Back",
+                        onClick = onBack,
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                        modifier = Modifier.testTag(PORT_FORWARD_BACK_TAG),
+                    )
+                    Spacer(Modifier.width(PocketShellSpacing.sm))
+                    StatusDot(status = state.connection.toConnectionStatus(state.enabled))
+                }
+            },
         )
 
         ForwardingToggleRow(enabled = state.enabled, onEnabledChange = onSetEnabled)

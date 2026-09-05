@@ -17,6 +17,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.AppNavHost
 import com.pocketshell.next.connect.TestConnectStack
+import com.pocketshell.next.crash.CRASH_REPORTS_BACK_TAG
 import com.pocketshell.next.crash.CRASH_REPORTS_SHARE_ALL_TAG
 import com.pocketshell.next.crash.CrashReportMetadata
 import com.pocketshell.next.crash.CrashReporter
@@ -160,7 +161,10 @@ class SettingsNavigationTest {
         composeRule.onNodeWithTag(SETTINGS_CRASH_REPORTS_TAG).performScrollTo().performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("‹").performClick()
+        composeRule.onNodeWithTag(CRASH_REPORTS_BACK_TAG).assertExists()
+        composeRule.onNodeWithText("Back").assertExists()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
+        composeRule.onNodeWithTag(CRASH_REPORTS_BACK_TAG).performClick()
         composeRule.waitForIdle()
 
         assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
@@ -202,7 +206,7 @@ class SettingsNavigationTest {
                 navController = controller,
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
-                treeScreen = { hostId, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 settingsScreen = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
                     SettingsRoute(
                         onBack = onBack,

@@ -16,6 +16,7 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.hosts.HOST_LIST_TAG
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -298,6 +299,23 @@ class J02SessionTreeListJourney {
         compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
     }
 
+    /**
+     * Issue #2532: the tree is a popped screen. Back must return to Hosts —
+     * the system gesture is not the only path.
+     */
+    @Test
+    fun tappingBackOnTheTreeReturnsToHosts() {
+        openTree()
+        compose.onNodeWithTag(SESSION_TREE_BACK_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Back").assertIsDisplayed()
+        JourneyScreenshots.capture("04-tree-back", JOURNEY)
+
+        compose.onNodeWithTag(SESSION_TREE_BACK_TAG).performClick()
+        awaitTag(HOST_LIST_TAG)
+        compose.onNodeWithTag(hostRowTag(hostId)).assertIsDisplayed()
+        JourneyScreenshots.capture("05-hosts-after-back", JOURNEY)
+    }
+
     // --- helpers ----------------------------------------------------------
 
     /** Taps the seeded host and waits for the tree's first real listing. */
@@ -364,6 +382,7 @@ class J02SessionTreeListJourney {
             "connectingToAHostListsItsRealSessionsGroupedByWorkspace" to 9_201L,
             "tappingASessionRowOpensThatSession" to 9_202L,
             "aPartialListingRaisesTheMissingSessionsBannerAndStillShowsTheRest" to 9_203L,
+            "tappingBackOnTheTreeReturnsToHosts" to 9_204L,
         )
     }
 }

@@ -650,6 +650,25 @@ class DesignRenders {
     }
 
     /**
+     * Issue #2532: session-tree header with Back top-left and Usage in the
+     * trailing slot next to Files/Ports. The real tree is app-only; this is
+     * the fast JVM check that both words are visible.
+     */
+    @Test
+    fun sessionTreeHeaderBackAndUsage() = render("session-tree-header-back-and-usage") {
+        SessionTreeHeaderBackAndUsageRender()
+    }
+
+    /**
+     * Issue #2532: session terminal header with Back and a Usage text button
+     * (the fallback when the glance pill has no reading).
+     */
+    @Test
+    fun sessionHeaderBackAndUsage() = render("session-header-back-and-usage") {
+        SessionHeaderBackAndUsageRender()
+    }
+
+    /**
      * Issue #1531 (audit RC1): the docked composer launcher's unsent-queue badge.
      * The real `ComposerLauncherButton` is an app-module PRIVATE composable, so
      * this MIRRORS its geometry (the `>_` glyph box) with the shared ui-kit [Badge]

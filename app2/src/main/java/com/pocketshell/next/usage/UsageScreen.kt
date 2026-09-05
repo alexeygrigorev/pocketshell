@@ -165,7 +165,7 @@ private fun UsageHeader(
         modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
         leading = {
             PocketShellButton(
-                text = "‹",
+                text = "Back",
                 onClick = onBack,
                 variant = ButtonVariant.Text,
                 compact = true,

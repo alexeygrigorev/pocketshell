@@ -291,16 +291,16 @@ class J03AttachAndTypeJourney {
      * a resize that never crossed the wire.
      *
      * Two viewport changes, the two the maintainer actually does: raising the
-     * keyboard (which must take rows and leave columns alone) and rotating
-     * (which swaps them). Both must also come BACK — a resize path that only
-     * ever shrinks leaves the session unusable after the keyboard closes.
+     * keyboard (which must NOT change rows or columns — #887/#2533: the
+     * keyboard overlays the terminal, it does not shrink it) and rotating
+     * (which swaps them). Rotation must also come BACK — a resize path that
+     * only ever shrinks leaves the session unusable after a rotate.
      *
      * Then the awkward one: a viewport change that lands in the MIDDLE of a
-     * measurement. Each of those gestures is a stream of sizes (an IME inset
-     * animation reports a new one per frame), and the app must end up telling
-     * the remote the size it settled at — not one from the middle of the
-     * animation, which leaves the pane wrapping at a width the screen does not
-     * have and no further layout change to correct it.
+     * measurement. Rotation is a stream of sizes (an inset animation reports
+     * a new one per frame), and the app must end up telling the remote the
+     * size it settled at. A keyboard arriving mid-measurement must not change
+     * the size at all (#887/#2533).
      */
     @Test
     fun theRemoteTerminalSizeTracksTheKeyboardAndRotation() {
@@ -313,20 +313,18 @@ class J03AttachAndTypeJourney {
         showKeyboard()
         val opened = remoteSize("keyboard up", keyboardUp = true)
         JourneyScreenshots.capture("05-keyboard-up", JOURNEY)
-        assertTrue(
-            "the keyboard must cost the remote rows: closed=$closed opened=$opened",
-            opened.rows < closed.rows,
-        )
         assertEquals(
-            "the keyboard takes height, not width: closed=$closed opened=$opened",
-            closed.cols,
-            opened.cols,
+            "the keyboard must not change the remote size (#887/#2533): " +
+                "closed=$closed opened=$opened",
+            closed,
+            opened,
         )
 
         hideKeyboard()
         val reclosed = remoteSize("keyboard down again", keyboardUp = false)
         assertEquals(
-            "closing the keyboard must give the rows back: was $closed, now $reclosed",
+            "closing the keyboard must leave the remote size unchanged: " +
+                "was $closed, now $reclosed",
             closed,
             reclosed,
         )
@@ -351,13 +349,11 @@ class J03AttachAndTypeJourney {
             backToPortrait,
         )
 
-        // A viewport change can land in the MIDDLE of a command, and on a
-        // device with no hardware keyboard the framework raises the IME by
-        // itself when the terminal takes focus — so this is not a contrived
-        // race, it is the one that left the CI run of this journey waiting a
-        // full minute for a `stty size` reply describing a size the remote no
-        // longer had. Both ends must converge afterwards, on the size the
-        // layout settled at.
+        // A keyboard can land in the MIDDLE of a command — on a device with
+        // no hardware keyboard the framework raises the IME by itself when
+        // the terminal takes focus. That used to resize the pane mid-
+        // measurement (#887 recurrence). Both ends must still agree, on the
+        // same size the keyboard-down reading had.
         val afterMidFlightKeyboard =
             remoteSize("a keyboard arriving mid-measurement", keyboardUp = false) {
                 showKeyboard()
@@ -878,10 +874,11 @@ class J03AttachAndTypeJourney {
     /**
      * Waits for the framework's own IME inset to reach the expected state.
      *
-     * The inset — not a screenshot, not `isActive()` — because it is the exact
-     * quantity `Modifier.imePadding()` consumes, so it is the thing that must
-     * change for the terminal to shrink. If it never does, the test says so
-     * instead of quietly asserting a resize that had no cause.
+     * The inset — not a screenshot, not `isActive()` — because it is the
+     * quantity that would have shrunk the terminal when the session column
+     * still had `imePadding()`. If it never appears, asserting "rows
+     * unchanged with the keyboard up" (#887/#2533) would be vacuous. If it
+     * never does, the test says so instead of quietly asserting a no-op.
      */
     /** The framework's own IME inset, in pixels. 0 when the keyboard is down. */
     private fun imeInsetBottom(): Int {

@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
@@ -139,14 +138,15 @@ fun SessionRoute(
  * launcher bar. Prompt Composer and the hotkeys panel open as floating
  * overlays (#2521) and do not sit in this column.
  *
- * ## The keyboard shrinks the terminal, the overlays do not
+ * ## The keyboard overlays the terminal; it must not resize it (#887/#2533)
  *
- * [imePadding] on the column is what makes `stty size` on the remote track
- * the system keyboard: the column shrinks, so the terminal slot shrinks, so
- * the vendored view reports a new cell count through [onResized]. The
- * composer and hotkeys sheets are [androidx.compose.material3.ModalBottomSheet]s
- * — they float over the viewport and must not change that cell count, so
- * imePadding is skipped while either overlay is open.
+ * The session column is a plain [Modifier.fillMaxSize] — no `imePadding`, no
+ * pan. The window is `SOFT_INPUT_ADJUST_NOTHING` (see [com.pocketshell.next.MainActivity]),
+ * so the OS neither resizes nor pans when the keyboard shows. The grid stays
+ * put; [onResized] does not fire; tmux does not reflow. The composer and
+ * hotkeys sheets are [androidx.compose.material3.ModalBottomSheet]s with their
+ * own IME policy, so Send/mic stay above the keyboard independently of this
+ * column.
  *
  * @param onResized the terminal's size in character cells.
  * @param onHotkeySend raw bytes for the remote from the hotkeys panel.
@@ -185,12 +185,10 @@ fun SessionScreen(
 ) {
     var composerOpen by remember { mutableStateOf(initiallyShowComposer) }
     var hotkeysOpen by remember { mutableStateOf(initiallyShowHotkeys) }
-    val overlayOpen = composerOpen || hotkeysOpen
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .then(if (overlayOpen) Modifier else Modifier.imePadding())
             .testTag(SESSION_SCREEN_TAG),
     ) {
         ScreenHeader(

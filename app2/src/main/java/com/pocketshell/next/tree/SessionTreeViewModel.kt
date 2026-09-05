@@ -7,6 +7,7 @@ import com.pocketshell.core.hostapi.BackendError
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.ProfileInfo
+import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -29,13 +31,13 @@ import kotlinx.coroutines.launch
  * (#2426) was introduced to end:
  *
  * - **still loading** — [loading] is true and [loaded] is false.
- * - **empty and healthy** — [loaded] with no [groups], no [errors], no
+ * - **empty and healthy** — [loaded] with no sessions, no [errors], no
  *   [failure]. The host really has no sessions.
  * - **empty and broken** — [failure] set (the whole listing failed), or
  *   [errors] non-empty (one backend failed to enumerate while the other
  *   answered). Either way the screen says so instead of printing "No sessions".
  *
- * [failure] and [groups] coexist on purpose: a refresh that fails after a good
+ * [failure] and [roots] coexist on purpose: a refresh that fails after a good
  * listing keeps the last known sessions on screen under an error banner. A
  * screen that blanked itself on a transient SSH hiccup would be less useful and
  * less truthful than one that says "this list is from a minute ago, the refresh
@@ -47,9 +49,9 @@ data class SessionTreeUiState(
     val loading: Boolean = false,
     /** A refresh over content that is already on screen. */
     val refreshing: Boolean = false,
-    /** At least one listing has succeeded, so [groups] is a real answer. */
+    /** At least one listing has succeeded, so [roots] is a real answer. */
     val loaded: Boolean = false,
-    val groups: List<WorkspaceGroup> = emptyList(),
+    val roots: List<SessionRoot> = emptyList(),
     /** Backends that failed to enumerate. Non-empty ⇒ this list may be short. */
     val errors: List<BackendError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
@@ -57,24 +59,30 @@ data class SessionTreeUiState(
     /** Everything the create-session sheet needs (task U-6). */
     val create: CreateSessionState = CreateSessionState(),
 ) {
-    val sessionCount: Int get() = groups.sumOf { it.rows.size }
+    val sessionCount: Int get() = roots.sumOf { it.sessionCount }
 
     /** True when the screen should say "no sessions" rather than stay blank. */
     val isEmptyAndHealthy: Boolean
-        get() = loaded && groups.isEmpty() && errors.isEmpty() && failure == null
+        get() = loaded && sessionCount == 0 && errors.isEmpty() && failure == null
 
     /**
      * What the create sheet's folder field is prefilled with: the workspace of
      * the most recently active session, when the host reported one.
      *
-     * The listing is the only folder knowledge this screen has, and its groups
-     * are already ordered most-recent-first, so the first ABSOLUTE workspace
-     * path is "where you were last". The [OTHER_WORKSPACE_LABEL] bucket is not
-     * a path and is skipped; with nothing usable the field starts empty, which
-     * means "no `--cwd`" and lets the host's own default apply.
+     * Tree *order* is creation, but the prefill is still "where you were last"
+     * — a create affordance, not a reason to shuffle the list. The
+     * [OTHER_ROOT_LABEL] bucket is not a path and is skipped; with nothing
+     * usable the field starts empty, which means "no `--cwd`" and lets the
+     * host's own default apply.
      */
     val suggestedFolder: String
-        get() = groups.firstOrNull { it.workspace?.startsWith("/") == true }?.label ?: ""
+        get() = roots.asSequence()
+            .flatMap { it.folders }
+            .flatMap { it.rows }
+            .filter { it.workspace?.startsWith("/") == true }
+            .maxByOrNull { it.activityEpoch ?: Long.MIN_VALUE }
+            ?.workspace
+            ?: ""
 }
 
 /**
@@ -117,7 +125,7 @@ data class CreateSessionState(
  * The session tree for one host (rewrite task U-3, journey J02).
  *
  * One refresh is one `pocketshell sessions list --json` over the host's live
- * connection, parsed by `core-hostapi` and bucketed by [groupSessionsByWorkspace].
+ * connection, parsed by `core-hostapi` and bucketed by [groupSessionsIntoRoots].
  * There is no poll loop, no cache, no incremental reconcile and no per-session
  * probe: agent-state polling is U-9's problem, and the old client's tree cache —
  * with its hydrate/reconcile/staleness machinery and its own persisted registry —
@@ -155,6 +163,7 @@ class SessionTreeViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val registry: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val projectRootDao: ProjectRootDao,
 ) : ViewModel() {
 
     private val hostId: Long = requireNotNull(
@@ -374,6 +383,9 @@ class SessionTreeViewModel @Inject constructor(
     }
 
     private suspend fun applyListing(connection: HostConnection) {
+        val registered = projectRootDao.getByHostId(hostId).first()
+            .sortedWith(compareBy({ it.createdAt }, { it.id }))
+            .map { it.path }
         clients.create(connection).listSessions().fold(
             onSuccess = { listing ->
                 _state.update { current ->
@@ -381,7 +393,10 @@ class SessionTreeViewModel @Inject constructor(
                         loading = false,
                         refreshing = false,
                         loaded = true,
-                        groups = groupSessionsByWorkspace(listing.sessions),
+                        roots = groupSessionsIntoRoots(
+                            sessions = listing.sessions,
+                            registeredRoots = registered,
+                        ),
                         errors = listing.errors,
                         // A successful listing clears a previous failure; the
                         // partial-backend banner is driven by `errors`, which
@@ -397,7 +412,7 @@ class SessionTreeViewModel @Inject constructor(
     }
 
     /**
-     * Records a hard failure WITHOUT clearing [SessionTreeUiState.groups] — see
+     * Records a hard failure WITHOUT clearing [SessionTreeUiState.roots] — see
      * the state doc for why the last good listing stays on screen.
      */
     private fun fail(message: String) {

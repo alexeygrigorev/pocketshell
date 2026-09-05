@@ -207,11 +207,18 @@ the tree renders that as a "some sessions may be missing" banner.
 ### Session tree
 
 `app2/tree/` — `SessionTreeViewModel` lists on enter, on `ON_START` and on
-pull-to-refresh; `TreeGrouping` buckets rows by the host's `workspace` string,
-compared exactly. Nothing parses a session name, strips a prefix or splits an
-aplexer `workspace:tag`: the host already knows the structure, so the phone
-buckets rather than deduces. Null/blank workspace lands in an `other` bucket.
-Both levels sort most-recently-active first.
+pull-to-refresh; `TreeGrouping.groupSessionsIntoRoots` projects rows into the
+desktop-style `root → folder → session` tree. The host's `workspace` string is
+the cwd (same as desktop `path`). Registered Settings workspace roots are the
+top level when any exist; otherwise roots are synthesised from `$HOME`'s
+children (`~/git`, `~/tmp`, …). Null/blank workspace, `$HOME` itself, and
+paths matching no root land in `other`, pinned last. Folder label is the cwd
+basename (parent segment on collision). A 1-session folder still has a folder
+row — collapsing it is the "grouping doesn't work" failure. Order is creation
+(`createdEpoch` oldest first, name tiebreak); `activityEpoch` is display-only
+and never a sort key. Nothing parses a session name, strips a prefix or splits
+an aplexer `workspace:tag`. The tree shows no engine/agent chrome (U-9 stays
+cut): attached is a green status dot, the row title is the session name.
 
 `SessionTreeUiState` keeps `groups` and `failure` simultaneously, so a failed
 refresh leaves the last known list on screen under an error banner instead of
@@ -344,7 +351,7 @@ graph, where a credential-carrying destination was the norm.
 | Route | Screen | Purpose |
 |---|---|---|
 | `hosts` | `HostListScreen` (+ `ConnectGate`) | Saved hosts; tap connects |
-| `tree/{hostId}` | `SessionTreeScreen` | Sessions grouped by workspace; create sheet |
+| `tree/{hostId}` | `SessionTreeScreen` | Sessions as root → folder → session; create sheet |
 | `session/{hostId}/{sessionName}` | `SessionScreen` | The attached terminal, key bar, composer |
 | `files/{hostId}?path=` | `FileExplorerScreen` | SFTP browser |
 | `file/{hostId}?path=` | `ViewerScreen` | File viewer/editor (text, markdown, image, binary) |
@@ -387,25 +394,23 @@ tree/env/repo helpers. Install and troubleshooting: [server-setup.md](server-set
 The client uses a subset. `jobs`, `env`, `cards` and `repos` exist server-side
 but have **no app2 UI** — those ports were cut from the rewrite's scope.
 
-Agent identity/state belongs to the host for both backends, and app2 only
-renders what the host reports. The wire path is live end to end:
-`session_enum.aplexer_agent_state` derives `(agent_state, agent_state_source)`
-for each aplexer row (a fresh `reported_state` push wins; otherwise a
-PTY-recency heuristic picks `working`/`waiting`), `core-hostapi` parses it into
-`AgentState?`, and `SessionTreeScreen` maps that to the ui-kit
-`AgentStateChip` — a tinted hourglass/spinner/check in every session row's
-trailing slot, beside the `AgentKindBadge` monogram. The chip draws **nothing**
-for the unknown state, so a row with no host opinion is absent, never wrong.
+Agent identity/state belongs to the host for both backends. The wire path is
+live end to end: `session_enum.aplexer_agent_state` derives
+`(agent_state, agent_state_source)` for each aplexer row (a fresh
+`reported_state` push wins; otherwise a PTY-recency heuristic picks
+`working`/`waiting`) and `core-hostapi` parses it into `AgentState?`. The
+session tree does **not** render that as UI — rewrite U-9 (agent-state chips /
+engine badges on the list) stays cut, so a row is a name, an optional relative
+time, and a green attached dot. The parsed fields remain on `SessionRow` for
+the terminal screen and for anything U-9 later grows.
 
-Two things are absent, and they are not the chip:
+Two things are absent, and they are not a chip:
 
 - **tmux-backed rows have no state to show.** They carry an explicit
   `agent_state: null` until the cross-repo `APX-ADOPT` capability lets aplexer
-  adopt a foreign tmux session, so on a tmux-only host the chip is wired but
-  invisible everywhere.
+  adopt a foreign tmux session.
 - **There is no conversation/transcript view and no client-side detection.**
-  Parsing agent output on the phone was cut with the rest of control mode; the
-  chip is the entire agent-awareness surface.
+  Parsing agent output on the phone was cut with the rest of control mode.
 
 A host CLI older than schema 2 is rejected with a typed `HostCliError.TooOld`
 rather than a parse error.

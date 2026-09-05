@@ -47,9 +47,9 @@
         Task P-2: the composer's mic. Both dictation arms need it — Android's
         `SpeechRecognizer` opens the microphone in the recognition service's
         process on the caller's behalf, and the Whisper arm records a WAV
-        locally. Declared here AND requested at runtime by `ComposerBar`; a
-        manifest-only declaration would make every mic tap fail silently on
-        Android 6+.
+        locally. Declared here AND requested at runtime by `PromptComposerSheet`
+        via `RequestPermission`; a manifest-only declaration would make every
+        mic tap fail silently (or crash) on Android 6+.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 

@@ -1,35 +1,16 @@
 package com.pocketshell.next.terminal
 
 /**
- * What each key bar slot puts on the wire (rewrite task U-5).
+ * What each hotkeys-panel slot puts on the wire (rewrite task U-5, restored
+ * catalog in #2521).
  *
- * ## Why this file exists at all
- *
- * The ui-kit's `KeyBar` is pure render plus a sticky-modifier state machine —
- * its own KDoc says "the semantic mapping (which keystroke this corresponds to
- * on the wire) is left to the caller". app2 talks to a plain PTY, so the
- * mapping is the raw control bytes a VT terminal has used since the 1970s, not
- * tmux `send-keys` named keys (the pre-rewrite client's mapping, which existed
- * because it drove a `-CC` control channel rather than a terminal).
+ * app2 talks to a plain PTY, so the mapping is the raw control bytes a VT
+ * terminal has used since the 1970s, not tmux `send-keys` named keys. The
+ * #1662 panel catalog (arrows, Esc/Tab/⇧Tab/Enter, `^B ^C ^D ^Q ^X`, and
+ * the Ctrl-page letters) all route through [keyBarBytes].
  *
  * Everything here is a pure function of its arguments: no Android types, no
- * Compose, no session state. The tap/arm/clear state machine belongs to
- * `KeyBar`; the "which byte" question belongs here; the "who do I send it to"
- * question belongs to [SessionViewModel].
- *
- * ## The trimmed key set
- *
- * Four slots — Ctrl, Esc, Tab, Enter — per the maintainer's 2026-09-03 scope
- * cut ("I need Ctrl+C, Ctrl+D, Escape, Enter, this kind of thing; most of the
- * shortcuts I don't really use"). D18's original eight-slot Esc/Tab/Ctrl/Alt/
- * arrows bar is explicitly NOT built, so there are deliberately no arrow-key or
- * Alt encodings below: an unexposed table is dead code, and dead code in an
- * encoder is the kind that silently rots until someone trusts it.
- *
- * Ctrl is the only modifier. It arms the NEXT character — which normally comes
- * from the on-screen keyboard, not from this bar, since a phone keyboard
- * already has every letter and the bar only needs to supply what a phone
- * keyboard lacks.
+ * Compose, no session state.
  */
 
 /** The label the key bar renders for the sticky Ctrl modifier. */
@@ -43,6 +24,27 @@ const val KEY_LABEL_TAB: String = "Tab"
 
 /** The label for Return. */
 const val KEY_LABEL_ENTER: String = "Enter"
+
+/** Back-tab / Shift+Tab. Emits CSI `Z`. */
+const val KEY_LABEL_SHIFT_TAB: String = "⇧Tab"
+
+/** Left arrow. */
+const val KEY_LABEL_ARROW_LEFT: String = "←"
+
+/** Up arrow. */
+const val KEY_LABEL_ARROW_UP: String = "↑"
+
+/** Down arrow. */
+const val KEY_LABEL_ARROW_DOWN: String = "↓"
+
+/** Right arrow. */
+const val KEY_LABEL_ARROW_RIGHT: String = "→"
+
+/** Long-press `^C`: two interrupt bytes. */
+const val KEY_LABEL_INTERRUPT_X2: String = "^C×2"
+
+/** Long-press `^D`: two EOF bytes. */
+const val KEY_LABEL_EOF_X2: String = "^D×2"
 
 /** `ESC` — 0x1B. */
 private const val BYTE_ESC: Byte = 0x1B
@@ -68,20 +70,40 @@ private const val BYTE_CR: Byte = 0x0D
  * modifier by itself never reaches the remote — it decorates the next key.
  *
  * [ctrlArmed] is accepted for every label rather than only the character case
- * because the screen cannot know in advance which labels care. It happens that
- * none of the three named keys change under Ctrl (Ctrl+[ IS Esc, Ctrl+I IS
- * Tab, Ctrl+M IS Enter — the same bytes), so an armed Ctrl plus Esc/Tab/Enter
- * is correctly a no-op rather than a special case.
+ * because the screen cannot know in advance which labels care. Named keys
+ * (Esc/Tab/Enter, arrows, ⇧Tab, `^X`) do not change under a leftover armed
+ * Ctrl: Ctrl+[ IS Esc, Ctrl+I IS Tab, Ctrl+M IS Enter.
  *
- * @param label the tapped slot's label, as rendered by the bar.
- * @param ctrlArmed whether the Ctrl slot is armed (one-shot or locked).
+ * @param label the tapped slot's label, as rendered by the bar or panel.
+ * @param ctrlArmed whether a sticky Ctrl is armed (one-shot or locked).
  */
 fun keyBarBytes(label: String, ctrlArmed: Boolean = false): ByteArray? = when (label) {
     KEY_LABEL_CTRL -> null
     KEY_LABEL_ESC -> byteArrayOf(BYTE_ESC)
     KEY_LABEL_TAB -> byteArrayOf(BYTE_TAB)
-    KEY_LABEL_ENTER -> byteArrayOf(BYTE_CR)
-    else -> characterKeyBytes(label, ctrlArmed)
+    KEY_LABEL_ENTER, "⏎" -> byteArrayOf(BYTE_CR)
+    KEY_LABEL_SHIFT_TAB -> csi('Z')
+    KEY_LABEL_ARROW_LEFT, "‹", "Left" -> csi('D')
+    KEY_LABEL_ARROW_UP, "⌃", "Up" -> csi('A')
+    KEY_LABEL_ARROW_DOWN, "⌄", "Down" -> csi('B')
+    KEY_LABEL_ARROW_RIGHT, "›", "Right" -> csi('C')
+    KEY_LABEL_INTERRUPT_X2 -> byteArrayOf(0x03, 0x03)
+    KEY_LABEL_EOF_X2 -> byteArrayOf(0x04, 0x04)
+    else -> caretControlBytes(label) ?: characterKeyBytes(label, ctrlArmed)
+}
+
+/** CSI sequence: `ESC [ <final>`. */
+private fun csi(finalByte: Char): ByteArray =
+    byteArrayOf(BYTE_ESC, '['.code.toByte(), finalByte.code.toByte())
+
+/**
+ * `^X` / `^C` / `^\` labels from the #1662 catalog.
+ *
+ * Length-2 and a leading caret, so `^C×2` does not fall through here.
+ */
+private fun caretControlBytes(label: String): ByteArray? {
+    if (label.length != 2 || label[0] != '^') return null
+    return controlBytes(label[1].code)
 }
 
 /**

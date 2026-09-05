@@ -1,5 +1,6 @@
 package com.pocketshell.next.composer
 
+import android.Manifest
 import android.content.Context
 import android.os.SystemClock
 import androidx.compose.ui.test.assertCountEquals
@@ -26,6 +27,8 @@ import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
+import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.next.voice.ConnectivityProbe
 import com.pocketshell.next.voice.PendingTranscriptionItem
 import com.pocketshell.next.voice.PendingTranscriptionStore
@@ -146,6 +149,8 @@ class J08VoiceDictationJourney {
     @Test
     fun micTapDictatesIntoTheComposerDraft() {
         openSession()
+        grantRecordAudio()
+        openComposer()
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
@@ -187,6 +192,7 @@ class J08VoiceDictationJourney {
         }
 
         openSession()
+        openComposer()
 
         awaitTag(COMPOSER_NOTICE_TAG, "the offline-dictation-delivered notice")
         JourneyScreenshots.capture("03-offline-delivered", JOURNEY)
@@ -207,6 +213,20 @@ class J08VoiceDictationJourney {
         awaitTag(sessionRowTag(SESSION))
         compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
+    }
+
+    private fun openComposer() {
+        awaitTag(SESSION_COMPOSER_LAUNCHER_TAG, "the Prompt Composer launcher")
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
+        awaitTag(COMPOSER_TAG, "the Prompt Composer sheet")
+    }
+
+    private fun grantRecordAudio() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.uiAutomation.grantRuntimePermission(
+            instrumentation.targetContext.packageName,
+            Manifest.permission.RECORD_AUDIO,
+        )
     }
 
     private fun awaitTag(tag: String, what: String = tag) {

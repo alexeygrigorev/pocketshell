@@ -6,10 +6,16 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.composer.COMPOSER_INSERT_TAG
+import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
+import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
 import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
 import com.pocketshell.next.composer.ComposerNotice
 import com.pocketshell.next.composer.ComposerUiState
+import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
+import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -199,40 +205,66 @@ class SessionScreenTest {
     }
 
     /**
-     * The composer stays mounted through a failure ON PURPOSE (task P-1): that
-     * is the state in which a kept draft matters most, and hiding it would
-     * delete the one thing the send contract promises.
+     * #2521: closed chrome is the compact launcher only. The circled stack
+     * (Ctrl Esc Tab Enter + draft + Send + mic) must not sit in the session
+     * column.
      */
     @Test
-    fun `the composer is present while connecting`() {
-        setContent(SessionUiState.Connecting)
-
-        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
-    }
-
-    @Test
-    fun `the composer is present on a live session`() {
+    fun `closed chrome is the compact launcher, not the composer or key bar`() {
         setContent(SessionUiState.Live(createRemoteTerminalSession()))
 
-        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Ctrl").assertDoesNotExist()
+        composeRule.onNodeWithText("Esc").assertDoesNotExist()
+        composeRule.onNodeWithText("Tab").assertDoesNotExist()
+        composeRule.onNodeWithText("Enter").assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertDoesNotExist()
     }
 
     @Test
-    fun `the composer survives a failure, because that is when a draft matters`() {
+    fun `the compact launcher is present while connecting`() {
+        setContent(SessionUiState.Connecting)
+
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun `a failed session keeps the composer launcher so a draft can still be kept`() {
         setContent(SessionUiState.Failed("no route to host"))
 
         composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertDoesNotExist()
     }
 
     @Test
-    fun `an undelivered draft is visible above the terminal`() {
+    fun `opening the composer shows a Prompt Composer sheet, not an inline bar`() {
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            initiallyShowComposer = true,
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `an undelivered draft is visible inside the composer sheet`() {
         setContent(
             SessionUiState.Live(createRemoteTerminalSession()),
             composerState = ComposerUiState(
                 draft = "kept text",
                 notice = ComposerNotice.Undelivered,
             ),
+            initiallyShowComposer = true,
         )
 
         composeRule.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertIsDisplayed()
@@ -245,7 +277,9 @@ class SessionScreenTest {
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
         onRetry: () -> Unit = {},
-        onKeyBarSend: (ByteArray) -> Unit = {},
+        onHotkeySend: (ByteArray) -> Unit = {},
+        initiallyShowComposer: Boolean = false,
+        initiallyShowHotkeys: Boolean = false,
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -256,9 +290,10 @@ class SessionScreenTest {
                     onBack = onBack,
                     onResized = onResized,
                     onRetry = onRetry,
-                    onKeyBarSend = onKeyBarSend,
+                    onHotkeySend = onHotkeySend,
                     onDraftChange = {},
                     onSend = {},
+                    onInsert = {},
                     onAttach = {},
                     onMicTap = {},
                     onCancelRecording = {},
@@ -268,6 +303,8 @@ class SessionScreenTest {
                     onDismissNotice = {},
                     onDiscardDraft = {},
                     onUseHistoryEntry = {},
+                    initiallyShowComposer = initiallyShowComposer,
+                    initiallyShowHotkeys = initiallyShowHotkeys,
                 )
             }
         }

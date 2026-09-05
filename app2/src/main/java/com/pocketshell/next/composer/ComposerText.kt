@@ -56,6 +56,14 @@ internal object ComposerText {
     fun enterBytes(): ByteArray = byteArrayOf(0x0D)
 
     /**
+     * Insert writes the body with no trailing Enter.
+     *
+     * The old Prompt Composer contract: Insert types into the PTY; Send
+     * submits. A `\r` here would make Insert indistinguishable from Send.
+     */
+    fun insertBytes(body: String): ByteArray = body.toByteArray(Charsets.UTF_8)
+
+    /**
      * The composer's storage key for one session, shared by the draft store and
      * the sent-message log so both answer "which session is this" identically.
      */

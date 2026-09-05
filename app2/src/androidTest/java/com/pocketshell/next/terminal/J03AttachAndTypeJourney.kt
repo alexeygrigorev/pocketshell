@@ -26,9 +26,16 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.idleWedgeNote
+import com.pocketshell.next.composer.COMPOSER_SEND_TAG
+import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
+import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -364,7 +371,26 @@ class J03AttachAndTypeJourney {
     }
 
     /**
-     * Task U-5: Ctrl on the key bar plus `c` on the keyboard is a real SIGINT.
+     * #2521: the circled always-visible 4-key bar + full composer is gone.
+     * Closed session chrome is the compact Prompt Composer + ⌨ launcher.
+     */
+    @Test
+    fun closedChromeIsCompactLauncherOnly() {
+        openSession()
+        awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
+
+        compose.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Ctrl").assertDoesNotExist()
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
+        JourneyScreenshots.capture("06-compact-launcher", JOURNEY)
+    }
+
+    /**
+     * Task U-5 / #2521: `^C` on the hotkeys panel is a real SIGINT.
      *
      * The oracle is the HOST's process table, not the screen. A terminal shows
      * `^C` for any number of reasons — a locally echoed control glyph, a shell
@@ -386,20 +412,20 @@ class J03AttachAndTypeJourney {
         awaitHostSleep(running = true)
         JourneyScreenshots.capture("07-sleeping", JOURNEY)
 
-        // The whole point of the key bar: the modifier comes from the bar, the
-        // letter from the keyboard, because a phone keyboard has every letter
-        // and no Ctrl.
-        compose.onNodeWithText(KEY_LABEL_CTRL).assertIsDisplayed()
-        compose.onNodeWithText(KEY_LABEL_CTRL).performClick()
-        compose.awaitIdle("after the Ctrl key-bar tap")
-        typeCharacter('c')
+        openHotkeys()
+        // Two ordinary taps are the documented accessible fallback for a
+        // stubborn agent; they also survive a first tap being eaten as a
+        // sheet-drag. Each tap is one 0x03.
+        compose.onNodeWithText("^C").performClick()
+        compose.onNodeWithText("^C").performClick()
+        compose.awaitIdle("after the hotkeys-panel ^C taps")
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitHostSleep(running = false)
         JourneyScreenshots.capture("08-interrupted", JOURNEY)
 
-        // ...and the session is still usable afterwards. Twice, for the reason
-        // the headline test explains: once as the shell echoes the typed line,
-        // once as the command's own output.
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG).performClick()
+        compose.awaitIdle("after closing the hotkeys panel")
         typeLine("echo $CTRL_MARKER")
         awaitTranscript("the post-interrupt marker twice") {
             it.split(CTRL_MARKER).size >= 3
@@ -411,36 +437,37 @@ class J03AttachAndTypeJourney {
     }
 
     /**
-     * Task U-5: Esc and Enter on the key bar reach the remote as real bytes.
+     * Task U-5 / #2521: Enter on the hotkeys panel reaches the remote as CR.
      *
-     * Enter is the load-bearing one — a bar that sent `\n` instead of `\r`
+     * Enter is the load-bearing one — a panel that sent `\n` instead of `\r`
      * submits nothing to a line editor — and it is asserted the only way that
      * distinguishes them: by typing a command WITHOUT a newline and letting the
-     * bar's Enter run it.
+     * panel's Enter run it. The panel stays open after the tap.
      */
     @Test
     fun theKeyBarsEnterSubmitsATypedCommand() {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
-        // Typed WITHOUT the Enter key event `typeLine` appends.
         typeCharacters("echo $ENTER_MARKER")
         val beforeEnter = awaitTranscript("the un-submitted command echoed back") {
             it.contains(ENTER_MARKER)
         }
         assertEquals(
-            "the command must NOT have run yet, or the key bar's Enter proves nothing:\n" +
+            "the command must NOT have run yet, or the panel's Enter proves nothing:\n" +
                 beforeEnter,
             2,
             squashed(beforeEnter).split(ENTER_MARKER).size,
         )
 
+        openHotkeys()
         compose.onNodeWithText(KEY_LABEL_ENTER).performClick()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitTranscript("the marker echoed and run") { it.split(ENTER_MARKER).size >= 3 }
-        JourneyScreenshots.capture("09-key-bar-enter", JOURNEY)
+        JourneyScreenshots.capture("09-hotkeys-enter", JOURNEY)
         assertTrue(
-            "the host must show the command the key bar's Enter submitted",
+            "the host must show the command the hotkeys panel's Enter submitted",
             squashed(capturePane()).contains(ENTER_MARKER),
         )
     }
@@ -460,6 +487,12 @@ class J03AttachAndTypeJourney {
         awaitTag(sessionRowTag(SESSION))
         compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
+    }
+
+    private fun openHotkeys() {
+        awaitTag(SESSION_HOTKEYS_LAUNCHER_TAG)
+        compose.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).performClick()
+        awaitTag(TERMINAL_HOTKEYS_PANEL_TAG)
     }
 
     /**
@@ -1070,6 +1103,7 @@ class J03AttachAndTypeJourney {
             "theRemoteTerminalSizeTracksTheKeyboardAndRotation" to 9_303L,
             "ctrlFromTheKeyBarInterruptsARunningCommand" to 9_304L,
             "theKeyBarsEnterSubmitsATypedCommand" to 9_305L,
+            "closedChromeIsCompactLauncherOnly" to 9_306L,
         )
     }
 }

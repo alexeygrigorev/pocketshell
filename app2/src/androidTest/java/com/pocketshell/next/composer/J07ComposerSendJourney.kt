@@ -29,6 +29,7 @@ import com.pocketshell.next.terminal.SESSION_ERROR_BANNER_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -155,6 +156,7 @@ class J07ComposerSendJourney {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
+        openComposer()
         compose.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("echo $MARKER")
         compose.awaitIdle("after composing the draft")
@@ -210,6 +212,7 @@ class J07ComposerSendJourney {
         AgentsFixture.exec("tmux -S $SOCKET kill-server 2>/dev/null || true")
         awaitTag(SESSION_ERROR_BANNER_TAG, "the session-ended banner")
 
+        openComposer()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(UNDELIVERED_TEXT)
         compose.awaitIdle("after composing the undelivered draft")
         // Prove the editor took the text and Send is live BEFORE asserting on
@@ -243,6 +246,7 @@ class J07ComposerSendJourney {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
+        openComposer()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(HISTORY_TEXT)
         compose.awaitIdle("after composing the history draft")
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
@@ -320,6 +324,12 @@ class J07ComposerSendJourney {
         awaitTag(sessionRowTag(SESSION))
         compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
+    }
+
+    private fun openComposer() {
+        awaitTag(SESSION_COMPOSER_LAUNCHER_TAG, "the Prompt Composer launcher")
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
+        awaitTag(COMPOSER_TAG, "the Prompt Composer sheet")
     }
 
     /**

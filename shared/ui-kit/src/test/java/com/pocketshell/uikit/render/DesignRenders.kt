@@ -104,6 +104,18 @@ import org.robolectric.annotation.GraphicsMode
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class DesignRenders {
 
+    /** Issue #2521: closed-session compact launcher (Prompt Composer + ⌨). */
+    @Test
+    fun sessionCompactLauncherBar() = render("session-compact-launcher-bar") {
+        SessionCompactLauncherBarRender()
+    }
+
+    /** Issue #2521: Prompt Composer sheet chrome (title, draft, Insert, Send, mic). */
+    @Test
+    fun promptComposerSheet() = render("prompt-composer-sheet") {
+        PromptComposerSheetRender()
+    }
+
     /** Issue #1662 common hotkeys page, including the visible hold cues. */
     @Test
     fun terminalHotkeysPanel() = render("terminal-hotkeys-panel") {

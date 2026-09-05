@@ -49,6 +49,7 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 const val COMPOSER_TAG: String = "composer"
 const val COMPOSER_DRAFT_TAG: String = "composer-draft"
 const val COMPOSER_SEND_TAG: String = "composer-send"
+const val COMPOSER_INSERT_TAG: String = "composer-insert"
 const val COMPOSER_ATTACH_TAG: String = "composer-attach"
 const val COMPOSER_MIC_TAG: String = "composer-mic"
 const val COMPOSER_DISCARD_RECORDING_TAG: String = "composer-discard-recording"
@@ -66,28 +67,18 @@ fun composerSlashRowTag(command: String): String = "composer-slash-row:$command"
 /** The text a send that never left the device puts on screen. */
 const val COMPOSER_UNDELIVERED_TEXT: String = "Not delivered — session offline. Your draft was kept."
 
+/** Shown when RECORD_AUDIO is denied; dictation is not started. */
+const val COMPOSER_RECORD_AUDIO_DENIED_TEXT: String =
+    "Microphone permission denied. You can still type."
+
 internal const val COMPOSER_PLACEHOLDER: String = "Compose a message…"
 
 /**
- * The composer, inline in the session screen's bottom chrome (rewrite task
- * P-1).
+ * The Prompt Composer body (rewrite task P-1, restored as a sheet in #2521).
  *
- * ## Why inline rather than the old modal bottom sheet
- *
- * The old composer was a `ModalBottomSheet`, and two of its ported support
- * files (`ComposerSheetChrome`, `PromptComposerImeAnchorPolicy`) existed only
- * to fight Material's sheet anchors: a policy that measured the sheet Surface
- * against the IME boundary and re-anchored it, plus a hand-rolled drag handle
- * that clawed back the ~45dp of dead top inset Material charged a floating
- * sheet. Both are chrome-shaped bug fixes for a container this composer does
- * not use.
- *
- * An inline bar sits above the keyboard by construction — the screen carries
- * `imePadding()` and the terminal above it resizes — so the whole class of
- * anchor/dead-band defect the maintainer reported against the sheet cannot
- * occur, and 289 lines of correction machinery do not need to be maintained to
- * prevent it. This is the rewrite's premise applied to the composer: delete the
- * shim by removing the thing it was shimming.
+ * Hosted inside [PromptComposerSheet], not inline in the session column. The
+ * session column's compact launcher opens the sheet; this composable is the
+ * draft, mic, Insert, and Send once it is open.
  *
  * ## Stateless
  *
@@ -103,6 +94,7 @@ fun ComposerBar(
     state: ComposerUiState,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
+    onInsert: () -> Unit,
     onAttach: () -> Unit,
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
@@ -194,6 +186,7 @@ fun ComposerBar(
         ControlsRow(
             state = state,
             onSend = onSend,
+            onInsert = onInsert,
             onAttach = onAttach,
             onMicTap = onMicTap,
             onCancelRecording = onCancelRecording,
@@ -297,6 +290,7 @@ private fun DraftField(value: TextFieldValue, onValueChange: (TextFieldValue) ->
 private fun ControlsRow(
     state: ComposerUiState,
     onSend: () -> Unit,
+    onInsert: () -> Unit,
     onAttach: () -> Unit,
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
@@ -304,7 +298,8 @@ private fun ControlsRow(
     onTogglePreview: () -> Unit,
     onDiscard: () -> Unit,
 ) {
-    Row(
+    Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+        Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
@@ -366,17 +361,6 @@ private fun ControlsRow(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        if (state.recording != RecordingState.Recording) {
-            PocketShellButton(
-                text = "Send",
-                onClick = onSend,
-                enabled = state.canSend && !state.busy,
-                compact = true,
-                modifier = Modifier.testTag(COMPOSER_SEND_TAG),
-            )
-            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
-        }
-
         MicButton(
             state = when {
                 state.recording == RecordingState.Recording -> MicButtonState.Recording
@@ -384,10 +368,34 @@ private fun ControlsRow(
                 else -> MicButtonState.Disabled
             },
             onClick = onMicTap,
-            // No size override: `MicButton` pins its own 56dp disc after the
-            // caller's modifier, so anything set here would be a silent no-op.
             modifier = Modifier.testTag(COMPOSER_MIC_TAG),
         )
+    }
+
+    if (state.recording != RecordingState.Recording) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+        ) {
+            Spacer(modifier = Modifier.weight(1f))
+            PocketShellButton(
+                text = "Insert",
+                onClick = onInsert,
+                enabled = state.canSend && !state.busy,
+                variant = ButtonVariant.Secondary,
+                compact = true,
+                modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
+            )
+            PocketShellButton(
+                text = "Send",
+                onClick = onSend,
+                enabled = state.canSend && !state.busy,
+                compact = true,
+                modifier = Modifier.testTag(COMPOSER_SEND_TAG),
+            )
+        }
+    }
     }
 }
 

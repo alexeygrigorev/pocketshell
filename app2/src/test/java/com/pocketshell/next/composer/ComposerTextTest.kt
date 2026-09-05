@@ -77,6 +77,11 @@ class ComposerTextTest {
     }
 
     @Test
+    fun `insert bytes are the body with no carriage return`() {
+        assertEquals("hello", ComposerText.insertBytes("hello").toString(Charsets.UTF_8))
+    }
+
+    @Test
     fun `the session key pairs the host id with the session name`() {
         assertEquals("7/my project", ComposerText.sessionKey(7, "my project"))
     }

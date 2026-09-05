@@ -134,6 +134,7 @@ class ComposerRenders {
         state = state,
         onDraftChange = {},
         onSend = {},
+        onInsert = {},
         onAttach = {},
         onMicTap = {},
         onCancelRecording = {},

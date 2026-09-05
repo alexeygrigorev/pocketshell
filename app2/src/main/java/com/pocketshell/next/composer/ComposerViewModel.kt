@@ -252,20 +252,36 @@ class ComposerViewModel @Inject constructor(
     // ---------------------------------------------------------------- sending
 
     /**
-     * Sends the composed message.
+     * Sends the composed message: body, then the agent-submit delay, then Enter.
      *
      * Ignored while an upload is in flight: an attachment that is halfway to
      * the host has no remote path yet, so sending now would send a message
      * referencing a file that is not there.
      */
-    fun send() {
+    fun send() = deliver(submit = true)
+
+    /**
+     * Writes the composed message to the PTY without submitting.
+     *
+     * Same live/undelivered contract as [send]; the only difference is the
+     * trailing carriage return.
+     */
+    fun insert() = deliver(submit = false)
+
+    private fun deliver(submit: Boolean) {
         val current = _state.value
         if (!current.canSend || current.busy) return
         val target = sink ?: return
 
         val body = ComposerText.compose(current.draft.trim(), current.attachments.map { it.remotePath })
         val delivered = target.isLive
-        if (delivered) deliver(target, body)
+        if (delivered) {
+            if (submit) {
+                deliver(target, body)
+            } else {
+                target.sendBytes(ComposerText.insertBytes(body))
+            }
+        }
         record(body, delivered)
 
         if (delivered) {
@@ -348,6 +364,11 @@ class ComposerViewModel @Inject constructor(
     /** Mic tap: start dictating, or stop and transcribe. */
     fun onMicTap() {
         if (dictation.isRecording) dictation.stop() else dictation.start()
+    }
+
+    /** RECORD_AUDIO was denied. The recognizer is not started. */
+    fun surfacePermissionDenied() {
+        notify(ComposerNotice.Problem(COMPOSER_RECORD_AUDIO_DENIED_TEXT))
     }
 
     /** Discard the recording and restore the draft as it was before the mic opened. */

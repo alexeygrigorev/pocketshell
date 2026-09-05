@@ -17,6 +17,7 @@ import logging
 import os
 import shlex
 import stat
+import sys
 import time
 
 import pytest
@@ -504,10 +505,8 @@ def test_probe_timeout_falls_back_to_native(fake_home, tmp_path, monkeypatch):
     assert {p.name for p in discovered} == {"Claude", "Claude (Z.AI)", "Codex"}
 
 
-def test_aplexer_profile_probe_uses_a_on_path(
-    fake_home, tmp_path, monkeypatch
-):
-    script = _install_fake_a(
+def _remote_laude_a(tmp_path, monkeypatch):
+    return _install_fake_a(
         tmp_path,
         monkeypatch,
         payload={
@@ -515,14 +514,56 @@ def test_aplexer_profile_probe_uses_a_on_path(
                 "engine": "claude",
                 "env": {"CLAUDE_CONFIG_DIR": "/srv/remote-laude"},
             }
-        }
+        },
     )
+
+
+def _interpreter_without_bundled_a(tmp_path, monkeypatch):
+    """Point ``sys.executable`` at a bin dir holding no bundled ``a``."""
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+    return bin_dir
+
+
+def test_aplexer_profile_probe_ignores_a_on_path(fake_home, tmp_path, monkeypatch):
+    """#2543 (D22 hard cut): a PATH-only ``a`` is NOT used any more.
+
+    This test used to assert the opposite (``…_uses_a_on_path``). aplexer now
+    ships WITH the pocketshell CLI as a pinned dependency, so a separately
+    installed ``a`` — the mode this change removes — must not be picked up:
+    with no bundled copy next to the interpreter, the probe is skipped and
+    native discovery stays authoritative.
+    """
+    script = _remote_laude_a(tmp_path, monkeypatch)
     monkeypatch.delenv("APLEXER_BIN", raising=False)
+    _interpreter_without_bundled_a(tmp_path, monkeypatch)
     environment = {
         "HOME": str(fake_home),
         "PATH": os.pathsep.join([str(script.parent), os.environ["PATH"]]),
         "POCKETSHELL_APLEXER_PROFILES": "1",
     }
+
+    assert profiles._aplexer_profiles(environment) is None
+
+
+def test_aplexer_profile_probe_uses_the_bundled_a(fake_home, tmp_path, monkeypatch):
+    """The bundled copy next to ``sys.executable`` IS what gets probed."""
+    script = _remote_laude_a(tmp_path, monkeypatch)
+    monkeypatch.delenv("APLEXER_BIN", raising=False)
+    bin_dir = _interpreter_without_bundled_a(tmp_path, monkeypatch)
+    bundled = bin_dir / "a"
+    bundled.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    bundled.chmod(bundled.stat().st_mode | stat.S_IEXEC)
+    environment = {
+        # No aplexer anywhere on PATH — only the system dirs the stub's own
+        # `/bin/sh` body needs. Resolution must come from the bundled copy.
+        "HOME": str(fake_home),
+        "PATH": "/usr/bin:/bin",
+        "POCKETSHELL_APLEXER_PROFILES": "1",
+    }
+
     mapped = profiles._aplexer_profiles(environment)
     assert mapped is not None
     assert [(item.name, item.config_dir) for item in mapped] == [

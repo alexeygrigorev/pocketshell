@@ -82,6 +82,62 @@ dependencies = [
     # per-session-server migration so every caller resolves sessions the same
     # way.
     "tmuxctl>=0.3.5",
+    # aplexer ships WITH the pocketshell CLI (issue #2543). `pocketshell
+    # sessions create --backend aplexer` needs BOTH the `a` CLI and its
+    # `aplexer` worker binary (aplexer/src/lib.rs::worker_executable resolves
+    # the worker as a sibling of current_exe); the published wheel bundles
+    # both native binaries and exposes them as the `a` / `aplexer`
+    # console-scripts, so `uv tool install pocketshell` delivers a complete,
+    # working aplexer with no separate build/copy/PATH step. That closes the
+    # reported failure where a hand-installed `~/bin/a` was invisible to the
+    # app's NON-INTERACTIVE SSH PATH and half-installed (no sibling worker).
+    #
+    # Pinned exactly, like `quse`: pocketshell speaks a specific `a --json`
+    # contract (`start`/`snapshot`/`list`/`launch-spec`/`engines`/`profiles`),
+    # and `pocketshell/aplexer.py` resolves the BUNDLED copy INSTEAD of PATH,
+    # so the pinned wheel is the ONLY aplexer this CLI can run. Bumping the
+    # pin is a deliberate, reviewed change.
+    #
+    # 0.1.2 (not 0.1.1) is required, and the version string alone cannot tell
+    # you why: aplexer HEAD sat 143 commits past the v0.1.1 tag while STILL
+    # self-reporting `a --version` as 0.1.1, so the published 0.1.1 wheel and
+    # the build every PocketShell host actually ran were indistinguishable by
+    # version. Pinning 0.1.1 under the hard cut would have silently DOWNGRADED
+    # every host to a build missing two fixes the real create-agent path needs:
+    #   * aplexer ee4b957 — profile `executable` override (argv[0]) for Codex
+    #     variants. Without it, `[profiles.zcodex] engine="codex",
+    #     executable="zcodex"` resolves argv[0] to `codex`, and `pocketshell
+    #     sessions create --backend aplexer --engine codex --profile zcodex`
+    #     dies with "a: command is not executable or was not found in PATH:
+    #     codex".
+    #   * aplexer d13ecb2 — preserve the provider environment for plain
+    #     `shell` launches (0.1.1 stripped 71 provider vars from every shell
+    #     session).
+    # tests/test_aplexer_contract.py pins BOTH behaviours against the BUNDLED
+    # binary, because `a --version` demonstrably cannot: a future pin that
+    # regresses to a build without them fails that test loudly instead of
+    # shipping a silent downgrade. Re-run it whenever this pin moves.
+    #
+    # There is no separate release-time guard for the aplexer version itself
+    # (scripts/check-pypi-version.sh only couples pocketshell's OWN version to
+    # the release tag and says nothing about quse or tmuxctl either), so the
+    # exact pin + the committed uv.lock + that contract test are the
+    # enforcement.
+    #
+    # The `sys_platform == 'linux'` marker is load-bearing: aplexer publishes
+    # manylinux wheels only (x86_64 + aarch64) and NO sdist, so an unmarked
+    # hard dependency would make `pip install pocketshell` unresolvable on
+    # macOS/Windows. PocketShell hosts are Linux; a non-Linux host simply gets
+    # no bundled aplexer at all, so `sessions create --backend aplexer` there
+    # fails loud (there is no PATH fallback — D22) while tmux, the default
+    # backend, keeps working.
+    #
+    # Install-surface note (0.1.2): the wheels moved from manylinux_2_17 to
+    # manylinux_2_28, raising the minimum glibc from 2.17 to 2.28. Linux hosts
+    # older than that (CentOS 7, Ubuntu 18.04) can no longer install
+    # pocketshell at all now that aplexer is a hard dependency. Flagged, not
+    # solved here — see docs/aplexer-integration.md.
+    "aplexer==0.1.2; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -137,8 +193,13 @@ required-version = "==0.10.11"
 # a rolling global `exclude-newer` policy that predates deliberately pinned
 # releases (quse 0.0.15 and tmuxctl 0.3.5); this exact value is also the
 # `uv.lock` options cutoff and must be used when checking this lock. Moved
-# past quse 0.0.15's 2026-08-28T12:09:07Z PyPI upload for issue #2293.
-exclude-newer = "2026-08-28T22:00:00Z"
+# past quse 0.0.15's 2026-08-28T12:09:07Z PyPI upload for issue #2293, then
+# past aplexer 0.1.2's 2026-09-05T22:38:08Z PyPI upload (its `aplexer-client`
+# runtime dep landed at 22:38:04Z) for issue #2543. A package uploaded after
+# the cutoff is simply invisible to `uv lock`, which reads like a broken index
+# rather than a stale cutoff, so this value moves in lock-step with every new
+# pin — and the `uv.lock` options cutoff must be moved to match.
+exclude-newer = "2026-09-05T23:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from pocketshell import aplexer as _aplexer
 from pocketshell.sessions import sessions_group
 
 FAKE_TMUXCTL = "/fake/tmuxctl"
@@ -85,7 +86,9 @@ class Harness:
                     stderr=f"prefix match is not allowed: {target}\n",
                 )
             return _completed()
-        if args[0] == "a" and "kill" in args:
+        # #2543: argv[0] is the RESOLVED aplexer binary (the fixture's stub via
+        # APLEXER_BIN), never a bare "a" that execvp would find on PATH.
+        if Path(args[0]).name in {"a", "fake-a"} and "kill" in args:
             self.events.append(("a-kill", args))
             if self.a_kill_fails:
                 return _completed(returncode=1, stderr="no such session\n")
@@ -270,7 +273,7 @@ def test_kill_json_not_found_is_an_error_envelope(socket_dir) -> None:
 
 
 def test_kill_aplexer_display_name_runs_a_kill(install_fake_a, socket_dir) -> None:
-    install_fake_a(
+    script = install_fake_a(
         snapshot=[
             {
                 "id": "sess-abc12345",
@@ -286,12 +289,12 @@ def test_kill_aplexer_display_name_runs_a_kill(install_fake_a, socket_dir) -> No
     result = _invoke(harness, ["kill", "toyaikit:codex"])
 
     assert result.exit_code == 0, result.output
-    assert harness.a_kill_calls == [["a", "kill", "sess-abc12345"]]
+    assert harness.a_kill_calls == [[str(script), "kill", "sess-abc12345"]]
     assert harness.kill_calls == []
 
 
 def test_kill_aplexer_id_prefix_runs_a_kill(install_fake_a, socket_dir) -> None:
-    install_fake_a(
+    script = install_fake_a(
         snapshot=[
             {
                 "id": "abcdef0123456789",
@@ -305,7 +308,7 @@ def test_kill_aplexer_id_prefix_runs_a_kill(install_fake_a, socket_dir) -> None:
     result = _invoke(harness, ["kill", "abcdef01"])
 
     assert result.exit_code == 0, result.output
-    assert harness.a_kill_calls == [["a", "kill", "abcdef0123456789"]]
+    assert harness.a_kill_calls == [[str(script), "kill", "abcdef0123456789"]]
 
 
 def test_kill_missing_a_binary_exits_127(install_fake_a, socket_dir) -> None:
@@ -320,11 +323,15 @@ def test_kill_missing_a_binary_exits_127(install_fake_a, socket_dir) -> None:
     )
     harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
 
-    with patch("pocketshell.sessions._resolve_aplexer_binary", return_value=None):
+    unresolved = _aplexer.AplexerResolution(
+        tried=("APLEXER_BIN (unset)", "/opt/venv/bin/a (bundled, missing)")
+    )
+    with patch("pocketshell.sessions._resolve_aplexer", return_value=unresolved):
         result = _invoke(harness, ["kill", "toyaikit:codex"])
 
     assert result.exit_code == 127, result.output
-    assert "`a` (aplexer) is not installed" in result.output
+    assert "could not resolve the `a` (aplexer) binary" in result.output
+    assert "/opt/venv/bin/a (bundled, missing)" in result.output
     assert harness.a_kill_calls == []
 
 

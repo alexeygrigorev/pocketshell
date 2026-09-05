@@ -25,6 +25,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.next.usage.UsageGlancePill
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.UsageGlanceViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -67,6 +70,12 @@ const val SESSION_TREE_FILES_TAG: String = "session-tree-files"
 /** The header action that opens this host's port-forward panel (task P-4). */
 const val SESSION_TREE_PORTS_TAG: String = "session-tree-ports"
 
+/** The header action that pops back to Hosts (issue #2532). */
+const val SESSION_TREE_BACK_TAG: String = "session-tree-back"
+
+/** The header action that opens this host's usage panel (issue #2532). */
+const val SESSION_TREE_USAGE_TAG: String = "session-tree-usage"
+
 fun sessionRowTag(name: String): String = "session-row-$name"
 
 fun sessionRowMenuTag(name: String): String = "session-row-menu-$name"
@@ -103,10 +112,14 @@ fun SessionTreeRoute(
     onOpenSession: (String) -> Unit,
     onOpenFiles: () -> Unit,
     onOpenPorts: () -> Unit,
+    onBack: () -> Unit,
+    onOpenUsage: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SessionTreeViewModel = hiltViewModel(),
+    usageGlanceViewModel: UsageGlanceViewModel? = null,
 ) {
     val state by viewModel.state.collectAsState()
+    val usagePillState = usageGlancePill(usageGlanceViewModel)
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
 
@@ -133,8 +146,24 @@ fun SessionTreeRoute(
         onCancelStop = viewModel::cancelStopSession,
         onOpenFiles = onOpenFiles,
         onOpenPorts = onOpenPorts,
+        onBack = onBack,
+        onOpenUsage = onOpenUsage,
+        usagePillState = usagePillState,
         modifier = modifier,
     )
+}
+
+/**
+ * Optional so a Robolectric composition that has no Hilt graph can still host
+ * the route. Production always passes a [UsageGlanceViewModel]; the tree still
+ * paints its Usage text button when the pill is absent.
+ */
+@Composable
+private fun usageGlancePill(viewModel: UsageGlanceViewModel?): UsageGlancePillState? {
+    if (viewModel == null) return null
+    val pill by viewModel.state.collectAsState()
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    return pill
 }
 
 /**
@@ -178,6 +207,9 @@ fun SessionTreeScreen(
     onOpenSession: (String) -> Unit,
     onOpenFiles: () -> Unit = {},
     onOpenPorts: () -> Unit = {},
+    onBack: () -> Unit = {},
+    onOpenUsage: () -> Unit = {},
+    usagePillState: UsageGlancePillState? = null,
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (CreateSessionRequest) -> Unit = {},
@@ -195,6 +227,9 @@ fun SessionTreeScreen(
             onRequestStop = onRequestStop,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
+            onBack = onBack,
+            onOpenUsage = onOpenUsage,
+            usagePillState = usagePillState,
             nowSec = nowSec,
         )
 
@@ -254,6 +289,9 @@ private fun SessionTreeBody(
     onRequestStop: (String) -> Unit,
     onOpenFiles: () -> Unit,
     onOpenPorts: () -> Unit,
+    onBack: () -> Unit,
+    onOpenUsage: () -> Unit,
+    usagePillState: UsageGlancePillState?,
     nowSec: Long,
 ) {
     Column(
@@ -264,9 +302,19 @@ private fun SessionTreeBody(
         ScreenHeader(
             title = "Sessions",
             subtitle = headerSubtitle(state),
-            // Tasks P-3a / P-4: Files and Ports are host-scoped, so they live
-            // in this header rather than behind a menu. ScreenHeader.trailing
-            // already lays its children out as a compact row.
+            leading = {
+                PocketShellButton(
+                    text = "Back",
+                    onClick = onBack,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(SESSION_TREE_BACK_TAG),
+                )
+            },
+            // Tasks P-3a / P-4 / issue #2532: Files, Ports and Usage are
+            // host-scoped, so they live in this header rather than behind a
+            // menu. The glance pill rides next to Usage when a reading exists;
+            // the Usage text button stays so the panel is always reachable.
             trailing = {
                 PocketShellButton(
                     text = "Files",
@@ -282,6 +330,16 @@ private fun SessionTreeBody(
                     compact = true,
                     modifier = Modifier.testTag(SESSION_TREE_PORTS_TAG),
                 )
+                PocketShellButton(
+                    text = "Usage",
+                    onClick = onOpenUsage,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(SESSION_TREE_USAGE_TAG),
+                )
+                usagePillState?.let { pillState ->
+                    UsageGlancePill(state = pillState, onClick = onOpenUsage)
+                }
             },
         )
 

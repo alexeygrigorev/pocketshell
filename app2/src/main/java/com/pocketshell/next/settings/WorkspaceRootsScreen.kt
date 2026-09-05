@@ -99,7 +99,7 @@ fun WorkspaceRootsScreen(
             title = if (state.hostName.isBlank()) "Workspace roots" else "Roots · ${state.hostName}",
             leading = {
                 PocketShellButton(
-                    text = "‹",
+                    text = "Back",
                     onClick = onBack,
                     variant = ButtonVariant.Text,
                     compact = true,

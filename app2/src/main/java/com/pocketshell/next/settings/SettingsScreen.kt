@@ -199,7 +199,7 @@ fun SettingsScreen(
             title = "Settings",
             leading = {
                 PocketShellButton(
-                    text = "‹",
+                    text = "Back",
                     onClick = onBack,
                     variant = ButtonVariant.Text,
                     compact = true,

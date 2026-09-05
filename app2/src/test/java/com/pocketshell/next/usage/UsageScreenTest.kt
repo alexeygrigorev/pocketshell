@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -36,6 +37,27 @@ class UsageScreenTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun `back button fires onBack`() {
+        var backs = 0
+        composeRule.setContent {
+            PocketShellTheme {
+                UsageScreen(
+                    state = UsageScreenState(),
+                    onBack = { backs += 1 },
+                    onRefresh = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(USAGE_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
+        composeRule.onNodeWithTag(USAGE_BACK_TAG).performClick()
+
+        assertEquals(1, backs)
+    }
 
     @Test
     fun opening_usage_shows_compact_strip_without_provider_cards() {

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -67,6 +66,7 @@ internal const val CRASH_REPORTS_SHARE_ALL_TAG = "crash:shareAll"
 internal const val CRASH_REPORTS_DELETE_ALL_TAG = "crash:deleteAll"
 internal const val CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG = "crash:deleteAll:confirm"
 internal const val CRASH_REPORTS_DELETE_ALL_CANCEL_TAG = "crash:deleteAll:cancel"
+internal const val CRASH_REPORTS_BACK_TAG = "crash:back"
 
 /**
  * [viewModel] is a seam, exactly like every other app2 route composable
@@ -346,7 +346,7 @@ private fun DialogScrim(
 /**
  * Crash reports header, routed through the shared [ScreenHeader] so the
  * screen reads as the tight dev-tool block — `bodyDense` SemiBold title +
- * `‹` back chevron in the leading slot.
+ * a visible Back control in the leading slot (issue #2532).
  */
 @Composable
 private fun CrashReportsAppBar(onBack: () -> Unit) {
@@ -354,18 +354,13 @@ private fun CrashReportsAppBar(onBack: () -> Unit) {
         title = "Crash reports",
         modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
         leading = {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clickable(role = Role.Button, onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "‹",
-                    color = PocketShellColors.TextSecondary,
-                    style = MaterialTheme.typography.headlineSmall,
-                )
-            }
+            PocketShellButton(
+                text = "Back",
+                onClick = onBack,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(CRASH_REPORTS_BACK_TAG),
+            )
         },
     )
 }

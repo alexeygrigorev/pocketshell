@@ -31,7 +31,10 @@ import com.pocketshell.next.usage.UsageGlanceViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -75,7 +78,22 @@ const val SESSION_TREE_USAGE_TAG: String = "session-tree-usage"
 
 fun sessionRowTag(name: String): String = "session-row-$name"
 
+fun sessionRowMenuTag(name: String): String = "session-row-menu-$name"
+
 fun rootHeaderTag(key: String): String = "root-header-$key"
+
+/** Overflow item and confirmation copy for Stop session (issue #2535). */
+const val STOP_SESSION_ITEM_LABEL: String = "Stop session"
+const val STOP_SESSION_TITLE: String = "Stop session?"
+const val STOP_SESSION_CONFIRM_LABEL: String = "Stop"
+const val STOP_SESSION_ITEM_TAG: String = "session-stop-item"
+const val STOP_SESSION_CONFIRM_TAG: String = "session-stop-confirm"
+const val STOP_SESSION_CANCEL_TAG: String = "session-stop-cancel"
+const val STOP_SESSION_TITLE_TAG: String = "session-stop-title"
+const val STOP_SESSION_MESSAGE_TAG: String = "session-stop-message"
+
+fun stopSessionMessage(name: String): String =
+    "Stop \"$name\"? This kills the session on the host. Anything running in it stops, and there is no undo."
 
 fun folderHeaderTag(key: String): String = "folder-header-$key"
 
@@ -123,6 +141,9 @@ fun SessionTreeRoute(
         onCreateSession = viewModel::openCreateSheet,
         onSubmitCreate = viewModel::createSession,
         onDismissCreate = viewModel::dismissCreateSheet,
+        onRequestStop = viewModel::requestStopSession,
+        onConfirmStop = viewModel::confirmStopSession,
+        onCancelStop = viewModel::cancelStopSession,
         onOpenFiles = onOpenFiles,
         onOpenPorts = onOpenPorts,
         onBack = onBack,
@@ -153,11 +174,11 @@ private fun usageGlancePill(viewModel: UsageGlanceViewModel?): UsageGlancePillSt
  * A three-level tree: root (`~/git`) → folder (cwd basename) → session. Root
  * and folder rows are headers, not attach targets; only a session row tap
  * opens the session. There is no collapse state, no drag reordering, no
- * persisted node registry, and no per-row action menu — the old client's tree
- * had all four and they are the machinery the rewrite is removing, not
- * features being deferred. A 1-session folder still draws its folder row
- * (collapsing it is the "grouping doesn't work" failure). The FAB creates a
- * session (U-6); that plus a row tap is the screen's whole interaction budget.
+ * persisted node registry — the old client's tree had those and they are the
+ * machinery the rewrite is removing. A 1-session folder still draws its
+ * folder row (collapsing it is the "grouping doesn't work" failure). The FAB
+ * creates a session (U-6); the row kebab's Stop session kills one after
+ * confirmation (#2535). Swipe actions are out of scope.
  *
  * ## The partial-list banner is the point of the screen, not decoration
  *
@@ -193,6 +214,9 @@ fun SessionTreeScreen(
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (CreateSessionRequest) -> Unit = {},
     onDismissCreate: () -> Unit = {},
+    onRequestStop: (String) -> Unit = {},
+    onConfirmStop: () -> Unit = {},
+    onCancelStop: () -> Unit = {},
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
@@ -200,6 +224,7 @@ fun SessionTreeScreen(
             state = state,
             onRefresh = onRefresh,
             onOpenSession = onOpenSession,
+            onRequestStop = onRequestStop,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
             onBack = onBack,
@@ -237,6 +262,21 @@ fun SessionTreeScreen(
             onCancel = onDismissCreate,
         )
     }
+
+    state.pendingStop?.let { name ->
+        ConfirmDialog(
+            title = STOP_SESSION_TITLE,
+            message = stopSessionMessage(name),
+            confirmLabel = STOP_SESSION_CONFIRM_LABEL,
+            destructive = true,
+            onConfirm = onConfirmStop,
+            onDismiss = onCancelStop,
+            confirmTestTag = STOP_SESSION_CONFIRM_TAG,
+            dismissTestTag = STOP_SESSION_CANCEL_TAG,
+            titleTestTag = STOP_SESSION_TITLE_TAG,
+            messageTestTag = STOP_SESSION_MESSAGE_TAG,
+        )
+    }
 }
 
 /** The tree's own chrome + list, split out so the FAB can sit over it. */
@@ -246,6 +286,7 @@ private fun SessionTreeBody(
     state: SessionTreeUiState,
     onRefresh: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onRequestStop: (String) -> Unit,
     onOpenFiles: () -> Unit,
     onOpenPorts: () -> Unit,
     onBack: () -> Unit,
@@ -412,6 +453,7 @@ private fun SessionTreeBody(
                                     nowSec = nowSec,
                                     indentLevels = if (folder.untracked) 1 else 2,
                                     onClick = { onOpenSession(row.name) },
+                                    onRequestStop = { onRequestStop(row.name) },
                                 )
                             }
                         }
@@ -436,6 +478,7 @@ private fun SessionTreeRow(
     nowSec: Long,
     indentLevels: Int,
     onClick: () -> Unit,
+    onRequestStop: () -> Unit,
 ) {
     ListRow(
         title = row.name,
@@ -443,6 +486,19 @@ private fun SessionTreeRow(
         leading = {
             StatusDot(
                 status = if (row.attached) ConnectionStatus.Connected else ConnectionStatus.Idle,
+            )
+        },
+        trailing = {
+            Kebab(
+                items = listOf(
+                    KebabItem(
+                        label = STOP_SESSION_ITEM_LABEL,
+                        onClick = onRequestStop,
+                        testTag = STOP_SESSION_ITEM_TAG,
+                    ),
+                ),
+                contentDescription = "Actions for ${row.name}",
+                triggerTestTag = sessionRowMenuTag(row.name),
             )
         },
         onClick = onClick,

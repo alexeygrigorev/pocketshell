@@ -13,6 +13,11 @@ import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
 import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
 import com.pocketshell.next.composer.ComposerNotice
 import com.pocketshell.next.composer.ComposerUiState
+import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
+import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
+import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
+import com.pocketshell.next.tree.STOP_SESSION_TITLE
+import com.pocketshell.next.tree.stopSessionMessage
 import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
@@ -304,6 +309,40 @@ class SessionScreenTest {
     }
 
     @Test
+    fun `header kebab Stop session confirms then reports the name`() {
+        var stopped = 0
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            onStopSession = { stopped += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
+        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).assertIsDisplayed()
+        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).performClick()
+        composeRule.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
+        composeRule.onNodeWithText(stopSessionMessage(SESSION)).assertIsDisplayed()
+        composeRule.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
+
+        assertEquals(1, stopped)
+    }
+
+    @Test
+    fun `cancelling Stop on the session screen does not kill`() {
+        var stopped = 0
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            onStopSession = { stopped += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
+        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).performClick()
+        composeRule.onNodeWithTag(STOP_SESSION_CANCEL_TAG).performClick()
+
+        assertEquals(0, stopped)
+        composeRule.onNodeWithText(STOP_SESSION_TITLE).assertDoesNotExist()
+    }
+
+    @Test
     fun `an undelivered draft is visible inside the composer sheet`() {
         setContent(
             SessionUiState.Live(createRemoteTerminalSession()),
@@ -324,6 +363,7 @@ class SessionScreenTest {
         onBack: () -> Unit = {},
         onResized: (Int, Int) -> Unit = { _, _ -> },
         onRetry: () -> Unit = {},
+        onStopSession: () -> Unit = {},
         onHotkeySend: (ByteArray) -> Unit = {},
         usagePillState: UsageGlancePillState? = null,
         onOpenUsage: () -> Unit = {},
@@ -341,6 +381,7 @@ class SessionScreenTest {
                     onOpenUsage = onOpenUsage,
                     onResized = onResized,
                     onRetry = onRetry,
+                    onStopSession = onStopSession,
                     onHotkeySend = onHotkeySend,
                     onDraftChange = {},
                     onSend = {},

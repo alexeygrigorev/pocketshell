@@ -712,6 +712,108 @@ class SessionTreeViewModelTest {
         assertEquals(4_242L, connection.execCalls.single().timeoutMs)
     }
 
+    // --- stop (issue #2535) ----------------------------------------------
+
+    @Test
+    fun `requesting Stop does not kill until confirm`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndKill(HEALTHY_LISTING, LISTING_WITHOUT_CLAUDE)
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.requestStopSession("claude-main")
+        advanceUntilIdle()
+
+        assertEquals("claude-main", viewModel.state.value.pendingStop)
+        assertTrue(
+            "the kebab must not kill before confirm",
+            connection().executedCommands.none { "kill" in it },
+        )
+        assertTrue(
+            viewModel.state.value.roots.flatMap { it.folders }.flatMap { it.rows }.any { it.name == "claude-main" },
+        )
+    }
+
+    @Test
+    fun `cancelling Stop is a no-op on the host`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndKill(HEALTHY_LISTING, LISTING_WITHOUT_CLAUDE)
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.requestStopSession("claude-main")
+        viewModel.cancelStopSession()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.pendingStop)
+        assertTrue(
+            "cancel must not send sessions kill",
+            connection().executedCommands.none { "kill" in it },
+        )
+        assertTrue(
+            "cancel must leave the session on the tree",
+            viewModel.state.value.roots.flatMap { it.folders }.flatMap { it.rows }.any { it.name == "claude-main" },
+        )
+    }
+
+    @Test
+    fun `confirming Stop kills the exact name and drops the row on refresh`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        answerListAndKill(HEALTHY_LISTING, LISTING_WITHOUT_CLAUDE)
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.requestStopSession("claude-main")
+        viewModel.confirmStopSession()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.pendingStop)
+        assertEquals(
+            "pocketshell sessions kill -- 'claude-main'",
+            connection().executedCommands.single { "kill" in it },
+        )
+        assertTrue(
+            "killing claude-main must not name a neighbour",
+            connection().executedCommands.none { it.contains("api-staging") },
+        )
+        assertTrue(
+            viewModel.state.value.roots.flatMap { it.folders }.flatMap { it.rows }.none { it.name == "claude-main" },
+        )
+        assertNull(viewModel.state.value.failure)
+    }
+
+    @Test
+    fun `a failed Stop keeps the row and shows the hosts own words`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        stack.factory.script = { connection ->
+            connection.onExecPrefix(
+                "pocketshell sessions list",
+                ExecResult(0, HEALTHY_LISTING, "", false),
+            )
+            connection.onExecPrefix(
+                "pocketshell sessions kill",
+                ExecResult(3, "", "no session named 'claude-main'\n", false),
+            )
+        }
+        val viewModel = viewModel(hostId)
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        viewModel.requestStopSession("claude-main")
+        viewModel.confirmStopSession()
+        advanceUntilIdle()
+
+        val failure = requireNotNull(viewModel.state.value.failure)
+        assertTrue(failure, failure.contains("no session named 'claude-main'"))
+        assertTrue(
+            "a refused kill must not drop the row locally",
+            viewModel.state.value.roots.flatMap { it.folders }.flatMap { it.rows }.any { it.name == "claude-main" },
+        )
+    }
+
     // --- helpers ----------------------------------------------------------
 
     private fun viewModel(hostId: Long) = SessionTreeViewModel(
@@ -728,6 +830,30 @@ class SessionTreeViewModelTest {
                 "pocketshell sessions list",
                 ExecResult(exitCode = 0, stdout = json, stderr = "", timedOut = false),
             )
+        }
+    }
+
+    /**
+     * Scripts list + kill so the listing after a successful kill no longer
+     * contains the stopped session.
+     */
+    private fun answerListAndKill(beforeJson: String, afterJson: String) {
+        var killed = false
+        stack.factory.script = { connection ->
+            connection.onExecMatching("sessions list or kill", once = false, { true }) { command ->
+                when {
+                    command.startsWith("pocketshell sessions kill") -> {
+                        killed = true
+                        ExecResult(exitCode = 0, stdout = "", stderr = "", timedOut = false)
+                    }
+                    else -> ExecResult(
+                        exitCode = 0,
+                        stdout = if (killed) afterJson else beforeJson,
+                        stderr = "",
+                        timedOut = false,
+                    )
+                }
+            }
         }
     }
 
@@ -766,6 +892,28 @@ class SessionTreeViewModelTest {
          * with an engine/tag, and a reported agent state — the shape the Docker
          * `agents` fixture serves journey J02.
          */
+        val LISTING_WITHOUT_CLAUDE = """
+            {
+              "schema": 2,
+              "managers": ["tmux", "aplexer"],
+              "sessions": [
+                {"name":"codex","manager":"tmux","id":null,
+                 "workspace":"/home/testuser/git/pocketshell","tag":null,"engine":null,
+                 "profile":null,"agent_state":null,"agent_state_source":null,
+                 "attached":false,"created_epoch":1788370000,"activity_epoch":1788409100},
+                {"name":"opencode-lab","manager":"tmux","id":null,
+                 "workspace":null,"tag":null,"engine":null,
+                 "profile":null,"agent_state":null,"agent_state_source":null,
+                 "attached":false,"created_epoch":1788360000,"activity_epoch":1788400000},
+                {"name":"aplexer-follow:yolo","manager":"aplexer","id":"52a2508e",
+                 "workspace":"/home/testuser/git/aplexer","tag":"yolo","engine":"codex",
+                 "profile":null,"agent_state":"waiting","agent_state_source":"heuristic",
+                 "attached":false,"created_epoch":1788350000,"activity_epoch":1788409200}
+              ],
+              "errors": []
+            }
+        """.trimIndent()
+
         val HEALTHY_LISTING = """
             {
               "schema": 2,

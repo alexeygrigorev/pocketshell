@@ -48,9 +48,9 @@ fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
  *
  * Two kinds of method live here, and the difference is deliberate:
  *
- * - `listX` / `createSession` **run** a command and parse its JSON. One call
- *   is one exec — no retry, no polling, no caching. The caller owns cadence
- *   and owns what to do with a failure.
+ * - `listX` / `createSession` / `killSession` **run** a command and parse
+ *   its answer. One call is one exec — no retry, no polling, no caching. The
+ *   caller owns cadence and owns what to do with a failure.
  * - `attachCommand` **builds** a command string and runs nothing. It takes
  *   over its channel (attach becomes the session), so it belongs on a PTY
  *   channel the caller opens, not on the request/response [RemoteExec] seam.
@@ -117,6 +117,26 @@ class HostCliClient(
         }
         val outcome = capture(command, CREATE_TIMEOUT_MS).getOrElse { return Result.failure(it) }
         return parseCreate(command, outcome)
+    }
+
+    /**
+     * `pocketshell sessions kill -- NAME` — kills that one session on the host.
+     *
+     * [name] is forwarded after `--` and single-quoted, so a session literally
+     * called `--help` or `it's a test` is still a name. The host CLI resolves
+     * it the same way attach does and kills with an exact `=` tmux target (or
+     * `a kill <id>`), so killing `api` cannot destroy `api-staging`.
+     *
+     * Success is exit 0. The host's kill is quiet on stdout; a non-zero exit
+     * is a [HostCliError.Failed] carrying the host's own stderr.
+     */
+    suspend fun killSession(name: String): Result<Unit> {
+        val command = buildString {
+            append(binary).append(" sessions kill -- ").append(shellSingleQuote(name))
+        }
+        val outcome = capture(command, KILL_TIMEOUT_MS).getOrElse { return Result.failure(it) }
+        if (outcome.exitCode != 0) return Result.failure(nonZeroExit(command, outcome))
+        return Result.success(Unit)
     }
 
     /** `pocketshell engines list --json`. */
@@ -314,6 +334,13 @@ class HostCliClient(
          * send an agent launch line, both slower than a read.
          */
         const val CREATE_TIMEOUT_MS: Long = 60_000
+
+        /**
+         * Budget for `sessions kill`. The host enumerates then kills one
+         * session; that is a list-shaped sweep plus a short tmux/`a` call,
+         * not a create.
+         */
+        const val KILL_TIMEOUT_MS: Long = 20_000
 
         private const val FIELD_SCHEMA = "schema"
         private const val FIELD_ERROR = "error"

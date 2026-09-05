@@ -1294,3 +1294,232 @@ def sessions_attach(ctx: click.Context, name: str, hide_status: bool) -> None:
                 err=True,
             )
     _exec(["tmux", "-S", socket_path, "attach-session", "-t", target])
+
+
+# ---------------------------------------------------------------------------
+# `sessions kill` — same name resolution as attach, then kill that one session
+# ---------------------------------------------------------------------------
+#
+# Desktop kills with `tmux -S <socket> kill-session -t '=NAME'`. The `=` is
+# tmux's exact-match form: without it, `-t api` will happily destroy
+# `api-staging` once `api` itself is gone. `tmux kill-server` is never used
+# — that would wipe every session on the socket, including ones the user did
+# not name.
+#
+# Exit codes match attach so a client can branch the same way:
+#   3   no session by that name
+#   4   ambiguous — several sessions match
+#   5   matched a tmux session but its server socket could not be located
+#   127 the `tmux` / `a` binary needed to kill is not installed
+
+KILL_SCHEMA_VERSION = CREATE_SCHEMA_VERSION
+
+
+def _emit_kill_failure(
+    ctx: click.Context, message: str, *, exit_code: int, as_json: bool
+) -> None:
+    """Report a failed kill: JSON error envelope on stdout, else stderr."""
+    if as_json:
+        click.echo(
+            json.dumps({"schema": KILL_SCHEMA_VERSION, "error": message}, indent=2)
+        )
+    else:
+        click.echo(message, err=True)
+    ctx.exit(exit_code if exit_code else 1)
+
+
+def _run_session_kill(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one kill argv (tmux kill-session or ``a kill``). Never kill-server."""
+    return subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=_TMUX_TIMEOUT_S,
+    )
+
+
+@sessions_group.command(
+    "kill",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("name")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the schema-2 kill envelope "
+        '{"schema","name","manager","id","killed"} on stdout.'
+    ),
+)
+@click.pass_context
+def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
+    """Kill a live session by exact name.
+
+    NAME is a tmux session name, an aplexer display name
+    (`<workspace>:<tag>`), or an aplexer id prefix of at least 8 characters.
+    Resolution uses the same enumeration and matching rules as
+    `sessions attach`, so any name that listing shows can be killed — and a
+    prefix cannot silently destroy a neighbour.
+
+    tmux sessions are killed with `tmux -S <socket> kill-session -t '=NAME'`
+    on the socket `_find_tmux_socket` located. aplexer sessions are killed
+    with `a kill <id>`. This never runs `tmux kill-server`.
+
+    Exit 3 = no such session, 4 = ambiguous, 5 = tmux session found but its
+    socket could not be located, 127 = the kill binary is missing.
+    """
+    rows, _errors = _attach_live_rows()
+    matches = _match_attach_target(rows, name)
+    if not matches:
+        _emit_kill_failure(
+            ctx,
+            f"no session named {name!r}",
+            exit_code=ATTACH_EXIT_NOT_FOUND,
+            as_json=as_json,
+        )
+        return
+    if len(matches) > 1:
+        if as_json:
+            _emit_kill_failure(
+                ctx,
+                f"ambiguous session name {name!r}",
+                exit_code=ATTACH_EXIT_AMBIGUOUS,
+                as_json=True,
+            )
+            return
+        click.echo(f"ambiguous session name {name!r}; candidates:", err=True)
+        for row in matches:
+            click.echo(_describe_candidate(row), err=True)
+        ctx.exit(ATTACH_EXIT_AMBIGUOUS)
+        return
+
+    row = matches[0]
+    if row.manager == _session_enum.MANAGER_APLEXER:
+        if _resolve_aplexer_binary() is None:
+            _emit_kill_failure(
+                ctx,
+                "pocketshell: `a` (aplexer) is not installed on this host; "
+                f"cannot kill {row.name!r}.",
+                exit_code=ATTACH_EXIT_NO_BINARY,
+                as_json=as_json,
+            )
+            return
+        aplexer_id = row.aplexer_id
+        if not aplexer_id:
+            _emit_kill_failure(
+                ctx,
+                f"pocketshell: aplexer session {row.name!r} has no id; cannot kill it.",
+                exit_code=ATTACH_EXIT_NOT_FOUND,
+                as_json=as_json,
+            )
+            return
+        argv = ["a", "kill", str(aplexer_id)]
+        try:
+            completed = _run_session_kill(argv)
+        except subprocess.TimeoutExpired:
+            _emit_kill_failure(
+                ctx,
+                f"pocketshell: `a kill {aplexer_id}` timed out.",
+                exit_code=1,
+                as_json=as_json,
+            )
+            return
+        except OSError as exc:
+            _emit_kill_failure(
+                ctx,
+                "pocketshell: `a` (aplexer) is not installed on this host; "
+                f"cannot kill {row.name!r}: {exc}",
+                exit_code=ATTACH_EXIT_NO_BINARY,
+                as_json=as_json,
+            )
+            return
+        if completed.returncode != 0:
+            detail = str(completed.stderr or "").strip() or f"exit {completed.returncode}"
+            _emit_kill_failure(
+                ctx,
+                f"pocketshell: could not kill {row.name!r}: {detail}",
+                exit_code=completed.returncode,
+                as_json=as_json,
+            )
+            return
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "schema": KILL_SCHEMA_VERSION,
+                        "name": row.name,
+                        "manager": row.manager,
+                        "id": aplexer_id,
+                        "killed": True,
+                    },
+                    indent=2,
+                )
+            )
+        return
+
+    if shutil.which("tmux") is None:
+        _emit_kill_failure(
+            ctx,
+            "pocketshell: `tmux` is not installed on this host; "
+            f"cannot kill {row.name!r}.",
+            exit_code=ATTACH_EXIT_NO_BINARY,
+            as_json=as_json,
+        )
+        return
+    socket_path = _find_tmux_socket(row.name)
+    if socket_path is None:
+        _emit_kill_failure(
+            ctx,
+            f"pocketshell: found tmux session {row.name!r} in the listing but "
+            "no tmux server socket serves it; it may have just exited.",
+            exit_code=ATTACH_EXIT_NO_SOCKET,
+            as_json=as_json,
+        )
+        return
+    # Exact `=` match on the listing's socket. A bare `-t NAME` fails open
+    # (kills a prefix neighbour and reports success); `=` fails closed.
+    argv = ["tmux", "-S", socket_path, "kill-session", "-t", f"={row.name}"]
+    try:
+        completed = _run_session_kill(argv)
+    except subprocess.TimeoutExpired:
+        _emit_kill_failure(
+            ctx,
+            f"pocketshell: `tmux kill-session` for {row.name!r} timed out.",
+            exit_code=1,
+            as_json=as_json,
+        )
+        return
+    except OSError as exc:
+        _emit_kill_failure(
+            ctx,
+            "pocketshell: `tmux` is not installed on this host; "
+            f"cannot kill {row.name!r}: {exc}",
+            exit_code=ATTACH_EXIT_NO_BINARY,
+            as_json=as_json,
+        )
+        return
+    if completed.returncode != 0:
+        detail = str(completed.stderr or "").strip() or f"exit {completed.returncode}"
+        _emit_kill_failure(
+            ctx,
+            f"pocketshell: could not kill {row.name!r}: {detail}",
+            exit_code=completed.returncode,
+            as_json=as_json,
+        )
+        return
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "schema": KILL_SCHEMA_VERSION,
+                    "name": row.name,
+                    "manager": row.manager,
+                    "id": row.aplexer_id,
+                    "killed": True,
+                },
+                indent=2,
+            )
+        )

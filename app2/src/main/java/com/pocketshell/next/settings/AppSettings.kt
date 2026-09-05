@@ -3,7 +3,7 @@ package com.pocketshell.next.settings
 /**
  * Every user-tunable preference app2 has (rewrite task P-6).
  *
- * ## Four fields, not sixteen
+ * ## Five fields, not sixteen
  *
  * The old client's `AppSettings` carried sixteen. Most of them configured
  * machinery the rewrite deleted, so porting them would have shipped a settings
@@ -15,13 +15,17 @@ package com.pocketshell.next.settings
  * | --- | --- |
  * | `tmuxOnAttachByDefault` | Plan P-6 drop list. app2 always attaches through the host CLI; there is no plain-SSH branch to prefer. |
  * | `outboundDeliveryAuthority` (+ enum) | Plan P-6 drop list. It selected between two outbound-queue implementations, both deleted. |
- * | `agentSubmitEnterDelayMs` | Plan P-6 drop list. Agent-TUI paste-race tuning; agent surfaces are cut. |
  * | `diagnosticsRecordingEnabled` | The connection-journal recorder subsystem is not ported (plan P-10, audit finding #5). |
  * | `terminalKeyboardMode` | app2's terminal pins char-based input (see `TerminalHostView`'s client) — a smart-text mode no longer exists to select. |
  * | `conversationFontSizeSp`, `showSystemNotes`, `defaultAgentSessionView` | The conversation view (U-10) is cut by the scope amendment. |
  * | `hostDetailViewMode` | The tree/flat toggle: app2 has one session-tree presentation (U-3). |
  * | `defaultHostId` | The open-on-launch destination. app2 always starts on the host list; "startup" is not in P-6's KEEP list. |
  * | `voiceSilenceThresholdSeconds`, `voiceTranscriptionProvider` | Both belonged to the buffered-WAV → OpenAI Whisper path. app2 dictates through the system recognizer only, which auto-stops itself and needs no API key. |
+ *
+ * `agentSubmitEnterDelayMs` was on that drop list (P-6: "agent surfaces are
+ * cut") and is back: the composer is still the send path into those agents,
+ * and concatenating body+Enter into one PTY write is the race issue #2526
+ * restores the delay to close. No capture-pane ACK gating (#869) — delay only.
  *
  * ## Values, not Compose state
  *
@@ -64,6 +68,18 @@ data class AppSettings(
      * is what lets it be changed without a rebuild.
      */
     val backgroundGraceMillis: Long = DEFAULT_BACKGROUND_GRACE_MILLIS,
+    /**
+     * Milliseconds to wait after writing the composer body before sending
+     * the submit Enter, as a second PTY write (issue #2526 / old #526).
+     *
+     * Agents (Claude/Codex/Grok) treat a body+CR concatenated into one write
+     * as a newline and swallow the submit. Default
+     * [DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS]; tunable between
+     * [MIN_AGENT_SUBMIT_ENTER_DELAY_MS] and [MAX_AGENT_SUBMIT_ENTER_DELAY_MS]
+     * via Settings → Terminal. Read per send, not once at graph construction
+     * (same lesson as #2488). Delay only — no capture-pane ACK gating (#869).
+     */
+    val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
 ) {
     companion object {
 
@@ -122,6 +138,27 @@ data class AppSettings(
          * and the same number task U-8's `GraceCoordinator` defaults to.
          */
         const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = BACKGROUND_GRACE_90_SECONDS_MS
+
+        /**
+         * Issue #526 / #2526: bounds + default for the composer agent-submit
+         * Enter delay (ms). After typing the message text into the pane the
+         * composer waits this long, then sends Enter as a separate PTY write
+         * so a fast Enter does not race ahead of the agent TUI's paste
+         * ingestion (which leaves the message sitting unsent).
+         *
+         * - Default 150ms sits in the maintainer-suggested 100–300ms band:
+         *   long enough for Claude Code / Codex to finish ingesting a typical
+         *   composer message before the submit Enter, short enough that Send
+         *   still feels instant.
+         * - The floor is 0ms (back-to-back) for users whose agent never
+         *   races; the ceiling 1000ms covers a sluggish TUI without letting
+         *   a hand-edited prefs value make Send feel broken.
+         * - The slider grain is 50ms, matching v0.4.47.
+         */
+        const val MIN_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 0
+        const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
+        const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
+        const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
 
         /**
          * The offered grace windows, ascending.

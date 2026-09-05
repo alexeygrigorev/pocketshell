@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * ## SharedPreferences, like the rest of app2's small stores
  *
- * Four scalars with one write per user tap. Room would need a schema bump for
+ * Five scalars with one write per user tap. Room would need a schema bump for
  * state that is never queried relationally; DataStore would add a version
  * catalog entry for nothing. `ShowAllPortsStore` made the same call for the
  * same reason.
@@ -59,6 +59,11 @@ import kotlinx.coroutines.flow.asStateFlow
  * picker changed nothing for a user who moved it. It is now read per armed
  * background window straight off [settings], so a change takes effect on the
  * next background rather than the next process.
+ *
+ * [AppSettings.agentSubmitEnterDelayMs] is the same shape for Send (issue
+ * #2526): [com.pocketshell.next.composer.ComposerViewModel] reads it per send
+ * off this snapshot, not once at Hilt graph construction, so a slider change
+ * is the next Send rather than the next process.
  */
 @Singleton
 class SettingsRepository @Inject constructor(
@@ -114,6 +119,22 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(backgroundGraceMillis = supported)
     }
 
+    /**
+     * Composer agent-submit Enter delay (ms). Issue #2526 / old #526.
+     * Clamped to [AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS] /
+     * [AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS] and snapped to the
+     * slider grid so a hand-edited prefs file or slider rounding cannot
+     * push the delay outside the useful band. The send path reads this
+     * value per send to decide how long to wait after the body before
+     * the submit Enter.
+     */
+    fun setAgentSubmitEnterDelayMs(delayMs: Int) {
+        val snapped = snapAgentSubmitEnterDelay(delayMs)
+        if (_settings.value.agentSubmitEnterDelayMs == snapped) return
+        write { putInt(KEY_AGENT_SUBMIT_ENTER_DELAY_MS, snapped) }
+        _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
+    }
+
     private fun write(edit: SharedPreferences.Editor.() -> Unit) {
         runCatching { prefs.edit().apply(edit).apply() }
     }
@@ -143,6 +164,12 @@ class SettingsRepository @Inject constructor(
         backgroundGraceMillis = normaliseBackgroundGrace(
             prefs.safeLong(KEY_BACKGROUND_GRACE_MILLIS, AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS),
         ),
+        agentSubmitEnterDelayMs = snapAgentSubmitEnterDelay(
+            prefs.safeInt(
+                KEY_AGENT_SUBMIT_ENTER_DELAY_MS,
+                AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+            ),
+        ),
     )
 
     private fun snapTerminalTextSize(sizePx: Int): Int = snap(
@@ -158,6 +185,28 @@ class SettingsRepository @Inject constructor(
         max = AppSettings.MAX_USAGE_WARN_PERCENT,
         step = AppSettings.USAGE_WARN_PERCENT_STEP,
     )
+
+    /**
+     * Snap [delayMs] to the nearest
+     * [AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS] grid point within
+     * [AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS] /
+     * [AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS]. Issue #526 / #2526.
+     * Persistence and read both route through this helper so a legacy or
+     * hand-edited prefs value lands on a slider stop. Formula matches
+     * v0.4.47 `snapAgentSubmitEnterDelay` (zero-anchored; the floor is 0).
+     */
+    private fun snapAgentSubmitEnterDelay(delayMs: Int): Int {
+        val clamped = delayMs.coerceIn(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
+        )
+        val step = AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS
+        val snapped = ((clamped + step / 2) / step) * step
+        return snapped.coerceIn(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
+        )
+    }
 
     private fun normaliseVoiceLanguage(code: String?): String {
         val trimmed = code?.trim()?.lowercase().orEmpty()
@@ -215,5 +264,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
+        const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
     }
 }

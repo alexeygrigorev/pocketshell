@@ -38,15 +38,22 @@ internal object ComposerText {
     }
 
     /**
-     * What actually leaves the app: the composed body plus the carriage return
-     * that submits it.
+     * The composed body as UTF-8, with no trailing Enter.
      *
-     * `\r`, not `\n`: this goes into a PTY, where a terminal line discipline
-     * turns carriage return into "the user pressed Enter". Sending `\n` types a
-     * literal newline into readline instead of submitting, which is the
-     * difference between a prompt running and a prompt sitting there.
+     * Send writes this first, waits [com.pocketshell.next.settings.AppSettings.agentSubmitEnterDelayMs],
+     * then writes [enterBytes] as a second PTY write. Concatenating body+CR
+     * here is the race agents treat as a newline instead of submit (#2526).
      */
-    fun wireBytes(body: String): ByteArray = (body + "\r").toByteArray(Charsets.UTF_8)
+    fun bodyBytes(body: String): ByteArray = body.toByteArray(Charsets.UTF_8)
+
+    /**
+     * Carriage return — a PTY line-discipline "the user pressed Enter".
+     *
+     * `\r`, not `\n`: sending `\n` types a literal newline into readline
+     * instead of submitting. A fresh array each call so a caller cannot
+     * mutate a shared buffer.
+     */
+    fun enterBytes(): ByteArray = byteArrayOf(0x0D)
 
     /**
      * The composer's storage key for one session, shared by the draft store and

@@ -13,6 +13,7 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.connect.FakeHostConnectionFactory
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.voice.ConnectivityProbe
 import com.pocketshell.next.voice.PendingTranscriptionDelivery
 import com.pocketshell.next.voice.PendingTranscriptionStore
@@ -58,6 +59,8 @@ class TestComposerStack(homeDirectory: String = "/home/testuser") {
     )
 
     val drafts = ComposerDraftStore(context, Dispatchers.Unconfined)
+
+    val settings = SettingsRepository(context)
 
     val speech = FakeSpeechRecognitionProvider()
 
@@ -129,6 +132,7 @@ class TestComposerStack(homeDirectory: String = "/home/testuser") {
         stager = stager,
         queuedDictations = queuedDictations,
         speech = speech,
+        settings = settings,
     )
 
     fun close() {
@@ -136,6 +140,12 @@ class TestComposerStack(homeDirectory: String = "/home/testuser") {
         // SharedPreferences are process-global under Robolectric, so a draft
         // written by one test would otherwise be loaded by the next.
         context.getSharedPreferences("composer_drafts", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+        // Same reason: a delay written by one test would otherwise be the
+        // next test's default.
+        context.getSharedPreferences("next_settings", Context.MODE_PRIVATE)
             .edit()
             .clear()
             .commit()

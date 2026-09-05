@@ -61,6 +61,23 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun `the agent submit delay slider shows the current value`() {
+        setContent(settings = AppSettings(agentSubmitEnterDelayMs = 300))
+
+        composeRule.onNodeWithTag(SETTINGS_AGENT_SUBMIT_DELAY_SLIDER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_AGENT_SUBMIT_DELAY_VALUE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("300ms").assertIsDisplayed()
+        composeRule.onNodeWithText("Agent submit delay").assertIsDisplayed()
+    }
+
+    @Test
+    fun `the agent submit delay slider defaults to 150ms`() {
+        setContent()
+
+        composeRule.onNodeWithText("150ms").assertIsDisplayed()
+    }
+
+    @Test
     fun `an empty host list shows the add-a-host nudge instead of a blank section`() {
         setContent(hosts = emptyList())
 
@@ -125,6 +142,7 @@ class SettingsScreenTest {
         onVoiceLanguageChange: (String) -> Unit = {},
         onUsageWarnThresholdChange: (Int) -> Unit = {},
         onBackgroundGraceChange: (Long) -> Unit = {},
+        onAgentSubmitEnterDelayChange: (Int) -> Unit = {},
         onOpenWorkspaceRoots: (Long) -> Unit = {},
         onOpenCrashReports: () -> Unit = {},
     ) {
@@ -138,6 +156,7 @@ class SettingsScreenTest {
                 onVoiceLanguageChange = onVoiceLanguageChange,
                 onUsageWarnThresholdChange = onUsageWarnThresholdChange,
                 onBackgroundGraceChange = onBackgroundGraceChange,
+                onAgentSubmitEnterDelayChange = onAgentSubmitEnterDelayChange,
                 onOpenWorkspaceRoots = onOpenWorkspaceRoots,
                 onOpenCrashReports = onOpenCrashReports,
             )

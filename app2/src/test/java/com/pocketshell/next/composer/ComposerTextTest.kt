@@ -52,22 +52,28 @@ class ComposerTextTest {
     }
 
     /**
+     * Body bytes are the draft only — no concatenated CR. Send writes Enter
+     * as a second PTY write after the delay (#2526); putting `\r` here is
+     * the race agents treat as a newline.
+     */
+    @Test
+    fun `body bytes are the draft with no trailing carriage return`() {
+        assertEquals("hello", ComposerText.bodyBytes("hello").toString(Charsets.UTF_8))
+        assertEquals(
+            "привет".toByteArray(Charsets.UTF_8).toList(),
+            ComposerText.bodyBytes("привет").toList(),
+        )
+    }
+
+    /**
      * Carriage return, not newline. A PTY's line discipline turns `\r` into
      * "the user pressed Enter"; `\n` types a literal newline into readline and
      * the prompt just sits there — the difference between a command running and
      * a command not running.
      */
     @Test
-    fun `the wire bytes end in a carriage return`() {
-        assertEquals("hello\r", ComposerText.wireBytes("hello").toString(Charsets.UTF_8))
-    }
-
-    @Test
-    fun `the wire bytes are UTF-8`() {
-        assertEquals(
-            "привет\r".toByteArray(Charsets.UTF_8).toList(),
-            ComposerText.wireBytes("привет").toList(),
-        )
+    fun `enter bytes are a single carriage return`() {
+        assertEquals(byteArrayOf(0x0D).toList(), ComposerText.enterBytes().toList())
     }
 
     @Test

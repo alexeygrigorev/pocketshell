@@ -5,7 +5,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.pocketshell.next.settings.AppSettings
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.TestScope
@@ -72,8 +74,120 @@ class ComposerViewModelTest {
             advanceUntilIdle()
 
             // `\r`, not `\n`: this is a PTY, and carriage return is what a line
-            // discipline turns into "the user pressed Enter".
-            assertEquals(listOf("run the tests\r"), sink.sentText())
+            // discipline turns into "the user pressed Enter". Two writes, not
+            // one concatenated buffer — agents treat an immediate Enter as a
+            // newline (#2526).
+            assertEquals(listOf("run the tests", "\r"), sink.sentText())
+        }
+
+    /**
+     * Issue #2526: agents (Claude/Codex/Grok) treat a body+CR concatenated
+     * into one PTY write as a newline and swallow the submit. The old client
+     * (#526) wrote the text, waited, then sent Enter. This is that contract
+     * on a virtual clock: after send, the body is on the wire WITHOUT CR;
+     * advancing less than the delay does not send CR; advancing the delay
+     * sends exactly `\r`.
+     *
+     * Written first against the unfixed concatenated write so the RED is
+     * the reported defect, not a proxy.
+     */
+    @Test
+    fun `send writes the body, waits the delay, then writes CR as a second PTY write`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onDraftChange("hello")
+            advanceUntilIdle()
+
+            viewModel.send()
+            runCurrent()
+
+            assertEquals(
+                "body must leave without a concatenated CR",
+                listOf("hello"),
+                sink.sentText(),
+            )
+            assertEquals(
+                "the first write must not be the concatenated body+CR buffer",
+                "hello".toByteArray().toList(),
+                sink.sent.single().toList(),
+            )
+
+            val delayMs = AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS.toLong()
+            advanceTimeBy(delayMs - 1)
+            runCurrent()
+            assertEquals(
+                "CR must not leave before the delay elapses",
+                listOf("hello"),
+                sink.sentText(),
+            )
+
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf("hello", "\r"), sink.sentText())
+            assertEquals(byteArrayOf(0x0D).toList(), sink.sent.last().toList())
+        }
+
+    /**
+     * Issue #2526: a 0 ms delay is still two writes (body, then CR), never
+     * one combined `body + "\r"` buffer — concatenating is the race even
+     * when the wait is zero.
+     */
+    @Test
+    fun `zero delay still writes body and CR as two buffers, never one concatenated write`() =
+        runTest(dispatcher) {
+            stack.settings.setAgentSubmitEnterDelayMs(0)
+            val viewModel = bound()
+            viewModel.onDraftChange("hello")
+            advanceUntilIdle()
+
+            viewModel.send()
+            advanceUntilIdle()
+
+            assertEquals(2, sink.sent.size)
+            assertEquals("hello", sink.sent[0].toString(Charsets.UTF_8))
+            assertEquals(byteArrayOf(0x0D).toList(), sink.sent[1].toList())
+            assertTrue(
+                "zero delay must still be two writes, not one concatenated body+CR buffer",
+                sink.sent.none { it.toList() == "hello\r".toByteArray().toList() },
+            )
+        }
+
+    /**
+     * Same lesson as #2488: the delay is read per send off the live
+     * settings snapshot, not captured when the ViewModel (or the Hilt
+     * graph) was constructed. Changing the slider has to change the NEXT
+     * Send without a process restart.
+     */
+    @Test
+    fun `changing the agent submit delay is honoured on the next send`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            stack.settings.setAgentSubmitEnterDelayMs(200)
+            viewModel.onDraftChange("first")
+            advanceUntilIdle()
+
+            viewModel.send()
+            runCurrent()
+            assertEquals(listOf("first"), sink.sentText())
+            advanceTimeBy(199)
+            runCurrent()
+            assertEquals(listOf("first"), sink.sentText())
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf("first", "\r"), sink.sentText())
+
+            stack.settings.setAgentSubmitEnterDelayMs(50)
+            viewModel.onDraftChange("second")
+            advanceUntilIdle()
+            viewModel.send()
+            runCurrent()
+            assertEquals(listOf("first", "\r", "second"), sink.sentText())
+            advanceTimeBy(49)
+            runCurrent()
+            assertEquals(listOf("first", "\r", "second"), sink.sentText())
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(listOf("first", "\r", "second", "\r"), sink.sentText())
         }
 
     @Test
@@ -129,7 +243,7 @@ class ComposerViewModelTest {
         viewModel.send()
         advanceUntilIdle()
 
-        assertEquals(listOf("first\r"), sink.sentText())
+        assertEquals(listOf("first", "\r"), sink.sentText())
         assertEquals("second", viewModel.state.value.draft)
     }
 
@@ -377,6 +491,7 @@ class ComposerViewModelTest {
             stager = stack.stager,
             queuedDictations = stack.queuedDictations,
             speech = stack.speech,
+            settings = stack.settings,
         )
 
         viewModel.bind(hostId, SESSION, sink)
@@ -499,7 +614,7 @@ class ComposerViewModelTest {
         viewModel.send()
         advanceUntilIdle()
 
-        assertEquals(listOf("try again later\r"), sink.sentText())
+        assertEquals(listOf("try again later", "\r"), sink.sentText())
         assertEquals(2, viewModel.state.value.history.size)
     }
 
@@ -549,7 +664,7 @@ class ComposerViewModelTest {
             advanceUntilIdle()
 
             assertEquals(
-                listOf("look at this\n\nAttached files:\n- ${staged.remotePath}\r"),
+                listOf("look at this\n\nAttached files:\n- ${staged.remotePath}", "\r"),
                 sink.sentText(),
             )
         }
@@ -565,7 +680,8 @@ class ComposerViewModelTest {
         advanceUntilIdle()
 
         val path = "~/.pocketshell/attachments/$SCOPE/"
-        assertTrue(sink.sentText().single().startsWith("Attached files:\n- $path"))
+        assertTrue(sink.sentText().first().startsWith("Attached files:\n- $path"))
+        assertEquals("\r", sink.sentText().last())
     }
 
     @Test
@@ -594,9 +710,10 @@ class ComposerViewModelTest {
         viewModel.send()
         advanceUntilIdle()
 
-        val body = sink.sentText().single()
+        val body = sink.sentText().first()
         assertTrue(body.contains("-b.txt"))
         assertFalse(body.contains("-a.txt"))
+        assertEquals("\r", sink.sentText().last())
     }
 
     /**
@@ -650,7 +767,8 @@ class ComposerViewModelTest {
         assertFalse(viewModel.state.value.busy)
         viewModel.send()
         advanceUntilIdle()
-        assertTrue(sink.sentText().single().contains("Attached files:"))
+        assertTrue(sink.sentText().first().contains("Attached files:"))
+        assertEquals("\r", sink.sentText().last())
     }
 
     // ------------------------------------------------------------- dictation

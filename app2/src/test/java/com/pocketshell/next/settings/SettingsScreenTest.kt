@@ -132,6 +132,9 @@ class SettingsScreenTest {
         var backCount = 0
         setContent(onBack = { backCount++ })
 
+        composeRule.onNodeWithTag(SETTINGS_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
 
         assertEquals(1, backCount)

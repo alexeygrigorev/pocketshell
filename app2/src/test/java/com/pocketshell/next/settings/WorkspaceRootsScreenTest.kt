@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -70,6 +71,9 @@ class WorkspaceRootsScreenTest {
         var backCount = 0
         setContent(onBack = { backCount++ })
 
+        composeRule.onNodeWithTag(WORKSPACE_ROOTS_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_BACK_TAG).performClick()
 
         assertEquals(1, backCount)

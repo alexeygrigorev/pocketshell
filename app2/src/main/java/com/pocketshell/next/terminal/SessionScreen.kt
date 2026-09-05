@@ -52,6 +52,8 @@ const val SESSION_ERROR_BANNER_TAG: String = "session-error-banner"
 const val SESSION_RECONNECT_BANNER_TAG: String = "session-reconnect-banner"
 const val SESSION_RETRY_TAG: String = "session-retry"
 const val SESSION_BACK_TAG: String = "session-back"
+/** Fallback Usage control when the glance pill has no reading (issue #2532). */
+const val SESSION_USAGE_TAG: String = "session-usage"
 
 /**
  * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
@@ -197,15 +199,25 @@ fun SessionScreen(
             titleTestTag = SESSION_TITLE_TAG,
             leading = {
                 PocketShellButton(
-                    text = "‹",
+                    text = "Back",
                     onClick = onBack,
                     variant = ButtonVariant.Text,
                     compact = true,
                     modifier = Modifier.testTag(SESSION_BACK_TAG),
                 )
             },
-            trailing = usagePillState?.let { pillState ->
-                { UsageGlancePill(state = pillState, onClick = onOpenUsage) }
+            trailing = {
+                if (usagePillState != null) {
+                    UsageGlancePill(state = usagePillState, onClick = onOpenUsage)
+                } else {
+                    PocketShellButton(
+                        text = "Usage",
+                        onClick = onOpenUsage,
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                        modifier = Modifier.testTag(SESSION_USAGE_TAG),
+                    )
+                }
             },
         )
 

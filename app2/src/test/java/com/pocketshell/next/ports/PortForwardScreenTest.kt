@@ -217,6 +217,24 @@ class PortForwardScreenTest {
         composeRule.onNodeWithText("Available").assertIsDisplayed()
     }
 
+    /**
+     * Issue #2532: Ports used the status dot as its only leading chrome, so
+     * there was no on-screen way back to the tree. Back must exist, be the
+     * word `Back` (not `‹`), and fire `onBack`.
+     */
+    @Test
+    fun `tapping Back in the header fires onBack`() {
+        var backs = 0
+        setContent(state(enabled = false), onBack = { backs += 1 })
+
+        composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithText("‹").assertDoesNotExist()
+        composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).performClick()
+
+        assertEquals(1, backs)
+    }
+
     @Test
     fun `byte formatting steps through the units`() {
         assertEquals("0 B", formatBytes(0))
@@ -245,6 +263,7 @@ class PortForwardScreenTest {
         onSetEnabled: (Boolean) -> Unit = {},
         onTogglePort: (Int) -> Unit = {},
         onSetShowAllPorts: (Boolean) -> Unit = {},
+        onBack: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -253,6 +272,7 @@ class PortForwardScreenTest {
                     onSetEnabled = onSetEnabled,
                     onTogglePort = onTogglePort,
                     onSetShowAllPorts = onSetShowAllPorts,
+                    onBack = onBack,
                 )
             }
         }

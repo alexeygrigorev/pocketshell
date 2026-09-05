@@ -164,7 +164,7 @@ class ConnectGateNavigationTest {
                 // through `hiltViewModel()`. This suite is about the connect
                 // gate's navigation edge, so the destination is a stand-in that
                 // echoes the argument the route delivered.
-                treeScreen = { hostId, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

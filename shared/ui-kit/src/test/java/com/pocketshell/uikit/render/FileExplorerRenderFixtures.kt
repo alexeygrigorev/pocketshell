@@ -19,10 +19,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.NavigationChevron
+import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -154,13 +156,12 @@ private fun FileViewerHeaderRow(name: String, path: String, iconClass: FileIconC
         subtitle = path,
         leading = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "‹",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 22.sp,
-                    )
-                }
+                PocketShellButton(
+                    text = "Back",
+                    onClick = {},
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
                 FileTypeIcon(iconClass = iconClass)
             }
         },

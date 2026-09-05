@@ -22,6 +22,7 @@ import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
 import com.pocketshell.next.tree.sessionRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -179,6 +180,25 @@ class J12UsagePanelJourney {
         compose.onNodeWithTag(usageSummaryRowTag("GitHub Copilot")).performScrollTo().performClick()
         awaitTag(usageProviderCardTag("copilot"), "the Copilot provider card")
         assertCardHasDescendant(usageProviderCardTag("copilot"), "WARN")
+    }
+
+    /**
+     * Issue #2532: Usage is a host-scoped action on the session tree, not only
+     * a glance pill inside a session. Tapping Usage on the tree must open the
+     * same panel.
+     */
+    @Test
+    fun tappingUsageOnTheTreeOpensThePanel() {
+        awaitTag(hostRowTag(hostId))
+        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
+        awaitTag(SESSION_TREE_TAG)
+        awaitTag(SESSION_TREE_USAGE_TAG, "the tree Usage header action")
+        JourneyScreenshots.capture("03-tree-usage", JOURNEY)
+
+        compose.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
+        awaitTag(USAGE_SCREEN_TAG, "the usage panel from the tree")
+        awaitTag(usageProviderCardTag("codex"), "the codex provider card")
+        JourneyScreenshots.capture("04-panel-from-tree", JOURNEY)
     }
 
     // --- helpers ------------------------------------------------------------

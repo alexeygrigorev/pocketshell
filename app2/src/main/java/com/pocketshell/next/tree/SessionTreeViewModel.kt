@@ -56,6 +56,12 @@ data class SessionTreeUiState(
     val errors: List<BackendError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
     val failure: String? = null,
+    /**
+     * The session the Stop confirmation dialog is asking about. Null when no
+     * dialog is up. Confirming this name is what actually kills; cancelling
+     * clears it and sends nothing.
+     */
+    val pendingStop: String? = null,
     /** Everything the create-session sheet needs (task U-6). */
     val create: CreateSessionState = CreateSessionState(),
 ) {
@@ -176,6 +182,7 @@ class SessionTreeViewModel @Inject constructor(
     private var inFlight: Job? = null
     private var createInFlight: Job? = null
     private var pickerInFlight: Job? = null
+    private var stopInFlight: Job? = null
 
     /**
      * Re-reads the host's session list. Safe to call from `ON_START` and from
@@ -269,6 +276,36 @@ class SessionTreeViewModel @Inject constructor(
         updateCreate { it.copy(openRequest = null) }
     }
 
+    // --- stop (issue #2535) ------------------------------------------------
+
+    /**
+     * Raises the Stop confirmation dialog for [name]. Does not kill anything:
+     * the first tap is the kebab item, never the kill.
+     */
+    fun requestStopSession(name: String) {
+        _state.update { it.copy(pendingStop = name) }
+    }
+
+    /**
+     * Dismisses the Stop dialog without talking to the host. A cancel is a
+     * no-op on the session list.
+     */
+    fun cancelStopSession() {
+        _state.update { it.copy(pendingStop = null) }
+    }
+
+    /**
+     * Confirms the pending Stop: `pocketshell sessions kill -- NAME`, then
+     * refresh the listing so the row is gone. Ignored when no dialog is up or
+     * a kill is already in flight.
+     */
+    fun confirmStopSession() {
+        val name = _state.value.pendingStop ?: return
+        if (stopInFlight?.isActive == true) return
+        _state.update { it.copy(pendingStop = null) }
+        stopInFlight = viewModelScope.launch { runStop(name) }
+    }
+
     private suspend fun loadPickerOptions() {
         val connection = when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> outcome.connection
@@ -346,6 +383,22 @@ class SessionTreeViewModel @Inject constructor(
     /** A create that failed: the sheet stays open, carrying the reason. */
     private fun failCreate(message: String) {
         updateCreate { it.copy(visible = true, submitting = false, failure = message) }
+    }
+
+    private suspend fun runStop(name: String) {
+        val connection = when (val outcome = resolveConnection()) {
+            is ConnectionOutcome.Ready -> outcome.connection
+            is ConnectionOutcome.Unavailable -> {
+                fail(outcome.message)
+                return
+            }
+        }
+        clients.create(connection).killSession(name).fold(
+            onSuccess = { refresh() },
+            onFailure = { error ->
+                fail(userMessage(error, "Could not stop the session on the host: "))
+            },
+        )
     }
 
     private fun updateCreate(block: (CreateSessionState) -> CreateSessionState) {

@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.HostCliClient
 import com.pocketshell.core.transport.CloseReason
+import com.pocketshell.core.transport.ExecResult
 import com.pocketshell.core.transport.FakeHostConnection
 import com.pocketshell.core.transport.FakePtyChannel
 import com.pocketshell.next.connect.TestConnectStack
@@ -959,6 +960,50 @@ class SessionViewModelTest {
         )
     }
 
+    @Test
+    fun `stopSession kills the exact name and asks the route to leave`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePtyWithKill(ExecResult(exitCode = 0, stdout = "", stderr = "", timedOut = false))
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        assertTrue(viewModel.uiState.value is SessionUiState.Live)
+
+        viewModel.stopSession()
+        settle()
+
+        assertEquals(
+            "pocketshell sessions kill -- '$SESSION'",
+            connection().executedCommands.single { "kill" in it },
+        )
+        assertTrue(viewModel.leaveAfterStop.value)
+        assertNull(viewModel.stopFailure.value)
+
+        clear()
+    }
+
+    @Test
+    fun `a refused Stop stays on the session and shows the hosts words`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePtyWithKill(
+            ExecResult(exitCode = 3, stdout = "", stderr = "no session named '$SESSION'\n", timedOut = false),
+        )
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        viewModel.stopSession()
+        settle()
+
+        assertFalse(viewModel.leaveAfterStop.value)
+        val failure = requireNotNull(viewModel.stopFailure.value)
+        assertTrue(failure, failure.contains("no session named '$SESSION'"))
+        assertTrue(viewModel.uiState.value is SessionUiState.Live)
+
+        clear()
+    }
+
     // --- helpers -------------------------------------------------------------
 
     /**
@@ -997,6 +1042,13 @@ class SessionViewModelTest {
     private fun livePty() {
         stack.factory.script = { connection ->
             connection.enqueuePty(completeAfterFrames = false, exitCode = null)
+        }
+    }
+
+    private fun livePtyWithKill(killResult: ExecResult) {
+        stack.factory.script = { connection ->
+            connection.enqueuePty(completeAfterFrames = false, exitCode = null)
+            connection.onExecPrefix("pocketshell sessions kill", killResult)
         }
     }
 

@@ -30,13 +30,25 @@ import com.pocketshell.next.composer.PromptComposerContent
 import com.pocketshell.next.composer.PromptComposerSheet
 import com.pocketshell.next.composer.SentMessage
 import com.pocketshell.next.composer.SessionSink
+import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
+import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_LABEL
+import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
+import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
+import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
+import com.pocketshell.next.tree.STOP_SESSION_MESSAGE_TAG
+import com.pocketshell.next.tree.STOP_SESSION_TITLE
+import com.pocketshell.next.tree.STOP_SESSION_TITLE_TAG
+import com.pocketshell.next.tree.stopSessionMessage
 import com.pocketshell.next.usage.UsageGlancePill
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.next.usage.UsageGlanceViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SessionLauncherBar
@@ -55,6 +67,8 @@ const val SESSION_RETRY_TAG: String = "session-retry"
 const val SESSION_BACK_TAG: String = "session-back"
 /** Fallback Usage control when the glance pill has no reading (issue #2532). */
 const val SESSION_USAGE_TAG: String = "session-usage"
+const val SESSION_HEADER_KEBAB_TAG: String = "session-header-kebab"
+const val SESSION_STOP_FAILURE_TAG: String = "session-stop-failure"
 
 /**
  * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
@@ -89,9 +103,17 @@ fun SessionRoute(
     val state by viewModel.uiState.collectAsState()
     val composerState by composerViewModel.state.collectAsState()
     val usagePillState by usageGlanceViewModel.state.collectAsState()
+    val leaveAfterStop by viewModel.leaveAfterStop.collectAsState()
+    val stopFailure by viewModel.stopFailure.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
     LifecycleEventEffect(Lifecycle.Event.ON_START) { usageGlanceViewModel.refresh() }
+
+    LaunchedEffect(leaveAfterStop) {
+        if (!leaveAfterStop) return@LaunchedEffect
+        viewModel.consumeLeaveAfterStop()
+        onBack()
+    }
 
     val sink = remember(viewModel) {
         object : SessionSink {
@@ -118,6 +140,8 @@ fun SessionRoute(
         onOpenUsage = onOpenUsage,
         onResized = viewModel::onResized,
         onRetry = viewModel::retryNow,
+        onStopSession = viewModel::stopSession,
+        stopFailure = stopFailure,
         onHotkeySend = viewModel::sendBytes,
         onDraftChange = composerViewModel::onDraftChange,
         onSend = { composerViewModel.send() },
@@ -167,6 +191,8 @@ fun SessionScreen(
     usagePillState: UsageGlancePillState? = null,
     onOpenUsage: () -> Unit = {},
     onRetry: () -> Unit,
+    onStopSession: () -> Unit = {},
+    stopFailure: String? = null,
     onHotkeySend: (ByteArray) -> Unit,
     onDraftChange: (String) -> Unit,
     /**
@@ -198,6 +224,7 @@ fun SessionScreen(
 ) {
     var composerOpen by remember { mutableStateOf(initiallyShowComposer) }
     var hotkeysOpen by remember { mutableStateOf(initiallyShowHotkeys) }
+    var pendingStop by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -229,8 +256,31 @@ fun SessionScreen(
                         modifier = Modifier.testTag(SESSION_USAGE_TAG),
                     )
                 }
+                Kebab(
+                    items = listOf(
+                        KebabItem(
+                            label = STOP_SESSION_ITEM_LABEL,
+                            onClick = { pendingStop = true },
+                            testTag = STOP_SESSION_ITEM_TAG,
+                        ),
+                    ),
+                    contentDescription = "Session actions",
+                    triggerTestTag = SESSION_HEADER_KEBAB_TAG,
+                )
             },
         )
+
+        stopFailure?.let { message ->
+            Banner(
+                text = message,
+                role = BannerRole.Error,
+                maxLines = 3,
+                modifier = Modifier
+                    .padding(horizontal = PocketShellSpacing.md)
+                    .padding(bottom = PocketShellSpacing.sm)
+                    .testTag(SESSION_STOP_FAILURE_TAG),
+            )
+        }
 
         Box(
             modifier = Modifier
@@ -390,6 +440,24 @@ fun SessionScreen(
             messages = composerState.history,
             onPick = onUseHistoryEntry,
             onDismiss = onToggleHistory,
+        )
+    }
+
+    if (pendingStop) {
+        ConfirmDialog(
+            title = STOP_SESSION_TITLE,
+            message = stopSessionMessage(sessionName),
+            confirmLabel = STOP_SESSION_CONFIRM_LABEL,
+            destructive = true,
+            onConfirm = {
+                pendingStop = false
+                onStopSession()
+            },
+            onDismiss = { pendingStop = false },
+            confirmTestTag = STOP_SESSION_CONFIRM_TAG,
+            dismissTestTag = STOP_SESSION_CANCEL_TAG,
+            titleTestTag = STOP_SESSION_TITLE_TAG,
+            messageTestTag = STOP_SESSION_MESSAGE_TAG,
         )
     }
 }

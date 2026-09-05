@@ -1,6 +1,7 @@
 package com.pocketshell.core.hostapi
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -189,5 +190,46 @@ class HostCliCommandStringTest {
         runSuspending { HostCliClient(exec, "/opt/ps/bin/pocketshell").listSessions() }
 
         assertEquals("/opt/ps/bin/pocketshell sessions list --json", exec.command)
+    }
+
+    // --- kill -------------------------------------------------------------
+
+    @Test
+    fun `killSession terminates options and quotes the exact name`() {
+        val exec = RecordingExec.ok("")
+
+        runSuspending { HostCliClient(exec).killSession("api") }
+
+        assertEquals("pocketshell sessions kill -- 'api'", exec.command)
+        assertEquals(listOf(HostCliClient.KILL_TIMEOUT_MS), exec.timeouts)
+    }
+
+    @Test
+    fun `killSession of api is not a prefix of api-staging`() {
+        val exec = RecordingExec.ok("")
+
+        runSuspending { HostCliClient(exec).killSession("api") }
+
+        assertEquals("pocketshell sessions kill -- 'api'", exec.command)
+        assertFalse(
+            "the command must name api exactly, not a prefix that would hit api-staging",
+            exec.command.contains("api-staging"),
+        )
+    }
+
+    @Test
+    fun `killSession quotes an apostrophe and a flag-like name`() {
+        val exec = RecordingExec.ok("")
+
+        runSuspending { HostCliClient(exec).killSession("it's a test") }
+        runSuspending { HostCliClient(exec).killSession("--help") }
+
+        assertEquals(
+            listOf(
+                "pocketshell sessions kill -- 'it'\\''s a test'",
+                "pocketshell sessions kill -- '--help'",
+            ),
+            exec.commands,
+        )
     }
 }

@@ -299,6 +299,42 @@ class HostCliClientVerbsTest {
         assertEquals(listOf(HostCliClient.CREATE_TIMEOUT_MS), exec.timeouts)
     }
 
+    // --- killSession ------------------------------------------------------
+
+    @Test
+    fun `killSession succeeds on a quiet exit 0`() {
+        val result = runSuspending { HostCliClient(RecordingExec.ok("")).killSession("api") }
+
+        assertTrue(result.isSuccess)
+    }
+
+    @Test
+    fun `killSession reports a missing session as a command failure`() {
+        val exec = RecordingExec.exit(code = 3, stderr = "no session named 'api'\n")
+
+        val error = runSuspending { HostCliClient(exec).killSession("api") }.hostCliError()
+
+        val failed = error as HostCliError.Failed
+        assertEquals(3, failed.exitCode)
+        assertEquals("pocketshell sessions kill -- 'api'", failed.command)
+        assertEquals(
+            "`pocketshell sessions kill -- 'api'` failed on the host (exit 3): " +
+                "no session named 'api'",
+            failed.userMessage,
+        )
+    }
+
+    @Test
+    fun `killSession times out on the kill budget`() {
+        val exec = RecordingExec.timedOut()
+
+        val error = runSuspending { HostCliClient(exec).killSession("api") }.hostCliError()
+
+        assertTrue((error as HostCliError.Failed).timedOut)
+        assertTrue(error.userMessage.contains("within 20000ms"))
+        assertEquals(listOf(HostCliClient.KILL_TIMEOUT_MS), exec.timeouts)
+    }
+
     // --- listEngines ------------------------------------------------------
 
     @Test
@@ -377,9 +413,10 @@ class HostCliClientVerbsTest {
 
         runSuspending { HostCliClient(exec).listSessions() }
         runSuspending { HostCliClient(exec).createSession(name = "work") }
+        runSuspending { HostCliClient(exec).killSession("work") }
         runSuspending { HostCliClient(exec).listEngines() }
         runSuspending { HostCliClient(exec).listProfiles() }
 
-        assertEquals(4, exec.commands.size)
+        assertEquals(5, exec.commands.size)
     }
 }

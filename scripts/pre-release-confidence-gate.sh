@@ -2008,6 +2008,24 @@ fi
 # instead of producing a green 'OK (0 tests)' deep inside the run.
 assert_app2_instrumented_suite_exists
 
+# Issue #2562: the ONLY check that proves a session PocketShell creates is
+# really memory-capped by the kernel (`memory.max` read back out of the created
+# session's cgroup). It runs here — cheap, before any emulator work — because
+# the property it protects regresses when APLEXER changes, i.e. exactly when
+# nobody is editing this repo and thinking about running a script by hand.
+#
+# `--if-supported`, not required mode, for one concrete reason: this same gate
+# script is what `release-emulator-validation.yml` runs, and that job is
+# `runs-on: ubuntu-latest`, where no cgroup-v2 user scope can be delegated (and
+# `uv` is not installed at all). A hard step would fail every hosted release
+# validation for an environment reason. `--if-supported` still fails on a real
+# defect, on any skip that is not a named MISSING HOST CAPABILITY, and on a
+# skipped-but-reported-as-passed run; where the capability is genuinely absent
+# it prints NOT PROVEN HERE into this step's log and the summary table, so the
+# gap is disclosed rather than silently absent. On the maintainer's box — where
+# release cuts actually happen — it is a full kernel-level proof.
+run_step "session-memory-cap-proof" "$ROOT_DIR/scripts/check-cgroup-cap-proof.sh" --if-supported
+
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds
 if ! "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then

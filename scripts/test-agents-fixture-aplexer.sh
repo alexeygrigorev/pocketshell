@@ -286,7 +286,10 @@ ok "self-check passes in the built image, over SSH"
 printf '\nPOSITIVE 2: real CLI create -> list -> PTY attach -> capture -> kill...\n'
 CLI_TAG="guard-cli-${SUFFIX}"
 CLI_MARKER="GUARD_CLI_MARKER_${SUFFIX}"
-create_json="$(ssh_exec "pocketshell-real-send sessions create '$CLI_TAG' --backend aplexer --cwd /home/testuser --json")" \
+# `--mem none` (issue #2562): session creates are memory-capped, aplexer's
+# limits fail closed, and this container has no user systemd to delegate a
+# cgroup-v2 scope. The opt-out is explicit here rather than silent in the CLI.
+create_json="$(ssh_exec "pocketshell-real-send sessions create '$CLI_TAG' --backend aplexer --cwd /home/testuser --mem none --json")" \
   || fail "\`sessions create --backend aplexer\` failed over SSH"
 CLI_NAME="$(printf '%s' "$create_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))')"
 [[ -n "$CLI_NAME" ]] || fail "create envelope carried no name: $create_json"

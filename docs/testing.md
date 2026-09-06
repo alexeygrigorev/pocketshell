@@ -409,6 +409,59 @@ command for cwd `/workspace/pocketshell` finds it via `find ... -mmin -5`.
 | Instrumented UI / smoke | `app/src/androidTest/` on emulator | Compose screen tests, navigation, local emulator-to-Docker agent smoke |
 | Manual smoke | Emulator + Docker | Issue-based implementer/reviewer flow, with reviewer emulator evidence before approval |
 
+## Session memory-cap proof — the one check CI structurally cannot run (issue #2562)
+
+`pocketshell sessions create` caps every session it starts. The aplexer arm's
+cap is only real if the kernel applied it, so
+`tools/pocketshell/tests/test_sessions_mem_cap.py::test_real_aplexer_session_cgroup_carries_the_resolved_cap`
+creates a session through the production CLI against an isolated aplexer
+instance and reads `memory.max` back out of `/sys/fs/cgroup`.
+
+That needs a delegated cgroup-v2 systemd `--user` scope, and **no automated lane
+we own has one**: `Python utility tests` and `release-emulator-validation.yml`
+both run on `ubuntu-latest`, where `a start --memory` fails with `spawn
+workload: Permission denied` (the runner's process tree lives outside
+`user@<uid>.service`, so cgroup-v2's common-ancestor rule denies the move), and
+the Docker `agents` container has no user systemd at all. So the test skips
+there — naming the missing capability, never bare — and CI still proves the
+environment-independent half: `test_production_cli_hands_the_resolved_cap_to_a_start`
+runs the real `python -m pocketshell sessions create` against a recording stub
+`a` and asserts `--memory <resolved bytes>`.
+
+The skip is converted back into an obligation on a host that CAN delegate:
+
+```bash
+scripts/check-cgroup-cap-proof.sh                 # required: a skip is a FAILURE
+scripts/check-cgroup-cap-proof.sh --self-test     # proves that mode still has teeth
+scripts/check-cgroup-cap-proof.sh --if-supported  # what the release gate runs
+```
+
+Run it after touching session containment, `pocketshell/memcap.py`,
+`sessions.py`'s create arms, the delegation probe, or the pinned aplexer
+version. There is deliberately no env knob that can force the proof to skip —
+the only knob is `POCKETSHELL_CGROUP_CAP_PROOF=required`, which makes skipping
+strictly harder.
+
+**The script asserts the reported counts, never pytest's exit code.** `pytest`
+exits 0 on a skip, so the first version of this script printed
+`PASS: the created session's cgroup carried the resolved memory.max.` for a
+proof that never ran — required mode only converts skips raised inside the
+test's own helper, and a decorator-level skip (`@pytest.mark.skipif(… or True)`,
+or simply a non-Linux host) never reaches it. Every mode now requires the exact
+number of passing tests and zero skipped/failed/errored ones.
+
+**Wired into `scripts/pre-release-confidence-gate.sh`** as the
+`session-memory-cap-proof` step, so it runs on every release cut instead of
+when someone remembers — the property it protects ("aplexer honours `--memory`
+and the kernel applies it") regresses when *aplexer* changes, not when this
+repo does. It uses `--if-supported` there because the same gate script is what
+`release-emulator-validation.yml` runs on `ubuntu-latest`, which can neither
+delegate a user scope nor even provide `uv`; that mode still fails on a real
+defect and on any skip that is not a named missing capability, and otherwise
+prints `NOT PROVEN HERE — missing capability: …` into the step log and the
+gate's summary table. On the maintainer's box, where release cuts happen, it is
+the full kernel-level proof.
+
 ## Host-CLI / area coverage guard suite, with area-scoped selection (issue #2063)
 
 The maintainer's directive: *"split our test set into different areas and run

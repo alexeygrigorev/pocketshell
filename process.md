@@ -214,7 +214,7 @@ Each issue needs a specific title, scope, acceptance criteria with checkboxes, n
 
 ## Local debug APK
 
-The default local compile/phone-install path is `scripts/assemble-debug.sh` (optional `--abi auto --install`, `--android-test`, `--abi all`) — it keeps the Gradle daemon and build cache, pins the Kotlin daemon heap, and compiles only the connected ABI when appropriate. Don't use `scripts/cgroup-run.sh -- ./gradlew assembleDebug` (undersized cgroup and heap, produces a fake OOM) or the release-gate `./gradlew --no-daemon --no-build-cache --max-workers=1 ...` profile (correct only for release/visual-audit builds via `scripts/pre-release-confidence-gate.sh`/`scripts/capture-walkthrough-screenshots.sh`, not a routine compile check) for this. Connected/emulator tests still go through `scripts/connected-test.sh --suffix i<issue>` (#672).
+The default local compile/phone-install path is `scripts/assemble-debug.sh` (optional `--install`, `--android-test`) — it keeps the Gradle daemon and build cache and pins the Kotlin daemon heap. It has no `--abi` flag: nothing in the build has had a native build since #2566, so #2570 removed the option and the unread `-PpocketshellAbiFilters` property it passed. Don't use `scripts/cgroup-run.sh -- ./gradlew assembleDebug` (undersized cgroup and heap, produces a fake OOM) or the release-gate `./gradlew --no-daemon --no-build-cache --max-workers=1 ...` profile (correct only for release/visual-audit builds via `scripts/pre-release-confidence-gate.sh`/`scripts/capture-walkthrough-screenshots.sh`, not a routine compile check) for this. Connected/emulator tests still go through `scripts/connected-test.sh --suffix i<issue>` (#672).
 
 ## Verification Checklist
 

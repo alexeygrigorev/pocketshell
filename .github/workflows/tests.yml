@@ -667,7 +667,7 @@ jobs:
             bash "$t"
           done
 
-      - name: Build NDK-retry and assemble-debug profile guards (#1581)
+      - name: Assemble-debug profile and no-native-build guards (#2570)
         run: |
           chmod +x scripts/ci-build-profile-guards.sh
           scripts/ci-build-profile-guards.sh

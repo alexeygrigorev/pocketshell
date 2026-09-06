@@ -699,10 +699,22 @@ def test_extract_signature_returns_none_for_clean_log():
 
 def test_is_likely_infra_matches_known_patterns():
     assert wci.is_likely_infra("No compose hierarchies found")
-    assert wci.is_likely_infra("Failed to install NDK installation")
     assert wci.is_likely_infra("Process crashed; SIGKILL")
+    assert wci.is_likely_infra("Timed out waiting for emulator to boot")
     assert wci.is_likely_infra("error: cannot find symbol") is False
     assert wci.is_likely_infra(None) is False
+
+
+def test_is_likely_infra_no_longer_excuses_an_ndk_install_failure():
+    """Issue #2570: nothing in the build downloads an NDK any more.
+
+    #2566 deleted the last `externalNativeBuild`, so an "NDK install failed"
+    line cannot come from a PocketShell build. Keeping it on the infra list
+    would tell the on-call to re-run a failure that, if it ever appeared, would
+    mean something genuinely unexpected about the runner image.
+    """
+    assert wci.is_likely_infra("Failed to install NDK installation") is False
+    assert wci.is_likely_infra("An error occurred while preparing SDK package NDK") is False
 
 
 # ── classify_run pure-function coverage ──────────────────────────────────────

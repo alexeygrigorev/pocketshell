@@ -138,7 +138,13 @@ bounded waits and an honest message — deliberately not a retry ladder.
 ### 3. Keep the vendored emulator, rewrite the bridge
 
 `core-terminal` keeps the vendored Termux `terminal-emulator`/`terminal-view`
-Java untouched (its `build.gradle.kts` carries a "do not refactor" rule).
+Java untouched (its `build.gradle.kts` carries a "do not refactor" rule) — with
+one deliberate exception: `com.termux.terminal.TerminalSession` is
+**PocketShell's own remote-only class**, not vendored code, so the view, the
+emulator and the renderer stay vendored while the session that feeds them is
+ours (issue #2566). It has no local pty, no byte queues and no JNI, which is
+why nothing in the build needs an NDK.
+
 Everything that used to sit between SSH and that emulator — `SshTerminalBridge`,
 `TerminalSurfaceState`, the drain schedulers/budgets, the frame coalescer — is
 gone. Its replacement is `app2`'s `TerminalPtyBridge`: PTY output → emulator,

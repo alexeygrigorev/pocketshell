@@ -54,6 +54,19 @@ import kotlinx.coroutines.Dispatchers
 annotation class IoDispatcher
 
 /**
+ * Marks the main-thread dispatcher.
+ *
+ * Injected rather than reached for directly ([Dispatchers.Main]) for the same
+ * reason [IoDispatcher] is: a unit test substitutes a deterministic scheduler.
+ * `immediate` so a caller already on the main thread applies its work in place
+ * instead of posting it a frame later — the terminal's output pump hops here
+ * once per output slice.
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class MainDispatcher
+
+/**
  * app2's only DI module so far (plan §U-1): the Room database and the DAOs the
  * screens that exist actually consume, plus the IO dispatcher.
  *
@@ -109,6 +122,10 @@ object AppModule {
     @Provides
     @IoDispatcher
     fun provideIoDispatcher(): CoroutineDispatcher = Dispatchers.IO
+
+    @Provides
+    @MainDispatcher
+    fun provideMainDispatcher(): CoroutineDispatcher = Dispatchers.Main.immediate
 
     // -------------------------------------------------------------------------
     // The composer (task P-1).

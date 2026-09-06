@@ -10,6 +10,7 @@ import com.pocketshell.core.transport.PtyChannel
 import com.pocketshell.core.transport.TransportState
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.di.IoDispatcher
+import com.pocketshell.next.di.MainDispatcher
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.termux.terminal.TerminalSession
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -156,6 +157,7 @@ class SessionViewModel @Inject constructor(
     private val reconnect: ReconnectController,
     private val foreground: ForegroundSignal,
     @IoDispatcher private val dispatcher: CoroutineDispatcher,
+    @MainDispatcher private val mainDispatcher: CoroutineDispatcher,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<SessionUiState>(SessionUiState.Connecting)
@@ -176,9 +178,10 @@ class SessionViewModel @Inject constructor(
 
     /**
      * Owns the two bridge pumps. Separate from [viewModelScope] because the
-     * output pump parks on a blocking queue write and the input pump on a
-     * blocking queue read: both need [dispatcher] (an IO pool), not the main
-     * dispatcher `viewModelScope` carries. Cancelled in [onCleared].
+     * pumps must not run on the main thread: the output pump collects the SSH
+     * channel's frames and hops to [mainDispatcher] only for the bounded slice
+     * it applies to the emulator, and the input pump writes to the channel.
+     * Both belong on [dispatcher] (an IO pool). Cancelled in [onCleared].
      */
     private val pumpScope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatcher)
 
@@ -502,6 +505,7 @@ class SessionViewModel @Inject constructor(
             pty = pty,
             emulator = emulator,
             scope = pumpScope,
+            mainDispatcher = mainDispatcher,
             onOutputEnded = { onOutputEnded(pty) },
         )
         channel = pty
@@ -615,10 +619,11 @@ class SessionViewModel @Inject constructor(
      * "this ViewModel is dead" — a [SessionUiState.Failed] screen still offers
      * [retryNow], which reattaches onto THIS terminal. Ending the bridge with
      * [TerminalPtyBridge.stop] here (as this did before issue #2487) closed the
-     * vendored session's byte queues one-way, so that Retry attached
-     * successfully onto a permanently unwritable emulator: `Live` on screen, a
-     * frozen last frame, and every keystroke and output frame dropped. Only
-     * [onCleared] — where the ViewModel really is over — stops the bridge.
+     * then-vendored session's byte queues one-way — those queues are gone with
+     * issue #2566's replacement session — so that Retry attached successfully
+     * onto a permanently unwritable emulator: `Live` on screen, a frozen last
+     * frame, and every keystroke and output frame dropped. Only [onCleared] —
+     * where the ViewModel really is over — stops the bridge.
      */
     private fun settleEnd(ended: PtyChannel, status: Int?, finalClose: Boolean = false) {
         if (channel !== ended) return
@@ -707,22 +712,23 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Retires the spent channel and its pumps WITHOUT closing the vendored
-     * terminal's byte queues — the whole reason [TerminalPtyBridge.detach]
-     * exists. `ByteQueue.close()` is one-way, so stopping the bridge the normal
-     * way would make this screen's [TerminalSession] permanently unwritable and
-     * force the reattach to build a fresh, empty one: a cleared screen.
+     * Retires the spent channel and its pumps, leaving the [TerminalSession]
+     * itself untouched.
      *
      * The single retire path for EVERY way an attach can end (issue #2487):
      * a drop, a clean remote exit and a requested close all leave a screen that
      * can still be reattached from — by the ladder or by [retryNow] — so none
-     * of them may take the emulator's queues down with them. Only [onCleared],
-     * where the ViewModel itself is over, stops the bridge.
+     * of them may take the emulator down with them. [TerminalPtyBridge.stop]
+     * only releases the session's input sink, so the grid (the last frame the
+     * user was reading) survives and the next bridge adopts the same session by
+     * starting on it. This is also the ONE place that sequences that hand-off:
+     * the spent bridge is always stopped before the next one starts, so the
+     * stop cannot clear a sink its successor installed.
      */
     private fun releaseChannel() {
         watchJob?.cancel()
         watchJob = null
-        bridge?.detach()
+        bridge?.stop()
         bridge = null
         val spent = channel
         channel = null

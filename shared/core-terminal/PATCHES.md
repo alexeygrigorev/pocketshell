@@ -7,11 +7,13 @@ is recorded here.
 
 The list below was produced by diffing the whole vendored tree
 (`src/main/java/com/termux/**`, `src/test/java/com/termux/**`,
-`src/main/res/**`, `src/main/jni/**`) against the pinned upstream commit
-`30ebb2dee381d292ade0f2868cfde0f9f20b89fe`. **Eight production files and four
-test files deviate; every other vendored file — including
-`TerminalSessionClient.java`, `ByteQueue.java`, the `textselection` package,
-the resources and the JNI sources — is byte-identical to upstream.** Re-run
+`src/main/res/**`) against the pinned upstream commit
+`30ebb2dee381d292ade0f2868cfde0f9f20b89fe`. **Seven production files and four
+test files deviate; one production file (`TerminalSession.java`) is not
+vendored at all; three upstream files (`ByteQueue.java`, `JNI.java` and the
+whole `src/main/jni/` tree) are deleted; every other vendored file — including
+`TerminalSessionClient.java`, the `textselection` package and the resources —
+is byte-identical to upstream.** Re-run
 that diff (see `VENDORED.md` → "Refresh procedure") whenever this file is
 edited: a claim of byte-identity is only useful if it has been checked, and
 this file has been wrong about it before.
@@ -23,7 +25,7 @@ Deviating files:
 | `src/main/java/com/termux/terminal/TerminalEmulator.java` | #259, #1955/#1961 |
 | `src/main/java/com/termux/terminal/TerminalBuffer.java` | #469, #966/#967/#1153, #1955/#1961 |
 | `src/main/java/com/termux/terminal/TerminalRow.java` | #469, #1955 |
-| `src/main/java/com/termux/terminal/TerminalSession.java` | #796/#803 |
+| `src/main/java/com/termux/terminal/TerminalSession.java` | **replaced wholesale (#2566)** — not a patch |
 | `src/main/java/com/termux/terminal/TextStyle.java` | #1955/#1961 |
 | `src/main/java/com/termux/view/TerminalRenderer.java` | #172, #241, #259, #469 |
 | `src/main/java/com/termux/view/TerminalView.java` | #107, #469/#721, #529/#1854, #568/#588, #966/#967, #2154 |
@@ -108,15 +110,21 @@ Deviating files:
   kept out of `decodeEffect(long)`, so the markers are rendering-neutral. No
   hyperlink URI is ever stored in a cell — the bits are pure provenance.
 
-## `src/main/java/com/termux/terminal/TerminalSession.java`
+## `src/main/java/com/termux/terminal/TerminalSession.java` — REPLACED, not patched
 
-- **#796/#803** — `MainThreadHandler` reads one 2 KB slice per `MSG_NEW_INPUT`
-  (upstream: 64 KB) and never re-posts itself; the poster (app2's
-  `TerminalPtyBridge`) writes the remote stream in slices of that size and
-  posts one message per slice, so no single main-thread turn parses more than
-  a slice of clear-heavy alt-screen content. `MSG_PROCESS_EXITED` drains the
-  whole queue first (`drainAllProcessOutput`). The handler is pinned to
-  `Looper.getMainLooper()`.
+- **#2566** — this file is **PocketShell's own remote-only session**. It keeps
+  upstream's fully qualified name so `TerminalView`,
+  `TextSelectionCursorController` and `TerminalEmulator` compile against it
+  unpatched, and it keeps `writeCodePoint`'s body verbatim, but nothing else
+  came from upstream and **upstream's version must never be re-applied**. A
+  refresh restores ours with `git checkout --` (see `VENDORED.md` →
+  "PocketShell's own `TerminalSession`" and step 5 of the refresh procedure).
+  What went with it: the local-pty spawn, the two byte ring buffers, the three
+  I/O threads, the main-thread handler and its `MSG_*` protocol, the pid/exit
+  status/cwd surface, `ByteQueue.java`, `JNI.java` and both native source
+  trees. The #796/#803 2 KB drain-slice bound survives as
+  `TerminalPtyBridge.DRAIN_SLICE_BYTES`, which is now the bridge's own number
+  and no longer has to agree with anything in this module.
 
 ## `src/main/java/com/termux/view/TerminalRenderer.java`
 
@@ -241,3 +249,9 @@ with one PTY source every query must be answered;
 `android.graphics.Rect` / `android.view.Window` /
 `androidx.annotation.VisibleForTesting` imports they needed, and the buffer's
 `hasNonBlankVisibleRow`.
+
+Removed on 2026-09-06 by #2566, this time by deleting the files rather than
+restoring them to upstream: `ByteQueue.java`, `JNI.java`, the upstream
+`src/main/jni/` C sources and PocketShell's `src/main/cpp/` stub
+`libtermux.so`. Nothing in the module calls them now that `TerminalSession` is
+ours, so there is no `externalNativeBuild` left and the module needs no NDK.

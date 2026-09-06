@@ -50,11 +50,12 @@ import org.robolectric.Shadows
  * through the channel, and every way the screen can end up saying "not
  * attached".
  *
- * Everything runs on one [StandardTestDispatcher] — both the main dispatcher
- * `viewModelScope` uses and the dispatcher injected into the ViewModel — so the
- * bridge's pumps live in virtual time. [settle] advances that clock rather than
- * calling `advanceUntilIdle()`, because the input pump polls on a `delay` loop
- * that by construction never leaves the scheduler idle.
+ * Everything runs on one [StandardTestDispatcher] — the main dispatcher
+ * `viewModelScope` uses, the dispatcher injected into the ViewModel, and the
+ * dispatcher the bridge feeds the emulator on — so both pumps live in virtual
+ * time. [settle] advances that clock in slices rather than calling
+ * `advanceUntilIdle()`, because the reconnect ladder and the resize coalescer
+ * hand work back and forth with the main looper between rungs.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(AndroidJUnit4::class)
@@ -136,9 +137,9 @@ class SessionViewModelTest {
     }
 
     /**
-     * A frame larger than one drain slice still lands whole — the chunk/message
-     * accounting in the output pump has to post one `MSG_NEW_INPUT` per slice
-     * because the vendored handler drains exactly one and never re-posts.
+     * A frame larger than one drain slice still lands whole — the output pump
+     * applies a frame in [TerminalPtyBridge.DRAIN_SLICE_BYTES] pieces, one
+     * main-thread turn each, so the slice accounting has to cover the tail.
      */
     @Test
     fun `a multi-slice frame is parsed in full`() = runTest(dispatcher) {
@@ -465,14 +466,11 @@ class SessionViewModelTest {
                 stack.registry.current(hostId),
             )
 
-            // Issue #2477's OWN postmortem: without the fix, this scenario ends
-            // with a REDIALLED, LIVE bridge whose input pump is a `delay` loop
-            // with no terminal condition (see `settle`'s class doc) — so a test
-            // that forgot this `clear()` would hang inside `runTest`'s own
-            // implicit `advanceUntilIdle()` rather than failing fast. Present
-            // for the same reason every other `livePty()` test above calls it,
-            // and load-bearing here specifically because THIS test is the one
-            // that used to leave a connection nothing was watching.
+            // Present for the same reason every other `livePty()` test above
+            // calls it — the ViewModel owns a live pump scope until the store
+            // clears it — and load-bearing here specifically because THIS test
+            // is the one that used to leave a connection nothing was watching
+            // (issue #2477).
             clear()
         }
 
@@ -570,14 +568,17 @@ class SessionViewModelTest {
      * produce a terminal that is genuinely alive, not merely one the state says
      * is `Live`.
      *
-     * `settleEnd`'s ended path used to call [TerminalPtyBridge.stop], which
-     * CLOSES the vendored session's two byte queues, and `ByteQueue.close()` is
+     * `settleEnd`'s ended path used to stop the bridge in a way that CLOSED
+     * the vendored session's two byte ring buffers, and closing one was
      * one-way. It never nulled `terminal` either, so [SessionViewModel.retryNow]
      * reattached onto that same permanently-unwritable session: SSH attached,
      * the state flipped to `Live`, and then every output frame was rejected by
      * the closed queue and the input pump's first read returned -1 and retired.
      * A frozen last frame that swallows every keystroke — recoverable only by
-     * leaving the screen.
+     * leaving the screen. Issue #2566 removed the queues outright, so a stopped
+     * bridge now only releases the session's input sink and the next bridge
+     * installs its own; this test is what pins that the hand-off still carries
+     * BOTH directions of I/O.
      *
      * Reachable on its own (type `exit` in the remote shell, then Retry) and
      * compounded with bug 1 into "background two minutes → false error → Retry
@@ -1027,6 +1028,12 @@ class SessionViewModelTest {
             reconnect = ReconnectController(),
             foreground = foreground,
             dispatcher = dispatcher,
+            // The pump dispatcher and the main dispatcher are the one test
+            // scheduler, so the main-thread hop the output pump makes per slice
+            // happens in virtual time. Robolectric runs the test body on the
+            // main looper's thread, so `TerminalSession.append`'s main-thread
+            // assertion is satisfied for real rather than bypassed.
+            mainDispatcher = dispatcher,
         )
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -1087,11 +1094,9 @@ class SessionViewModelTest {
      * Runs the virtual clock far enough for the attach chain AND several input
      * poll ticks, then drains the main looper.
      *
-     * `advanceUntilIdle()` cannot be used: the input pump is a `delay` loop with
-     * no terminal condition, so "the scheduler ran out of work" never happens.
-     * The looper drain is separate because the vendored emulator parses on the
-     * main thread by design (upstream's contract) and Robolectric's looper is
-     * paused, so queued `MSG_NEW_INPUT` messages sit there until dispatched.
+     * The looper drain is separate from the coroutine clock because the
+     * vendored `TerminalView` posts its repaints through the main looper, which
+     * Robolectric leaves paused, so those messages sit there until dispatched.
      */
     private fun TestScope.settle() = settleFor(SETTLE_STEP_MS * SETTLE_ROUNDS)
 

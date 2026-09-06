@@ -27,7 +27,7 @@ import org.junit.Test
  * render path (covered by the instrumented
  * `TerminalRendererSpinnerRewriteInstrumentedTest`) rather than to grid state.
  *
- * Pure JVM: [TerminalEmulator.append] parses bytes without touching JNI, so
+ * Pure JVM: [TerminalEmulator.append] parses bytes without touching native code, so
  * no Android / SSH / session machinery is required.
  */
 class StatusSpinnerRewriteGridTest {

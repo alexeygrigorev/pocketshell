@@ -36,7 +36,7 @@ aplexer is **not installed separately**. `tools/pocketshell/pyproject.toml`
 carries a pinned, Linux-marked hard dependency:
 
 ```toml
-"aplexer==0.1.3; sys_platform == 'linux'"
+"aplexer==0.1.4; sys_platform == 'linux'"
 ```
 
 so the documented host install — `uv tool install pocketshell` — also delivers
@@ -138,9 +138,14 @@ BEHAVIOUR the CLI depends on:
   `sessions._aplexer_snapshot` driving the real binary, and by a concurrent
   `a start` (see "0.1.3" below).
 
+- a real session whose workload shell spawns a process named `claude`
+  reports `agent: "claude"` on `a --json list` **and** `a --json snapshot`,
+  and reports `null` again once that process exits (see "0.1.4" below).
+
 Those assertions were verified to fail against published 0.1.1 and pass
-against 0.1.2 (the `executable` / shell-env pair), and to fail against 0.1.2
-and pass against 0.1.3 (the registry-scan trio). **Re-run that file whenever
+against 0.1.2 (the `executable` / shell-env pair), to fail against 0.1.2
+and pass against 0.1.3 (the registry-scan trio), and to fail against 0.1.3 and
+pass against 0.1.4 (the `agent` field). **Re-run that file whenever
 the pin moves** — it is what a bump has to re-verify, in place of a version
 check that cannot see the difference.
 
@@ -181,6 +186,52 @@ error, `_aplexer_snapshot` is not `None`, a live session stays listed, and a
 second `a start` still succeeds. Verified red on published 0.1.2, green on
 0.1.3.
 
+### 0.1.4 — the session tree can say WHICH agent is running
+
+Issue #2581 (slice 2 of #2579). Through 0.1.3 the only agent-ish field on a
+snapshot row was `engine`, and `engine` cannot answer the question. Every
+session PocketShell creates is `engine: "shell"` with the agent started by
+hand inside it, so `engine` is `null` on exactly the rows a user would call
+"my claude session" — a tree of claude/codex/opencode sessions was
+indistinguishable from a tree of bare shells.
+
+0.1.4 (aplexer `ca56fa5`, spec.md §18, `src/agent_kind.rs`) adds a derived
+`agent` field: `claude`, `codex`, `opencode`, `grok`, or `null`. Three
+properties matter to this CLI:
+
+- **Derived at query time, never persisted.** aplexer walks the workload's
+  descendant process tree (`workload_pid` plus `/proc/<pid>/task/*/children`,
+  the same walk containment uses) on every `a list --json` / `a snapshot` /
+  `a status --json`, and classifies each process's `comm`/`cmdline` by
+  whole-word command token — the same rule as
+  `cgroup_agents.py`/`AgentDetector.namesAgent`, so `node /…/bin/codex` names
+  codex while `codex-helper` in an unrelated path does not. Because nothing is
+  written to disk, the value cannot go stale; it goes back to `null` the
+  moment the agent exits.
+- **The key is always present**, so a consumer reads it unconditionally.
+- **A terminal-phase record is never probed** — its `workload_pid` names a
+  dead process and a recycled pid must not resurrect an agent.
+
+Host side, `session_enum._aplexer_rows` reads it onto `LiveSession.agent` and
+schema 2 emits it on every row (`null` for tmux rows, which have no workload
+pid to walk). An older `a` simply omits the key, which reads as `null`, never
+a `KeyError` — the pin is a floor, not a promise about the binary a given host
+happens to be running.
+
+Pinned behaviour, in `test_aplexer_contract.py`: a real session started on the
+`shell` engine (the production shape) reports `agent: null` while idle,
+`"claude"` while a live process named `claude` runs in its descendant tree,
+and `null` again once that process is killed — asserted on the raw `a` output
+**and** on the schema-2 payload `session_enum._probe_aplexer` produces from
+it. Verified red on published 0.1.3 (no `agent` key at all), green on 0.1.4.
+
+The Docker `agents` fixture needs no separate bump: `tests/docker/
+Dockerfile.agents` derives the aplexer release it downloads from this same
+`aplexer==X.Y.Z` pin, which `tests/test_agents_fixture_aplexer.py` enforces.
+The consequence is an ordering constraint, not an edit — the pin may only move
+after the matching GitHub release assets (`a-linux-{amd64,arm64}`,
+`aplexer-linux-{amd64,arm64}`) are published, or every image rebuild 404s.
+
 ### Lock cutoff
 
 `[tool.uv] exclude-newer` in `tools/pocketshell/pyproject.toml` (mirrored in
@@ -188,9 +239,10 @@ second `a start` still succeeds. Verified red on published 0.1.2, green on
 package uploaded *after* it is simply invisible to `uv lock` — which looks
 like a broken index rather than a stale cutoff. So it moves in lock-step with
 every new pin: past quse 0.0.15 (#2293), then past aplexer 0.1.2's
-2026-09-05T22:38:08Z upload (#2543), now past aplexer 0.1.3's
+2026-09-05T22:38:08Z upload (#2543), then past aplexer 0.1.3's
 2026-09-06T00:32:09Z upload (its `aplexer-client` runtime dependency landed at
-00:32:04Z). Bump both places together, or `uv lock --check` fails.
+00:32:04Z), now past aplexer 0.1.4's 2026-09-06T16:14:52Z upload
+(`aplexer-client` at 16:14:48Z) for #2581. Bump both places together, or `uv lock --check` fails.
 
 Two host-level traps when re-locking: this box carries a rolling global
 `exclude-newer = "7 days"` in `~/.config/uv/uv.toml`, so a local `uv lock` /

@@ -123,6 +123,15 @@ class LiveSession:
     profile: Optional[str] = None
     aplexer_id: Optional[str] = None
     attach: Optional[str] = None
+    #: Which coding agent aplexer can SEE running inside the session right
+    #: now (``claude``/``codex``/``opencode``/``grok``), or ``None``. Not the
+    #: same question as ``engine``: every session PocketShell creates is
+    #: ``engine: "shell"`` with the agent started by hand inside it, so
+    #: ``engine`` is ``None`` for exactly the rows a user would call "my
+    #: claude session". aplexer 0.1.4 derives this per query from the
+    #: workload's descendant process tree and never persists it, so it
+    #: cannot go stale; a tmux row has no such authority and stays ``None``.
+    agent: Optional[str] = None
     agent_state: Optional[str] = None
     agent_state_source: Optional[str] = None
     attached: bool = False
@@ -153,6 +162,7 @@ class LiveSession:
                 "tag": self.tag,
                 "engine": self.engine,
                 "profile": self.profile,
+                "agent": self.agent,
                 "agent_state": self.agent_state,
                 "agent_state_source": self.agent_state_source,
                 "attached": bool(self.attached),
@@ -332,6 +342,31 @@ def _aplexer_engine(raw: Mapping[str, Any]) -> Optional[str]:
     if not engine or engine == "shell":
         return None
     return engine
+
+
+def _aplexer_agent(raw: Mapping[str, Any]) -> Optional[str]:
+    """The agent aplexer detected in this session, or ``None``.
+
+    ``agent`` is a QUERY-time field (aplexer 0.1.4, ``src/agent_kind.rs`` /
+    spec.md section 18): aplexer walks the workload's descendant process tree
+    and names the coding agent it finds, or reports ``null`` when there is
+    none — including a shell session whose agent has just exited. It is never
+    written to disk, so it cannot go stale.
+
+    A missing key means an aplexer older than 0.1.4 answered the probe, which
+    is a "cannot tell", not "no agent" — both land on ``None`` here, but it
+    must never be a ``KeyError``: the pin is a floor, not a guarantee about
+    the binary a given host happens to run.
+
+    Only a non-empty string is a name. Anything else is read as ``None``
+    rather than coerced with ``str()``, which would turn a malformed
+    ``["claude"]`` into the literal agent name ``"['claude']"`` and put it on
+    the wire.
+    """
+    agent = raw.get("agent")
+    if not isinstance(agent, str):
+        return None
+    return agent.strip() or None
 
 
 def _aplexer_attached(raw: Mapping[str, Any]) -> bool:
@@ -557,6 +592,7 @@ def _aplexer_rows(payload: Any, now_ms: Optional[int]) -> list[LiveSession]:
                 profile=str(profile) if profile else None,
                 aplexer_id=ident or None,
                 attach=attach,
+                agent=_aplexer_agent(raw),
                 agent_state=state,
                 agent_state_source=state_source,
                 attached=_aplexer_attached(raw),

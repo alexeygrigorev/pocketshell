@@ -398,6 +398,10 @@ def test_aplexer_is_pinned_exactly() -> None:
       scan on a session directory that has no `session.json` yet, which is the
       state every `a start` creates for 26-43 ms, so a session being created
       blanked the phone's aplexer session rows (aplexer#2 / aplexer#3).
+    * 0.1.4, never 0.1.3 — 0.1.3 emits no `agent` field, so the session tree
+      cannot say WHICH agent a session is running. `engine` cannot stand in
+      for it: every session PocketShell creates is `engine: "shell"` with the
+      agent launched by hand inside it (issue #2581).
 
     This assertion only guards the STRING. ``test_aplexer_contract.py`` pins
     the behaviours themselves against the bundled binary, which is the part
@@ -405,7 +409,7 @@ def test_aplexer_is_pinned_exactly() -> None:
     """
     requirement = _aplexer_requirement()
     pin = requirement.split(";")[0].strip()
-    assert pin == "aplexer==0.1.3", pin
+    assert pin == "aplexer==0.1.4", pin
 
 
 def test_aplexer_dependency_marker_is_linux_only() -> None:

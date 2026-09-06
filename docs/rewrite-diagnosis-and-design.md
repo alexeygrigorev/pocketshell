@@ -302,7 +302,8 @@ Python that already probes both managers):
 
 - `pocketshell sessions list --json` → rows
   `{name, manager: "tmux"|"aplexer", id, workspace, tag, engine, profile,
-  agent_state, agent_state_source, attached, created_epoch, activity_epoch}`
+  agent, agent_state, agent_state_source, attached, created_epoch,
+  activity_epoch}` (`agent` added later, issue #2581)
   plus a first-class `errors` array (a backend that fails to enumerate MUST
   surface there, never silently shrink the list — the #2426 fix as contract).
   This command **already exists and already unions both managers**

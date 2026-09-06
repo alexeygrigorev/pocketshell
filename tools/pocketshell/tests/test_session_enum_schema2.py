@@ -35,6 +35,15 @@ The aplexer fixtures under ``tests/fixtures/aplexer/`` are REAL captures of
   (``SessionRecord::worker_alive`` returns false for a ``None`` pid). Every
   ``a start`` passes through this shape for tens of milliseconds. Calling it
   dead hides a session that is being created — the #2547 symptom.
+- ``snapshot-agent.json`` — captured against the PINNED aplexer 0.1.4
+  (issue #2581), the first release that derives an ``agent`` field. Three
+  sessions in one isolated instance, all ``engine: "shell"`` (the production
+  shape — PocketShell never sets an engine, the agent is launched by hand
+  inside the session): one whose workload shell has a live child named
+  ``claude``, one with a child named ``codex``, and one plain ``sleep``.
+  aplexer reports ``agent: "claude"``, ``"codex"`` and ``null`` respectively,
+  which is the whole point of the field: ``engine`` is ``"shell"`` on all
+  three and therefore cannot tell them apart.
 - ``snapshot-crashed-start.json`` — the OTHER side of that boundary,
   captured by SIGKILLing a real ``a start``'s process group inside the
   pre-PID window: byte-identical in shape (``starting`` / no ``worker_pid``
@@ -42,9 +51,13 @@ The aplexer fixtures under ``tests/fixtures/aplexer/`` are REAL captures of
   ``a list`` renders it ``✗ broken``. The two fixtures differ only in age,
   which is why age is the discriminator.
 
-Both were captured with the maintainer's ``a 0.1.3``; the key set was
-compared against the copy PINNED in this package's venv and is identical,
-and neither carries a ``state`` field (that is unreleased — see #2556).
+All but ``snapshot-agent.json`` were captured with the maintainer's
+``a 0.1.3``; the key set was compared against the copy PINNED in this
+package's venv and is identical, and none of them carries an ``agent`` or a
+``state`` field, because 0.1.3 emits neither. That makes them the
+older-aplexer fixtures for free: every assertion below that an ``agent``-less
+row reads as ``agent: null`` (never a ``KeyError``) runs against real 0.1.3
+output rather than a hand-deleted key.
 """
 
 from __future__ import annotations
@@ -72,6 +85,9 @@ SCHEMA2_ROW_KEYS = {
     "tag",
     "engine",
     "profile",
+    # Issue #2581: WHICH agent aplexer sees running inside the session. Not a
+    # restatement of `engine` — see the agent tests below.
+    "agent",
     "agent_state",
     "agent_state_source",
     "attached",
@@ -96,6 +112,13 @@ ZOMBIE_ID = "c06513a5-ee94-4081-b4b1-6d4d39d22ac5"
 MID_CREATE_ID = "078e2bf5-8e37-44e6-b1cf-8f72e261495e"
 # id from snapshot-crashed-start.json (real capture of a killed `a start`)
 CRASHED_START_ID = "6b1ddabb-1b5c-4a76-b46b-1f7e70d78a9a"
+# ids from snapshot-agent.json (real aplexer 0.1.4 capture, issue #2581)
+AGENT_CLAUDE_ID = "f8514235-4a65-4139-b8fa-c8c917cb5d4b"
+AGENT_CODEX_ID = "0ef96cac-7169-4e8d-90bc-3ff95d5be3fe"
+AGENT_NONE_ID = "e4da25b0-22f2-4612-aa07-e3eb7be69d8e"
+# `now` for snapshot-agent.json: a few seconds after the capture, so all
+# three records are comfortably live.
+AGENT_NOW_MS = 1_788_711_835_000
 # Captured values, read back from the fixture rather than restated here.
 
 
@@ -371,6 +394,160 @@ def test_exited_session_has_no_agent_state() -> None:
     assert row.agent_state_source is None
     assert row.phase == "exited"
     assert row.alive is False
+
+
+# ---------------------------------------------------------------------------
+# `agent` — WHICH agent is running in the session (issue #2581, aplexer 0.1.4)
+# ---------------------------------------------------------------------------
+#
+# `engine` cannot answer this. Every session PocketShell creates is
+# `engine: "shell"` with the agent started by hand inside it, so `engine` is
+# `null` for exactly the rows a user would call "my claude session". aplexer
+# 0.1.4 derives `agent` per query from the workload's descendant process tree
+# and emits it on every `a list --json` / `a snapshot` row; the host passes it
+# straight through on schema 2.
+
+
+def test_aplexer_row_names_the_agent_running_inside_it() -> None:
+    """The real 0.1.4 capture: claude, codex, and none — all `engine: shell`."""
+    snapshot = _load("snapshot-agent.json")
+    assert {row["engine"] for row in snapshot} == {"shell"}, (
+        "fixture precondition: all three rows are the production shape, so "
+        "`engine` cannot be what tells them apart"
+    )
+
+    sessions = session_enum.sessions_from_aplexer_snapshot(
+        snapshot, now_ms=AGENT_NOW_MS
+    )
+
+    by_id = {row.aplexer_id: row for row in sessions}
+    assert by_id[AGENT_CLAUDE_ID].agent == "claude"
+    assert by_id[AGENT_CODEX_ID].agent == "codex"
+    assert by_id[AGENT_NONE_ID].agent is None
+    # ...and the field it is NOT a restatement of.
+    assert {row.engine for row in sessions} == {None}
+
+
+def test_schema_2_emits_the_agent_on_every_row() -> None:
+    """"Every key, always" covers `agent`: named, null, and tmux alike."""
+    sessions, errors = session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=_tmuxctl_table(),
+        aplexer_payload=_load("snapshot-agent.json"),
+        now_ms=AGENT_NOW_MS,
+    )
+    payload = session_enum.json_payload(sessions, errors)
+
+    for row in payload["sessions"]:
+        assert set(row) == SCHEMA2_ROW_KEYS
+        assert "agent" in row
+
+    agents = {row["id"]: row["agent"] for row in payload["sessions"]}
+    assert agents[AGENT_CLAUDE_ID] == "claude"
+    assert agents[AGENT_CODEX_ID] == "codex"
+    assert agents[AGENT_NONE_ID] is None
+
+
+def test_tmux_rows_never_carry_an_agent() -> None:
+    """A tmux row has no process-tree authority behind it: explicit null.
+
+    tmuxctl exposes no workload pid to walk, and the host must not guess one
+    from the session name, so the key is present and null rather than absent
+    or invented (the same rule `agent_state` follows until APX-ADOPT).
+    """
+    sessions, errors = session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=_tmuxctl_table(),
+        include_aplexer=False,
+    )
+    payload = session_enum.json_payload(sessions, errors)
+
+    assert payload["sessions"], "fixture must produce tmux rows"
+    for row in payload["sessions"]:
+        assert row["manager"] == "tmux"
+        assert "agent" in row
+        assert row["agent"] is None
+
+
+def test_an_aplexer_without_the_agent_key_reads_as_null_not_a_keyerror() -> None:
+    """An older `a` (0.1.3, the previous pin) simply omits the key.
+
+    The pin is a floor, not a promise about the binary a given host runs — a
+    stale bundled wheel, or the fixture image mid-rebuild, answers the probe
+    with no `agent` field at all. That is "cannot tell", which serialises as
+    null; it must never be an exception that blanks the whole session list.
+    `snapshot-reported-state.json` is a REAL 0.1.3 capture, so this is the
+    genuine older-aplexer wire shape rather than a hand-deleted key.
+    """
+    snapshot = _load("snapshot-reported-state.json")
+    assert all("agent" not in row for row in snapshot), (
+        "fixture precondition: these captures predate the `agent` field"
+    )
+
+    sessions = session_enum.sessions_from_aplexer_snapshot(
+        snapshot, now_ms=1_788_409_006_000
+    )
+
+    assert sessions, "fixture must produce aplexer rows"
+    for row in sessions:
+        assert row.agent is None
+        payload = row.to_payload(schema=2)
+        assert set(payload) == SCHEMA2_ROW_KEYS
+        assert payload["agent"] is None
+
+
+def test_an_empty_or_non_string_agent_reads_as_null() -> None:
+    """Defensive read: only a non-empty string is an agent name.
+
+    ``["claude"]`` matters more than it looks: a ``str()`` coercion would put
+    the literal name ``"['claude']"`` on the wire instead of admitting it
+    could not tell.
+    """
+    live = _row(_load("snapshot-agent.json"), AGENT_CLAUDE_ID)
+    for value in ("", "   ", None, 0, [], {}, ["claude"], 7, True):
+        grown = [dict(live, agent=value)]
+        row = session_enum.sessions_from_aplexer_snapshot(
+            grown, now_ms=AGENT_NOW_MS
+        )[0]
+        assert row.agent is None, f"agent={value!r} should read as null"
+
+
+def test_a_dead_row_still_serialises_its_agent_key() -> None:
+    """The dead projection is schema 2 too — no key may go missing there.
+
+    aplexer never probes the process tree of a terminal-phase record (its
+    `workload_pid` names a process that is gone and a recycled pid must not
+    resurrect an agent), so a dead row's `agent` is null in practice; what is
+    pinned here is that the KEY is emitted regardless.
+    """
+    dead = session_enum.dead_sessions_from_aplexer_snapshot(
+        _load("snapshot-liveness-mix.json"), now_ms=1_788_682_060_000
+    )
+
+    assert dead, "fixture must contain dead records"
+    for row in dead:
+        payload = row.to_payload(schema=2)
+        assert set(payload) == SCHEMA2_ROW_KEYS
+        assert payload["agent"] is None
+
+
+def test_cli_list_json_carries_the_agent_end_to_end(install_fake_a) -> None:
+    """Through the real CLI: `sessions list --json` reaches stdout with `agent`.
+
+    The fake `a` replays the 0.1.4 capture verbatim, so this exercises the
+    production probe -> `_aplexer_rows` -> schema-2 payload path the phone
+    reads, not just the row builder.
+    """
+    install_fake_a(snapshot=_load("snapshot-agent.json"))
+
+    result = _invoke_list_json(tmuxctl_stdout=_tmuxctl_table())
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["errors"] == []
+    agents = {row["name"]: row["agent"] for row in payload["sessions"]}
+    assert agents["ws:claude"] == "claude"
+    assert agents["ws:codex"] == "codex"
+    assert agents["ws:plain"] is None
+    assert agents["git-pocketshell"] is None
 
 
 def test_aplexer_rows_are_not_attached_without_a_snapshot_field() -> None:

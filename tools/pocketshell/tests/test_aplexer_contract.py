@@ -36,8 +36,8 @@ personal ``~/.config/aplexer/config.toml`` or the live sessions in
 and disturb real work while doing it. Every assertion here was verified to
 fail on the previous published wheel and pass on the pinned one (0.1.1 -> 0.1.2
 for the ``executable`` / shell-env pair, 0.1.2 -> 0.1.3 for the registry-scan
-trio); a future pin that regresses fails loudly instead of shipping a silent
-downgrade.
+trio, 0.1.3 -> 0.1.4 for the ``agent`` field); a future pin that regresses
+fails loudly instead of shipping a silent downgrade.
 
 They run in the ``Python utility tests`` job (``tests.yml``), on Linux, with
 no Docker service or fixture port — the same gate the rest of this suite uses.
@@ -543,6 +543,172 @@ def test_session_being_created_does_not_erase_live_aplexer_sessions(
     finally:
         kill(live_tag)
         kill(second_tag)
+
+
+# ---------------------------------------------------------------------------
+# 0.1.4 — the snapshot names WHICH agent is running inside the session
+# ---------------------------------------------------------------------------
+#
+# `engine` cannot answer that. Every session PocketShell creates is
+# `engine: "shell"` with the agent started by hand inside it, so on 0.1.3 a
+# tree of claude/codex/opencode sessions was indistinguishable from a tree of
+# bare shells. 0.1.4 derives an `agent` field at QUERY time from the
+# workload's descendant process tree (aplexer ca56fa5, spec.md section 18)
+# and puts it on every `a list --json` / `a snapshot` row.
+#
+# Version-trap rule (AGENTS.md): pin the BEHAVIOUR, never the string. So this
+# drives the bundled binary through a real session whose workload shell spawns
+# a real process named `claude`, and follows it all the way out to the
+# schema-2 payload the phone reads.
+
+
+def _poll(read, predicate, *, timeout: float = 30.0, interval: float = 0.2):
+    """Poll ``read()`` until ``predicate`` holds; return the last value seen.
+
+    Detection is a live ``/proc`` walk, so the answer changes a few hundred ms
+    after the process tree does. Polling with a deadline is the honest way to
+    observe that; a fixed sleep would be either flaky or slow.
+    """
+    deadline = time.monotonic() + timeout
+    value = read()
+    while not predicate(value) and time.monotonic() < deadline:
+        time.sleep(interval)
+        value = read()
+    return value
+
+
+def test_bundled_aplexer_names_the_agent_running_inside_a_session(
+    aplexer_fixture, monkeypatch
+) -> None:
+    """A real session: no agent -> `claude` -> no agent again, on the real `a`.
+
+    The workload is a plain shell (the production shape); the "agent" is a
+    symlink to ``sleep`` whose FILENAME is the agent's command token, exactly
+    how detection is supposed to recognise a hand-launched agent. Nothing in
+    the shell's own argv names an agent, so the null bookends are real
+    evidence and not an accident of the temp path.
+
+    Published 0.1.3 has no `agent` key at all — the first assertion below
+    fails on it — while 0.1.4 tracks the process tree in both directions.
+    Both ends of the wire are checked: the raw `a --json list`/`snapshot`
+    rows, and the schema-2 payload `pocketshell sessions list --json` emits
+    after `session_enum._probe_aplexer` has driven the same binary.
+    """
+    agent_bin = aplexer_fixture.workspace.parent / "ps2581-bin"
+    agent_bin.mkdir()
+    # `sleep` under an agent's name: `comm` and argv[0] both become the token
+    # detection looks for, with no coding agent installed anywhere.
+    (agent_bin / "claude").symlink_to("/bin/sleep")
+    go_marker = aplexer_fixture.workspace.parent / "ps2581-go"
+    pid_file = aplexer_fixture.workspace.parent / "ps2581-agent-pid"
+    runner = aplexer_fixture.workspace.parent / "ps2581-session-runner.sh"
+    # The paths live in the SCRIPT, never in the shell's argv, so the parent
+    # process cannot itself be mistaken for the agent.
+    runner.write_text(
+        "#!/bin/sh\n"
+        f'while [ ! -e "{go_marker}" ]; do sleep 0.05; done\n'
+        f'"{agent_bin}/claude" 3600 &\n'
+        f'echo $! > "{pid_file}"\n'
+        "wait\n"
+        "exec sleep 300\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    # Deliberately the literal `shell` engine, overridden to run the fixture
+    # runner: that is the shape EVERY PocketShell session has, and the shape
+    # in which `engine` is null on the wire and therefore cannot name the
+    # agent. Anything else would prove the field works on a session type the
+    # product never creates.
+    aplexer_fixture.write_config(
+        "version = 1\n"
+        "[engines.shell]\n"
+        f'command = ["/bin/sh", "{runner}"]\n'
+    )
+    for key, value in aplexer_fixture.env.items():
+        monkeypatch.setenv(key, value)
+    tag = f"ps2581-{uuid.uuid4().hex[:8]}"
+
+    def listed(subcommand: str = "list") -> dict[str, Any]:
+        rows = [
+            row for row in aplexer_fixture.json([subcommand]) if row["tag"] == tag
+        ]
+        assert len(rows) == 1, f"expected exactly one `{tag}` row, got {rows}"
+        return rows[0]
+
+    def probed_payload() -> dict[str, Any]:
+        payload, error = _session_enum._probe_aplexer(aplexer_fixture.env)
+        assert error is None, error
+        rows = _session_enum.sessions_from_aplexer_snapshot(payload)
+        row = next(r for r in rows if r.tag == tag)
+        return row.to_payload(schema=2)
+
+    started = aplexer_fixture.run(
+        [
+            "--json", "start",
+            "--workspace", str(aplexer_fixture.workspace),
+            "--tag", tag,
+            "--engine", "shell",
+        ]
+    )
+    try:
+        assert started.returncode == 0, (
+            f"could not start the fixture session: {started.stderr.strip()}"
+        )
+        assert json.loads(started.stdout)["command"] == ["/bin/sh", str(runner)], (
+            "the fixture must own the workload; the config override did not "
+            f"take: {started.stdout}"
+        )
+
+        # 1. The key exists at all. This is what 0.1.3 cannot do.
+        row = listed()
+        assert "agent" in row, (
+            "the bundled aplexer emits no `agent` field; this is aplexer "
+            "ca56fa5, missing from published 0.1.3, and without it the "
+            "session tree cannot say which agent a session is running "
+            f"(engine is {row.get('engine')!r} for every PocketShell "
+            f"session). Row keys: {sorted(row)}"
+        )
+        # 2. ...and it is honest before anything agent-shaped is running.
+        assert row["agent"] is None, (
+            "an idle shell session reported an agent; the workload's own argv "
+            f"({row.get('command')}) must not name one. Row: {row}"
+        )
+        assert probed_payload()["agent"] is None
+
+        # 3. Launch the agent inside the session; detection follows the tree.
+        go_marker.touch()
+        row = _poll(listed, lambda r: r.get("agent") is not None)
+        assert row["agent"] == "claude", (
+            "the bundled aplexer did not detect a live `claude` process in "
+            f"the session's own descendant tree. Row: {row}"
+        )
+        # `a snapshot` is the probe pocketshell tries FIRST; the two commands
+        # must not disagree.
+        assert listed("snapshot")["agent"] == "claude"
+        # ...and it survives the whole host path out to the wire.
+        payload = probed_payload()
+        assert payload["agent"] == "claude", payload
+        assert payload["engine"] is None, (
+            "precondition for the whole feature: this row's engine says "
+            f"nothing about the agent. Payload: {payload}"
+        )
+
+        # 4. The agent exits; the session stays. Nothing may be sticky —
+        #    detection is per-query and must never be persisted.
+        os.kill(int(pid_file.read_text().strip()), 15)
+        row = _poll(listed, lambda r: r.get("agent") is None)
+        assert row["agent"] is None, (
+            "the agent exited but the row still names it, so the value is "
+            f"cached or persisted rather than derived per query. Row: {row}"
+        )
+        assert row["phase"] == "running", (
+            f"the session itself must still be alive: {row}"
+        )
+        assert probed_payload()["agent"] is None
+    finally:
+        aplexer_fixture.run(
+            ["kill", "--workspace", str(aplexer_fixture.workspace), "--tag", tag]
+        )
 
 
 # ---------------------------------------------------------------------------

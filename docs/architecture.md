@@ -210,11 +210,23 @@ user-controlled argument goes through `shellSingleQuote` and option lists are
 terminated with `--`.
 
 `sessions list --json` schema 2 rows carry `{name, manager, id, workspace, tag,
-engine, profile, agent_state, agent_state_source, attached, created_epoch,
-activity_epoch, phase, alive}` plus a first-class `errors[]` array. A backend
+engine, profile, agent, agent_state, agent_state_source, attached,
+created_epoch, activity_epoch, phase, alive}` plus a first-class `errors[]`
+array. A backend
 that fails to enumerate **must** appear in `errors` rather than silently
 shortening the list; the tree renders that as a "some sessions may be missing"
 banner.
+
+`agent` names WHICH coding agent is running inside the session — `claude`,
+`codex`, `opencode`, `grok`, or `null` (#2581). It is not a restatement of
+`engine`: every session PocketShell creates is `engine: "shell"` with the agent
+started by hand inside it, so `engine` is `null` for exactly the rows a user
+would call "my claude session". aplexer 0.1.4 derives it per query by walking
+the workload's descendant process tree and classifying each `comm`/`cmdline`
+by whole-word command token; nothing is persisted, so it cannot go stale. tmux
+rows are always `null` (no workload pid to walk, and the host must not guess
+one from the session name), and an aplexer older than 0.1.4 omits the key
+entirely, which the host reads as `null` rather than an error.
 
 `phase`/`alive` are the liveness pair (#2554). aplexer keeps a session record
 after the session dies — a killed one stays at `phase: exited` forever, and a

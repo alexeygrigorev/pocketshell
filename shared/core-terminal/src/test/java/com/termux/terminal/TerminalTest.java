@@ -367,80 +367,21 @@ public class TerminalTest extends TerminalTestCase {
 				.assertLinesAre("abc     ", "next    ");
 	}
 
-	public void testSuppressQueryResponsesXTWINOPS() {
+	public void testQueryResponsesAreAnswered() {
+		// PocketShell: the emulator is the REAL terminal a remote program talks to
+		// (app2 attaches over a PTY), so every query it asks must be answered on
+		// the wire. The pre-0.5.0 client had a suppression flag for tmux control
+		// mode; with one PTY source there is nothing to suppress.
 		withTerminalSized(5, 5);
 		assertEnteringStringGivesResponse("\033[14t", "\033[4;75;65t");
 		assertEnteringStringGivesResponse("\033[18t", "\033[8;5;5t");
-
-		mTerminal.setSuppressQueryResponses(true);
-		enterString("\033[14t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[18t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[11t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[13t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[16t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[19t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[20t");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[21t");
-		assertEquals("", mOutput.getOutputAndClear());
-
-		mTerminal.setSuppressQueryResponses(false);
-		assertEnteringStringGivesResponse("\033[14t", "\033[4;75;65t");
-		assertEnteringStringGivesResponse("\033[18t", "\033[8;5;5t");
-	}
-
-	public void testSuppressQueryResponsesDA() {
-		withTerminalSized(5, 5);
 		assertEnteringStringGivesResponse("\033[c", "\033[?64;1;2;6;9;15;18;21;22c");
 		assertEnteringStringGivesResponse("\033[>c", "\033[>41;320;0c");
-
-		mTerminal.setSuppressQueryResponses(true);
-		enterString("\033[c");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[>c");
-		assertEquals("", mOutput.getOutputAndClear());
-
-		mTerminal.setSuppressQueryResponses(false);
-		assertEnteringStringGivesResponse("\033[c", "\033[?64;1;2;6;9;15;18;21;22c");
-		assertEnteringStringGivesResponse("\033[>c", "\033[>41;320;0c");
-	}
-
-	public void testSuppressQueryResponsesDSRAndCPR() {
-		withTerminalSized(5, 5);
 		assertEnteringStringGivesResponse("\033[5n", "\033[0n");
 		assertEnteringStringGivesResponse("\033[6n", "\033[1;1R");
 
-		mTerminal.setSuppressQueryResponses(true);
-		enterString("\033[5n");
-		assertEquals("", mOutput.getOutputAndClear());
-		enterString("\033[6n");
-		assertEquals("", mOutput.getOutputAndClear());
-
-		mTerminal.setSuppressQueryResponses(false);
-		assertEnteringStringGivesResponse("\033[5n", "\033[0n");
-		assertEnteringStringGivesResponse("\033[6n", "\033[1;1R");
-	}
-
-	public void testSuppressQueryResponsesOSC11() {
-		withTerminalSized(5, 5);
 		enterString("\033]11;?\033\\");
 		String response = mOutput.getOutputAndClear();
-		assertTrue(response.startsWith("\033]11;rgb:"));
-		assertTrue(response.endsWith("\033\\"));
-
-		mTerminal.setSuppressQueryResponses(true);
-		enterString("\033]11;?\033\\");
-		assertEquals("", mOutput.getOutputAndClear());
-
-		mTerminal.setSuppressQueryResponses(false);
-		enterString("\033]11;?\033\\");
-		response = mOutput.getOutputAndClear();
 		assertTrue(response.startsWith("\033]11;rgb:"));
 		assertTrue(response.endsWith("\033\\"));
 	}

@@ -334,17 +334,6 @@ public final class TerminalSession extends TerminalOutput {
         return result;
     }
 
-    /**
-     * PocketShell #803: bytes currently buffered in the process→terminal queue
-     * and not yet parsed by the emulator. Read on the main thread by the
-     * PocketShell MainThreadDrainScheduler to drive frame-budgeted drain
-     * continuation (yield-and-continue while &gt; 0, stop when 0). Reflected into
-     * by SshTerminalBridge so the scheduler can live outside this package.
-     */
-    int availableProcessOutputBytes() {
-        return mProcessToTerminalIOQueue.getAvailable();
-    }
-
     @SuppressLint("HandlerLeak")
     class MainThreadHandler extends Handler {
 
@@ -353,20 +342,14 @@ public final class TerminalSession extends TerminalOutput {
         }
 
         // PocketShell #796/#803: ONE MSG_NEW_INPUT dispatch parses at most this
-        // many bytes in a single, uninterruptible mEmulator.append() call. It was
-        // 16 KB, but a 16 KB slice of clear-heavy alt-screen content (an agent's
-        // full-viewport redraw: ESC[H + 30x ESC[K per chunk) does ~4000
-        // blockClear/allocateFullLineIfNecessary ops — far more main-thread WORK
-        // per byte than append text — and on a swiftshader emulator that one
-        // atomic append pinned the looper for >1 s (the #796 ANR). The byte budget
-        // did not model that work. Shrinking the per-dispatch slice gives the
-        // PocketShell MainThreadDrainScheduler a fine enough granularity to apply
-        // an ELAPSED-TIME budget across slices and yield mid-burst, so no single
-        // main-thread turn blows the frame/ANR deadline even for clear-heavy
-        // content. 2 KB keeps the worst-case single atomic append well under the
-        // responsiveness budget while keeping per-slice dispatch overhead low (the
-        // scheduler still drains several slices per turn for cheap append load, so
-        // normal throughput is unchanged).
+        // many bytes in a single, uninterruptible mEmulator.append() call.
+        // Upstream reads 64 KB per message; a 16 KB slice of clear-heavy
+        // alt-screen content (an agent's full-viewport redraw: ESC[H + 30x ESC[K
+        // per chunk) does ~4000 blockClear/allocateFullLineIfNecessary ops and on
+        // a swiftshader emulator pinned the looper for >1 s (the #796 ANR). 2 KB
+        // keeps the worst-case single atomic append well under the responsiveness
+        // budget. The poster (app2's TerminalPtyBridge) writes the remote stream
+        // in slices of exactly this size and posts one message per slice.
         private static final int PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES = 2 * 1024;
 
         final byte[] mReceiveBuffer = new byte[PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES];
@@ -375,16 +358,11 @@ public final class TerminalSession extends TerminalOutput {
         public void handleMessage(Message msg) {
             if (msg.what == MSG_NEW_INPUT) {
                 // PocketShell #803/#796: one MSG_NEW_INPUT dispatch drains exactly
-                // ONE 2 KB slice (PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES; #796 shrank
-                // it from 16 KB) and does NOT self-re-post. Continuation across the
-                // rest of the queue is owned by the PocketShell
-                // MainThreadDrainScheduler, which applies a per-frame byte budget
-                // and yields the main looper between budgeted turns so a dense
-                // colored-diff burst cannot pin the thread in one unbounded
-                // back-to-back parse run (the #803 ANR). The scheduler is the SOLE
-                // poster of MSG_NEW_INPUT in PocketShell (the upstream local-PTY
-                // input reader in initializeEmulator is never started — the bridge
-                // pre-installs the emulator).
+                // ONE slice and does NOT self-re-post; the bridge posts one message
+                // per slice it writes, so the queue is drained message by message
+                // with the looper free to run other work in between (the upstream
+                // local-PTY input reader in initializeEmulator is never started —
+                // the bridge pre-installs the emulator).
                 drainProcessOutputSlice();
             }
 
@@ -426,7 +404,6 @@ public final class TerminalSession extends TerminalOutput {
             if (bytesRead <= 0) return bytesRead;
 
             mEmulator.append(mReceiveBuffer, bytesRead);
-            mClient.onProcessOutputDrained(TerminalSession.this, bytesRead);
             notifyScreenUpdate();
             return bytesRead;
         }

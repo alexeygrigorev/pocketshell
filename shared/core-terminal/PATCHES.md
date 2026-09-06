@@ -45,6 +45,52 @@ Not byte-identical to upstream.
   `#259` cases in `TerminalTest.java`, `StatusSpinnerRewriteGridTest`, and
   `CapturePaneSeedReplayGridTest`.
 
-`com.termux.view.TerminalView` and the rest of `com.termux.terminal.**` remain
-byte-identical to upstream — see `TerminalRendererSpinnerRewriteInstrumentedTest`
-for the render-side coverage.
+## `src/main/java/com/termux/terminal/TerminalSession.java`
+
+Not byte-identical to upstream.
+
+- **#796/#803** — `MainThreadHandler` reads one 2 KB slice per `MSG_NEW_INPUT`
+  (upstream: 64 KB) and never re-posts itself; the poster (app2's
+  `TerminalPtyBridge`) writes the remote stream in slices of that size and
+  posts one message per slice, so no single main-thread turn parses more than
+  a slice of clear-heavy alt-screen content. `MSG_PROCESS_EXITED` drains the
+  whole queue first. The handler is pinned to `Looper.getMainLooper()`.
+
+## `src/main/java/com/termux/terminal/TerminalBuffer.java`, `TerminalRow.java`
+
+Not byte-identical to upstream.
+
+- **#469** — per-row `mGeneration` content stamps, bumped at every mutating
+  chokepoint, so `TerminalRenderer` can skip unchanged rows.
+- **#966/#967/#1153** — `getVisibleScreenText`, `getVisibleScreenTextFullyJoined`,
+  `getVisibleScreenRows` on the buffer, and `mHardWrapStart` on the row. These
+  fed the pre-0.5.0 stale-render oracles and smart-selection overlays; nothing
+  in app2 calls them today.
+
+## `src/main/java/com/termux/view/TerminalView.java`, `TerminalViewClient.java`
+
+Not byte-identical to upstream.
+
+- **#469/#721** — `onScreenUpdated` coalesces repaints through one
+  `postOnAnimation` runnable (`scheduleRenderInvalidation`) and
+  `forceFullRepaint()` resets the renderer's dirty cache.
+- **#966/#967** — `onDraw`/`updateSize` catch `Throwable` (an `Error` mid-render
+  used to crash the composition), paint one background frame, force a full
+  repaint next frame, and report through `TerminalViewClient.onTerminalRenderFailure`.
+- **#529/#1854** — smart-text IME staging behind
+  `TerminalViewClient.shouldUseSmartTextInput()` (default false), and a
+  multi-line IME commit is framed with `BracketedPaste` before it is written.
+- **#2154** — a resize during a live text selection keeps the viewport row
+  instead of snapping to the bottom; `TerminalViewClient.onScrollChanged()`
+  reports viewport moves.
+
+Removed on 2026-09-06 (the rewrite left them without a caller): the emulator's
+`setSuppressQueryResponses` (#246 — with one PTY source every query must be
+answered; `TerminalTest.testQueryResponsesAreAnswered` pins that), the
+session's `availableProcessOutputBytes` / `onProcessOutputDrained` drain seams
+(#803), the view's `FramePaintObserver`, `forceSurfaceRepaint` and PixelCopy
+surface-black probe (#1192/#1203/#1296/#1443/#2003), and the buffer's
+`hasNonBlankVisibleRow`.
+
+`TerminalSessionClient.java` and everything not listed above is byte-identical
+to upstream at the pinned commit.

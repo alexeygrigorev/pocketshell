@@ -143,7 +143,12 @@ Everything that used to sit between SSH and that emulator — `SshTerminalBridge
 `TerminalSurfaceState`, the drain schedulers/budgets, the frame coalescer — is
 gone. Its replacement is `app2`'s `TerminalPtyBridge`: PTY output → emulator,
 emulator input → PTY, one resize path. `TerminalHostView` is a thin `AndroidView`
-around `com.termux.view.TerminalView`.
+around `com.termux.view.TerminalView`; its session client is where the emulator's
+palette (installed as the vendored *default* scheme so `reset`/`OSC 104` return
+to it), the selection menu's Copy/Paste and `OSC 52` get a window and a
+clipboard. The emulator answers terminal queries (`DA`, `DSR`, `OSC 11 ?`) on
+the wire itself — it is the real terminal the remote program talks to, so the
+old tmux-mode suppression is gone.
 
 ## Connecting to a host
 

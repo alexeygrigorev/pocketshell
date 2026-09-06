@@ -335,6 +335,9 @@ fun createRemoteTerminalSession(
         /* transcriptRows = */ transcriptRows,
         /* client = */ client,
     )
+    // Before the emulator: its constructor copies the default scheme into the
+    // live palette, and every later reset copies it again.
+    installTerminalPalette()
     val emulator = TerminalEmulator(
         /* session = */ session,
         /* columns = */ cols,

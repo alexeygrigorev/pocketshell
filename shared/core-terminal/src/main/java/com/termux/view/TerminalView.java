@@ -903,7 +903,26 @@ public final class TerminalView extends View {
         mEmulator.sendMouseEvent(button, x, y, pressed);
     }
 
-    /** Perform a scroll, either from dragging the screen or by scrolling a mouse wheel. */
+    /**
+     * Perform a scroll, either from dragging the screen or by scrolling a mouse wheel.
+     *
+     * <p>PocketShell #2555 — LOCAL DIVERGENCE FROM UPSTREAM TERMUX, see {@code PATCHES.md}.
+     * Upstream has a third branch here: when the ALTERNATE screen is active and mouse
+     * tracking is not, it synthesised {@code KEYCODE_DPAD_UP}/{@code KEYCODE_DPAD_DOWN}
+     * and wrote the resulting {@code ESC [ A} / {@code ESC O A} to the session, because
+     * that is how {@code less} scrolls. On a phone that is a destructive default: the
+     * app's emulator is on the alternate screen for the whole of any tmux attach (tmux
+     * puts its client there) and for any aplexer attach onto an alt-screen workload,
+     * and {@code mouse} is OFF by default in tmux — so on a stock host every finger
+     * drag became arrow keys, which in a shell or an agent TUI is command/prompt
+     * history. Scrolling back through an agent's output rewrote what the user was
+     * typing. That branch is deleted, not made conditional (D22 hard cut): the
+     * alternate screen has no transcript to scroll, so with no mouse tracking to
+     * forward a wheel event to there is nothing honest to do, and doing nothing is
+     * strictly better than sending a keystroke the user did not press. The key bar's
+     * ARROWS page still sends real arrows for {@code less}-style pagers, deliberately
+     * and only when the user asks for them.
+     */
     void doScroll(MotionEvent event, int rowsDown) {
         boolean up = rowsDown < 0;
         int amount = Math.abs(rowsDown);
@@ -911,11 +930,7 @@ public final class TerminalView extends View {
         for (int i = 0; i < amount; i++) {
             if (mEmulator.isMouseTrackingActive()) {
                 sendMouseEventCode(event, up ? TerminalEmulator.MOUSE_WHEELUP_BUTTON : TerminalEmulator.MOUSE_WHEELDOWN_BUTTON, true);
-            } else if (mEmulator.isAlternateBufferActive()) {
-                // Send up and down key events for scrolling, which is what some terminals do to make scroll work in
-                // e.g. less, which shifts to the alt screen without mouse handling.
-                handleKeyCode(up ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, 0);
-            } else {
+            } else if (!mEmulator.isAlternateBufferActive()) {
                 int nextTopRow = Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1)));
                 if (nextTopRow != mTopRow) {
                     mTopRow = nextTopRow;

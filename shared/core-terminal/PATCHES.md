@@ -205,6 +205,32 @@ Deviating files:
   instead of snapping to the bottom; `doScroll` and `setTopRow` only fire when
   the top row actually moves and report the move through
   `TerminalViewClient.onScrollChanged()`.
+- **#2555** — `doScroll` no longer synthesises arrow keys on the alternate
+  screen. Upstream's middle branch answered a drag/wheel with
+  `handleKeyCode(KEYCODE_DPAD_UP/DOWN)` whenever the alternate buffer was
+  active and mouse tracking was not — the trick desktop terminals use so
+  scrolling works in `less`. On a phone that default is destructive and it is
+  reached constantly: any attach whose remote takes the alternate screen and
+  does not ask for mouse reporting (an aplexer attach onto an alt-screen agent
+  TUI; a tmux client, whose `mouse` option is off by default) put every finger
+  drag on the wire as `ESC O A` / `ESC [ A`. In a shell or an agent TUI that is
+  command/prompt history, so the maintainer scrolling back through an agent's
+  output silently rewrote what he was typing (the #2555 report).
+
+  The branch is DELETED rather than made conditional (D22 hard cut, no
+  "restore the old scrolling" flag). The alternate screen keeps no transcript,
+  so once there is no mouse tracking to forward a wheel event to there is
+  nothing truthful left to scroll; doing nothing is strictly better than
+  sending a keystroke the user never pressed, and `less`-style paging still
+  has real, deliberate arrows on the key bar's ARROWS page. The two branches
+  that DO have a defined meaning are untouched: mouse tracking active still
+  sends SGR wheel events, and the normal buffer still moves `mTopRow` through
+  the local transcript.
+
+  Covered by `src/test/java/com/termux/view/TerminalScrollGestureTest.kt`
+  (real PTY captures of four attach paths, see
+  `src/test/resources/pocketshell/scroll/README.md`) and by
+  `app2/src/androidTest/.../J15TerminalScrollJourney.kt` on a device.
 
 ## `src/main/java/com/termux/view/TerminalViewClient.java`
 

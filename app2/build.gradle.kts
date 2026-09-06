@@ -383,6 +383,13 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
+    // Issue #2549: the journey harness bounds `waitForIdle()` with Espresso's
+    // idling policies plus an IdlingResource tripwire, so Espresso has to be a
+    // COMPILE dependency here, not just a runtime transitive of
+    // compose-ui-test-junit4. This also BUMPS the resolved espresso version for
+    // this source set from 3.5.0 (what ui-test-android 1.8.1 requires) to 3.6.1
+    // — see the catalog entry for why that is deliberate.
+    androidTestImplementation(libs.androidx.espresso.core)
     // The journey's INDEPENDENT host-key oracle dials the fixture with sshj
     // directly (sshj itself is `api` on core-transport, so it is already on this
     // classpath). BouncyCastle is only an `implementation` detail there, so the

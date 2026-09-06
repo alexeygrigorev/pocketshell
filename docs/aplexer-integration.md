@@ -396,6 +396,61 @@ push feed, `usage` / `quse`.
 
 ---
 
+## Session memory caps: `cgroups.toml` is the source of truth, `memcap.py` reads it (#2562)
+
+Every session PocketShell creates is memory-capped, on both backends. Until
+#2562 only the tmux arm was: `tmuxctl create-detached` resolved the per-project
+cap itself and wrapped the session shell in a capped cgroup-v2 systemd `--user`
+scope, while `a start` was invoked with no memory parameter at all — every
+aplexer-backed session on the dev box recorded `"limits": {}`. That protection
+exists because a runaway session can OOM-kill the whole box, which is the
+maintainer's only dev machine and is usually reached from a phone.
+
+**The decision #2562 asks to record — where cap resolution lives once tmux is
+gone:** in PocketShell, as `tools/pocketshell/src/pocketshell/memcap.py`, reading
+the same per-project files tmuxctl reads. Not `from tmuxctl.robust import
+resolve_mem`, because #2561 deletes that dependency and the aplexer arm has to
+outlive it; importing it would make the cap disappear again exactly when tmux is
+removed, which is the failure #2562 exists to close. The contract is the FILE,
+not tmuxctl's code: `cgroups.toml` keeps its location and format (an explicit
+non-goal of #2562 to change either), and `memcap.py` becomes its only reader
+when the tmux arm goes. `tests/test_sessions_mem_cap.py` pins the two readers'
+agreement against the real tmuxctl while both exist, and asserts the resolved
+BYTE value against the committed file so the number is never copied into code.
+
+Resolution order for a session created in workspace `W`:
+
+1. an explicit `--mem`;
+2. `W/cgroups.toml` → `mem`;
+3. `W/pyproject.toml` → `[tool.tmuxctl] mem`;
+4. the same two files at `W`'s git root;
+5. `memcap.DEFAULT_MEM` (12G — the same fallback tmuxctl uses).
+
+Deliberately NOT carried over: tmuxctl's `ROBUST_TMUX_MEM` env layer and its
+`~/.config/tmuxctl/cgroups.toml` user-config layer. Both are tmuxctl-namespaced
+knobs that die with it, and an inherited environment variable should not be able
+to change a session's containment.
+
+Two fail-loud rules keep "uncapped" from ever happening by accident:
+
+- an unresolvable cap (malformed `cgroups.toml`, an unparseable size, a value
+  below the sanity floor) refuses the create — it does not fall back;
+- `mem = "none"` in a project file is an error. The single escape hatch is
+  `--mem none` typed at the call site, and it is aplexer-only.
+
+`--mem none` exists because aplexer's limits **fail closed**: with no delegated
+cgroup-v2 user scope, `a start --memory` errors rather than running uncapped.
+That is correct on a real host and impossible to satisfy in an unprivileged
+container, so the Docker `agents` fixture
+(`tests/docker/agents-aplexer-selfcheck.py`,
+`scripts/test-agents-fixture-aplexer.sh`) passes `--mem none` explicitly. The
+fixture therefore cannot prove capping; the real-transport proof lives in
+`tests/test_sessions_mem_cap.py`, which creates a session through the production
+CLI against an isolated aplexer instance and reads `memory.max` back out of the
+kernel.
+
+---
+
 ## Product defaults (unless the maintainer says otherwise)
 
 1. **Picker ids.** Phase A keeps PocketShell display names (`Claude (Z.AI)`).

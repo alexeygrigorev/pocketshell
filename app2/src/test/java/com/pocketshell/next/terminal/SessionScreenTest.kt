@@ -2,6 +2,7 @@ package com.pocketshell.next.terminal
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -123,6 +124,40 @@ class SessionScreenTest {
         composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
 
         assertEquals(1, opened)
+    }
+
+    /**
+     * Issue #2579: on the session screen the pill is about THIS session's
+     * agent. A focused state carries no window, and the rendered chrome has to
+     * show exactly that — "Claude 38%", not "Claude 7d 38%". Asserting on the
+     * painted text (not on the data class) is the point: `attribution` is what
+     * the pill draws, and a regression that re-added the token would be
+     * invisible to a state-level assertion.
+     */
+    @Test
+    fun `a focused pill renders the provider and percent with no window token`() {
+        setContent(
+            SessionUiState.Connecting,
+            usagePillState = UsageGlancePillState(
+                percent = 38,
+                provider = "Claude",
+                window = null,
+                kind = PillKind.Ok,
+                stale = false,
+                fetchedClock = "13:40",
+            ),
+        )
+
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Claude").assertIsDisplayed()
+        composeRule.onNodeWithText("38%").assertIsDisplayed()
+        // The tokens the cross-provider pill would have shown must be absent.
+        composeRule.onNodeWithText("Claude 7d").assertDoesNotExist()
+        composeRule.onNodeWithText("7d").assertDoesNotExist()
+        composeRule.onNodeWithText("5h").assertDoesNotExist()
+        composeRule
+            .onNodeWithContentDescription("Usage Claude 38%")
+            .assertIsDisplayed()
     }
 
     @Test

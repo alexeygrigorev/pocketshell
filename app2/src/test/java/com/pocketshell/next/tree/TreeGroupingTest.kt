@@ -413,6 +413,7 @@ class TreeGroupingTest {
         tag = null,
         engine = null,
         profile = null,
+        agent = null,
         agentState = null as AgentState?,
         agentStateSource = null as AgentStateSource?,
         attached = false,

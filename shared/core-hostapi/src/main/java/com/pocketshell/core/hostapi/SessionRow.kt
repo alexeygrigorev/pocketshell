@@ -17,6 +17,25 @@ data class SessionRow(
     val tag: String?,
     val engine: String?,
     val profile: String?,
+    /**
+     * Which agent aplexer detected RUNNING inside this session's workload
+     * ("claude", "codex", "opencode", "grok"), lowercase, verbatim off the
+     * wire (issue #2579).
+     *
+     * Distinct from [engine], which is only what the session was STARTED as:
+     * every aplexer session on the maintainer's box is `engine: "shell"`
+     * (`a start … -- /bin/bash -l`) with the agent launched inside it
+     * afterwards, so [engine] answers nothing about what is running now.
+     * aplexer owns the workload process tree, so it is the one place that can
+     * answer; the client never probes for this itself.
+     *
+     * `null` means the host reported no agent — a tmux row (always null), an
+     * aplexer session with no known agent among its workload's descendants,
+     * or, importantly, a host CLI old enough not to emit the key at all. All
+     * three collapse to "no focus" at the call site, so an older host keeps
+     * working unchanged.
+     */
+    val agent: String?,
     val agentState: AgentState?,
     val agentStateSource: AgentStateSource?,
     val attached: Boolean,

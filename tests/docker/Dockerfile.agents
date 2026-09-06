@@ -3,33 +3,133 @@
 # This image is intentionally deterministic: it exposes the command names
 # PocketShell probes without installing real provider CLIs or requiring API
 # credentials. Use it for local emulator + Docker smoke tests only.
-FROM alpine:latest
+#
+# BASE: debian:trixie-slim, NOT alpine (issue #2563, slice 1 of #2561).
+#
+# aplexer — which is on its way to becoming the only session backend — ships
+# manylinux wheels/release binaries only (glibc >= 2.28) and no sdist, so a
+# musl image physically cannot run the pinned `a`. Until #2563 this image faked
+# aplexer with a 61-line shell stub that answered one dead verb (`a --json
+# sessions`) and hosted no attachable process, so no journey could ever
+# exercise a real aplexer session. That stub is deleted (D22 hard cut) and the
+# REAL pinned binaries are installed below. tmux stays exactly as it was: this
+# slice ADDS a working aplexer, it removes no tmux capability.
+#
+# Two things about the base are load-bearing and were each paid for once:
+#
+#   * It must be TRIXIE, not bookworm. The shared tests/docker/sshd_config
+#     carries `PerSourcePenalties no` (issue #2150), a keyword OpenSSH 9.2
+#     (bookworm) does not know — and sshd REFUSES TO START on an unknown
+#     keyword, so the whole fixture dies at container start. Trixie ships
+#     OpenSSH 10.x. The in-tree glibc precedent, real-agent/Dockerfile's
+#     `node:24-bookworm-slim`, is therefore the wrong base to copy.
+#   * `ln -sfn /usr/lib/openssh /usr/lib/ssh` keeps the SHARED sshd_config's
+#     Alpine `Subsystem sftp /usr/lib/ssh/sftp-server` path resolving. That is
+#     what stops this base swap from fanning out into the other four
+#     Dockerfiles sharing that config file, and it keeps J10's SFTP channel
+#     working unchanged.
+#
+# THE BASE SWAP MOVES EVERY TOOL VERSION IN THIS IMAGE, and tmux moves DOWN.
+# Nothing currently depends on the difference (the whole `Integration tests
+# (Docker)` set is green on trixie, and an A/B of J03AttachAndTypeJourney over
+# three reps a side found 3.5a no worse than 3.7c — it flaked on the alpine
+# fixture and not on this one), but a journey debugged three weeks from now
+# should find this table here rather than rediscover it from a red run.
+# Measured `--no-cache` on both images, back to back:
+#
+#     tool      alpine:latest (was)   debian:trixie-slim (now)
+#     tmux      3.7c                  3.5a          <- a DOWNGRADE
+#     OpenSSH   10.3p1                10.0p2
+#     python3   3.14.7                3.13.5
+#     nano      9.2                   8.4
+#     sqlite3   3.53.4                3.46.1
+#     git       2.54.0                2.47.3
+#
+# tmux is the load-bearing one: every terminal journey drives it through
+# `agent-bin/tmux` -> `/usr/bin/tmux.real`. 3.5a is still comfortably past the
+# 3.4 quirks the real CLI documents (`sessions.py`'s `=name:` pane-target
+# note), which is the oldest behaviour anything here relies on.
+FROM debian:trixie-slim
 
 # Issue #1091: `nano` is the maintainer's real dogfood TUI (he was trapped in
 # GNU nano, unable to save/exit from PocketShell). The connected nano save/exit
-# journey (`TmuxKeyBarCtrlComboE2eTest`) opens a real nano buffer and drives
-# `^O`/`^X` from the hotkeys panel, so the fixture must ship a real `nano`.
-# Issue #2276: `py3-yaml` is required because the fixture's `engines list
+# journey opens a real nano buffer and drives `^O`/`^X` from the hotkeys panel,
+# so the fixture must ship a real `nano`.
+# Issue #2276: `python3-yaml` is required because the fixture's `engines list
 # --json` arm delegates to the REPOSITORY's real `pocketshell.engines`
 # registry (see agent-bin/pocketshell), which reads
 # ~/.config/pocketshell/engines.yaml. Without PyYAML the registry silently
 # ignores the fixture's engine rows.
-# `openssh-sftp-server` (rewrite task P-3): Alpine ships the SFTP subsystem in
-# its OWN package, so `openssh-server` alone gives an sshd whose
-# `Subsystem sftp /usr/lib/ssh/sftp-server` line points at a binary that is not
-# installed. Every SFTP channel against this fixture then closed immediately —
-# invisible to every test that only ran `exec`, and fatal to the file
-# explorer/viewer journey (J10). `Dockerfile.ssh` already carried the package;
-# this image had drifted from it.
-RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client \
-    tmux procps bash sqlite git nano \
-    python3 py3-click py3-yaml \
+#
+# Alpine -> Debian package mapping (issue #2563):
+#   openssh-sftp-server -> shipped INSIDE openssh-server on Debian
+#   sqlite              -> sqlite3
+#   py3-click/py3-yaml  -> python3-click/python3-yaml
+#   adduser -D          -> useradd -m
+#   passwd -u           -> usermod -p '*'  (Debian's passwd(1) refuses to
+#                          unlock into a passwordless account and exits 3;
+#                          busybox's is lenient)
+# `curl` + `ca-certificates` are new and exist only to fetch the pinned
+# aplexer release binaries below.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server openssh-client \
+        tmux procps bash sqlite3 git nano ca-certificates curl \
+        python3 python3-click python3-yaml \
+    && find /var/lib/apt/lists -mindepth 1 -delete \
+    && ln -sfn /usr/lib/openssh /usr/lib/ssh \
     && mv /usr/bin/tmux /usr/bin/tmux.real \
+    && mkdir -p /run/sshd \
     && ssh-keygen -A \
-    && adduser -D -s /bin/sh testuser \
-    && passwd -u testuser \
+    && useradd -m -s /bin/sh testuser \
+    && usermod -p '*' testuser \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh
+
+# Copied on its own, ABOVE the source tree, so editing tools/pocketshell/src
+# does not invalidate the aplexer download layer below it.
+COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
+
+# THE REAL, PINNED aplexer (issue #2563).
+#
+# WHERE the binaries land is load-bearing; being on PATH is NOT enough.
+# `pocketshell.aplexer::_bundled_bin_dirs` resolves `a` next to
+# `sys.executable` and nowhere else — the PATH lookup is a D22 hard cut
+# (#2543). With `a` only on PATH the real CLI reports `managers: ["tmux"]`,
+# ZERO aplexer rows and exit 0: a fixture that is silently green-and-empty,
+# the exact vacuous-pass shape docs/ci-pitfalls.md catalogues. `/usr/bin/a`
+# sitting next to `/usr/bin/python3` is what makes the resolution succeed, and
+# the self-check further down fails the BUILD if that ever stops being true.
+#
+# `a` also needs its sibling worker: aplexer/src/lib.rs::worker_executable
+# resolves `aplexer` next to `current_exe`, so both binaries ship.
+#
+# The version is DERIVED from the same `aplexer==X.Y.Z` line
+# tools/pocketshell/pyproject.toml already pins for production — never a
+# hardcoded literal and never a `--build-arg` default, which is exactly the
+# drift a fixture must not have. Bump the pin and the fixture follows in the
+# same commit; they cannot disagree.
+#
+# The GitHub release asset is byte-identical to the binary inside the PyPI
+# wheel (aplexer's release.yml builds `target/<t>/release/a` once, then both
+# wheel-packs it and uploads it), so this is the production artefact rather
+# than "a build of the same version" — the 143-commit version trap recorded in
+# AGENTS.md does not apply. Nothing here greps `a --version`: the pin is
+# asserted by BEHAVIOUR (the self-check below, and
+# tools/pocketshell/tests/test_aplexer_contract.py).
+RUN set -eu; \
+    ver="$(sed -n 's/^ *"aplexer==\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-real/pyproject.toml | head -1)"; \
+    test -n "$ver" || { echo "FATAL: no aplexer==X.Y.Z pin in pyproject.toml" >&2; exit 1; }; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset_arch=linux-amd64 ;; \
+      arm64) asset_arch=linux-arm64 ;; \
+      *) echo "FATAL: aplexer publishes no release binary for dpkg arch $arch" >&2; exit 1 ;; \
+    esac; \
+    echo "pinned aplexer=$ver $asset_arch (derived from pyproject.toml)"; \
+    base="https://github.com/alexeygrigorev/aplexer/releases/download/v${ver}"; \
+    curl -fsSL -o /usr/bin/a "$base/a-${asset_arch}"; \
+    curl -fsSL -o /usr/bin/aplexer "$base/aplexer-${asset_arch}"; \
+    chmod +x /usr/bin/a /usr/bin/aplexer
 
 COPY tests/docker/sshd_config /etc/ssh/sshd_config
 COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
@@ -41,7 +141,6 @@ COPY tests/docker/agent-bin/ /usr/local/bin/
 # acknowledged send verb delegates to the real host implementation so a
 # connected test can leave and reread a genuine pending journal record.
 COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
-COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # The #1302/#1208 idle-incremental-claude.sh TUI fixture was DELETED here (D22).
 # It painted a full TUI frame once and then repainted only a spinner in place —
 # an idle agent that cannot self-heal a lost grid, so recovery had to come from
@@ -52,6 +151,7 @@ COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # terminal-recovery journey that needs the non-self-healing repaint shape.
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY tests/docker/agents-aplexer-selfcheck.py /usr/local/bin/pocketshell-fixture-aplexer-selfcheck
 
 # Issue #2381: the baked version is only the floor. #2356 removed the
 # `versionName = "X.Y.Z"` literal this image used to sed out of a COPYed
@@ -62,13 +162,19 @@ COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoin
 # same file at container start. `0.0.0-dev` matches what
 # scripts/derive-version.sh yields for a tagless checkout, so an unset caller
 # and a tagless-checkout APK still agree.
+#
+# `/usr/local/bin/a` is no longer chmod'd here: the shell stub it used to name
+# is deleted, and `a` is now the real binary in /usr/bin (see above). Nothing
+# symlinks it onto /usr/local/bin either — a PATH-facing `a` is precisely the
+# shape that made the fixture look green while enumerating nothing, so the ONE
+# copy lives next to the interpreter and callers that want it on PATH get it
+# from /usr/bin, which is already on every PATH the fixture uses.
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \
         /usr/local/bin/pocketshell \
         /usr/local/bin/pocketshell-fixture-sessions \
-        /usr/local/bin/a \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \
         /usr/local/bin/tmux \
@@ -78,6 +184,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
+        /usr/local/bin/pocketshell-fixture-aplexer-selfcheck \
         /usr/local/bin/pocketshell-real-send \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && printf '%s\n' "0.0.0-dev" > /opt/pocketshell-agent-fixture-version \
@@ -142,6 +249,30 @@ RUN install -d -o testuser -g testuser \
         > /home/testuser/.config/pocketshell/engines.yaml \
     && chown -R testuser:testuser /home/testuser/.nvm /home/testuser/.config \
         /home/testuser/.profile
+
+# THE ANTI-VACUOUS-GREEN GATE (issue #2563).
+#
+# The image cannot be built hollow. This drives the REAL, unmodified
+# `pocketshell` CLI (`python3 -m pocketshell`, the same entry point
+# pocketshell-real-send uses) through a full aplexer lifecycle as `testuser`:
+# resolve the bundled `a` -> `sessions create --backend aplexer` ->
+# `sessions list --json` must contain that row with `manager: "aplexer"`,
+# `phase: "running"`, `alive: true` -> `sessions kill` must report
+# `killed: true, reaped: true` -> the row must be gone.
+#
+# Any deviation — a stub `a`, `a` moved somewhere only PATH can see, a missing
+# sibling worker, a session that starts but cannot be enumerated or killed —
+# fails the BUILD with a named diagnostic instead of producing an image that
+# reports zero aplexer rows and exit 0 forever after.
+#
+# What this check does NOT prove is the binary's VINTAGE. A neighbouring
+# release that still satisfies this lifecycle would pass it, and that is fine:
+# the vintage guarantee comes from the derivation above (the version is read
+# out of the same pyproject.toml line production pins) plus the release URL it
+# builds, not from anything asserted at run time. Version STRINGS are never
+# consulted anywhere here — see the note above the download for why they are
+# not evidence.
+RUN su testuser -s /bin/sh -c 'HOME=/home/testuser /usr/local/bin/pocketshell-fixture-aplexer-selfcheck'
 
 EXPOSE 22
 

@@ -8,7 +8,8 @@ two managers:
                   is why a bare default-socket ``tmux list-sessions`` (and a
                   live ``-CC`` control client, which is attached to exactly ONE
                   server) sees only a small subset;
-  * ``aplexer`` — rows reported by the ``a`` binary.
+  * ``aplexer`` — a second manager, whose rows this fixture takes from a
+                  per-user seed file (see below).
 
 The fixture used to fake all of that with one canned human table, so no journey
 could reproduce the maintainer's reported shape: 7 tmuxctl-managed sessions
@@ -21,7 +22,7 @@ journey:
     other journey runs in) ``list`` emits the canned file verbatim and ``json``
     carries exactly the canned rows;
   * seeded sockets are enumerated live and appended after the canned rows;
-  * aplexer rows come from the ``a`` fixture binary.
+  * aplexer rows come from the ``POCKETSHELL_FIXTURE_APLEXER_FILE`` seed.
 
 SCHEMA 2 (rewrite task U-3). ``json`` now emits the schema-2 document the
 Android client's ``core-hostapi`` parser reads: a ``schema`` field, the FULL key
@@ -32,8 +33,8 @@ The pre-schema-2 ``{"managers": [...], "sessions": [{"name", "manager",
 "created", "attach"}]}`` shape is gone — a hard cut (D22), matching the deleted
 schema-1 client. ``list`` is untouched and still byte-for-byte the canned table.
 
-Two per-user seed files let a journey give the fixture a realistic host state
-over the SSH session it already has, with no image rebuild:
+Three per-user seed files let a journey give the fixture a realistic host
+state over the SSH session it already has, with no image rebuild:
 
   * ``POCKETSHELL_FIXTURE_SESSION_DETAIL_FILE``
     (default ``$HOME/.pocketshell-fixture-session-detail.json``) — an object
@@ -42,6 +43,12 @@ over the SSH session it already has, with no image rebuild:
     "activity_epoch": 1788409253, "agent_state": "working"}}``. A tmux session
     with no entry reports ``workspace: null``, which is exactly the
     "other" bucket the client must still render.
+  * ``POCKETSHELL_FIXTURE_APLEXER_FILE``
+    (default ``$HOME/.pocketshell-fixture-aplexer.json``) — ``{"sessions":
+    [{"name": ..., "workspace": ..., ...}]}``, appended as ``manager:
+    "aplexer"`` rows. Absent file => no aplexer rows, which is every journey
+    that does not seed one. Issue #2563 moved this read here from the deleted
+    61-line shell ``a`` stub, which did nothing else.
   * ``POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE``
     (default ``$HOME/.pocketshell-fixture-session-errors.json``) — a list of
     ``{"manager": ..., "message": ...}`` records, appended verbatim to
@@ -49,7 +56,8 @@ over the SSH session it already has, with no image rebuild:
     contract on a device: a backend that failed to enumerate while the other
     one answered. Absent file => no errors, which is every other journey.
 
-Both default to absent, so a fixture nobody seeded behaves the same as before.
+All three default to absent, so a fixture nobody seeded behaves the same as
+before.
 
 Usage: ``pocketshell-fixture-sessions {list|json} <canned-table-file>``
 """
@@ -189,23 +197,34 @@ def tmuxctl_socket_rows() -> list[tuple[str, str]]:
 
 
 def aplexer_rows() -> list[dict]:
-    """Rows from the `a` fixture binary (aplexer), or none when it is absent."""
+    """Canned aplexer rows a journey seeded, or none when it seeded nothing.
+
+    Issue #2563 deleted the 61-line shell ``a`` stub this used to shell out to.
+    That stub only ever ``cat``-ed the seed file below (through the long-dead
+    ``a --json sessions`` verb, which the real aplexer does not implement), and
+    ``/usr/local/bin/a`` had to be freed anyway: the `agents` image now ships
+    the REAL pinned aplexer binaries next to ``/usr/bin/python3``, which is the
+    only placement ``pocketshell.aplexer`` will resolve. Reading the seed file
+    directly is the same behaviour minus a process, and it works in every image
+    that copies ``agent-bin/`` whether or not a real ``a`` is installed there.
+
+    This is the DETERMINISTIC arm and stays that way: it is what lets J02 seed
+    an exact aplexer row (and the #2426 partial-listing error shape) without a
+    live session. Journeys that must exercise a real aplexer session drive the
+    real CLI, whose enumeration is guarded by
+    ``tests/docker/agents-aplexer-selfcheck.py``.
+    """
     if os.environ.get("POCKETSHELL_APLEXER") == "0":
         return []
-    binary = os.environ.get("APLEXER_BIN") or "/usr/local/bin/a"
-    if not os.path.exists(binary):
-        return []
+    path = _seed_file(
+        "POCKETSHELL_FIXTURE_APLEXER_FILE", ".pocketshell-fixture-aplexer.json"
+    )
     try:
-        proc = subprocess.run(
-            [binary, "--json", "sessions"], capture_output=True, text=True, timeout=5
-        )
-    except (OSError, subprocess.SubprocessError):
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
         return []
-    if proc.returncode != 0:
-        return []
-    try:
-        payload = json.loads(proc.stdout)
-    except ValueError:
+    if not isinstance(payload, dict):
         return []
     sessions = payload.get("sessions")
     if not isinstance(sessions, list):

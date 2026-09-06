@@ -64,10 +64,12 @@ import kotlinx.coroutines.runBlocking
  *    sessions their workspace / attach / activity / agent-state fields. One
  *    session is deliberately left OUT of it, so the host reports a `null`
  *    workspace and the "other" bucket is exercised on a real device.
- *  - `~/.pocketshell-fixture-aplexer.json` gives the `a` fixture binary an
- *    aplexer session, so the tree lists BOTH managers — the shape the
+ *  - `~/.pocketshell-fixture-aplexer.json` hands the fixture enumerator a
+ *    canned aplexer session, so the tree lists BOTH managers — the shape the
  *    maintainer's own box has, and the one a tmux-only fixture could never
- *    reproduce.
+ *    reproduce. Issue #2563 deleted the shell `a` stub this used to be read
+ *    through (the image now ships the real pinned aplexer binaries); the seed
+ *    file and its payload are unchanged.
  *  - `~/.pocketshell-fixture-session-errors.json` makes a backend report an
  *    enumeration failure. Only the partial-listing test seeds it; the others
  *    delete it, because a leftover file would make the happy-path

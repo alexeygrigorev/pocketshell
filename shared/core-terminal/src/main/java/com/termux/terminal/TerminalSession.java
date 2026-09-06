@@ -1,186 +1,273 @@
 package com.termux.terminal;
 
-import android.annotation.SuppressLint;
-import android.os.Handler;
 import android.os.Looper;
-import android.os.Message;
-import android.system.ErrnoException;
-import android.system.Os;
-import android.system.OsConstants;
-
-import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.reflect.Field;
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 
 /**
- * A terminal session, consisting of a process coupled to a terminal interface.
- * <p>
- * The subprocess will be executed by the constructor, and when the size is made known by a call to
- * {@link #updateSize(int, int, int, int)} terminal emulation will begin and threads will be spawned to handle the subprocess I/O.
- * All terminal emulation and callback methods will be performed on the main thread.
- * <p>
- * The child process may be exited forcefully by using the {@link #finishIfRunning()} method.
- * <p>
- * NOTE: The terminal session may outlive the EmulatorView, so be careful with callbacks!
+ * PocketShell's remote-only terminal session (issue #2566).
+ *
+ * <p><b>This class is NOT vendored from Termux.</b> It keeps upstream's fully
+ * qualified name and its six-method surface so {@link com.termux.view.TerminalView},
+ * {@code com.termux.view.textselection.TextSelectionCursorController} and
+ * {@link TerminalEmulator} stay unpatched, but the body is ours and is never
+ * refreshed from upstream — see {@code VENDORED.md} and {@code PATCHES.md}.
+ *
+ * <h2>Why it was replaced</h2>
+ *
+ * Upstream's {@code TerminalSession} exists to spawn a LOCAL pty subprocess
+ * through a native library and shuttle bytes between that file descriptor and
+ * the emulator across two byte ring buffers, on three dedicated threads, driven
+ * by a {@code Handler}. PocketShell's terminal data flow is remote-only: bytes
+ * arrive on an SSH PTY channel and keystrokes leave the same way. Every piece
+ * of upstream's machinery therefore had to be worked around rather than used —
+ * app2's bridge pre-installed the emulator and faked a shell pid by reflection,
+ * duplicated a private handler-message constant, polled the input buffer every
+ * 8 ms because that ring buffer offers no callback, and the module compiled a
+ * stub native library purely so {@code updateSize} would not land in a native
+ * call we never wanted.
+ *
+ * <p>So the shuttle is gone. Remote bytes come in through {@link #append},
+ * typed bytes go out through an {@link InputSink}, and there is no handler, no
+ * thread, no pid and no native code. The one piece of upstream's plumbing that
+ * survives is a small bounded buffer for bytes written while no sink is
+ * installed ({@link #PENDING_INPUT_CAPACITY_BYTES}) — that is what carries a
+ * keystroke across a reconnect.
+ *
+ * <h2>Threading</h2>
+ *
+ * The emulator is single-threaded by upstream contract: everything that touches
+ * it runs on the main thread. {@link #append} enforces that with a hard failure
+ * rather than trusting its caller, because a parse racing a render is a
+ * corrupted grid with no exception to point at. {@link #write} may be called
+ * from anywhere (the vendored view calls it from input dispatch) — it only
+ * hands bytes to the sink, which is expected to be non-blocking, or parks them
+ * in a small bounded buffer while no sink is installed.
  */
 public final class TerminalSession extends TerminalOutput {
 
-    private static final int MSG_NEW_INPUT = 1;
-    private static final int MSG_PROCESS_EXITED = 4;
-
-    public final String mHandle = UUID.randomUUID().toString();
-
-    TerminalEmulator mEmulator;
-
     /**
-     * A queue written to from a separate thread when the process outputs, and read by main thread to process by
-     * terminal emulator.
+     * Everything the user types, and every query reply the emulator emits, in
+     * order.
+     *
+     * <p>Both directions of "the terminal is answering something" land here:
+     * a keystroke the vendored view encoded, and the emulator's own replies to
+     * {@code CSI 6 n} (cursor position), {@code CSI c} (device attributes) and
+     * {@code OSC 11 ?} (background colour). To the remote they are the same
+     * stream, which is why there is one sink and not two.
+     *
+     * <p>Implementations must not block: this is called on the main thread from
+     * the view's input dispatch and from inside the emulator's parser.
      */
-    final ByteQueue mProcessToTerminalIOQueue = new ByteQueue(64 * 1024);
-    /**
-     * A queue written to from the main thread due to user interaction, and read by another thread which forwards by
-     * writing to the {@link #mTerminalFileDescriptor}.
-     */
-    final ByteQueue mTerminalToProcessIOQueue = new ByteQueue(4096);
-    /** Buffer to write translate code points into utf8 before writing to mTerminalToProcessIOQueue */
-    private final byte[] mUtf8InputBuffer = new byte[5];
-
-    /** Callback which gets notified when a session finishes or changes title. */
-    TerminalSessionClient mClient;
-
-    /** The pid of the shell process. 0 if not started and -1 if finished running. */
-    int mShellPid;
-
-    /** The exit status of the shell process. Only valid if ${@link #mShellPid} is -1. */
-    int mShellExitStatus;
-
-    /**
-     * The file descriptor referencing the master half of a pseudo-terminal pair, resulting from calling
-     * {@link JNI#createSubprocess(String, String, String[], String[], int[], int, int, int, int)}.
-     */
-    private int mTerminalFileDescriptor;
-
-    /** Set by the application for user identification of session, not by terminal. */
-    public String mSessionName;
-
-    final Handler mMainThreadHandler = new MainThreadHandler();
-
-    private final String mShellPath;
-    private final String mCwd;
-    private final String[] mArgs;
-    private final String[] mEnv;
-    private final Integer mTranscriptRows;
-
-
-    private static final String LOG_TAG = "TerminalSession";
-
-    public TerminalSession(String shellPath, String cwd, String[] args, String[] env, Integer transcriptRows, TerminalSessionClient client) {
-        this.mShellPath = shellPath;
-        this.mCwd = cwd;
-        this.mArgs = args;
-        this.mEnv = env;
-        this.mTranscriptRows = transcriptRows;
-        this.mClient = client;
+    public interface InputSink {
+        void onInput(byte[] data, int offset, int count);
     }
 
     /**
-     * @param client The {@link TerminalSessionClient} interface implementation to allow
-     *               for communication between {@link TerminalSession} and its client.
+     * How many bytes written with no {@link InputSink} installed are held for
+     * the next one.
+     *
+     * <p>4 KB is the size of the terminal-to-process ring buffer upstream's
+     * session used to carry exactly these bytes, and that buffer turned out to
+     * be load-bearing: between a dropped channel and the reconnect ladder's
+     * next successful attach — seconds, since it spans a full SSH dial — the
+     * user is still typing at the "Reconnecting" banner, and those keystrokes
+     * have to run when the session comes back (journey J06).
+     *
+     * <p>Past the bound bytes are dropped rather than blocking the caller.
+     * Upstream's queue blocked the writing thread when it filled, which here
+     * would be the main thread parked inside a keystroke; losing a burst nobody
+     * can see the effect of is the better failure.
+     */
+    public static final int PENDING_INPUT_CAPACITY_BYTES = 4096;
+
+    /** Buffer used to translate a code point into UTF-8 before writing it out. */
+    private final byte[] mUtf8InputBuffer = new byte[5];
+
+    private final TerminalEmulator mEmulator;
+
+    /** Callback which gets notified when the screen, the title or the palette changes. */
+    private TerminalSessionClient mClient;
+
+    /**
+     * Guards the sink and the pending buffer as ONE unit.
+     *
+     * <p>They are a single piece of state — "where does the next byte go?" —
+     * and the answer must not change between the check and the write, or a
+     * keystroke racing an attach would be delivered twice or not at all. The
+     * sink is invoked while the lock is held, so bytes reach it in the order
+     * they were written; sinks are contractually non-blocking (the bridge
+     * offers to an unbounded channel), so holding it costs nothing.
+     */
+    private final Object mInputLock = new Object();
+
+    /**
+     * Where typed bytes go. Null means nothing is attached and bytes are held
+     * in {@link #mPendingInput} for the next sink.
+     */
+    private InputSink mInputSink;
+
+    /**
+     * Bytes written while {@link #mInputSink} was null, oldest first, flushed
+     * by the next {@link #setInputSink}.
+     */
+    private final byte[] mPendingInput = new byte[PENDING_INPUT_CAPACITY_BYTES];
+
+    private int mPendingInputSize;
+
+    /**
+     * Builds the session AND its emulator, at the given geometry.
+     *
+     * <p>The emulator is final and built here rather than lazily on the first
+     * {@link #updateSize}: upstream deferred it because it could not spawn a pty
+     * before it knew the window size, and that deferral is exactly what made
+     * "is there an emulator yet?" a state every caller had to reason about.
+     * There is no pty to spawn here, so there is no reason for the null window.
+     *
+     * @param columns        initial width in character cells.
+     * @param rows           initial height in character cells.
+     * @param cellWidthPx    cell width in pixels; reported to the remote by the
+     *                       {@code CSI 14t}/{@code CSI 16t} pixel-size queries.
+     * @param cellHeightPx   cell height in pixels, likewise.
+     * @param transcriptRows scrollback depth.
+     * @param client         the callback target; swap it with
+     *                       {@link #updateTerminalSessionClient}.
+     */
+    public TerminalSession(
+            int columns,
+            int rows,
+            int cellWidthPx,
+            int cellHeightPx,
+            int transcriptRows,
+            TerminalSessionClient client) {
+        mClient = client;
+        mEmulator = new TerminalEmulator(
+                this, columns, rows, cellWidthPx, cellHeightPx, transcriptRows, client);
+    }
+
+    public TerminalEmulator getEmulator() {
+        return mEmulator;
+    }
+
+    /**
+     * Swaps the callback target for BOTH this session and its emulator.
+     *
+     * <p>Both halves matter: the session reports title/clipboard/bell/palette
+     * changes, while the emulator reports cursor style and logging through its
+     * own copy of the same reference. Updating one and not the other leaves a
+     * detached view being called back.
      */
     public void updateTerminalSessionClient(TerminalSessionClient client) {
         mClient = client;
-
-        if (mEmulator != null)
-            mEmulator.updateTerminalSessionClient(client);
-    }
-
-    /** Inform the attached pty of the new size and reflow or initialize the emulator. */
-    public void updateSize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
-        if (mEmulator == null) {
-            initializeEmulator(columns, rows, cellWidthPixels, cellHeightPixels);
-        } else {
-            JNI.setPtyWindowSize(mTerminalFileDescriptor, rows, columns, cellWidthPixels, cellHeightPixels);
-            mEmulator.resize(columns, rows, cellWidthPixels, cellHeightPixels);
-        }
-    }
-
-    /** The terminal title as set through escape sequences or null if none set. */
-    public String getTitle() {
-        return (mEmulator == null) ? null : mEmulator.getTitle();
+        mEmulator.updateTerminalSessionClient(client);
     }
 
     /**
-     * Set the terminal emulator's window size and start terminal emulation.
+     * Installs (or, with null, removes) the destination for typed bytes,
+     * handing it first everything that was written while nobody was listening.
      *
-     * @param columns The number of columns in the terminal window.
-     * @param rows    The number of rows in the terminal window.
+     * <p>The flush is what makes typing at a reconnecting terminal work: the
+     * bridge that owned the dead channel cleared the sink, the user kept
+     * typing, and the bridge that attaches next installs its sink and receives
+     * those bytes, in order, before anything typed afterwards. They are handed
+     * over exactly once — the flush empties the pending buffer — and nothing
+     * older than the last hand-off is ever replayed, because a sink is only
+     * installed on an attach.
+     *
+     * <p>Ownership is still single and hand-off is still stop-then-start: the
+     * bridge that stops clears the sink, the bridge that starts installs its
+     * own. Only the gap between the two now holds bytes instead of discarding
+     * them, bounded by {@link #PENDING_INPUT_CAPACITY_BYTES}.
      */
-    public void initializeEmulator(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
-        mEmulator = new TerminalEmulator(this, columns, rows, cellWidthPixels, cellHeightPixels, mTranscriptRows, mClient);
-
-        int[] processId = new int[1];
-        mTerminalFileDescriptor = JNI.createSubprocess(mShellPath, mCwd, mArgs, mEnv, processId, rows, columns, cellWidthPixels, cellHeightPixels);
-        mShellPid = processId[0];
-        mClient.setTerminalShellPid(this, mShellPid);
-
-        final FileDescriptor terminalFileDescriptorWrapped = wrapFileDescriptor(mTerminalFileDescriptor, mClient);
-
-        new Thread("TermSessionInputReader[pid=" + mShellPid + "]") {
-            @Override
-            public void run() {
-                try (InputStream termIn = new FileInputStream(terminalFileDescriptorWrapped)) {
-                    final byte[] buffer = new byte[4096];
-                    while (true) {
-                        int read = termIn.read(buffer);
-                        if (read == -1) return;
-                        if (!mProcessToTerminalIOQueue.write(buffer, 0, read)) return;
-                        mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT);
-                    }
-                } catch (Exception e) {
-                    // Ignore, just shutting down.
-                }
+    public void setInputSink(InputSink sink) {
+        synchronized (mInputLock) {
+            if (sink != null && mPendingInputSize > 0) {
+                // Copied out and the buffer emptied BEFORE the callout, so a
+                // sink that writes back from inside onInput appends after the
+                // flush instead of overwriting the bytes being delivered.
+                byte[] pending = new byte[mPendingInputSize];
+                System.arraycopy(mPendingInput, 0, pending, 0, mPendingInputSize);
+                mPendingInputSize = 0;
+                sink.onInput(pending, 0, pending.length);
             }
-        }.start();
-
-        new Thread("TermSessionOutputWriter[pid=" + mShellPid + "]") {
-            @Override
-            public void run() {
-                final byte[] buffer = new byte[4096];
-                try (FileOutputStream termOut = new FileOutputStream(terminalFileDescriptorWrapped)) {
-                    while (true) {
-                        int bytesToWrite = mTerminalToProcessIOQueue.read(buffer, true);
-                        if (bytesToWrite == -1) return;
-                        termOut.write(buffer, 0, bytesToWrite);
-                    }
-                } catch (IOException e) {
-                    // Ignore.
-                }
-            }
-        }.start();
-
-        new Thread("TermSessionWaiter[pid=" + mShellPid + "]") {
-            @Override
-            public void run() {
-                int processExitCode = JNI.waitFor(mShellPid);
-                mMainThreadHandler.sendMessage(mMainThreadHandler.obtainMessage(MSG_PROCESS_EXITED, processExitCode));
-            }
-        }.start();
-
+            mInputSink = sink;
+        }
     }
 
-    /** Write data to the shell process. */
+    /** Reflows the emulator to a new size. There is no local pty to inform. */
+    public void updateSize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
+        mEmulator.resize(columns, rows, cellWidthPixels, cellHeightPixels);
+    }
+
+    /** The terminal title as set through escape sequences, or null if none set. */
+    public String getTitle() {
+        return mEmulator.getTitle();
+    }
+
+    /**
+     * Parses remote bytes into the grid and reports the change, on the main
+     * thread.
+     *
+     * <p>Called by app2's {@code TerminalPtyBridge} once per output slice. The
+     * main-thread requirement is upstream's own (the emulator has no locking
+     * and the renderer reads the same buffers on the main thread), and it is
+     * asserted rather than assumed because the failure it prevents — a parse
+     * racing a render — shows up as a garbled grid days later, not as a stack
+     * trace here.
+     *
+     * @throws IllegalStateException if called off the main thread.
+     */
+    public void append(byte[] data, int offset, int count) {
+        if (!Looper.getMainLooper().isCurrentThread()) {
+            throw new IllegalStateException(
+                    "TerminalSession.append must run on the main thread (the emulator is "
+                            + "single-threaded by upstream contract); was on "
+                            + Thread.currentThread().getName());
+        }
+        if (count <= 0) return;
+        if (offset == 0) {
+            mEmulator.append(data, count);
+        } else {
+            // TerminalEmulator.append has no offset parameter, so a mid-array
+            // slice has to be copied. The bridge writes at offset 0, so this
+            // branch is for callers that hold one buffer and walk it.
+            byte[] slice = new byte[count];
+            System.arraycopy(data, offset, slice, 0, count);
+            mEmulator.append(slice, count);
+        }
+        mClient.onTextChanged(this);
+    }
+
+    /**
+     * Send data to the remote: typed bytes and the emulator's own query replies.
+     *
+     * <p>With no sink installed the bytes are held for the next one (see
+     * {@link #setInputSink}), up to {@link #PENDING_INPUT_CAPACITY_BYTES};
+     * past that they are dropped. This never blocks and never throws — it is
+     * called from the vendored view's input dispatch and from inside the
+     * emulator's parser, neither of which can handle either.
+     */
     @Override
     public void write(byte[] data, int offset, int count) {
-        if (mShellPid > 0) mTerminalToProcessIOQueue.write(data, offset, count);
+        if (count <= 0) return;
+        synchronized (mInputLock) {
+            InputSink sink = mInputSink;
+            if (sink != null) {
+                sink.onInput(data, offset, count);
+                return;
+            }
+            int room = PENDING_INPUT_CAPACITY_BYTES - mPendingInputSize;
+            if (room <= 0) return;
+            int held = Math.min(room, count);
+            System.arraycopy(data, offset, mPendingInput, mPendingInputSize, held);
+            mPendingInputSize += held;
+        }
     }
 
-    /** Write the Unicode code point to the terminal encoded in UTF-8. */
+    /**
+     * Write the Unicode code point to the terminal encoded in UTF-8.
+     *
+     * <p>Body carried over verbatim from upstream Termux — it is the encoder
+     * the vendored {@code TerminalView} calls for every printable key.
+     */
     public void writeCodePoint(boolean prependEscape, int codePoint) {
         if (codePoint > 1114111 || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
             // 1114111 (= 2**16 + 1024**2 - 1) is the highest code point, [0xD800,0xDFFF] is the surrogate range.
@@ -217,57 +304,9 @@ public final class TerminalSession extends TerminalOutput {
         write(mUtf8InputBuffer, 0, bufferPosition);
     }
 
-    public TerminalEmulator getEmulator() {
-        return mEmulator;
-    }
-
-    /** Notify the {@link #mClient} that the screen has changed. */
-    protected void notifyScreenUpdate() {
-        mClient.onTextChanged(this);
-    }
-
-    /** Reset state for terminal emulator state. */
-    public void reset() {
-        mEmulator.reset();
-        notifyScreenUpdate();
-    }
-
-    /** Finish this terminal session by sending SIGKILL to the shell. */
-    public void finishIfRunning() {
-        if (isRunning()) {
-            try {
-                Os.kill(mShellPid, OsConstants.SIGKILL);
-            } catch (ErrnoException e) {
-                Logger.logWarn(mClient, LOG_TAG, "Failed sending SIGKILL: " + e.getMessage());
-            }
-        }
-    }
-
-    /** Cleanup resources when the process exits. */
-    void cleanupResources(int exitStatus) {
-        synchronized (this) {
-            mShellPid = -1;
-            mShellExitStatus = exitStatus;
-        }
-
-        // Stop the reader and writer threads, and close the I/O streams
-        mTerminalToProcessIOQueue.close();
-        mProcessToTerminalIOQueue.close();
-        JNI.close(mTerminalFileDescriptor);
-    }
-
     @Override
     public void titleChanged(String oldTitle, String newTitle) {
         mClient.onTitleChanged(this);
-    }
-
-    public synchronized boolean isRunning() {
-        return mShellPid != -1;
-    }
-
-    /** Only valid if not {@link #isRunning()}. */
-    public synchronized int getExitStatus() {
-        return mShellExitStatus;
     }
 
     @Override
@@ -288,126 +327,6 @@ public final class TerminalSession extends TerminalOutput {
     @Override
     public void onColorsChanged() {
         mClient.onColorsChanged(this);
-    }
-
-    public int getPid() {
-        return mShellPid;
-    }
-
-    /** Returns the shell's working directory or null if it was unavailable. */
-    public String getCwd() {
-        if (mShellPid < 1) {
-            return null;
-        }
-        try {
-            final String cwdSymlink = String.format("/proc/%s/cwd/", mShellPid);
-            String outputPath = new File(cwdSymlink).getCanonicalPath();
-            String outputPathWithTrailingSlash = outputPath;
-            if (!outputPath.endsWith("/")) {
-                outputPathWithTrailingSlash += '/';
-            }
-            if (!cwdSymlink.equals(outputPathWithTrailingSlash)) {
-                return outputPath;
-            }
-        } catch (IOException | SecurityException e) {
-            Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Error getting current directory", e);
-        }
-        return null;
-    }
-
-    private static FileDescriptor wrapFileDescriptor(int fileDescriptor, TerminalSessionClient client) {
-        FileDescriptor result = new FileDescriptor();
-        try {
-            Field descriptorField;
-            try {
-                descriptorField = FileDescriptor.class.getDeclaredField("descriptor");
-            } catch (NoSuchFieldException e) {
-                // For desktop java:
-                descriptorField = FileDescriptor.class.getDeclaredField("fd");
-            }
-            descriptorField.setAccessible(true);
-            descriptorField.set(result, fileDescriptor);
-        } catch (NoSuchFieldException | IllegalAccessException | IllegalArgumentException e) {
-            Logger.logStackTraceWithMessage(client, LOG_TAG, "Error accessing FileDescriptor#descriptor private field", e);
-            System.exit(1);
-        }
-        return result;
-    }
-
-    @SuppressLint("HandlerLeak")
-    class MainThreadHandler extends Handler {
-
-        MainThreadHandler() {
-            super(Looper.getMainLooper());
-        }
-
-        // PocketShell #796/#803: ONE MSG_NEW_INPUT dispatch parses at most this
-        // many bytes in a single, uninterruptible mEmulator.append() call.
-        // Upstream reads 64 KB per message; a 16 KB slice of clear-heavy
-        // alt-screen content (an agent's full-viewport redraw: ESC[H + 30x ESC[K
-        // per chunk) does ~4000 blockClear/allocateFullLineIfNecessary ops and on
-        // a swiftshader emulator pinned the looper for >1 s (the #796 ANR). 2 KB
-        // keeps the worst-case single atomic append well under the responsiveness
-        // budget. The poster (app2's TerminalPtyBridge) writes the remote stream
-        // in slices of exactly this size and posts one message per slice.
-        private static final int PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES = 2 * 1024;
-
-        final byte[] mReceiveBuffer = new byte[PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES];
-
-        @Override
-        public void handleMessage(Message msg) {
-            if (msg.what == MSG_NEW_INPUT) {
-                // PocketShell #803/#796: one MSG_NEW_INPUT dispatch drains exactly
-                // ONE slice and does NOT self-re-post; the bridge posts one message
-                // per slice it writes, so the queue is drained message by message
-                // with the looper free to run other work in between (the upstream
-                // local-PTY input reader in initializeEmulator is never started —
-                // the bridge pre-installs the emulator).
-                drainProcessOutputSlice();
-            }
-
-            if (msg.what == MSG_PROCESS_EXITED) {
-                drainAllProcessOutput();
-
-                int exitCode = (Integer) msg.obj;
-                cleanupResources(exitCode);
-
-                String exitDescription = "\r\n[Process completed";
-                if (exitCode > 0) {
-                    // Non-zero process exit.
-                    exitDescription += " (code " + exitCode + ")";
-                } else if (exitCode < 0) {
-                    // Negated signal.
-                    exitDescription += " (signal " + (-exitCode) + ")";
-                }
-                exitDescription += " - press Enter]";
-
-                byte[] bytesToWrite = exitDescription.getBytes(StandardCharsets.UTF_8);
-                mEmulator.append(bytesToWrite, bytesToWrite.length);
-                notifyScreenUpdate();
-
-                mClient.onSessionFinished(TerminalSession.this);
-            }
-        }
-
-        private void drainAllProcessOutput() {
-            removeMessages(MSG_NEW_INPUT);
-
-            int bytesRead;
-            do {
-                bytesRead = drainProcessOutputSlice();
-            } while (bytesRead == mReceiveBuffer.length);
-        }
-
-        private int drainProcessOutputSlice() {
-            int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
-            if (bytesRead <= 0) return bytesRead;
-
-            mEmulator.append(mReceiveBuffer, bytesRead);
-            notifyScreenUpdate();
-            return bytesRead;
-        }
-
     }
 
 }

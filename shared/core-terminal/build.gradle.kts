@@ -11,12 +11,19 @@ plugins {
 // This module vendors Termux's `terminal-emulator` + `terminal-view` libraries
 // (Apache-2.0 per upstream LICENSE.md — these two libs are explicitly carved
 // out from termux-app's GPLv3 umbrella). See VENDORED.md for the upstream
-// commit pin, refresh procedure, and the per-Compose-adapter (#8) note about
-// the native `libtermux.so`.
+// commit pin and refresh procedure, and PATCHES.md for every local deviation.
 //
 // Source files keep their upstream package names (`com.termux.terminal.*` and
 // `com.termux.view.*`) per the issue's "do not refactor" non-goal. This module
 // only re-exports them; downstream callers depend on the Termux APIs directly.
+//
+// `com.termux.terminal.TerminalSession` is the ONE exception: it is
+// PocketShell's own remote-only class (issue #2566), not vendored code, and is
+// never refreshed from upstream. Replacing it removed the local-pty machinery
+// this module used to carry — `ByteQueue`, `JNI`, the upstream `src/main/jni/`
+// C sources and the stub `libtermux.so` built from `src/main/cpp/` — so there
+// is no `externalNativeBuild` here any more and the module needs no NDK or
+// CMake to build.
 android {
     // Namespace is set to upstream Termux's `terminal-view` namespace
     // (`com.termux.view`) — NOT to `com.pocketshell.core.terminal`. Reason: the
@@ -45,44 +52,6 @@ android {
         // swiftshader emulator) yet turns a future hang into a ~3 min failure
         // instead of a 3 h gate wedge.
         testInstrumentationRunnerArguments["timeout_msec"] = "180000"
-
-        // Issue #9: a stub `libtermux.so` ships in the AAR so the vendored
-        // `com.termux.terminal.JNI` static initializer (`System.loadLibrary`)
-        // does not throw `UnsatisfiedLinkError`. Default ABIs are the
-        // emulator-friendly set plus arm64; the stub is tiny (<10 KB per ABI)
-        // so the APK overhead is negligible. See `src/main/cpp/CMakeLists.txt`
-        // for the rationale.
-        //
-        // Local `scripts/assemble-debug.sh` may pass -PpocketshellAbiFilters to
-        // compile only the connected device ABI. CI/release omit the property
-        // and keep the full set.
-        val nativeAbis = (project.findProperty("pocketshellAbiFilters") as String?)
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            .orEmpty()
-            .ifEmpty {
-                listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
-            }
-        externalNativeBuild {
-            cmake {
-                abiFilters += nativeAbis
-            }
-        }
-    }
-
-    // Wire CMake to build the stub `libtermux.so` from `src/main/cpp/`. The
-    // upstream `src/main/jni/` C source is left untouched on disk (refresh
-    // parity, see VENDORED.md) — we deliberately do NOT compile it. The
-    // PocketShell stub at `src/main/cpp/pocketshell_termux_stub.c` provides
-    // safe no-ops for the four `JNI.*` native methods so that
-    // `TerminalSession.updateSize` (which calls `JNI.setPtyWindowSize` on
-    // every layout change once an emulator is attached) does not crash.
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 
     compileOptions {
@@ -92,28 +61,6 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-    }
-
-    sourceSets {
-        // Exclude the upstream JNI C sources from the build. The upstream code
-        // at `src/main/jni/termux.c` spawns a *local* PTY subprocess — not
-        // what PocketShell needs (we render remote SSH streams). Issue #9
-        // replaces it with a stub `libtermux.so` built from
-        // `src/main/cpp/pocketshell_termux_stub.c` via `externalNativeBuild`
-        // (see the cmake block above and `src/main/cpp/CMakeLists.txt`).
-        //
-        // The upstream `src/main/jni/` tree is retained on disk only as a
-        // refresh-tracking copy of upstream (VENDORED.md "Refresh procedure")
-        // — `externalNativeBuild` points at the stub CMake project directly,
-        // so the deprecated `jni` source-set DSL is intentionally unused here.
-        // `jniLibs { srcDirs() }` is cleared so AGP only picks up the `.so`
-        // files produced by the cmake build, not any stray pre-built libraries
-        // that might be dropped under `src/main/jniLibs/`.
-        named("main") {
-            jniLibs {
-                srcDirs()
-            }
-        }
     }
 
     testOptions {

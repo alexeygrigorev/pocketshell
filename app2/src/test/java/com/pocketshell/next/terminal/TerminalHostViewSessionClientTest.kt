@@ -51,8 +51,9 @@ import org.junit.runner.RunWith
  *
  * These tests drive the vendored entry points the menu itself calls, on the
  * REAL emulator and the REAL hosted view under Robolectric, and read the
- * result from the system clipboard, the view's background drawable and the
- * session's own terminal→process queue — the bytes the remote would receive.
+ * result from the system clipboard, the view's background drawable and an
+ * installed [TerminalSession.InputSink] — the bytes the bridge would put on
+ * the channel, i.e. exactly what the remote would receive.
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalHostViewSessionClientTest {
@@ -61,6 +62,9 @@ class TerminalHostViewSessionClientTest {
     val composeRule = createComposeRule()
 
     private var rootView: View? = null
+
+    /** Per-session record of everything an installed sink was handed. */
+    private val sentToRemote = mutableMapOf<TerminalSession, StringBuilder>()
 
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
@@ -173,7 +177,7 @@ class TerminalHostViewSessionClientTest {
 
     @Test
     fun `without a hosting view the clipboard callbacks are inert, not crashes`() {
-        val session = createRemoteTerminalSession()
+        val session = createRemoteTerminalSession().recordingInput()
         setClipboard("never sent")
 
         session.onCopyTextToClipboard("never copied")
@@ -186,7 +190,7 @@ class TerminalHostViewSessionClientTest {
     // --- helpers -------------------------------------------------------------
 
     private fun host(): TerminalSession {
-        val session = createRemoteTerminalSession()
+        val session = createRemoteTerminalSession().recordingInput()
         composeRule.setContent {
             rootView = LocalView.current
             TerminalHostView(
@@ -222,12 +226,26 @@ class TerminalHostViewSessionClientTest {
         assertEquals(CURSOR, emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR])
     }
 
-    /** Everything the emulator has queued for the remote, i.e. what the bridge's input pump would send. */
-    private fun TerminalSession.bytesForRemote(): String {
-        val buffer = ByteArray(4096)
-        val read = TerminalSessionInternals.readTerminalToProcessQueue(this, buffer)
-        return if (read <= 0) "" else String(buffer, 0, read)
+    /**
+     * Installs the sink the bridge would install, recording what it is handed.
+     *
+     * This is the real production seam, not a test hook: [TerminalPtyBridge]
+     * calls exactly this method in `start()` and forwards the bytes to the PTY
+     * channel. Installed on EVERY session these tests build — including the
+     * unhosted one — so "nothing was sent" is a genuine empty recording rather
+     * than the absence of a recorder.
+     */
+    private fun TerminalSession.recordingInput(): TerminalSession = apply {
+        val recorded = StringBuilder()
+        sentToRemote[this] = recorded
+        setInputSink { data, offset, count ->
+            recorded.append(String(data, offset, count))
+        }
     }
+
+    /** Everything handed to the sink, i.e. what the bridge's input pump would send. */
+    private fun TerminalSession.bytesForRemote(): String =
+        sentToRemote[this]?.toString().orEmpty()
 
     private fun clipboard(): ClipboardManager =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

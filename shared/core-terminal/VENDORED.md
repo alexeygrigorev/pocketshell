@@ -42,11 +42,10 @@ modifications).
 
 | Path | Source | Notes |
 |---|---|---|
-| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator`, `TerminalBuffer`, `TerminalRow`, `TerminalSession`, `TextStyle`; every deviation is listed in `PATCHES.md`. Rest (including `ByteQueue`, `TerminalSessionClient`) byte-identical. |
+| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator`, `TerminalBuffer`, `TerminalRow`, `TextStyle`; every deviation is listed in `PATCHES.md`. **`TerminalSession.java` is NOT vendored at all** — see "PocketShell's own `TerminalSession`" below. `ByteQueue`/`JNI` are deleted. Rest (including `TerminalSessionClient`) byte-identical. |
 | `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer`, `TerminalView`, `TerminalViewClient`; every deviation is listed in `PATCHES.md`. Rest (including the `textselection` package) byte-identical. |
 | `src/main/res/drawable/text_select_handle_*.xml` | upstream `terminal-view/src/main/res/drawable/` | byte-identical |
 | `src/main/res/values/strings.xml` | upstream `terminal-view/src/main/res/values/strings.xml` | byte-identical |
-| `src/main/jni/termux.c`, `src/main/jni/Android.mk` | upstream `terminal-emulator/src/main/jni/` | **not compiled** — see "JNI handling" |
 | `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | **patched** — adds cases (never modifies upstream ones) to `TerminalTest`, `OperatingSystemControlTest`, `RectangularAreasTest`, `TextStyleTest`; listed in `PATCHES.md`. Rest byte-identical. |
 
 If we ever deviate from upstream — even a one-character patch — record it in
@@ -85,156 +84,61 @@ framework `View` / `EditText` plumbing; it does not extend any `AppCompat*`
 classes. This avoids a transitive AppCompat dependency in PocketShell, which
 is purely a Compose app.
 
-## JNI handling — important for #8 and #9
+## PocketShell's own `TerminalSession` — NOT vendored, never refreshed
 
-Upstream `terminal-emulator` ships a small JNI library (`libtermux.so`) used
-exclusively by `TerminalSession` to spawn **local** PTY subprocesses
-(`JNI.createSubprocess(...)`, `JNI.setPtyWindowSize(...)`, `JNI.waitFor(...)`,
-`JNI.close(...)`).
+`src/main/java/com/termux/terminal/TerminalSession.java` keeps upstream's
+package and class name so `TerminalView`, `TextSelectionCursorController` and
+`TerminalEmulator` compile unpatched against it, but the body is **PocketShell's
+own** (issue #2566). It is not a patched copy of upstream's file and it must
+never be re-copied from a refresh.
 
-PocketShell's terminal data flow is **remote-only** (SSH-attached `tmux -CC`
-panes — see `docs/architecture.md`). We do not fork local processes from the
-phone, so the JNI is not on the critical path for either the Compose adapter
-(#8) or the SSH/PTY wiring (#9).
+Upstream's class exists to spawn a **local** pty subprocess through JNI and
+shuttle bytes across two byte ring buffers on three threads. PocketShell's
+terminal data flow is remote-only — bytes arrive on an SSH PTY channel opened
+by app2's `TerminalPtyBridge` and keystrokes leave the same way — so every part
+of that machinery had to be worked around rather than used: app2 pre-installed
+the emulator and faked a shell pid by reflection, duplicated a private
+handler-message constant, polled the input buffer every 8 ms, and this module
+compiled a stub `libtermux.so` purely so `updateSize` would not land in a native
+call nobody wanted. Replacing the class deleted all of it.
 
-This module therefore:
+The replacement is a remote-only session:
 
-- Vendors the JNI sources to disk (`src/main/jni/`) only for refresh-tracking
-  parity with upstream. The Gradle build explicitly **clears the `jni` and
-  `jniLibs` source-set directories** so neither is compiled into the AAR and
-  no native toolchain is required to build the module.
-- Compiles the Java-side `com.termux.terminal.JNI` class normally. It contains
-  only `native` method declarations; calling those without `libtermux.so` on
-  the runtime path would `UnsatisfiedLinkError`.
+- constructed at a known geometry and building its own `TerminalEmulator`
+  (there is no "no emulator yet" window, because there is no pty to wait for);
+- `append(byte[], int, int)` parses remote bytes into the grid and fires
+  `onTextChanged`, and **throws `IllegalStateException` off the main thread**;
+- `setInputSink(InputSink)` is where typed bytes and the emulator's own query
+  replies go. With no sink installed they are held in a bounded 4 KB buffer
+  (`PENDING_INPUT_CAPACITY_BYTES`) and flushed, in order, to the next sink
+  installed — that is what carries a keystroke typed at the "Reconnecting"
+  banner into the reattached channel (journey J06), the one behaviour upstream's
+  terminal-to-process ring buffer was load-bearing for. Past the bound bytes are
+  dropped rather than blocking the writer;
+- `updateSize`, `write`, `writeCodePoint`, `getEmulator`, `getTitle`,
+  `updateTerminalSessionClient` and the `TerminalOutput` callbacks are the rest
+  of the surface — nothing else exists.
 
-**Action for #8 / #9:**
+Consequences for this module:
 
-- The Compose adapter (#8) should drive `TerminalEmulator` + `TerminalBuffer`
-  directly (or via a custom subclass of `TerminalSession` that bypasses the
-  `JNI.createSubprocess` path). It must not call
-  `TerminalSession.initializeEmulator(...)` as-is unless the JNI is built.
-- The PTY plumbing (#9) feeds bytes into the emulator from sshj's `Session`
-  output stream, not from a local PTY fd. The local-PTY entrypoints in
-  `TerminalSession` are dead weight for our use case.
-- If we ever need local PTYs (we currently don't), wire `externalNativeBuild`
-  + `ndkBuild` back in this module, point at `src/main/jni/Android.mk`, and
-  set `abiFilters` to whatever target ABIs we support. The upstream Android.mk
-  is single-file and trivially buildable; no upstream patches needed.
+- `ByteQueue.java`, `JNI.java`, `src/main/jni/` (upstream's C sources) and
+  `src/main/cpp/` (the PocketShell stub + its `CMakeLists.txt`) are **deleted**.
+- `build.gradle.kts` has **no `externalNativeBuild`, no `abiFilters` and no
+  `jniLibs` block**: the module builds with no NDK and no CMake installed.
+- There are **no reflection hazards left**. A Termux refresh cannot silently
+  break app2's terminal by moving a package-private field, because app2 no
+  longer reads one.
 
-### Issue #8 outcome — pass-through, no session
+### Refresh rule
 
-The Compose adapter (`com.pocketshell.core.terminal.ui.TerminalSurface`)
-shipped by #8 deliberately does **not** construct or attach a
-`TerminalSession`. Reasons:
-
-- `TerminalSession` is `final`, so the suggested "custom subclass" route
-  above is not actually open to us — Kotlin / Java cannot extend it.
-- Constructing a real `TerminalSession` and just declining to call
-  `initializeEmulator` is not enough either: `TerminalView.updateSize`
-  unconditionally forwards into `session.updateSize` once it gets a
-  non-zero size, which calls `initializeEmulator` and lands in JNI.
-
-So the #8 adapter:
-
-- Hosts a bare `TerminalView` via `AndroidView`.
-- Wires a no-op `TerminalViewClient` so the view does not NPE.
-- Leaves `TerminalSurfaceState.session` `null` by default.
-- Exposes `attach(TerminalSession)`, `writeInput(...)`, and an `output`
-  `SharedFlow` so #9 can plug in a real session source without changing
-  the public API.
-
-When #9 lands, it will either:
-
-- Compile the JNI back into the module (`externalNativeBuild` + `ndkBuild`,
-  per the bullet above) and construct a real `TerminalSession`, **or**
-- Vendor a fresh fork of `TerminalSession` (non-final) into our own
-  package that drives `TerminalEmulator` + `TerminalBuffer` from
-  SSH-attached PTY bytes, bypassing JNI entirely. The vendored
-  `TerminalSession` source stays as close to upstream as possible for
-  refresh-tracking parity (its actual deviations are listed in `PATCHES.md`);
-  our fork lives under `com.pocketshell.core.terminal.*`.
-
-Either path keeps the #8 public API stable.
-
-## Reflection hazards
-
-`com.pocketshell.core.terminal.bridge.SshTerminalBridge` (in this module) is
-intentionally kept outside the `com.termux.terminal` package so the vendored
-sources need as few local patches as possible. To do that without forking
-Termux,
-the bridge reaches into a handful of package-private members of
-[`TerminalSession`](src/main/java/com/termux/terminal/TerminalSession.java)
-and [`ByteQueue`](src/main/java/com/termux/terminal/ByteQueue.java) via
-reflection. Each lookup is wrapped so a missing target throws
-`IllegalStateException("PocketShell SshTerminalBridge: expected field <name>
-on <class> (upstream Termux). Vendored source was refreshed without updating
-the bridge?")` — but the failure happens at first use, not at compile time,
-so refreshes must verify these targets explicitly.
-
-### `TerminalSession` fields the bridge reflects on
-
-All five are package-private on
-[`com.termux.terminal.TerminalSession`](src/main/java/com/termux/terminal/TerminalSession.java)
-and accessed via `getDeclaredField(...).setAccessible(true)`:
-
-| Field | Type | Why the bridge needs it |
-|---|---|---|
-| `mEmulator` | `TerminalEmulator` | Pre-installed (write) so `TerminalSession.updateSize`'s "first call creates the emulator + spawns a local PTY via JNI" branch is never taken. |
-| `mShellPid` | `int` | Set to a positive value (write) so `TerminalSession.write(byte[], int, int)`'s `if (mShellPid > 0)` guard accepts user input. |
-| `mProcessToTerminalIOQueue` | `ByteQueue` | Read access — the bridge pushes SSH-stdout bytes into this queue (the upstream "PTY-to-emulator" buffer) so the emulator renders them. |
-| `mTerminalToProcessIOQueue` | `ByteQueue` | Read access — the bridge drains user-typed bytes from this queue (the upstream "emulator-to-PTY" buffer) and forwards them to the SSH stdin stream. |
-| `mMainThreadHandler` | `android.os.Handler` | Read access — the bridge posts the `MSG_NEW_INPUT` message here so the emulator runs on the main thread (matching upstream's threading contract). |
-
-### `ByteQueue` methods the bridge reflects on
-
-`com.termux.terminal.ByteQueue` is itself package-private. The bridge looks
-up two methods on `Class.forName("com.termux.terminal.ByteQueue")`:
-
-| Method | Signature | Why |
-|---|---|---|
-| `write` | `write(byte[] buffer, int offset, int length) -> boolean` | Push SSH-stdout bytes into `mProcessToTerminalIOQueue`. Returns `false` if the queue is closed. |
-| `read` | `read(byte[] buffer, boolean block) -> int` | Block-read from `mTerminalToProcessIOQueue` for the drainer thread. Returns `-1` if closed. |
-
-### Hardcoded handler-message constant
-
-`TerminalSession.MSG_NEW_INPUT` is declared `private static final int = 1` in
-the vendored source. The bridge hardcodes the value as
-`SshTerminalBridge.MSG_NEW_INPUT = 1` and posts it via
-`Handler.sendEmptyMessage(MSG_NEW_INPUT)` to nudge the emulator into draining
-`mProcessToTerminalIOQueue`. The constant is duplicated in our code (rather
-than reflected) on the assumption it never changes; if upstream ever renames
-or renumbers it, the bridge will go silent — bytes will land in the queue but
-nothing will pull them out, and the terminal will appear frozen with no
-exception thrown.
-
-### Refresh checklist for the reflection targets
-
-After running the [refresh procedure](#refresh-procedure), before committing,
-verify each item below. Any rename, removal, or signature change breaks the
-bridge — most loudly with
-`IllegalStateException("vendored source was refreshed")` at first use, but
-silently in the `MSG_NEW_INPUT` case.
-
-- [ ] `TerminalSession.mEmulator` still exists with type `TerminalEmulator`
-- [ ] `TerminalSession.mShellPid` still exists with type `int`
-- [ ] `TerminalSession.mProcessToTerminalIOQueue` still exists with type `ByteQueue`
-- [ ] `TerminalSession.mTerminalToProcessIOQueue` still exists with type `ByteQueue`
-- [ ] `TerminalSession.mMainThreadHandler` still exists with type `android.os.Handler`
-- [ ] `ByteQueue.write(byte[], int, int): boolean` still exists with that signature
-- [ ] `ByteQueue.read(byte[], boolean): int` still exists with that signature
-- [ ] `TerminalSession.MSG_NEW_INPUT` still equals `1` (grep the vendored
-      `TerminalSession.java` for `MSG_NEW_INPUT`); if not, update
-      `SshTerminalBridge.MSG_NEW_INPUT` to match
-- [ ] `./gradlew :shared:core-terminal:assemble :shared:core-terminal:testDebugUnitTest`
-      passes, AND any downstream module exercising `SshTerminalBridge`
-      (currently `:app` proof-of-life, eventually the production terminal
-      composer) still works end-to-end against the
-      `pocketshell-test:ssh` Testcontainers image
-
-The reflection helper itself lives in
-[`SshTerminalBridge.kt`](src/main/java/com/pocketshell/core/terminal/bridge/SshTerminalBridge.kt)
-under `private object SessionReflection` — single source of truth, so the
-refresh checklist maps 1:1 to the lookups in that object.
+Step 4 of the [refresh procedure](#refresh-procedure) below copies the upstream
+`com/termux` tree wholesale. After doing so, **delete the upstream
+`TerminalSession.java`, `ByteQueue.java` and `JNI.java` it brings back and
+restore ours from git**, and do not re-create `src/main/jni/`. If upstream's
+`TerminalOutput` or `TerminalSessionClient` contract changes, ours is the file
+that has to be updated by hand — `TerminalSessionTest`
+(`src/test/java/com/pocketshell/core/terminal/session/`) is what tells you
+whether it still holds.
 
 ## Refresh procedure
 
@@ -249,8 +153,7 @@ When a future Termux release fixes a bug or adds a CSI sequence we care about:
    rm -rf shared/core-terminal/src/main/java/com/termux \
           shared/core-terminal/src/test/java/com/termux \
           shared/core-terminal/src/main/res/drawable/text_select_handle_*.xml \
-          shared/core-terminal/src/main/res/values/strings.xml \
-          shared/core-terminal/src/main/jni/*
+          shared/core-terminal/src/main/res/values/strings.xml
    cp -r /tmp/termux-app/terminal-emulator/src/main/java/com/termux \
          shared/core-terminal/src/main/java/com/termux
    cp -r /tmp/termux-app/terminal-view/src/main/java/com/termux/* \
@@ -259,14 +162,16 @@ When a future Termux release fixes a bug or adds a CSI sequence we care about:
       shared/core-terminal/src/main/res/drawable/
    cp /tmp/termux-app/terminal-view/src/main/res/values/strings.xml \
       shared/core-terminal/src/main/res/values/strings.xml
-   cp -r /tmp/termux-app/terminal-emulator/src/main/jni/* \
-         shared/core-terminal/src/main/jni/
    cp -r /tmp/termux-app/terminal-emulator/src/test/java/com/termux \
          shared/core-terminal/src/test/java/com/termux
    ```
-5. Diff the whole vendored tree against the new pin (`diff -rq` of
-   `src/main/java/com/termux`, `src/test/java/com/termux`, `src/main/res` and
-   `src/main/jni` against the upstream checkout) and **regenerate `PATCHES.md`
+5. Undo what the copy brought back for the three files this module does not
+   take from upstream — restore ours with `git checkout --` on
+   `TerminalSession.java`, and delete `ByteQueue.java` and `JNI.java` again
+   (see "PocketShell's own `TerminalSession`" above). Then diff the whole
+   vendored tree against the new pin (`diff -rq` of
+   `src/main/java/com/termux`, `src/test/java/com/termux` and `src/main/res`
+   against the upstream checkout) and **regenerate `PATCHES.md`
    from that diff**, not from memory — its file list is the record a future
    refresh re-applies from, and it has been wrong before. If the upstream
    `androidx.annotation` version changed, bump `androidx-annotation` in
@@ -278,16 +183,3 @@ When a future Termux release fixes a bug or adds a CSI sequence we care about:
 8. If patches were carried in `PATCHES.md`, re-apply them on top.
 9. `./gradlew :shared:core-terminal:assemble` + `:testDebugUnitTest`. Both
    must pass before committing the refresh.
-
-## Open questions / risks
-
-- **Compose BOM compatibility:** This module declares no Compose deps and
-  uses no Compose APIs; there is no BOM conflict here. The Compose adapter
-  (#8) will marshal between `TerminalEmulator` state and Compose draw calls
-  in its own module.
-- **`minSdk` mismatch:** PocketShell is at SDK 26. Upstream Termux runs as
-  low as SDK 24 historically. We never lower; the upstream code's
-  `Build.VERSION.SDK_INT` checks are simply always-true on our floor.
-- **JNI:** documented above. No surprises at compile time; runtime callers
-  must steer clear of `TerminalSession.initializeEmulator()` until #8/#9
-  resolve the local-PTY question (and we may decide we never need it).

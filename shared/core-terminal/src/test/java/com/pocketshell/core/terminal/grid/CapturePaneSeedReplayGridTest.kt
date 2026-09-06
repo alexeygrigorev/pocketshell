@@ -33,7 +33,7 @@ import org.junit.Test
  * exactly. These tests encode both the BROKEN seed (to prove the garble) and
  * the FIXED seed (to prove it is clean).
  *
- * Pure JVM: [TerminalEmulator.append] parses bytes without JNI, so no Android
+ * Pure JVM: [TerminalEmulator.append] parses bytes without native code, so no Android
  * / SSH / tmux machinery is required.
  */
 class CapturePaneSeedReplayGridTest {

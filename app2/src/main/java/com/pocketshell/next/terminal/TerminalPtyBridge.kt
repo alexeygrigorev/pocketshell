@@ -1,19 +1,17 @@
 package com.pocketshell.next.terminal
 
-import android.os.Handler
-import android.os.Looper
 import com.pocketshell.core.transport.PtyChannel
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import java.lang.reflect.Field
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -31,35 +29,43 @@ import java.util.concurrent.atomic.AtomicBoolean
  * emulator was designed to read in the first place. So this class is a pump,
  * not a reconciler, and it has no gate, no snapshot, no reseed and no epoch.
  *
- * ## How the vendored emulator is driven
+ * ## Two flows, no queues, no reflection
  *
- * `com.termux.terminal.TerminalSession` is upstream Termux's, unchanged: it
- * expects to spawn a LOCAL pty subprocess through JNI and then shuttle bytes
- * between that file descriptor and the emulator through two [ByteQueue]s. We
- * want the shuttle and not the subprocess, so — exactly as the old bridge did,
- * and for the same reasons — two package-private fields are set by reflection
- * at construction ([createRemoteTerminalSession]):
+ * [com.termux.terminal.TerminalSession] is PocketShell's own remote-only class
+ * (issue #2566), not upstream Termux's local-pty one, so this bridge talks to
+ * it through plain public methods:
  *
- *  - `mEmulator` is pre-installed, so `TerminalSession.updateSize`'s
- *    "no emulator yet" branch (which calls `JNI.createSubprocess` and starts
- *    three local-pty threads) can never be taken;
- *  - `mShellPid` is set positive, because `TerminalSession.write` drops user
- *    input on the floor while it is 0.
+ *  - **Output.** Every frame from [pty] is applied to the session in slices of
+ *    at most [DRAIN_SLICE_BYTES], one `withContext(mainDispatcher)` turn each.
+ *    That bound is the #796 fix: a single uninterruptible `append` of a large
+ *    clear-heavy alt-screen redraw pinned the looper for over a second on a
+ *    swiftshader emulator. Slicing keeps each main-thread turn small without a
+ *    scheduler, a budget or a coalescer.
+ *  - **Back-pressure** falls out of the same call: `collect` suspends until the
+ *    slice has been applied, so a slow main thread throttles the collector,
+ *    which throttles the SSH channel window — exactly what the vendored 64 KB
+ *    queue used to do by filling up.
+ *  - **Input.** [start] installs a [TerminalSession.InputSink]; everything the
+ *    user types (and every query reply the emulator answers) is handed to an
+ *    unbounded [Channel] and written to [pty] in order by ONE consumer
+ *    coroutine. The sink is called from the view's input dispatch on the main
+ *    thread, so it only offers to the channel — it never blocks and never
+ *    polls.
  *
- * Everything else goes through the vendored queues, which is why this class
- * needs no repaint callback of its own: writing into `mProcessToTerminalIOQueue`
- * and posting `MSG_NEW_INPUT` makes the session's own main-thread handler parse
- * the bytes AND call `notifyScreenUpdate()`, which is what repaints the view.
+ * ## Ownership of the session's sink is stop-then-start
  *
- * ## Threading
+ * A session outlives the channel it is attached through (that is what keeps the
+ * last frame on screen across a reconnect), so several bridges drive one
+ * session over its life — but never at the same time. [stop] clears the sink,
+ * the next bridge's [start] installs its own.
+ * [SessionViewModel.releaseChannel] is the single place that sequences the two.
  *
- * - [pty] output is collected on [scope] (the caller supplies the dispatcher);
- *   each frame is written to the queue in slice-sized chunks with one
- *   `MSG_NEW_INPUT` per chunk, so the emulator parse happens on the main looper
- *   in bounded turns rather than one unbounded append.
- * - User input is drained on [scope] too, by a blocking read of the session's
- *   terminal→process queue. [stop] closes both queues, which is what unparks a
- *   blocked reader or writer — cancelling the scope alone could not.
+ * Between those two points nobody is listening, and that gap spans a whole SSH
+ * dial: the session itself holds what is typed there (up to
+ * [TerminalSession.PENDING_INPUT_CAPACITY_BYTES]) and hands it to the next sink
+ * on install, so a command typed at the "Reconnecting" banner runs when the
+ * ladder lands. The buffer is the session's, not this class's — a bridge owns
+ * nothing across attaches.
  *
  * ## Resize has ONE owner
  *
@@ -71,9 +77,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * would be a second owner writing the same state with worse cell metrics.
  *
  * @param pty the remote channel; spent once its output completes.
- * @param emulator the vendored [TerminalSession] this bridge drives. Named for
- *   the role it plays here (it IS the emulator front end) per the task spec.
+ * @param emulator the [TerminalSession] this bridge drives. Named for the role
+ *   it plays here (it IS the emulator front end) per the task spec.
  * @param scope owns the two pumps. Cancelled by the caller, not by this class.
+ * @param mainDispatcher where the emulator is fed. The emulator is
+ *   single-threaded by upstream contract and [TerminalSession.append] enforces
+ *   it, so this must dispatch to the main thread; injected rather than
+ *   hard-coded so a test can drive it on a virtual clock.
  * @param onOutputEnded fired once when [pty]'s output flow completes — remote
  *   EOF, a closed channel or a dropped transport. The session layer turns that
  *   into a user-visible state; this class has no opinion about it.
@@ -82,6 +92,7 @@ class TerminalPtyBridge(
     private val pty: PtyChannel,
     private val emulator: TerminalSession,
     private val scope: CoroutineScope,
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val cellWidthPx: Int = DEFAULT_CELL_WIDTH_PX,
     private val cellHeightPx: Int = DEFAULT_CELL_HEIGHT_PX,
     private val onOutputEnded: () -> Unit = {},
@@ -90,6 +101,16 @@ class TerminalPtyBridge(
     private val started = AtomicBoolean(false)
     private val stopped = AtomicBoolean(false)
 
+    /**
+     * Typed bytes waiting for the channel.
+     *
+     * Unbounded because the producer is the main thread inside a keystroke: a
+     * bounded channel would either drop the keystroke or block the UI, and a
+     * human cannot outrun an SSH channel anyway. Closed by [stop], which is
+     * what retires the consumer.
+     */
+    private val input = Channel<ByteArray>(Channel.UNLIMITED)
+
     private var outputJob: Job? = null
     private var inputJob: Job? = null
 
@@ -97,6 +118,9 @@ class TerminalPtyBridge(
     fun start() {
         if (stopped.get()) return
         if (!started.compareAndSet(false, true)) return
+        emulator.setInputSink { data, offset, count ->
+            input.trySend(data.copyOfRange(offset, offset + count))
+        }
         outputJob = scope.launch { pumpRemoteOutput() }
         inputJob = scope.launch { pumpUserInput() }
     }
@@ -113,50 +137,35 @@ class TerminalPtyBridge(
     suspend fun resize(cols: Int, rows: Int) {
         if (cols <= 0 || rows <= 0) return
         if (stopped.get()) return
-        val screen: TerminalEmulator? = emulator.emulator
-        if (screen != null && (screen.mColumns != cols || screen.mRows != rows)) {
-            onMainThread { screen.resize(cols, rows, cellWidthPx, cellHeightPx) }
+        val screen: TerminalEmulator = emulator.emulator
+        if (screen.mColumns != cols || screen.mRows != rows) {
+            withContext(mainDispatcher) {
+                emulator.updateSize(cols, rows, cellWidthPx, cellHeightPx)
+            }
         }
         pty.resize(cols, rows)
     }
 
     /**
-     * Stops both pumps and releases anything parked on the vendored queues.
+     * Retires both pumps and releases the session's input sink.
      *
-     * Closing the queues is not optional cleanup: a `ByteQueue.write` into a
-     * FULL queue parks on the queue monitor and is woken ONLY by `close()`, so
-     * a slow/dead main looper plus a fast remote would otherwise strand the
-     * output pump past cancellation. Closing also makes the input pump's next
-     * read return -1 so it retires immediately instead of on its next poll
-     * tick. Idempotent.
+     * Every way an attach can end goes through here: a drop, a clean remote
+     * exit, a requested close and the screen being left. What it deliberately
+     * does NOT touch is the [TerminalSession] itself — the emulator keeps its
+     * grid, which is what leaves the last frame on screen under the reconnect
+     * banner, and a fresh bridge can adopt the same session by starting on it.
+     *
+     * Bytes typed after this and before the next bridge starts go nowhere near
+     * THIS bridge — its channel is spent and its pumps are cancelled. The
+     * session holds them instead and flushes them to the next bridge's sink
+     * ([TerminalSession.setInputSink]), which is what makes typing at a
+     * reconnecting terminal work. Idempotent, and a stopped bridge is not
+     * restartable.
      */
-    fun stop() = shutdown(closeQueues = true)
-
-    /**
-     * Stops the pumps but leaves the vendored session's byte queues OPEN, so a
-     * fresh bridge can adopt the same [TerminalSession] (task U-7's reconnect).
-     *
-     * `ByteQueue.close()` is one-way: a queue closed by [stop] never reopens,
-     * and a reattach onto that session would silently accept no bytes and send
-     * no keystrokes. Reconnect therefore detaches rather than stops, which is
-     * also what keeps the last frame on screen — the emulator is untouched, it
-     * simply stops being fed.
-     *
-     * The trade-off is that a pump parked INSIDE a full-queue write is not
-     * unparked here (only a queue close does that). That cannot happen on the
-     * path this is used for: the channel whose output ended has no more frames
-     * to write. [stop] — which [SessionViewModel.onCleared] still calls — keeps
-     * the unparking behaviour for the teardown case that needs it. Idempotent,
-     * and a detached bridge is not restartable.
-     */
-    fun detach() = shutdown(closeQueues = false)
-
-    private fun shutdown(closeQueues: Boolean) {
+    fun stop() {
         if (!stopped.compareAndSet(false, true)) return
-        if (closeQueues) {
-            runCatching { TerminalSessionInternals.closeTerminalToProcessQueue(emulator) }
-            runCatching { TerminalSessionInternals.closeProcessToTerminalQueue(emulator) }
-        }
+        emulator.setInputSink(null)
+        input.close()
         outputJob?.cancel()
         inputJob?.cancel()
         outputJob = null
@@ -168,28 +177,19 @@ class TerminalPtyBridge(
     /**
      * Remote bytes → emulator.
      *
-     * One `MSG_NEW_INPUT` per written slice, because the vendored
-     * `MainThreadHandler` drains EXACTLY one [DRAIN_SLICE_BYTES] slice per
-     * message and deliberately does not re-post itself (upstream PocketShell
-     * #796/#803). Posting per slice therefore parses the whole frame while
-     * keeping each main-looper turn to one bounded append.
+     * One main-thread turn per [DRAIN_SLICE_BYTES] slice (see the class doc):
+     * the loop suspends on each turn, so the frame is parsed in bounded pieces
+     * with the looper free to draw in between, and the collector cannot run
+     * ahead of the main thread.
      */
     private suspend fun pumpRemoteOutput() {
-        val handler = TerminalSessionInternals.mainThreadHandler(emulator)
         try {
             pty.output.collect { frame ->
                 var offset = 0
                 while (offset < frame.size) {
                     val length = minOf(DRAIN_SLICE_BYTES, frame.size - offset)
-                    val accepted = TerminalSessionInternals.writeProcessToTerminalQueue(
-                        session = emulator,
-                        data = frame,
-                        offset = offset,
-                        length = length,
-                    )
-                    // false == the queue was closed under us, i.e. `stop()` ran.
-                    if (!accepted) return@collect
-                    handler.sendEmptyMessage(MSG_NEW_INPUT)
+                    val start = offset
+                    withContext(mainDispatcher) { emulator.append(frame, start, length) }
                     offset += length
                 }
             }
@@ -204,36 +204,11 @@ class TerminalPtyBridge(
     /**
      * User input → remote.
      *
-     * The vendored view writes typed characters, IME commits and key-handler
-     * escape sequences into `mTerminalToProcessIOQueue`; upstream's local-pty
-     * writer thread is never started (we bypassed `initializeEmulator`), so this
-     * is the only consumer.
-     *
-     * ## Why it polls
-     *
-     * `ByteQueue` offers a BLOCKING read and no callback, and upstream's
-     * consumer is a dedicated `Thread` that can afford to park in it. A
-     * coroutine cannot: a blocking read pins whatever thread the dispatcher gave
-     * it, is not interruptible by cancellation, and on a test dispatcher would
-     * wedge the whole scheduler. Polling with `delay` keeps the pump
-     * cancellable, keeps it honest under virtual time, and costs one cheap
-     * synchronized read per [INPUT_POLL_MS]. At [INPUT_POLL_MS] the added
-     * keystroke latency is well under a frame — invisible next to the network
-     * round trip that follows it.
+     * One consumer, so the order bytes were typed in is the order they reach
+     * the channel. The loop ends when [input] is closed by [stop] and drained.
      */
     private suspend fun pumpUserInput() {
-        val buffer = ByteArray(INPUT_BUFFER_BYTES)
-        while (scope.isActive && !stopped.get()) {
-            val read = runCatching {
-                TerminalSessionInternals.readTerminalToProcessQueue(emulator, buffer)
-            }.getOrElse { -1 }
-            // -1 == the queue was closed, i.e. `stop()` ran. 0 == nothing typed.
-            if (read < 0) return
-            if (read == 0) {
-                delay(INPUT_POLL_MS)
-                continue
-            }
-            val payload = buffer.copyOf(read)
+        for (payload in input) {
             try {
                 pty.write(payload)
             } catch (failure: Throwable) {
@@ -245,48 +220,21 @@ class TerminalPtyBridge(
         }
     }
 
-    private suspend fun onMainThread(block: () -> Unit) {
-        val handler = TerminalSessionInternals.mainThreadHandler(emulator)
-        if (Looper.myLooper() === handler.looper) {
-            block()
-            return
-        }
-        val done = CompletableDeferred<Unit>()
-        handler.post {
-            runCatching(block)
-            done.complete(Unit)
-        }
-        done.await()
-    }
-
     companion object {
-        /**
-         * Matches `TerminalSession.MSG_NEW_INPUT` (private static final int = 1
-         * in the vendored source). Hard-coded rather than reflected per call; a
-         * Termux refresh that changed it would show up in the vendored diff.
-         */
-        const val MSG_NEW_INPUT: Int = 1
 
         /**
-         * Must match `TerminalSession.MainThreadHandler.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES`
-         * (the vendored `mReceiveBuffer` size). One posted message drains one
-         * slice, so writing in slice-sized chunks makes "one message per chunk"
-         * exactly enough to parse everything we wrote.
+         * How much of a remote frame is applied to the emulator in one
+         * main-thread turn.
+         *
+         * PocketShell #796/#803: a 16 KB slice of clear-heavy alt-screen
+         * content (an agent's full-viewport redraw: `ESC[H` + 30x `ESC[K` per
+         * chunk) does ~4000 blockClear/allocateFullLineIfNecessary ops and on a
+         * swiftshader emulator pinned the looper for >1 s. 2 KB keeps the
+         * worst-case single atomic append well under the responsiveness budget.
+         * The bound is this class's own now — nothing vendored has to agree
+         * with it.
          */
         const val DRAIN_SLICE_BYTES: Int = 2 * 1024
-
-        /** Matches the size of the vendored terminal→process queue. */
-        private const val INPUT_BUFFER_BYTES: Int = 4096
-
-        /** How often the input pump looks for freshly typed bytes. */
-        const val INPUT_POLL_MS: Long = 8L
-
-        /**
-         * Any positive value unlocks `TerminalSession.write`'s `mShellPid > 0`
-         * gate. Nothing ever reads it back: `finishIfRunning()` (the one method
-         * that would `SIGKILL` it) is never called on a remote session.
-         */
-        const val FAKE_SHELL_PID: Int = 1
 
         /**
          * Initial emulator geometry. 80x24 is the historical default a remote
@@ -311,13 +259,13 @@ class TerminalPtyBridge(
 }
 
 /**
- * Builds a [TerminalSession] that renders a REMOTE stream instead of spawning a
- * local pty subprocess.
+ * Builds the [TerminalSession] this screen renders into.
  *
- * See [TerminalPtyBridge]'s class doc for why the two field writes are needed.
- * They are done here, once, at construction — never later and never
- * conditionally — so there is exactly one place in app2 that knows the vendored
- * session has an inside.
+ * The one construction site in app2, so the palette install and the geometry
+ * defaults have exactly one answer. [installTerminalPalette] runs BEFORE the
+ * constructor because the session builds its emulator, and the emulator's
+ * constructor copies the default scheme into the live palette — patching it
+ * afterwards would hold only until the first `reset`.
  */
 fun createRemoteTerminalSession(
     cols: Int = TerminalPtyBridge.DEFAULT_COLS,
@@ -327,29 +275,15 @@ fun createRemoteTerminalSession(
     transcriptRows: Int = TerminalPtyBridge.DEFAULT_TRANSCRIPT_ROWS,
     client: TerminalSessionClient = NoOpTerminalSessionClient(),
 ): TerminalSession {
-    val session = TerminalSession(
-        /* shellPath = */ "/system/bin/sh",
-        /* cwd = */ "/",
-        /* args = */ emptyArray(),
-        /* env = */ emptyArray(),
-        /* transcriptRows = */ transcriptRows,
-        /* client = */ client,
-    )
-    // Before the emulator: its constructor copies the default scheme into the
-    // live palette, and every later reset copies it again.
     installTerminalPalette()
-    val emulator = TerminalEmulator(
-        /* session = */ session,
+    return TerminalSession(
         /* columns = */ cols,
         /* rows = */ rows,
-        /* cellWidthPixels = */ cellWidthPx,
-        /* cellHeightPixels = */ cellHeightPx,
+        /* cellWidthPx = */ cellWidthPx,
+        /* cellHeightPx = */ cellHeightPx,
         /* transcriptRows = */ transcriptRows,
         /* client = */ client,
     )
-    TerminalSessionInternals.setEmulator(session, emulator)
-    TerminalSessionInternals.setShellPid(session, TerminalPtyBridge.FAKE_SHELL_PID)
-    return session
 }
 
 /**
@@ -375,100 +309,4 @@ class NoOpTerminalSessionClient : TerminalSessionClient {
     override fun logVerbose(tag: String?, message: String?) = Unit
     override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) = Unit
     override fun logStackTrace(tag: String?, e: Exception?) = Unit
-}
-
-/**
- * The four package-private members of the vendored [TerminalSession] app2
- * touches, and nothing else.
- *
- * Reflection rather than a patch to the vendored source because
- * `shared/core-terminal` is pinned to an upstream Termux commit and every
- * local deviation has to be re-applied by hand on a refresh (its
- * `build.gradle.kts` states the "do not refactor" rule, `VENDORED.md`
- * documents the refresh procedure, and `PATCHES.md` is the complete record of
- * the patches we do carry). Keeping this out of the vendored source means one
- * fewer hunk to re-apply. A missing field fails loudly, naming the refresh as
- * the likely cause, instead of degrading into a silently dead terminal.
- */
-internal object TerminalSessionInternals {
-
-    private val emulatorField: Field by lazy { field("mEmulator") }
-    private val shellPidField: Field by lazy { field("mShellPid") }
-    private val processToTerminalQueueField: Field by lazy { field("mProcessToTerminalIOQueue") }
-    private val terminalToProcessQueueField: Field by lazy { field("mTerminalToProcessIOQueue") }
-    private val mainThreadHandlerField: Field by lazy { field("mMainThreadHandler") }
-
-    private val byteQueueClass: Class<*> by lazy { Class.forName("com.termux.terminal.ByteQueue") }
-
-    private val byteQueueWrite by lazy {
-        byteQueueClass.getDeclaredMethod(
-            "write",
-            ByteArray::class.java,
-            Int::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType,
-        ).apply { isAccessible = true }
-    }
-
-    private val byteQueueRead by lazy {
-        byteQueueClass.getDeclaredMethod(
-            "read",
-            ByteArray::class.java,
-            Boolean::class.javaPrimitiveType,
-        ).apply { isAccessible = true }
-    }
-
-    private val byteQueueClose by lazy {
-        byteQueueClass.getDeclaredMethod("close").apply { isAccessible = true }
-    }
-
-    fun setEmulator(session: TerminalSession, emulator: TerminalEmulator) {
-        emulatorField.set(session, emulator)
-    }
-
-    fun setShellPid(session: TerminalSession, pid: Int) {
-        shellPidField.setInt(session, pid)
-    }
-
-    fun mainThreadHandler(session: TerminalSession): Handler =
-        mainThreadHandlerField.get(session) as Handler
-
-    /** Returns false when the queue was closed before the write completed. */
-    fun writeProcessToTerminalQueue(
-        session: TerminalSession,
-        data: ByteArray,
-        offset: Int,
-        length: Int,
-    ): Boolean {
-        val queue = processToTerminalQueueField.get(session)
-        return byteQueueWrite.invoke(queue, data, offset, length) as Boolean
-    }
-
-    /**
-     * NON-blocking read: 0 when nothing has been typed, -1 once the queue is
-     * closed. Blocking is deliberately not used — see
-     * [TerminalPtyBridge.pumpUserInput].
-     */
-    fun readTerminalToProcessQueue(session: TerminalSession, buffer: ByteArray): Int {
-        val queue = terminalToProcessQueueField.get(session)
-        return byteQueueRead.invoke(queue, buffer, false) as Int
-    }
-
-    fun closeTerminalToProcessQueue(session: TerminalSession) {
-        byteQueueClose.invoke(terminalToProcessQueueField.get(session))
-    }
-
-    fun closeProcessToTerminalQueue(session: TerminalSession) {
-        byteQueueClose.invoke(processToTerminalQueueField.get(session))
-    }
-
-    private fun field(name: String): Field = try {
-        TerminalSession::class.java.getDeclaredField(name).apply { isAccessible = true }
-    } catch (missing: NoSuchFieldException) {
-        throw IllegalStateException(
-            "TerminalPtyBridge expected field `$name` on ${TerminalSession::class.java.name}. " +
-                "The vendored Termux sources were probably refreshed without updating " +
-                "app2's terminal bridge (see shared/core-terminal/VENDORED.md).",
-            missing,
-        )
-    }
 }

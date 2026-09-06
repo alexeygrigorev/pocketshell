@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Alternate-screen TUI fixture that RECORDS every key it is sent (#2555).
+
+Issue #2555: a finger drag on the phone's terminal used to be answered with
+synthesised `KEYCODE_DPAD_UP`/`DOWN` whenever the app's emulator was on the
+ALTERNATE screen with no mouse tracking — which is the state a stock-config
+tmux attach and an aplexer attach onto an alt-screen workload both produce.
+In an agent TUI or a shell, arrow-up is prompt/command history, so scrolling
+back rewrote what the user was typing.
+
+Reproducing that on a device needs a program with three properties, and no
+program already in the image has all three:
+
+  1. it takes the alternate screen (`CSI ? 1049 h`) and never enables mouse
+     tracking, so it recreates the exact emulator state the bug needed;
+  2. its VISIBLE state changes when an arrow key arrives, so a screenshot and
+     the rendered transcript can tell "the session scrolled" from "the session
+     got keystrokes";
+  3. it writes every key it receives to a file, so the journey has a host-side
+     oracle over an independent SSH connection instead of trusting the phone's
+     own screen.
+
+`less` has (1) and (2) but not (3), and its exact repaint is a busybox
+implementation detail a regression test should not depend on. So this exists.
+
+Driven by `J15TerminalScrollJourney` from BOTH backends: directly, as a tmux
+pane's command, and through `a attach`, as the aplexer fixture's workload.
+
+Keys: arrows move the cursor line, `q` quits. Everything else is recorded and
+otherwise ignored.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import termios
+import tty
+
+BANNER = "POCKETSHELL-ALTSCREEN-TUI"
+
+# Small enough that the header lines survive on the SHORTEST viewport any
+# caller uses (a seeded 80x24 tmux pane). The alternate screen keeps no
+# scrollback, so a frame taller than the pane would push BANNER/CURSOR/KEYS —
+# the whole oracle — off the top with no way to get them back.
+BODY_LINES = 12
+
+KEY_LOG = os.environ.get(
+    "POCKETSHELL_ALTSCREEN_KEY_LOG",
+    os.path.join(os.path.expanduser("~"), ".pocketshell-fixture-altscreen-keys.log"),
+)
+
+# CSI (`ESC [ A`) is what a terminal sends with DECCKM off; SS3 (`ESC O A`) is
+# what the SAME key sends once an application has turned DECCKM on, which tmux
+# does on every attach. Both spellings have to be recognised or the oracle
+# would miss half of the reported bug.
+ARROWS = {
+    "\x1b[A": "UP",
+    "\x1b[B": "DOWN",
+    "\x1b[C": "RIGHT",
+    "\x1b[D": "LEFT",
+    "\x1bOA": "UP",
+    "\x1bOB": "DOWN",
+    "\x1bOC": "RIGHT",
+    "\x1bOD": "LEFT",
+}
+
+
+class Screen:
+    def __init__(self) -> None:
+        self.cursor = 0
+        self.keys = 0
+
+    def paint(self) -> None:
+        # Absolute cursor addressing, never newlines: a newline on the last row
+        # scrolls the screen, and on the alternate screen whatever scrolls off
+        # is gone. Every frame therefore lands on the same rows.
+        lines = [BANNER, f"CURSOR={self.cursor}", f"KEYS={self.keys}"]
+        for index in range(BODY_LINES):
+            marker = ">" if index == self.cursor else " "
+            lines.append(f"{marker}row-{index:02d}")
+        out = ["\x1b[H\x1b[2J"]
+        for row, text in enumerate(lines, start=1):
+            out.append(f"\x1b[{row};1H{text}")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+
+def record(name: str) -> None:
+    with open(KEY_LOG, "a", encoding="utf-8") as handle:
+        handle.write(name + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def main() -> int:
+    # Start from a clean log: the journey asserts on its emptiness, and a log
+    # left behind by a previous run would fail the NEXT test for the wrong
+    # reason.
+    with open(KEY_LOG, "w", encoding="utf-8"):
+        pass
+
+    fd = sys.stdin.fileno()
+    restore = None
+    if os.isatty(fd):
+        restore = termios.tcgetattr(fd)
+        tty.setraw(fd)
+
+    # The alternate screen, and deliberately NO mouse tracking: together those
+    # two are the host state issue #2555 is about.
+    sys.stdout.write("\x1b[?1049h")
+    screen = Screen()
+    screen.paint()
+
+    pending = ""
+    try:
+        while True:
+            char = sys.stdin.read(1)
+            if char == "":
+                break
+            pending += char
+            if pending in ("\x1b", "\x1b[", "\x1bO"):
+                # An incomplete escape sequence; wait for the rest.
+                continue
+            name = ARROWS.get(pending)
+            if name is None:
+                name = "Q" if pending in ("q", "Q") else repr(pending)
+            record(name)
+            screen.keys += 1
+            if name == "UP":
+                screen.cursor = max(0, screen.cursor - 1)
+            elif name == "DOWN":
+                screen.cursor = min(BODY_LINES - 1, screen.cursor + 1)
+            elif name == "Q":
+                pending = ""
+                break
+            pending = ""
+            screen.paint()
+    finally:
+        sys.stdout.write("\x1b[?1049l")
+        sys.stdout.flush()
+        if restore is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, restore)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

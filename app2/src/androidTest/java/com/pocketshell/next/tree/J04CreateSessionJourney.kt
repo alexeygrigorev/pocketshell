@@ -132,7 +132,13 @@ class J04CreateSessionJourney {
      * instead, silently testing the wrong half).
      */
     private fun seedHostState() {
-        AgentsFixture.exec("rm -f $ERRORS_FILE $APLEXER_FILE $DETAIL_FILE")
+        // $LIVE_MARKER: issue #2586. A journey that opted into the fixture's
+        // LIVE aplexer arm leaves that marker in the shared container, and
+        // marker + a seed file is a deliberate rc-78 mode conflict — the app
+        // gets no listing at all and this journey would fail as a bare
+        // 60-second Compose timeout. Cleared here with the seeds it already
+        // clears, so the deterministic arm defends itself.
+        AgentsFixture.exec("rm -f $ERRORS_FILE $APLEXER_FILE $DETAIL_FILE $LIVE_MARKER")
         AgentsFixture.exec("mkdir -p $FOLDER_NEW $FOLDER_TWICE")
         killSession(SESSION_NEW)
         killSession(SESSION_TWICE)
@@ -375,6 +381,9 @@ class J04CreateSessionJourney {
         const val DETAIL_FILE = "\$HOME/.pocketshell-fixture-session-detail.json"
         const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
+
+        /** The fixture's LIVE-aplexer opt-in marker (issue #2586); cleared, never set. */
+        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
 
         /** Per-test host ids, for the same reason J01/J02 use them. */
         val HOST_IDS: Map<String, Long> = mapOf(

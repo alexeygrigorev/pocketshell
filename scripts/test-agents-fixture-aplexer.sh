@@ -15,11 +15,21 @@
 #
 # The static half runs per-push in `guards-ci-harness`; `--docker` runs in
 # `Integration tests (Docker)`.
+#
+# Issue #2586 added the second half of the same failure family: the fixture's
+# `sessions list --json` served aplexer rows ONLY from a seed file, so a
+# session really created with `sessions create --backend aplexer` — real
+# worker, real PTY, provably attachable — was invisible to the app. The seed
+# arm stays (it is the only way to produce J02's exact row and #2426's
+# one-backend-failing shape); live enumeration is an opt-in second arm, and
+# POSITIVE 5 below drives both sides of that bug plus the two ways the arms
+# must refuse to be confused with each other.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="$ROOT_DIR/tests/docker/Dockerfile.agents"
 SELFCHECK="$ROOT_DIR/tests/docker/agents-aplexer-selfcheck.py"
+ENUMERATOR="$ROOT_DIR/tests/docker/agent-bin/pocketshell-fixture-sessions"
 PYPROJECT="$ROOT_DIR/tools/pocketshell/pyproject.toml"
 
 pass_count=0
@@ -123,6 +133,38 @@ ok "the pin is asserted by behaviour, never \`a --version\`"
 python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$SELFCHECK" \
   || fail "$SELFCHECK does not parse"
 ok "self-check parses"
+
+# --- The two enumeration arms (issue #2586) --------------------------------
+# The fixture's `sessions list --json` has a DETERMINISTIC seed arm and an
+# opt-in LIVE arm. Each is load-bearing for something the other cannot do, so
+# both the seed arm's contract note and the live arm's wiring are pinned here.
+[[ -f "$ENUMERATOR" ]] || fail "missing $ENUMERATOR"
+grep -Fq 'DETERMINISTIC arm' "$ENUMERATOR" \
+  || fail "the seed arm's contract note is gone from $ENUMERATOR. That arm is
+  not an unfinished stub: it is the only way to produce J02's exact aplexer row
+  and the #2426 shape of one backend failing while the other answers, neither
+  of which a live session can do. Replacing it with live enumeration deletes
+  that coverage silently."
+ok "the deterministic seed arm is still documented as deliberate"
+
+grep -Fq 'enumerate_live_sessions' "$ENUMERATOR" \
+  || fail "the live arm must call the PRODUCTION enumerator
+  (pocketshell.session_enum.enumerate_live_sessions), not a second
+  implementation in the fixture — a fixture that maps aplexer rows its own way
+  can agree with a broken client."
+ok "the live arm delegates to the production enumerator"
+
+grep -Fq 'FIXTURE-SESSIONS FAIL [mode]' "$ENUMERATOR" \
+  && grep -Fq 'FIXTURE-SESSIONS FAIL [live]' "$ENUMERATOR" \
+  || fail "the live arm must fail LOUDLY for a stale seed ([mode]) and for an
+  unresolvable \`a\` or a kill switch ([live]). Both degrade into a listing
+  that looks healthy, which is the vacuous-green shape this whole guard exists
+  to prevent."
+ok "both live-arm conflict diagnostics are present"
+
+python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ENUMERATOR" \
+  || fail "$ENUMERATOR does not parse"
+ok "the fixture enumerator parses"
 
 printf 'Static invariants passed (%d checks).\n' "$pass_count"
 
@@ -354,6 +396,218 @@ ssh_exec '
 ' || fail "tmux no longer works in the agents image; this slice must not remove tmux"
 ok "tmux capability is intact"
 
+# --- POSITIVE 5: the OPT-IN LIVE enumeration arm (issue #2586) -----------
+#
+# Until now the fixture's `pocketshell sessions list --json` served aplexer
+# rows from a seed file and NOTHING else, so a session a journey really created
+# with `sessions create --backend aplexer` — a real aplexer session, with a
+# real worker and a real PTY, as POSITIVE 2 above proves — was invisible to the
+# app. That seed arm is deliberate and stays: it is the only way to produce
+# J02's exact row and the #2426 shape of one backend failing while the other
+# answers, neither of which a live session can do. So live enumeration is an
+# OPT-IN second arm, and this block drives BOTH sides of the bug plus the two
+# ways the arms must refuse to be confused.
+#
+# Everything here goes through `pocketshell`, the FIXTURE shim the app
+# actually invokes — not `pocketshell-real-send`, which is the real CLI and was
+# never the broken one.
+printf '\nPOSITIVE 5: opt-in live enumeration through the fixture shim...\n'
+LIVE_TAG="guard-live-${SUFFIX}"
+# Literal paths, not $HOME-derived: the container user is always `testuser`,
+# and the seed/marker names are the fixture's published contract, so a journey
+# reading this file sees exactly what it must write.
+
+aplexer_rows_in() {
+  python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+print(len([r for r in d["sessions"] if r["manager"] == "aplexer"]))' "$1"
+}
+
+# Start from the state every journey is in: nothing seeded, no marker.
+ssh_exec "rm -f /home/testuser/.pocketshell-fixture-aplexer.json /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not clear the aplexer seed/marker state"
+ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-before.json" \
+  || fail "the fixture's \`sessions list --json\` failed"
+[[ "$(aplexer_rows_in "$tmp_dir/live-before.json")" == "0" ]] \
+  || fail "the unseeded fixture already reports aplexer rows"
+ok "baseline: unseeded fixture reports zero aplexer rows"
+
+# THE SESSION. Created over the app's own channel, through the fixture shim.
+# No --memory: `a start --memory` fails closed in this unprivileged container
+# (no cgroup delegation), so a limit here would test the fixture's plumbing
+# rather than its enumeration.
+live_create="$(ssh_exec "pocketshell sessions create '$LIVE_TAG' --backend aplexer --cwd /home/testuser --json")" \
+  || fail "\`pocketshell sessions create --backend aplexer\` failed through the fixture shim"
+LIVE_NAME="$(printf '%s' "$live_create" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))')"
+[[ -n "$LIVE_NAME" ]] || fail "fixture create envelope carried no name: $live_create"
+printf '%s' "$live_create" | grep -Fq '"manager": "aplexer"' \
+  || fail "the fixture shim did not route create to aplexer: $live_create"
+ok "created a REAL aplexer session '$LIVE_NAME' through the fixture shim"
+
+# THE BUG, still true by design: with no opt-in the listing is the
+# deterministic arm, so the live session it just made is not in it. This
+# assertion is not a bug report — it is the guarantee that adding live mode
+# changed nothing for J02 and the #2426 journeys, which seed and never opt in.
+ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-default.json" \
+  || fail "the fixture's \`sessions list --json\` failed after create"
+[[ "$(aplexer_rows_in "$tmp_dir/live-default.json")" == "0" ]] \
+  || fail "the DEFAULT arm leaked a live session into the listing; J02 and the
+  #2426 journeys depend on the deterministic arm ignoring live state"
+ok "default arm: the live session is invisible (deterministic arm unchanged)"
+
+# THE OPT-IN. One marker file, written over the same SSH channel a journey
+# seeds everything else with.
+ssh_exec "touch /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not write the live-mode marker"
+ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-on.json" \
+  || fail "the fixture's \`sessions list --json\` failed in live mode"
+# The oracle is the REAL CLI's own listing, on a separate connection: the live
+# row must be the row `a` reports, not a row the fixture composed.
+ssh_exec "pocketshell-real-send sessions list --json" > "$tmp_dir/live-real.json" \
+  || fail "the real CLI's \`sessions list --json\` failed"
+python3 - "$tmp_dir/live-on.json" "$tmp_dir/live-real.json" "$LIVE_TAG" "$LIVE_NAME" <<'PY' || fail "live mode did not report the session the real \`a\` reports"
+import json, sys
+fixture = json.load(open(sys.argv[1]))
+real = json.load(open(sys.argv[2]))
+tag, name = sys.argv[3], sys.argv[4]
+rows = [r for r in fixture["sessions"] if r["manager"] == "aplexer" and r["tag"] == tag]
+if not rows:
+    sys.stderr.write("guard: live mode has no aplexer row for %r; managers=%r errors=%r\n"
+                     % (tag, fixture.get("managers"), fixture.get("errors")))
+    raise SystemExit(1)
+row = rows[0]
+truth = [r for r in real["sessions"] if r["manager"] == "aplexer" and r["tag"] == tag]
+if not truth:
+    sys.stderr.write("guard: the REAL CLI does not list %r either\n" % (tag,))
+    raise SystemExit(1)
+truth = truth[0]
+for key in ("name", "id", "workspace", "tag", "phase", "alive"):
+    if row.get(key) != truth.get(key):
+        sys.stderr.write("guard: live row %s=%r but the real CLI says %r\n"
+                         % (key, row.get(key), truth.get(key)))
+        raise SystemExit(1)
+if row["name"] != name:
+    sys.stderr.write("guard: live row name %r != created name %r\n" % (row["name"], name))
+    raise SystemExit(1)
+if "aplexer" not in fixture.get("managers", []):
+    sys.stderr.write("guard: live rows present but aplexer absent from managers\n")
+    raise SystemExit(1)
+if fixture.get("errors"):
+    sys.stderr.write("guard: healthy live enumeration reported errors: %r\n" % (fixture["errors"],))
+    raise SystemExit(1)
+# The canned tmux rows must survive: live mode replaces the aplexer arm only.
+if not [r for r in fixture["sessions"] if r["manager"] == "tmux"]:
+    sys.stderr.write("guard: live mode dropped the canned tmux rows\n")
+    raise SystemExit(1)
+print("guard: live row %s id=%s matches the real CLI byte for byte" % (row["name"], row["id"]))
+PY
+ok "live mode lists the created session with the id + name the real \`a\` reports"
+
+# THE CONFUSION GUARD. A leftover seed plus the marker must not merge into one
+# listing — a journey would assert against whichever source happened to win.
+ssh_exec "printf '%s' '{\"sessions\": [{\"name\": \"stale:row\"}]}' > /home/testuser/.pocketshell-fixture-aplexer.json" \
+  || fail "could not stage the stale-seed state"
+set +e
+conflict_out="$(ssh_exec "pocketshell sessions list --json" 2>"$tmp_dir/live-conflict.err")"
+conflict_rc=$?
+set -e
+printf '  conflict stderr: %s\n' "$(head -c 300 "$tmp_dir/live-conflict.err")"
+[[ $conflict_rc -ne 0 ]] \
+  || fail "live mode with a stale seed file exited 0; the arms merged silently"
+[[ -z "${conflict_out// /}" ]] \
+  || fail "a mode conflict emitted a listing on stdout: $conflict_out"
+grep -Fq 'FIXTURE-SESSIONS FAIL [mode]' "$tmp_dir/live-conflict.err" \
+  || fail "expected a [mode] diagnostic for seed+live, got: $(cat "$tmp_dir/live-conflict.err")"
+ok "stale seed + live marker fails LOUDLY (rc=$conflict_rc, no listing)"
+
+# Back to the deterministic arm: seed alone, no marker, exactly J02's state.
+ssh_exec "rm -f /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not remove the live marker"
+ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-seed-only.json" \
+  || fail "the fixture's \`sessions list --json\` failed with the seed alone"
+python3 - "$tmp_dir/live-seed-only.json" "$LIVE_TAG" <<'PY' || fail "the seed arm did not recover"
+import json, sys
+payload = json.load(open(sys.argv[1]))
+rows = [r for r in payload["sessions"] if r["manager"] == "aplexer"]
+names = [r["name"] for r in rows]
+if names != ["stale:row"]:
+    sys.stderr.write("guard: seed arm reported %r, expected exactly the seeded row\n" % (names,))
+    raise SystemExit(1)
+if any(r.get("tag") == sys.argv[2] for r in rows):
+    sys.stderr.write("guard: the live session leaked into the seed arm\n")
+    raise SystemExit(1)
+print("guard: seed arm reports exactly the seeded row")
+PY
+ok "removing the marker restores the seed arm verbatim (so the red above was the marker)"
+
+# THE CROSS-JOURNEY SEQUENCE, in order (issue #2586, round 2). The marker is
+# per-user state in a container the WHOLE app2 suite shares (#2474 runs it
+# unfiltered, one process, one fixture) and nothing expires it, so a journey
+# that opts into live mode leaves it behind for every journey after it. The
+# next journey to seed the deterministic arm then gets rc 78 and no listing —
+# which reaches its author as bare 60-second Compose timeouts naming nothing.
+# Reproduced here at the fixture level, with the EXACT `rm -f` string
+# J02/J04/J14 now run, so the property is pinned rather than rediscovered.
+printf '  cross-journey sequence: live journey -> seeding journey\n'
+JOURNEY_CLEAR="rm -f /home/testuser/.pocketshell-fixture-session-errors.json \
+/home/testuser/.pocketshell-fixture-aplexer.json \
+/home/testuser/.pocketshell-fixture-session-detail.json \
+/home/testuser/.pocketshell-fixture-aplexer-live"
+SEED_ROW='{"sessions": [{"name": "aplexer-follow:yolo", "id": "seed-id"}]}'
+
+# 1. A live-mode journey ran and left the marker. The next journey seeds
+#    WITHOUT clearing it — the round-1 state, and it must be hostile.
+ssh_exec "rm -f /home/testuser/.pocketshell-fixture-aplexer.json" \
+  || fail "could not clear the seed"
+ssh_exec "touch /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not leave the marker behind"
+ssh_exec "printf '%s' '$SEED_ROW' > /home/testuser/.pocketshell-fixture-aplexer.json" \
+  || fail "could not seed as the next journey would"
+set +e
+poisoned_out="$(ssh_exec "pocketshell sessions list --json" 2>/dev/null)"
+poisoned_rc=$?
+set -e
+[[ $poisoned_rc -ne 0 && -z "${poisoned_out// /}" ]] \
+  || fail "a seeding journey following a live one got a listing (rc=$poisoned_rc);
+  the sequence below would then prove nothing"
+ok "uncleared sequence is genuinely hostile (rc=$poisoned_rc, no listing)"
+
+# 2. The same sequence with the journeys' own clearing command in front of the
+#    seed: the deterministic arm answers, exactly as it does with no live
+#    journey in the run at all.
+ssh_exec "$JOURNEY_CLEAR" || fail "the journeys' clearing command failed"
+ssh_exec "printf '%s' '$SEED_ROW' > /home/testuser/.pocketshell-fixture-aplexer.json" \
+  || fail "could not re-seed after clearing"
+ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-sequence.json" \
+  || fail "the seeding journey still cannot list after clearing the marker"
+python3 - "$tmp_dir/live-sequence.json" <<'PY' || fail "the clearing command did not restore the deterministic arm"
+import json, sys
+payload = json.load(open(sys.argv[1]))
+names = [r["name"] for r in payload["sessions"] if r["manager"] == "aplexer"]
+if names != ["aplexer-follow:yolo"]:
+    sys.stderr.write("guard: after clearing, aplexer rows were %r\n" % (names,))
+    raise SystemExit(1)
+if not [r for r in payload["sessions"] if r["manager"] == "tmux"]:
+    sys.stderr.write("guard: the canned tmux rows are missing\n")
+    raise SystemExit(1)
+print("guard: seeding journey after a live journey sees exactly its seeded row")
+PY
+ok "the journeys' \`rm -f ... aplexer-live\` makes the sequence green again"
+
+# The human table is not part of either arm and must not have moved.
+ssh_exec "pocketshell sessions list" > "$tmp_dir/live-human.txt" \
+  || fail "the fixture's human \`sessions list\` failed"
+diff -u "$ROOT_DIR/tests/docker/agent-fixtures/pocketshell-sessions-list.txt" \
+  "$tmp_dir/live-human.txt" >/dev/null \
+  || fail "the human \`sessions list\` table is no longer byte-for-byte the canned file"
+ok "the human \`sessions list\` table is still byte-for-byte the canned file"
+
+ssh_exec "rm -f /home/testuser/.pocketshell-fixture-aplexer.json /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not clear the seed/marker state"
+ssh_exec "pocketshell-real-send sessions kill '$LIVE_NAME' --json" >/dev/null \
+  || fail "could not kill the live guard session"
+ok "cleaned up the live guard session"
+
 # --- NEGATIVE 1: the bundle is half-installed ----------------------------
 # Issue #2553 (landed after this slice started) made `resolve_a` REJECT a
 # bundled `a` whose sibling worker is missing, rather than let `a` fall back to
@@ -412,6 +666,25 @@ case "$silent" in
   *"aplexer_rows=0"*) ok "confirmed: the real CLI stays silent over SSH (exit 0, zero aplexer rows)" ;;
   *) fail "expected the misplaced-\`a\` state to yield zero aplexer rows, got: $silent" ;;
 esac
+
+# 2b. THE SAME SILENCE, THROUGH THE FIXTURE'S LIVE ARM (issue #2586). A
+#     journey that opted into live enumeration asked for real sessions; being
+#     handed a tmux-only listing with exit 0 because `a` is misplaced is the
+#     vacuous green one level up. The fixture must name it instead.
+ssh_exec "touch /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not write the live-mode marker"
+set +e
+live_neg_out="$(ssh_exec "pocketshell sessions list --json" 2>"$tmp_dir/live-neg.err")"
+live_neg_rc=$?
+set -e
+printf '  live-arm stderr: %s\n' "$(head -c 300 "$tmp_dir/live-neg.err")"
+[[ $live_neg_rc -ne 0 ]] \
+  || fail "live mode returned a listing with \`a\` on PATH only: $live_neg_out"
+grep -Fq 'FIXTURE-SESSIONS FAIL [live]' "$tmp_dir/live-neg.err" \
+  || fail "expected a [live] diagnostic for a misplaced \`a\`, got: $(cat "$tmp_dir/live-neg.err")"
+ok "live mode turns the misplaced-\`a\` silence into FAIL [live] (rc=$live_neg_rc)"
+ssh_exec "rm -f /home/testuser/.pocketshell-fixture-aplexer-live" \
+  || fail "could not remove the live-mode marker"
 
 # 3. THE GUARD. The self-check must turn that silence into a named failure.
 set +e

@@ -33,7 +33,7 @@ The pre-schema-2 ``{"managers": [...], "sessions": [{"name", "manager",
 "created", "attach"}]}`` shape is gone — a hard cut (D22), matching the deleted
 schema-1 client. ``list`` is untouched and still byte-for-byte the canned table.
 
-Three per-user seed files let a journey give the fixture a realistic host
+Four per-user seed files let a journey give the fixture a realistic host
 state over the SSH session it already has, with no image rebuild:
 
   * ``POCKETSHELL_FIXTURE_SESSION_DETAIL_FILE``
@@ -48,7 +48,9 @@ state over the SSH session it already has, with no image rebuild:
     [{"name": ..., "workspace": ..., ...}]}``, appended as ``manager:
     "aplexer"`` rows. Absent file => no aplexer rows, which is every journey
     that does not seed one. Issue #2563 moved this read here from the deleted
-    61-line shell ``a`` stub, which did nothing else.
+    61-line shell ``a`` stub, which did nothing else. This is the DEFAULT
+    and DETERMINISTIC arm; ``POCKETSHELL_FIXTURE_APLEXER_LIVE_FILE`` below is
+    the other one.
   * ``POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE``
     (default ``$HOME/.pocketshell-fixture-session-errors.json``) — a list of
     ``{"manager": ..., "message": ...}`` records, appended verbatim to
@@ -56,8 +58,55 @@ state over the SSH session it already has, with no image rebuild:
     contract on a device: a backend that failed to enumerate while the other
     one answered. Absent file => no errors, which is every other journey.
 
-All three default to absent, so a fixture nobody seeded behaves the same as
-before.
+  * ``POCKETSHELL_FIXTURE_APLEXER_LIVE_FILE``
+    (default ``$HOME/.pocketshell-fixture-aplexer-live``) — a MARKER file, any
+    content, whose mere presence switches the aplexer arm from the seed file to
+    LIVE enumeration through the real pinned ``a`` (issue #2586). A session a
+    journey really made with ``pocketshell sessions create --backend aplexer``
+    used to be invisible here, because this arm only ever read the seed; with
+    the marker in place it is enumerated by the PRODUCTION code
+    (``pocketshell.session_enum.enumerate_live_sessions``), so the fixture and
+    the real CLI cannot disagree about a live session's id or display name.
+
+    The two arms never merge and never degrade quietly:
+
+      * live + a leftover seed file => a hard ``[mode]`` failure, no listing at
+        all. Merging them is how a journey ends up asserting against the wrong
+        source and passing for the wrong reason;
+      * live + no resolvable ``a`` (absent, or the #2543 PATH-only landmine),
+        or live + the ``POCKETSHELL_APLEXER=0`` kill switch => a hard ``[live]``
+        failure. The production probe's answer for those states is "this host
+        has no aplexer": zero rows, zero errors, exit 0. That is right for a
+        tmux-only host and never right for a journey that ASKED for live
+        enumeration — it is the vacuous green ci-pitfalls.md catalogues;
+      * live + an ``a`` that IS there and whose probe FAILS => not a mode error
+        at all, but the #2426 partial-listing contract: the listing is emitted
+        with aplexer in ``errors`` and out of ``managers``.
+
+    LIFECYCLE. The marker is per-user state in a container the WHOLE app2
+    journey suite shares (#2474 runs the set unfiltered, one process, one
+    fixture) and nothing expires it, so a journey that opts in leaves it behind
+    for every journey after it — and the next journey to seed the deterministic
+    arm gets the rc-78 conflict above, which reaches its author as bare
+    60-second Compose timeouts naming nothing. Two rules, both enforced by
+    ``tools/pocketshell/tests/test_agents_fixture_aplexer.py``:
+
+      * a journey opts in and out as a PAIR — the teardown is not optional::
+
+            // setup
+            AgentsFixture.exec(
+                "rm -f \\$HOME/.pocketshell-fixture-aplexer.json && " +
+                    "touch \\$HOME/.pocketshell-fixture-aplexer-live",
+            )
+            // @After
+            AgentsFixture.exec("rm -f \\$HOME/.pocketshell-fixture-aplexer-live")
+
+      * and every journey that SEEDS the deterministic arm removes the marker
+        itself (J02/J04/J14 do, in the ``rm -f`` they already run), so a
+        forgotten teardown cannot poison it.
+
+All four default to absent, so a fixture nobody seeded behaves the same as
+before, and ``list`` (the human table) is untouched by all of them.
 
 Usage: ``pocketshell-fixture-sessions {list|json} <canned-table-file>``
 """
@@ -105,6 +154,22 @@ ROW_KEYS = (
     "activity_epoch",
 )
 TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+# `EX_CONFIG`. A mode conflict is a FIXTURE misconfiguration, not a host
+# failure, so it exits non-zero with an empty stdout: a journey gets a hard
+# host-CLI error instead of a listing it could mistake for either arm.
+EXIT_FIXTURE_MISCONFIGURED = 78
+
+# The two ways the aplexer arms refuse to be confused, spelled out as literals
+# so a guard can grep for them (same shape as the self-check's
+# `FIXTURE-APLEXER-SELFCHECK FAIL [placement]`). An unknown kind raises
+# KeyError rather than printing a prefix nobody greps for.
+FAIL_PREFIXES = {
+    #: live enumeration requested while a deterministic seed file still exists
+    "mode": "FIXTURE-SESSIONS FAIL [mode]",
+    #: live enumeration requested but it could not be performed for real
+    "live": "FIXTURE-SESSIONS FAIL [live]",
+}
 LEADING_IDX = re.compile(r"^(\s*\d+\s+)")
 
 
@@ -246,6 +311,130 @@ def aplexer_rows() -> list[dict]:
     return rows
 
 
+class FixtureModeError(Exception):
+    """The fixture was asked for two mutually exclusive things (issue #2586).
+
+    Raised instead of degrading, because every degradation available here is
+    indistinguishable from a healthy answer: a merged seed+live listing looks
+    like a listing, and a live listing with no ``a`` looks like a tmux-only
+    host. Both are the vacuous-green shape ``docs/ci-pitfalls.md`` catalogues.
+    """
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def live_mode_requested() -> bool:
+    """Whether a journey opted into live aplexer enumeration (issue #2586).
+
+    A marker FILE, not an environment variable: a journey seeds the fixture
+    over the same non-interactive SSH ``exec`` channel the app uses, where it
+    can write ``$HOME`` but cannot set the environment of the app's later
+    commands. Same reason the other three seeds are files.
+    """
+    return os.path.exists(
+        _seed_file(
+            "POCKETSHELL_FIXTURE_APLEXER_LIVE_FILE",
+            ".pocketshell-fixture-aplexer-live",
+        )
+    )
+
+
+def _real_source_dir() -> str | None:
+    """Where the repository's real ``pocketshell`` package lives, if anywhere.
+
+    The live arm does not reimplement enumeration — it calls the PRODUCTION
+    code, so the fixture's live rows are the rows the real CLI would emit
+    (display name, liveness filtering, agent-state derivation, the #2426 error
+    shape) rather than a second implementation that can drift from it.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("POCKETSHELL_FIXTURE_REAL_SRC"),
+        # Inside the `agents` image (Dockerfile.agents COPYs it there).
+        "/opt/pocketshell-real/src",
+        # Straight out of the repo: tests/docker/agent-bin/<this file>.
+        os.path.join(here, "..", "..", "..", "tools", "pocketshell", "src"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isdir(os.path.join(candidate, "pocketshell")):
+            return os.path.abspath(candidate)
+    return None
+
+
+def live_aplexer_rows() -> tuple[list[dict], list[dict]]:
+    """``(rows, errors)`` for the LIVE arm — real sessions through the real ``a``.
+
+    Every precondition below fails LOUDLY rather than returning an empty list,
+    for the reason :class:`FixtureModeError` documents. The one thing that does
+    NOT fail loudly is a resolvable ``a`` whose probe blows up: that is the
+    #2426 partial-listing contract, and the production enumerator already
+    reports it as an ``errors`` entry.
+    """
+    seed = _seed_file(
+        "POCKETSHELL_FIXTURE_APLEXER_FILE", ".pocketshell-fixture-aplexer.json"
+    )
+    live_marker = _seed_file(
+        "POCKETSHELL_FIXTURE_APLEXER_LIVE_FILE",
+        ".pocketshell-fixture-aplexer-live",
+    )
+    if os.path.exists(seed):
+        raise FixtureModeError(
+            "mode",
+            "live aplexer enumeration was requested (%s) but the deterministic "
+            "seed file %s still exists. The two arms are mutually exclusive and "
+            "are never merged: delete the seed before opting into live mode, or "
+            "delete the marker to keep using the seed." % (live_marker, seed),
+        )
+
+    source = _real_source_dir()
+    if source is None:
+        raise FixtureModeError(
+            "live",
+            "live aplexer enumeration needs the repository's real `pocketshell` "
+            "package (tried POCKETSHELL_FIXTURE_REAL_SRC, "
+            "/opt/pocketshell-real/src and the in-repo tools/pocketshell/src); "
+            "none of them holds one",
+        )
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    try:
+        from pocketshell import aplexer as real_aplexer
+        from pocketshell.session_enum import enumerate_live_sessions
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise FixtureModeError(
+            "live",
+            "live aplexer enumeration could not import the real `pocketshell` "
+            "package from %s: %s" % (source, exc),
+        )
+
+    if not real_aplexer.enabled("sessions"):
+        raise FixtureModeError(
+            "live",
+            "live aplexer enumeration was requested but a kill switch is set "
+            "(POCKETSHELL_APLEXER / POCKETSHELL_APLEXER_SESSIONS = 0), which "
+            "would make the probe report a tmux-only host: zero rows, zero "
+            "errors, exit 0",
+        )
+    resolution = real_aplexer.resolve_a()
+    if not resolution.path or not os.path.exists(resolution.path):
+        raise FixtureModeError(
+            "live",
+            "live aplexer enumeration was requested but no pinned `a` resolves "
+            "next to %s. `pocketshell.aplexer` never consults PATH (D22 hard "
+            "cut, #2543), so an `a` that is merely on PATH reads as absent and "
+            "the listing would be silently empty. Tried: %s"
+            % (sys.executable, "; ".join(resolution.tried) or "nothing"),
+        )
+
+    rows, errors = enumerate_live_sessions(tmuxctl_stdout=None)
+    return (
+        [row.to_payload(schema=SCHEMA_VERSION) for row in rows],
+        [dict(error) for error in errors],
+    )
+
+
 def tmux_rows(canned: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
     rows = list(canned)
     seen = {name for name, _ in rows}
@@ -341,13 +530,19 @@ def render_json(path: str) -> str:
             row["created_epoch"] = created_epoch(created)
         row["attached"] = bool(seeded.get("attached"))
         sessions.append(row)
-    sessions.extend(aplexer_rows())
+    if live_mode_requested():
+        live_rows, live_errors = live_aplexer_rows()
+        sessions.extend(live_rows)
+    else:
+        sessions.extend(aplexer_rows())
+        live_errors = []
+    errors = backend_errors() + live_errors
 
     managers = []
     for row in sessions:
         if row["manager"] not in managers:
             managers.append(row["manager"])
-    for error in backend_errors():
+    for error in errors:
         # A manager that FAILED contributed no rows, so it must not appear in
         # `managers` — that list is "who answered", `errors` is "who did not".
         if error["manager"] in managers:
@@ -361,7 +556,7 @@ def render_json(path: str) -> str:
                 "schema": SCHEMA_VERSION,
                 "managers": managers,
                 "sessions": sessions,
-                "errors": backend_errors(),
+                "errors": errors,
             },
             indent=2,
         )
@@ -376,7 +571,14 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(render_list(path))
         return 0
     if verb == "json" and path:
-        sys.stdout.write(render_json(path))
+        try:
+            payload = render_json(path)
+        except FixtureModeError as exc:
+            # Nothing on stdout: a partial or ambiguous listing is exactly what
+            # a journey would assert against by accident.
+            sys.stderr.write("%s: %s\n" % (FAIL_PREFIXES[exc.kind], exc))
+            return EXIT_FIXTURE_MISCONFIGURED
+        sys.stdout.write(payload)
         return 0
     sys.stderr.write(
         "pocketshell-fixture-sessions supports: {list|json} <canned-table-file>\n"

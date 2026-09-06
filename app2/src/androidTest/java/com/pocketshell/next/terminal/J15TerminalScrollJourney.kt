@@ -657,7 +657,14 @@ class J15TerminalScrollJourney {
      * would see from a real enumeration.
      */
     private fun seedAplexerSession() {
-        AgentsFixture.exec("rm -f $ERRORS_FILE")
+        // $LIVE_MARKER: issue #2586. A journey that opted into the fixture's
+        // LIVE aplexer arm leaves that marker in the shared container (#2474
+        // runs the suite unfiltered, one process, one fixture), and marker +
+        // the seed written below is a deliberate rc-78 mode conflict — the app
+        // would receive no listing at all and this journey would fail as a bare
+        // 60-second Compose timeout. Cleared with the errors file it already
+        // clears, so the deterministic arm defends itself.
+        AgentsFixture.exec("rm -f $ERRORS_FILE $LIVE_MARKER")
         // One live session per run: a leftover from a previous run would be a
         // second `<workspace>:<tag>` and `a start` refuses the duplicate.
         killAplexerSession()
@@ -801,6 +808,9 @@ class J15TerminalScrollJourney {
 
         const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
+
+        /** The fixture's LIVE-aplexer opt-in marker (issue #2586); cleared, never set. */
+        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
 
         const val TMUX_SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
         const val TMUX_SOCKET =

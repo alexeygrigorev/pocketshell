@@ -1,0 +1,82 @@
+index,id,title,group,layout,source,job
+1,hosts,Hosts,01 · Hosts & access,page,Hosts,Choose a machine.
+2,hosts-empty,Hosts,01 · Hosts & access,page,Hosts: empty,Connect the first host.
+3,add-host,Add host,01 · Hosts & access,sheet,HostForm / QrScan,Choose a setup method.
+4,host-form,Connection details,01 · Hosts & access,page,HostForm,Enter and test connection details.
+5,connecting,Connecting,01 · Hosts & access,page,ConnectGate,Understand that a connection attempt is in progress.
+6,trust,Verify server,01 · Hosts & access,sheet,ConnectGate: TrustPromptSheet,Confirm the server identity.
+7,qr-scan,Scan host,01 · Hosts & access,page,QrScan,Import host details.
+8,qr-review,Review import,01 · Hosts & access,page,QrScan: review,Review a scanned host.
+9,keys,SSH keys,01 · Hosts & access,page,SshKeys,Select or manage authentication.
+10,key-import,Import key,01 · Hosts & access,page,SshKeys: import,Import existing authentication.
+11,key-generate,Generate key,01 · Hosts & access,page,SshKeys: generate,Create a device key.
+12,key-detail,Laptop key,01 · Hosts & access,page,SshKeys: details,Use or inspect a key.
+13,delete-key,Remove key?,01 · Hosts & access,sheet,SshKeys: delete,Remove local authentication safely.
+14,unlock,Unlock key,01 · Hosts & access,sheet,Key unlock / Android BiometricPrompt,Authenticate without reconfiguring the host.
+15,workspaces,hetzner,02 · Workspaces & roots,page,Tree → new workspace-first projection,"Find the workspace, then its terminal."
+16,workspace-search,hetzner,02 · Workspaces & roots,page,New: workspace search,Find a workspace by name.
+17,host-tools,hetzner,02 · Workspaces & roots,sheet,Tree header actions,Reach occasional host utilities.
+18,add-workspace,Add workspace,02 · Workspaces & roots,page,New: root-scoped folder picker,Choose a workspace within the selected root.
+19,folder-browser,Choose folder,02 · Workspaces & roots,page,New: nested folder picker,"Use a nested folder, not just a root’s first child."
+20,create-folder,Create folder,02 · Workspaces & roots,sheet,New: folder creation,Start from a folder that does not exist yet.
+21,create-folder-error,Create folder,02 · Workspaces & roots,sheet,New: create validation,Recover without losing the folder choice.
+22,workspace,pocketshell,02 · Workspaces & roots,page,New: workspace/{hostId}/{path},Open a terminal or start another session here.
+23,workspace-empty,new-project,02 · Workspaces & roots,page,New: empty workspace,Start the first terminal in a workspace.
+24,workspace-actions,pocketshell,02 · Workspaces & roots,sheet,New: workspace actions,Manage workspace presentation.
+25,remove-workspace,Remove from list?,02 · Workspaces & roots,sheet,New: remove workspace,Unpin without destroying work.
+26,roots,Project roots,02 · Workspaces & roots,page,WorkspaceRoots,Choose where workspaces live.
+27,add-root,Add project root,02 · Workspaces & roots,page,WorkspaceRoots: add,Register a remote root.
+28,root-actions,~/git,02 · Workspaces & roots,sheet,New: root actions,Create a session at ~/git itself.
+29,root-session,hetzner,02 · Workspaces & roots,page,New: root-local session,Find the terminal started directly in ~/git.
+30,reorder,Reorder workspaces,02 · Workspaces & roots,page,New: manual order,Arrange projects once.
+31,host-offline,hetzner,02 · Workspaces & roots,page,Tree: offline,Keep context during network failure.
+32,host-empty,hetzner,02 · Workspaces & roots,page,Tree: empty root,Add a first workspace in a registered root.
+33,new-session,New session,03 · Start & use terminals,sheet,CreateSessionSheet,Start another terminal in the current folder.
+34,session-options,Session options,03 · Start & use terminals,sheet,CreateSessionSheet: advanced,Override launch defaults deliberately.
+35,agent-unavailable,Grok is not available,03 · Start & use terminals,sheet,CreateSessionSheet: failure,Recover from a missing agent.
+36,terminal,pocketshell,03 · Start & use terminals,terminal,Session,Read output and send input.
+37,session-switch,Sessions,03 · Start & use terminals,sheet,New: workspace session switcher,Move between terminals in a workspace.
+38,terminal-actions,Terminal,03 · Start & use terminals,sheet,Session: overflow,Leave safely or explicitly end a process.
+39,composer,pocketshell,03 · Start & use terminals,terminal,PromptComposerSheet,Write input without losing the output.
+40,composer-tools,Add to input,03 · Start & use terminals,sheet,ComposerBar: tools,Add context to a draft.
+41,dictation,pocketshell,03 · Start & use terminals,terminal,ComposerBar: recording,"Dictate, review, then send."
+42,attachment,pocketshell,03 · Start & use terminals,terminal,ComposerBar: attachments,Send a file reference with input.
+43,history,Recent prompts,03 · Start & use terminals,sheet,MessageHistorySheet,Reuse input.
+44,commands,Slash commands,03 · Start & use terminals,sheet,SlashCommandDropdown,Find supported input commands.
+45,hotkeys,Terminal keys,03 · Start & use terminals,sheet,TerminalHotkeysSheet,Send special terminal keys.
+46,end-session,End Terminal?,03 · Start & use terminals,sheet,Stop-session ConfirmDialog,Stop remote work deliberately.
+47,reconnecting,pocketshell,03 · Start & use terminals,terminal,Session: Reconnecting,"Recover the existing session, not start a duplicate."
+48,session-ended,Session ended,03 · Start & use terminals,page,Session: ended,Continue after a session exits.
+49,send-uncertain,Review before resending,03 · Start & use terminals,page,Composer: delivery state,Avoid duplicate command execution.
+50,files,Files,04 · Files & transfers,page,Files,Find and inspect a remote file.
+51,files-folder,Files,04 · Files & transfers,page,Files: directory state,Browse into a workspace folder.
+52,files-parent,Files,04 · Files & transfers,page,Files: directory state,Move up without entering workspace selection.
+53,file-tools,Files,04 · Files & transfers,sheet,Files: overflow,Manage file operations.
+54,create-file-folder,Create folder,04 · Files & transfers,sheet,Files: create folder,Create a remote directory while browsing files.
+55,file-actions,README.md,04 · Files & transfers,sheet,Files / FileViewer: actions,Act on a selected file.
+56,markdown,README.md,04 · Files & transfers,page,FileViewer: markdown,Read formatted text.
+57,source,README.md,04 · Files & transfers,page,FileViewer: source,Inspect raw file content.
+58,editor,Edit README.md,04 · Files & transfers,page,FileViewer: edit,Update a file on hetzner.
+59,unsaved,Keep your changes?,04 · Files & transfers,sheet,FileViewer: dirty buffer,Leave an editor safely.
+60,image-view,workspace.png,04 · Files & transfers,page,FileViewer: image,Inspect a remote image.
+61,rename-file,Rename file,04 · Files & transfers,sheet,Files: rename,Change a remote filename.
+62,delete-file,Delete README.md?,04 · Files & transfers,sheet,Files: delete,Delete a remote file deliberately.
+63,file-conflict,File changed on host,04 · Files & transfers,page,New: file conflict,Avoid overwriting concurrent changes.
+64,transfers,Transfers,04 · Files & transfers,page,Files: transfer states,Understand upload/download state.
+65,services,Services & tunnels,05 · Services & usage,page,Ports: discovery off,Choose how to expose a remote service locally.
+66,services-active,Services & tunnels,05 · Services & usage,page,Ports: discovery on,Forward a service and open its local address.
+67,tunnel-detail,Development server,05 · Services & usage,page,Ports: details,Use or stop one active tunnel.
+68,add-tunnel,Add tunnel,05 · Services & usage,page,Ports: add,Create a local port forward.
+69,usage,Usage,05 · Services & usage,page,Usage,Check remaining provider capacity.
+70,settings,Settings,06 · Settings & support,page,Settings,Find a preference.
+71,terminal-settings,Terminal,06 · Settings & support,page,Settings: terminal,Make terminal output comfortable to read.
+72,voice-settings,Voice,06 · Settings & support,page,Settings: voice,Configure dictation.
+73,language,Dictation language,06 · Settings & support,page,Settings: voice language,Choose a language.
+74,connection-settings,Connections,06 · Settings & support,page,Settings: background grace,Tune mobile app switching behavior.
+75,grace,Keep connection,06 · Settings & support,sheet,Settings: grace picker,Choose a connection grace period.
+76,advanced-settings,Advanced,06 · Settings & support,page,Settings: advanced,Adjust compatibility settings deliberately.
+77,diagnostics,Diagnostics,06 · Settings & support,page,CrashReports,Find useful evidence after a failure.
+78,report,Connection report,06 · Settings & support,page,CrashReports: detail,Inspect and share a support report.
+79,clear-reports,Clear local reports?,06 · Settings & support,sheet,CrashReports: clear,Remove local diagnostics.
+80,about,About PocketShell,06 · Settings & support,page,Settings: About,Check the installed build.
+81,update,Update available,06 · Settings & support,page,Settings: update,Review a new release.

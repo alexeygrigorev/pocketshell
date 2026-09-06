@@ -1,0 +1,4985 @@
+{
+  "name": "PocketShell Quiet",
+  "version": "1.0.0",
+  "created": "2026-09-06",
+  "start": "workspaces",
+  "model": "Host \u2192 Root \u2192 Workspace (canonical folder) \u2192 Session \u2192 real terminal",
+  "disclaimer": "Offline interaction and layout prototype. All connections, processes, keys, usage, files and transfers are illustrative. No SSH, microphone, camera, credential, file-write or network operations run.",
+  "constraints": [
+    "Terminal only. No conversation view.",
+    "Workspaces are folders in roots and can have zero, one or many sessions.",
+    "Do not duplicate folder name and full path in workspace rows.",
+    "Flat lists, larger type, monochrome session marks and text.",
+    "Metadata is not a tiny button. The whole row is the target.",
+    "Session status must not conflate running, attached, busy or connected.",
+    "Stable ordering across refresh.",
+    "Start directly in a root, choose existing folders, or explicitly create missing folders."
+  ],
+  "screens": [
+    {
+      "id": "hosts",
+      "index": 1,
+      "title": "Hosts",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "hetzner",
+          "subtitle": "7 workspaces",
+          "route": "workspaces",
+          "icon": "",
+          "trailing": "Last opened"
+        },
+        {
+          "type": "row",
+          "title": "Home workstation",
+          "subtitle": "2 workspaces",
+          "route": "workspaces",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "SSH keys",
+          "subtitle": "2 saved keys",
+          "route": "keys",
+          "icon": "key",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Settings",
+          "subtitle": "",
+          "route": "settings",
+          "icon": "settings",
+          "trailing": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Add host",
+          "route": "add-host",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The occasional machine switcher, not a new dashboard.",
+      "job": "Choose a machine.",
+      "notes": [
+        "Opening the app resumes the last host workspace list when configured.",
+        "Do not claim a saved host is online before a connection check.",
+        "Rows stay flat; last-opened is metadata, not a status probe."
+      ],
+      "source": "Hosts",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "hosts-empty",
+      "index": 2,
+      "title": "Hosts",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "",
+      "blocks": [
+        {
+          "type": "empty",
+          "icon": "server",
+          "title": "Your work, from here.",
+          "text": "Connect to a development machine to open its workspaces and terminals."
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Add host",
+          "route": "add-host",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "First-run state. One next action.",
+      "job": "Connect the first host.",
+      "notes": [
+        "No upfront permission requests.",
+        "No duplicate Add action in both header and empty state."
+      ],
+      "source": "Hosts: empty",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "add-host",
+      "index": 3,
+      "title": "Add host",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Scan a QR code",
+          "subtitle": "Import from your computer",
+          "route": "qr-scan",
+          "icon": "qr",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Enter connection details",
+          "subtitle": "Address, user and SSH key",
+          "route": "host-form",
+          "icon": "server",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "hosts",
+      "description": "Two ways into the same setup flow.",
+      "job": "Choose a setup method.",
+      "notes": [
+        "Both paths end in a connection review.",
+        "Sheet contains no separate primary button."
+      ],
+      "source": "HostForm / QrScan",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "host-form",
+      "index": 4,
+      "title": "Connection details",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "field",
+          "label": "Name",
+          "value": "hetzner",
+          "placeholder": "",
+          "id": "host-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "field",
+          "label": "Address",
+          "value": "dev.example.com",
+          "placeholder": "",
+          "id": "host-address",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "field",
+          "label": "Username",
+          "value": "alexey",
+          "placeholder": "",
+          "id": "host-user",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "row",
+          "title": "SSH key",
+          "subtitle": "Laptop key \u00b7 ED25519",
+          "route": "keys",
+          "icon": "key",
+          "trailing": ""
+        },
+        {
+          "type": "disclosure",
+          "title": "Connection options",
+          "children": [
+            {
+              "type": "field",
+              "label": "Port",
+              "value": "22",
+              "placeholder": "",
+              "id": "port",
+              "helper": "",
+              "kind": "number"
+            },
+            {
+              "type": "field",
+              "label": "Usage command",
+              "value": "pocketshell usage --json",
+              "placeholder": "",
+              "id": "usage-command",
+              "helper": "",
+              "kind": "text"
+            }
+          ]
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Test connection",
+          "route": "connecting",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Existing and new host forms share one layout.",
+      "job": "Enter and test connection details.",
+      "notes": [
+        "Edited values persist after an unsuccessful test.",
+        "Default port stays inside Connection options.",
+        "Private key contents never appear on this screen."
+      ],
+      "source": "HostForm",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "connecting",
+      "index": 5,
+      "title": "Connecting",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "host-form",
+      "blocks": [
+        {
+          "type": "progress",
+          "title": "Connecting to hetzner",
+          "text": "Checking the server and SSH credentials."
+        },
+        {
+          "type": "row",
+          "title": "Server address",
+          "subtitle": "dev.example.com",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "You can cancel without changing your saved host.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Cancel",
+          "route": "back",
+          "variant": "secondary"
+        },
+        {
+          "type": "button",
+          "label": "Continue demo",
+          "route": "trust",
+          "variant": "text"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Observable progress with cancellation.",
+      "job": "Understand that a connection attempt is in progress.",
+      "notes": [
+        "Continue demo is a prototype-only control, not part of the Android production screen.",
+        "Production advances on a verified transport result, not a timer."
+      ],
+      "source": "ConnectGate",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "trust",
+      "index": 6,
+      "title": "Verify server",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "host-form",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "First connection to hetzner. Check this fingerprint against the one on your server.",
+          "tone": "secondary"
+        },
+        {
+          "type": "code",
+          "text": "ED25519\nSHA256:Qm7r\u2026p8N2 (demo)"
+        },
+        {
+          "type": "text",
+          "text": "Only continue when it matches. A changed fingerprint is a different, blocking state.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Trust and connect",
+          "route": "workspaces",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Cancel",
+          "route": "back",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "host-form",
+      "description": "Explicit trust, not a disguised success step.",
+      "job": "Confirm the server identity.",
+      "notes": [
+        "The mock fingerprint is illustrative and deliberately not a valid trusted identity.",
+        "Production must show the complete fingerprint with copy and screen-reader support.",
+        "A changed key must not reuse this first-trust copy."
+      ],
+      "source": "ConnectGate: TrustPromptSheet",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "qr-scan",
+      "index": 7,
+      "title": "Scan host",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Point your camera at the PocketShell QR code on your computer.",
+          "tone": "secondary"
+        },
+        {
+          "type": "scanner"
+        },
+        {
+          "type": "text",
+          "text": "Waiting for a QR code\u2026",
+          "tone": "secondary"
+        },
+        {
+          "type": "button",
+          "label": "Show import review",
+          "route": "qr-review",
+          "variant": "secondary"
+        },
+        {
+          "type": "row",
+          "title": "Enter details instead",
+          "subtitle": "",
+          "route": "host-form",
+          "icon": "",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Camera acquisition is a system integration, not a new visual style.",
+      "job": "Import host details.",
+      "notes": [
+        "Camera rectangle is an illustration; this prototype does not access the camera.",
+        "Production requests camera permission in context and supports multi-part progress.",
+        "Show import review is a prototype-only control."
+      ],
+      "source": "QrScan",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "qr-review",
+      "index": 8,
+      "title": "Review import",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "qr-scan",
+      "blocks": [
+        {
+          "type": "section",
+          "title": "Connection",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "hetzner",
+          "subtitle": "alexey@dev.example.com",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "Authentication",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Imported key",
+          "subtitle": "ED25519 \u00b7 Passphrase protected",
+          "route": "key-detail",
+          "icon": "key",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "This QR includes a private key. Import it only from a source you trust.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Import and connect",
+          "route": "trust",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "No silent credential import.",
+      "job": "Review a scanned host.",
+      "notes": [
+        "Never render the private key in the summary.",
+        "Duplicate hosts require an explicit replace decision in implementation."
+      ],
+      "source": "QrScan: review",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "keys",
+      "index": 9,
+      "title": "SSH keys",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "host-form",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Laptop key",
+          "subtitle": "ED25519 \u00b7 Used by hetzner",
+          "route": "key-detail",
+          "icon": "key",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Travel key",
+          "subtitle": "ED25519 \u00b7 Not assigned",
+          "route": "key-detail",
+          "icon": "key",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Generate a key",
+          "subtitle": "Create on this device",
+          "route": "key-generate",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Import a key",
+          "subtitle": "Paste or select a file",
+          "route": "key-import",
+          "icon": "",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Friendly identities, not raw IDs.",
+      "job": "Select or manage authentication.",
+      "notes": [
+        "When opened from a host form, choosing a key returns it to that form.",
+        "When opened from Hosts, Back returns to Hosts; keep return context."
+      ],
+      "source": "SshKeys",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "key-import",
+      "index": 10,
+      "title": "Import key",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "keys",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Prototype only \u2014 do not paste a real private key.",
+          "tone": "secondary"
+        },
+        {
+          "type": "field",
+          "label": "Key name",
+          "value": "Travel key",
+          "placeholder": "",
+          "id": "key-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "disclosure",
+          "title": "Paste a private key",
+          "children": [
+            {
+              "type": "field",
+              "label": "Private key",
+              "value": "",
+              "placeholder": "Paste PEM or OpenSSH key",
+              "id": "private-key",
+              "helper": "",
+              "kind": "password-multiline"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Choose a key file",
+          "subtitle": "Opens the Android file picker",
+          "route": "key-detail",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "Key parsing stays on this device. Never include key text in logs or reports.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Review key",
+          "route": "key-detail",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A focused import form with a system-file alternative.",
+      "job": "Import existing authentication.",
+      "notes": [
+        "Preview fixture uses no real key.",
+        "Enable Review only after successful local parsing in Android.",
+        "Use platform clipboard and file picker; mask by default and never log input."
+      ],
+      "source": "SshKeys: import",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "key-generate",
+      "index": 11,
+      "title": "Generate key",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "keys",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Prototype only \u2014 use a sample passphrase.",
+          "tone": "secondary"
+        },
+        {
+          "type": "field",
+          "label": "Key name",
+          "value": "Phone key",
+          "placeholder": "",
+          "id": "key-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "row",
+          "title": "Key type",
+          "subtitle": "ED25519",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "field",
+          "label": "Passphrase",
+          "value": "",
+          "placeholder": "Recommended",
+          "id": "passphrase",
+          "helper": "",
+          "kind": "password"
+        },
+        {
+          "type": "field",
+          "label": "Confirm passphrase",
+          "value": "",
+          "placeholder": "Repeat passphrase",
+          "id": "confirm-passphrase",
+          "helper": "",
+          "kind": "password"
+        },
+        {
+          "type": "text",
+          "text": "Add the public key to your server before connecting.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Generate key",
+          "route": "key-detail",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "One modern default and an explicit protection choice.",
+      "job": "Create a device key.",
+      "notes": [
+        "Generation and validation are fixtures here, not cryptographic operations.",
+        "Never export a private key as part of the public-key install flow."
+      ],
+      "source": "SshKeys: generate",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "key-detail",
+      "index": 12,
+      "title": "Laptop key",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "keys",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Type",
+          "subtitle": "ED25519",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Protection",
+          "subtitle": "Passphrase required",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Used by",
+          "subtitle": "hetzner",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "Public key",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "code",
+          "text": "ssh-ed25519 AAAA\u2026\nphone@pocketshell (demo)"
+        },
+        {
+          "type": "button",
+          "label": "Copy public key",
+          "route": "toast:Public key copied (demo)",
+          "variant": "secondary"
+        },
+        {
+          "type": "section",
+          "title": "",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Use this key",
+          "subtitle": "",
+          "route": "host-form",
+          "icon": "check",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Remove key from device",
+          "subtitle": "",
+          "route": "delete-key",
+          "icon": "trash",
+          "trailing": "",
+          "danger": true
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Dependencies are visible before deletion.",
+      "job": "Use or inspect a key.",
+      "notes": [
+        "The sample public key is not a real key.",
+        "Production shows complete fingerprint and public key on demand."
+      ],
+      "source": "SshKeys: details",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "delete-key",
+      "index": 13,
+      "title": "Remove key?",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "key-detail",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Laptop key is used by hetzner. You will need another key to connect from this device.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "This does not change the server or remove its authorized key.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Remove key",
+          "route": "keys",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep key",
+          "route": "key-detail",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "key-detail",
+      "description": "Deletion scope is explicit.",
+      "job": "Remove local authentication safely.",
+      "notes": [
+        "Never present removal as deleting a key from the remote host."
+      ],
+      "source": "SshKeys: delete",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "unlock",
+      "index": 14,
+      "title": "Unlock key",
+      "group": "01 \u00b7 Hosts & access",
+      "subtitle": "",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "empty",
+          "icon": "fingerprint",
+          "title": "Unlock Laptop key",
+          "text": "Use device authentication, or enter the key passphrase."
+        },
+        {
+          "type": "field",
+          "label": "Passphrase",
+          "value": "",
+          "placeholder": "Enter passphrase",
+          "id": "passphrase",
+          "helper": "",
+          "kind": "password"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Unlock",
+          "route": "workspaces",
+          "variant": "primary"
+        }
+      ],
+      "layout": "sheet",
+      "base": "workspaces",
+      "description": "A native biometric handoff with a passphrase fallback.",
+      "job": "Authenticate without reconfiguring the host.",
+      "notes": [
+        "Biometric prompt is OS-owned and is not recreated by this UI.",
+        "Passphrase persistence must follow the existing key-storage policy."
+      ],
+      "source": "Key unlock / Android BiometricPrompt",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "workspaces",
+      "index": 15,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "Connected",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "search",
+          "placeholder": "Find a workspace",
+          "id": "workspace-search"
+        },
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "Add",
+          "route": "add-workspace"
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell",
+          "sessions": [
+            {
+              "kind": "claude",
+              "count": 1
+            },
+            {
+              "kind": "shell",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "pocketshell"
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell-desktop",
+          "sessions": [
+            {
+              "kind": "shell",
+              "count": 2
+            }
+          ],
+          "route": "workspace",
+          "key": "pocketshell-desktop"
+        },
+        {
+          "type": "workspace",
+          "name": "data-engineering-zoomcamp",
+          "sessions": [],
+          "route": "workspace-empty",
+          "key": "data-engineering-zoomcamp"
+        },
+        {
+          "type": "workspace",
+          "name": "ml-experiments",
+          "sessions": [
+            {
+              "kind": "claude",
+              "count": 1
+            },
+            {
+              "kind": "codex",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "ml-experiments"
+        },
+        {
+          "type": "section",
+          "title": "~/work",
+          "action": "Add",
+          "route": "add-workspace"
+        },
+        {
+          "type": "workspace",
+          "name": "client-projects",
+          "sessions": [
+            {
+              "kind": "shell",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "client-projects"
+        },
+        {
+          "type": "workspace",
+          "name": "personal-site",
+          "sessions": [
+            {
+              "kind": "opencode",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "personal-site"
+        },
+        {
+          "type": "workspace",
+          "name": "sandbox",
+          "sessions": [],
+          "route": "workspace-empty",
+          "key": "sandbox"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The approved visual anchor: a quiet, folder-first host screen.",
+      "job": "Find the workspace, then its terminal.",
+      "notes": [
+        "Root \u2192 workspace \u2192 sessions. A workspace name is never replaced by its single session.",
+        "No duplicated paths, folder icons, colored agent logos, cards, or activity timestamps.",
+        "Muted marks + names are non-interactive metadata. The entire workspace row opens the workspace.",
+        "Stable manual/creation order; updates do not reshuffle rows."
+      ],
+      "source": "Tree \u2192 new workspace-first projection",
+      "headerAction": "more",
+      "headerRoute": "host-tools",
+      "status": "connected",
+      "keyflow": "Find work"
+    },
+    {
+      "id": "workspace-search",
+      "index": 16,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "Connected",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "search",
+          "placeholder": "Find a workspace",
+          "value": "pocket",
+          "id": "workspace-search"
+        },
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell",
+          "sessions": [
+            {
+              "kind": "claude",
+              "count": 1
+            },
+            {
+              "kind": "shell",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "pocketshell"
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell-desktop",
+          "sessions": [
+            {
+              "kind": "shell",
+              "count": 2
+            }
+          ],
+          "route": "workspace",
+          "key": "pocketshell-desktop"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Search returns workspaces, not mixed object types.",
+      "job": "Find a workspace by name.",
+      "notes": [
+        "Match workspace names; session names may contribute a match but result type stays workspace.",
+        "Root headings disambiguate otherwise identical names.",
+        "Search keyboard is OS-owned; typed browser input filters the live host screen too."
+      ],
+      "source": "New: workspace search",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "connected",
+      "keyflow": ""
+    },
+    {
+      "id": "host-tools",
+      "index": 17,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Browse host files",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Services & tunnels",
+          "subtitle": "",
+          "route": "services",
+          "icon": "ports",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Usage",
+          "subtitle": "",
+          "route": "usage",
+          "icon": "chart",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Project roots",
+          "subtitle": "",
+          "route": "roots",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Refresh workspaces",
+          "subtitle": "",
+          "route": "workspaces",
+          "icon": "refresh",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Connection details",
+          "subtitle": "",
+          "route": "host-form",
+          "icon": "settings",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Disconnect",
+          "subtitle": "",
+          "route": "hosts",
+          "icon": "",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "workspaces",
+      "description": "Host tools stop competing with the workspace list.",
+      "job": "Reach occasional host utilities.",
+      "notes": [
+        "No Workspaces/Host tab strip.",
+        "Files, tunnels and usage keep host scope, even when launched from a workspace."
+      ],
+      "source": "Tree header actions",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "add-workspace",
+      "index": 18,
+      "title": "Add workspace",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git",
+          "action": "Change",
+          "route": "roots"
+        },
+        {
+          "type": "search",
+          "placeholder": "Find a folder",
+          "id": "folder-search"
+        },
+        {
+          "type": "row",
+          "title": "Create folder",
+          "subtitle": "",
+          "route": "create-folder",
+          "icon": "plus",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "Folders",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "aplexer",
+          "subtitle": "",
+          "route": "workspace-empty",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "course-notes",
+          "subtitle": "",
+          "route": "workspace-empty",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "experiments",
+          "subtitle": "",
+          "route": "workspace-empty",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse subfolders",
+          "subtitle": "",
+          "route": "folder-browser",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Start session in ~/git",
+          "subtitle": "Use the root itself",
+          "route": "new-session",
+          "icon": "terminal",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Existing folders and new folders share the same entry point.",
+      "job": "Choose a workspace within the selected root.",
+      "notes": [
+        "Root Add is contextual; it does not ask for the host again.",
+        "Existing workspaces are marked Already added in the Android implementation.",
+        "Choosing a folder opens its workspace; it does not automatically start a session.",
+        "Root session is explicit and does not require a dummy child folder."
+      ],
+      "source": "New: root-scoped folder picker",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": "Create work"
+    },
+    {
+      "id": "folder-browser",
+      "index": 19,
+      "title": "Choose folder",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "add-workspace",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git/experiments",
+          "action": "Up",
+          "route": "add-workspace"
+        },
+        {
+          "type": "search",
+          "placeholder": "Find a folder",
+          "id": "folder-search"
+        },
+        {
+          "type": "row",
+          "title": "benchmarks",
+          "subtitle": "",
+          "route": "action:drill",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "notes",
+          "subtitle": "",
+          "route": "action:drill",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Create folder here",
+          "subtitle": "",
+          "route": "create-folder",
+          "icon": "plus",
+          "trailing": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Use this folder",
+          "route": "workspace-empty",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Browsing and selecting a directory are separate gestures.",
+      "job": "Use a nested folder, not just a root\u2019s first child.",
+      "notes": [
+        "Tapping a folder in browse mode enters it; Use this folder selects it.",
+        "Keep a full canonical path as identity. Never group solely by basename."
+      ],
+      "source": "New: nested folder picker",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "create-folder",
+      "index": 20,
+      "title": "Create folder",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "add-workspace",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git"
+        },
+        {
+          "type": "field",
+          "label": "Folder name",
+          "value": "new-project",
+          "placeholder": "",
+          "id": "new-folder-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "text",
+          "text": "Creates ~/git/new-project on hetzner.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "The new folder becomes a workspace. A session is not started yet.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Create workspace",
+          "route": "action:create-workspace",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Cancel",
+          "route": "back",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "add-workspace",
+      "description": "Create exactly what is named; no hidden process launch.",
+      "job": "Start from a folder that does not exist yet.",
+      "notes": [
+        "Validate empty name, separators, existing path, permissions and connection errors inline.",
+        "Never silently overwrite, merge or create missing parent directories.",
+        "A creation failure keeps the name and parent location."
+      ],
+      "source": "New: folder creation",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "create-folder-error",
+      "index": 21,
+      "title": "Create folder",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "add-workspace",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git"
+        },
+        {
+          "type": "field",
+          "label": "Folder name",
+          "value": "new-project",
+          "placeholder": "",
+          "id": "new-folder-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "alert",
+          "title": "This folder already exists",
+          "text": "Use the existing folder as a workspace, or choose another name.",
+          "tone": "warning",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "button",
+          "label": "Use existing folder",
+          "route": "workspace-empty",
+          "variant": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Cancel",
+          "route": "back",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "add-workspace",
+      "description": "Existence is not a fatal dead end.",
+      "job": "Recover without losing the folder choice.",
+      "notes": [
+        "Existing file at that path is a different error and cannot be used as a workspace."
+      ],
+      "source": "New: create validation",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "workspace",
+      "index": 22,
+      "title": "pocketshell",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "hetzner \u00b7 ~/git",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Terminal",
+          "subtitle": "Claude Code \u00b7 Running",
+          "route": "terminal",
+          "icon": "hexagon",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Terminal 2",
+          "subtitle": "Shell \u00b7 Running",
+          "route": "terminal",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "button",
+          "label": "New session",
+          "route": "new-session",
+          "variant": "secondary"
+        },
+        {
+          "type": "section",
+          "title": "Workspace",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse files",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Services & tunnels",
+          "subtitle": "On hetzner",
+          "route": "services",
+          "icon": "ports",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Sessions belong to this folder; terminal remains the work surface.",
+      "job": "Open a terminal or start another session here.",
+      "notes": [
+        "Display labels follow desktop: Terminal, Terminal 2, or a meaningful suffix.",
+        "Multiple agents of the same kind get separate session names here.",
+        "No conversation view, transcript UI, activity dashboard or agent chat."
+      ],
+      "source": "New: workspace/{hostId}/{path}",
+      "headerAction": "more",
+      "headerRoute": "workspace-actions",
+      "status": "",
+      "keyflow": "Find work"
+    },
+    {
+      "id": "workspace-empty",
+      "index": 23,
+      "title": "new-project",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "hetzner \u00b7 ~/git",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "empty",
+          "icon": "terminal",
+          "title": "No sessions",
+          "text": "Start a shell or an agent in this workspace."
+        },
+        {
+          "type": "button",
+          "label": "New session",
+          "route": "new-session",
+          "variant": "primary"
+        },
+        {
+          "type": "section",
+          "title": "Workspace",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse files",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A folder persists independently of its sessions.",
+      "job": "Start the first terminal in a workspace.",
+      "notes": [
+        "Ending the final session does not remove the workspace.",
+        "The workspace identity is host + canonical remote path, not its display name."
+      ],
+      "source": "New: empty workspace",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "workspace-actions",
+      "index": 24,
+      "title": "pocketshell",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "New session",
+          "subtitle": "",
+          "route": "new-session",
+          "icon": "plus",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse files",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Copy folder path",
+          "subtitle": "",
+          "route": "toast:Folder path copied (demo)",
+          "icon": "copy",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Reorder workspaces",
+          "subtitle": "",
+          "route": "reorder",
+          "icon": "sliders",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Remove from list",
+          "subtitle": "Keeps the folder and running sessions",
+          "route": "remove-workspace",
+          "icon": "close",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "workspace",
+      "description": "Folder operations have explicit scope.",
+      "job": "Manage workspace presentation.",
+      "notes": [
+        "No hidden directory delete behind Remove from list.",
+        "File deletion belongs in the file browser with a separate confirmation."
+      ],
+      "source": "New: workspace actions",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "remove-workspace",
+      "index": 25,
+      "title": "Remove from list?",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "pocketshell will be removed from this workspace list.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "The folder and its running sessions stay on hetzner. You can add it again from ~/git.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Remove from list",
+          "route": "workspaces",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep workspace",
+          "route": "workspace",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "workspace",
+      "description": "Remove is not delete and is not stop.",
+      "job": "Unpin without destroying work.",
+      "notes": [
+        "Storage implementation must preserve discoverability of unlisted running sessions under Other."
+      ],
+      "source": "New: remove workspace",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "roots",
+      "index": 26,
+      "title": "Project roots",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "hetzner",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "~/git",
+          "subtitle": "4 workspaces",
+          "route": "root-actions",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "~/work",
+          "subtitle": "3 workspaces",
+          "route": "root-actions",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "Roots organize folders on this host. They are not workspaces themselves.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Add root",
+          "route": "add-root",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Roots remain distinct from projects.",
+      "job": "Choose where workspaces live.",
+      "notes": [
+        "Normalize home-relative paths per host; deduplicate aliases after resolution.",
+        "Longest matching root wins. Unmatched workspaces remain under Other."
+      ],
+      "source": "WorkspaceRoots",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "add-root",
+      "index": 27,
+      "title": "Add project root",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "roots",
+      "blocks": [
+        {
+          "type": "field",
+          "label": "Folder path",
+          "value": "~/projects",
+          "placeholder": "",
+          "id": "root-path",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "row",
+          "title": "Browse folders",
+          "subtitle": "",
+          "route": "folder-browser",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "PocketShell will look for workspaces in this folder. Existing folders and sessions are not moved.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Add root",
+          "route": "roots",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A location, not another project abstraction.",
+      "job": "Register a remote root.",
+      "notes": [
+        "Validate existence and permission before saving.",
+        "A nonexistent root offers explicit creation rather than silently inventing directories."
+      ],
+      "source": "WorkspaceRoots: add",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "root-actions",
+      "index": 28,
+      "title": "~/git",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Add workspace",
+          "subtitle": "",
+          "route": "add-workspace",
+          "icon": "plus",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Create folder",
+          "subtitle": "",
+          "route": "create-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Start session here",
+          "subtitle": "Working folder: ~/git",
+          "route": "new-session",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse root",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Remove root",
+          "subtitle": "Keeps folders and sessions",
+          "route": "roots",
+          "icon": "close",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "workspaces",
+      "description": "An explicit route to working directly at the root.",
+      "job": "Create a session at ~/git itself.",
+      "notes": [
+        "On Start session here, the actual working directory is the root.",
+        "Root-local sessions appear in a quiet \u201cIn this root\u201d group, never as a fake child workspace."
+      ],
+      "source": "New: root actions",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "root-session",
+      "index": 29,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "Connected",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "search",
+          "placeholder": "Find a workspace",
+          "id": "workspace-search"
+        },
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "Add",
+          "route": "add-workspace"
+        },
+        {
+          "type": "row",
+          "title": "In this root",
+          "subtitle": "Terminal \u00b7 Shell",
+          "route": "terminal",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell",
+          "sessions": [
+            {
+              "kind": "claude",
+              "count": 1
+            }
+          ],
+          "route": "workspace",
+          "key": "pocketshell"
+        },
+        {
+          "type": "workspace",
+          "name": "aplexer",
+          "sessions": [],
+          "route": "workspace-empty",
+          "key": "aplexer"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Sessions can exist at a root without inventing a project folder.",
+      "job": "Find the terminal started directly in ~/git.",
+      "notes": [
+        "This is an edge-state example, not an extra section on every root.",
+        "Only show In this root when a root-local session exists."
+      ],
+      "source": "New: root-local session",
+      "headerAction": "more",
+      "headerRoute": "host-tools",
+      "status": "connected",
+      "keyflow": ""
+    },
+    {
+      "id": "reorder",
+      "index": 30,
+      "title": "Reorder workspaces",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "order",
+          "names": [
+            "pocketshell",
+            "pocketshell-desktop",
+            "data-engineering-zoomcamp",
+            "ml-experiments"
+          ]
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Done",
+          "route": "workspaces",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Stable placement is a preference, not an activity feed.",
+      "job": "Arrange projects once.",
+      "notes": [
+        "Move controls have 48dp hit targets; native drag handles are an optional enhancement.",
+        "Never silently re-sort this list after a refresh."
+      ],
+      "source": "New: manual order",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "host-offline",
+      "index": 31,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "Offline \u00b7 Saved list",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "alert",
+          "title": "Cannot reach hetzner",
+          "text": "Saved workspaces are shown below. Session status is unavailable.",
+          "tone": "warning",
+          "action": "Reconnect",
+          "route": "workspaces"
+        },
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell",
+          "sessions": [],
+          "route": "workspace",
+          "key": "pocketshell"
+        },
+        {
+          "type": "workspace",
+          "name": "pocketshell-desktop",
+          "sessions": [],
+          "route": "workspace",
+          "key": "pocketshell-desktop"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Unavailable is not the same as empty.",
+      "job": "Keep context during network failure.",
+      "notes": [
+        "Session summaries read Status unavailable, not No sessions.",
+        "Avoid promising that remote processes are still running without checking."
+      ],
+      "source": "Tree: offline",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "host-empty",
+      "index": 32,
+      "title": "hetzner",
+      "group": "02 \u00b7 Workspaces & roots",
+      "subtitle": "Connected",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "search",
+          "placeholder": "Find a workspace",
+          "id": "workspace-search"
+        },
+        {
+          "type": "section",
+          "title": "~/git",
+          "action": "Add",
+          "route": "add-workspace"
+        },
+        {
+          "type": "empty",
+          "title": "No workspaces yet",
+          "text": "Add an existing folder or create a new one inside this root."
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "An empty root still exists and can create work.",
+      "job": "Add a first workspace in a registered root.",
+      "notes": [
+        "Do not remove a root because its session list is empty."
+      ],
+      "source": "Tree: empty root",
+      "headerAction": "more",
+      "headerRoute": "host-tools",
+      "status": "connected",
+      "keyflow": ""
+    },
+    {
+      "id": "new-session",
+      "index": 33,
+      "title": "New session",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "In pocketshell",
+          "tone": "secondary"
+        },
+        {
+          "type": "choice",
+          "title": "Shell",
+          "subtitle": "A plain terminal",
+          "selected": false,
+          "icon": "terminal",
+          "value": "shell",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "Claude Code",
+          "subtitle": "Ready on hetzner",
+          "selected": true,
+          "icon": "hexagon",
+          "value": "claude",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "Codex",
+          "subtitle": "Ready on hetzner",
+          "selected": false,
+          "icon": "code",
+          "value": "codex",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "OpenCode",
+          "subtitle": "Ready on hetzner",
+          "selected": false,
+          "icon": "terminal",
+          "value": "opencode",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "Grok",
+          "subtitle": "Not available",
+          "selected": false,
+          "icon": "zap",
+          "value": "grok",
+          "route": "agent-unavailable"
+        },
+        {
+          "type": "row",
+          "title": "More options",
+          "subtitle": "Name, profile and backend",
+          "route": "session-options",
+          "icon": "sliders",
+          "trailing": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Start Claude Code",
+          "route": "action:start-session",
+          "variant": "primary"
+        }
+      ],
+      "layout": "sheet",
+      "base": "workspace",
+      "description": "Choose a program. No separate Shell-versus-Agent wizard.",
+      "job": "Start another terminal in the current folder.",
+      "notes": [
+        "Program selection and launch are separate; the last valid selection may be remembered.",
+        "Name is derived and collision-safe. Existing sessions never block starting another.",
+        "Agent output remains in the real terminal."
+      ],
+      "source": "CreateSessionSheet",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": "Create work"
+    },
+    {
+      "id": "session-options",
+      "index": 34,
+      "title": "Session options",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "new-session",
+      "blocks": [
+        {
+          "type": "field",
+          "label": "Session name",
+          "value": "Terminal 3",
+          "placeholder": "",
+          "id": "session-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "row",
+          "title": "Profile",
+          "subtitle": "Host default",
+          "route": "toast:Profile picker uses host registry",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Backend",
+          "subtitle": "Host default",
+          "route": "toast:Backend picker: host default, tmux, aplexer",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "These options only affect the session you are about to start.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Apply options",
+          "route": "new-session",
+          "variant": "primary"
+        }
+      ],
+      "layout": "sheet",
+      "base": "workspace",
+      "description": "Advanced choices exist, but not in the everyday path.",
+      "job": "Override launch defaults deliberately.",
+      "notes": [
+        "Display names are not raw command strings.",
+        "Do not expose unsupported engines or backends as working options."
+      ],
+      "source": "CreateSessionSheet: advanced",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "agent-unavailable",
+      "index": 35,
+      "title": "Grok is not available",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "new-session",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "PocketShell could not find a usable Grok installation on hetzner.",
+          "tone": "secondary"
+        },
+        {
+          "type": "button",
+          "label": "Choose another program",
+          "route": "new-session",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Re-check",
+          "route": "toast:Still unavailable in this demo",
+          "variant": "secondary"
+        },
+        {
+          "type": "disclosure",
+          "title": "Technical details",
+          "children": [
+            {
+              "type": "code",
+              "text": "Executable not found in the host PATH.\nHost: hetzner\nEngine: grok"
+            }
+          ]
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "workspace",
+      "description": "A launch failure explains the next step.",
+      "job": "Recover from a missing agent.",
+      "notes": [
+        "Only show an installation command when verified for that host and provider.",
+        "Preflight is authoritative host capability data, not a client guess."
+      ],
+      "source": "CreateSessionSheet: failure",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "terminal",
+      "index": 36,
+      "title": "pocketshell",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 Connected",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "sessionbar",
+          "label": "Terminal",
+          "program": "Claude Code",
+          "count": 2,
+          "route": "session-switch"
+        },
+        {
+          "type": "terminal",
+          "lines": [
+            {
+              "text": "~/git/pocketshell",
+              "style": "muted"
+            },
+            {
+              "text": "$ git status --short",
+              "style": "normal"
+            },
+            {
+              "text": " M app2/ui/WorkspaceScreen.kt",
+              "style": "normal"
+            },
+            {
+              "text": " M shared/ui-kit/Theme.kt",
+              "style": "normal"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ ./gradlew testDebugUnitTest",
+              "style": "normal"
+            },
+            {
+              "text": "> Task :app2:testDebugUnitTest",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "BUILD SUCCESSFUL in 12s",
+              "style": "normal"
+            },
+            {
+              "text": "48 actionable tasks: 6 executed",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ _",
+              "style": "normal"
+            }
+          ]
+        },
+        {
+          "type": "launcher"
+        }
+      ],
+      "footer": [],
+      "layout": "terminal",
+      "base": "workspaces",
+      "description": "A terminal, not a transcript. Input opens over the fixed grid.",
+      "job": "Read output and send input.",
+      "notes": [
+        "Browser terminal is static fixture output, not an emulator.",
+        "In Android reuse the existing TerminalHostView; preserve its grid when IME appears.",
+        "Only the input overlay consumes keyboard insets; do not apply imePadding to the terminal column."
+      ],
+      "source": "Session",
+      "headerAction": "more",
+      "headerRoute": "terminal-actions",
+      "status": "",
+      "keyflow": "Use terminal"
+    },
+    {
+      "id": "session-switch",
+      "index": 37,
+      "title": "Sessions",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Terminal",
+          "subtitle": "Claude Code \u00b7 Running",
+          "route": "terminal",
+          "icon": "hexagon",
+          "trailing": "Current"
+        },
+        {
+          "type": "row",
+          "title": "Terminal 2",
+          "subtitle": "Shell \u00b7 Running",
+          "route": "terminal",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "New session",
+          "subtitle": "",
+          "route": "new-session",
+          "icon": "plus",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "Readable switching instead of squeezing tabs onto a phone.",
+      "job": "Move between terminals in a workspace.",
+      "notes": [
+        "Session labels, not vendor identity alone, disambiguate same-agent sessions.",
+        "A switch preserves each session\u2019s selection and the workspace draft target."
+      ],
+      "source": "New: workspace session switcher",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "terminal-actions",
+      "index": 38,
+      "title": "Terminal",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Sessions in workspace",
+          "subtitle": "",
+          "route": "session-switch",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Browse workspace files",
+          "subtitle": "",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Copy selection",
+          "subtitle": "",
+          "route": "toast:Select terminal text first",
+          "icon": "copy",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Detach and keep running",
+          "subtitle": "",
+          "route": "workspace",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "End session\u2026",
+          "subtitle": "",
+          "route": "end-session",
+          "icon": "stop",
+          "trailing": "",
+          "danger": true
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "Navigation and destructive lifecycle actions are not peers.",
+      "job": "Leave safely or explicitly end a process.",
+      "notes": [
+        "Back and Detach do not send a kill command.",
+        "End session requires confirmation and names the remote target."
+      ],
+      "source": "Session: overflow",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "composer",
+      "index": 39,
+      "title": "pocketshell",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 Connected",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "sessionbar",
+          "label": "Terminal",
+          "program": "Claude Code",
+          "count": 2,
+          "route": "session-switch"
+        },
+        {
+          "type": "terminal",
+          "lines": [
+            {
+              "text": "~/git/pocketshell",
+              "style": "muted"
+            },
+            {
+              "text": "$ git status --short",
+              "style": "normal"
+            },
+            {
+              "text": " M app2/ui/WorkspaceScreen.kt",
+              "style": "normal"
+            },
+            {
+              "text": " M shared/ui-kit/Theme.kt",
+              "style": "normal"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ ./gradlew testDebugUnitTest",
+              "style": "normal"
+            },
+            {
+              "text": "> Task :app2:testDebugUnitTest",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "BUILD SUCCESSFUL in 12s",
+              "style": "normal"
+            }
+          ]
+        },
+        {
+          "type": "composer",
+          "mode": "edit",
+          "draft": "Use the workspace name as the primary label. Keep the session indicators muted."
+        },
+        {
+          "type": "keyboard"
+        }
+      ],
+      "footer": [],
+      "layout": "terminal",
+      "base": "workspaces",
+      "description": "One draft surface; visible terminal context stays above it.",
+      "job": "Write input without losing the output.",
+      "notes": [
+        "The keyboard in the mock is a platform stand-in, not an app component to implement.",
+        "Send writes text then Enter; Paste only writes text. Keep the distinction explicit.",
+        "Every draft is bound to an explicit target session before sending."
+      ],
+      "source": "PromptComposerSheet",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": "Use terminal"
+    },
+    {
+      "id": "composer-tools",
+      "index": 40,
+      "title": "Add to input",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "composer",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Attach file",
+          "subtitle": "Android document picker",
+          "route": "attachment",
+          "icon": "paperclip",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Recent prompts",
+          "subtitle": "",
+          "route": "history",
+          "icon": "history",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Slash commands",
+          "subtitle": "",
+          "route": "commands",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Terminal keys",
+          "subtitle": "",
+          "route": "hotkeys",
+          "icon": "keyboard",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Clear draft",
+          "subtitle": "",
+          "route": "toast:Draft cleared (demo)",
+          "icon": "close",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "One tools menu, no stack of competing pills.",
+      "job": "Add context to a draft.",
+      "notes": [
+        "A submenu replaces this sheet; it does not stack another modal on top.",
+        "Returning preserves text and selection."
+      ],
+      "source": "ComposerBar: tools",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "dictation",
+      "index": 41,
+      "title": "pocketshell",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 Connected",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "sessionbar",
+          "label": "Terminal",
+          "program": "Claude Code",
+          "count": 2,
+          "route": "session-switch"
+        },
+        {
+          "type": "terminal",
+          "lines": [
+            {
+              "text": "~/git/pocketshell",
+              "style": "muted"
+            },
+            {
+              "text": "$ git status --short",
+              "style": "normal"
+            },
+            {
+              "text": " M app2/ui/WorkspaceScreen.kt",
+              "style": "normal"
+            },
+            {
+              "text": " M shared/ui-kit/Theme.kt",
+              "style": "normal"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ ./gradlew testDebugUnitTest",
+              "style": "normal"
+            },
+            {
+              "text": "> Task :app2:testDebugUnitTest",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            }
+          ]
+        },
+        {
+          "type": "composer",
+          "mode": "voice",
+          "draft": "Make the workspace names larger and keep the session indicators quiet."
+        }
+      ],
+      "footer": [],
+      "layout": "terminal",
+      "base": "workspaces",
+      "description": "Recording and sending are separate actions.",
+      "job": "Dictate, review, then send.",
+      "notes": [
+        "Request microphone permission on first use, not on launch.",
+        "Stop produces an editable draft. Never automatically execute a transcript.",
+        "Animation reflects capture state; fake audio levels are not production telemetry."
+      ],
+      "source": "ComposerBar: recording",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "attachment",
+      "index": 42,
+      "title": "pocketshell",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 Connected",
+      "back": "composer",
+      "blocks": [
+        {
+          "type": "sessionbar",
+          "label": "Terminal",
+          "program": "Claude Code",
+          "count": 2,
+          "route": "session-switch"
+        },
+        {
+          "type": "terminal",
+          "lines": [
+            {
+              "text": "~/git/pocketshell",
+              "style": "muted"
+            },
+            {
+              "text": "$ git status --short",
+              "style": "normal"
+            },
+            {
+              "text": " M app2/ui/WorkspaceScreen.kt",
+              "style": "normal"
+            },
+            {
+              "text": " M shared/ui-kit/Theme.kt",
+              "style": "normal"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ ./gradlew testDebugUnitTest",
+              "style": "normal"
+            },
+            {
+              "text": "> Task :app2:testDebugUnitTest",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            }
+          ]
+        },
+        {
+          "type": "composer",
+          "mode": "attachment",
+          "draft": "Use this screenshot as the reference."
+        }
+      ],
+      "footer": [],
+      "layout": "terminal",
+      "base": "workspaces",
+      "description": "Attachment status sits next to the draft, not in another destination.",
+      "job": "Send a file reference with input.",
+      "notes": [
+        "workspace.png is a fixture; no upload occurs here.",
+        "Production displays remote destination and upload/failure state before sending.",
+        "The Android picker is a native external surface; do not redesign it."
+      ],
+      "source": "ComposerBar: attachments",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "history",
+      "index": 43,
+      "title": "Recent prompts",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "composer",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Keep the session icons muted.",
+          "subtitle": "Today",
+          "route": "action:reuse-prompt",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Run the unit tests before committing.",
+          "subtitle": "Yesterday",
+          "route": "action:reuse-prompt",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Explain the reconnect failure.",
+          "subtitle": "Yesterday",
+          "route": "action:reuse-prompt",
+          "icon": "",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "History inserts into the draft; it never executes.",
+      "job": "Reuse input.",
+      "notes": [
+        "Selecting an entry returns to the composer for review.",
+        "History is not a conversation view. It contains only reusable sent input."
+      ],
+      "source": "MessageHistorySheet",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "commands",
+      "index": 44,
+      "title": "Slash commands",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "composer",
+      "blocks": [
+        {
+          "type": "search",
+          "placeholder": "Find a command",
+          "value": "/",
+          "id": "command-search"
+        },
+        {
+          "type": "row",
+          "title": "/help",
+          "subtitle": "Show supported commands",
+          "route": "action:insert-command",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "/compact",
+          "subtitle": "Compact agent context",
+          "route": "action:insert-command",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "/clear",
+          "subtitle": "Start a fresh agent context",
+          "route": "action:insert-command",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "Inserted into your draft. Nothing runs until you send.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "Contextual command insertion, not a second agent UI.",
+      "job": "Find supported input commands.",
+      "notes": [
+        "Example commands are fixtures, not a cross-agent API guarantee.",
+        "Android must use capabilities for the actual selected session; unknown agent means no invented commands."
+      ],
+      "source": "SlashCommandDropdown",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "hotkeys",
+      "index": 45,
+      "title": "Terminal keys",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "keygrid",
+          "keys": [
+            "Esc",
+            "Tab",
+            "Ctrl+C",
+            "Ctrl+D",
+            "Ctrl+Z",
+            "Alt",
+            "Home",
+            "End",
+            "\u2191",
+            "\u2190",
+            "\u2193",
+            "\u2192"
+          ]
+        },
+        {
+          "type": "text",
+          "text": "Keys are sent to the current terminal immediately.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "Large keyboard targets, quiet styling.",
+      "job": "Send special terminal keys.",
+      "notes": [
+        "Actual byte bindings come from the existing terminal key controller.",
+        "Browser buttons are demonstrations and never send remote commands."
+      ],
+      "source": "TerminalHotkeysSheet",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "end-session",
+      "index": 46,
+      "title": "End Terminal?",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "This ends Terminal in pocketshell on hetzner. Anything running in this session stops.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "The workspace and its other sessions remain. There is no undo.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "End session",
+          "route": "session-ended",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep running",
+          "route": "terminal",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "terminal",
+      "description": "Danger is scoped to one named session.",
+      "job": "Stop remote work deliberately.",
+      "notes": [
+        "Do not label this Close or Back.",
+        "Force kill is not an ordinary navigation gesture."
+      ],
+      "source": "Stop-session ConfirmDialog",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "reconnecting",
+      "index": 47,
+      "title": "pocketshell",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 Reconnecting",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "sessionbar",
+          "label": "Terminal",
+          "program": "Claude Code",
+          "count": 2,
+          "route": "session-switch"
+        },
+        {
+          "type": "alert",
+          "title": "Connection lost",
+          "text": "Last output is shown. Reconnecting\u2026",
+          "tone": "warning",
+          "action": "Retry now",
+          "route": "terminal"
+        },
+        {
+          "type": "terminal",
+          "lines": [
+            {
+              "text": "~/git/pocketshell",
+              "style": "muted"
+            },
+            {
+              "text": "$ git status --short",
+              "style": "normal"
+            },
+            {
+              "text": " M app2/ui/WorkspaceScreen.kt",
+              "style": "normal"
+            },
+            {
+              "text": " M shared/ui-kit/Theme.kt",
+              "style": "normal"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ ./gradlew testDebugUnitTest",
+              "style": "normal"
+            },
+            {
+              "text": "> Task :app2:testDebugUnitTest",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "BUILD SUCCESSFUL in 12s",
+              "style": "normal"
+            },
+            {
+              "text": "48 actionable tasks: 6 executed",
+              "style": "muted"
+            },
+            {
+              "text": "",
+              "style": "normal"
+            },
+            {
+              "text": "$ _",
+              "style": "normal"
+            }
+          ]
+        },
+        {
+          "type": "launcher",
+          "disabled": true
+        }
+      ],
+      "footer": [],
+      "layout": "terminal",
+      "base": "workspaces",
+      "description": "Network failure preserves output and drafts.",
+      "job": "Recover the existing session, not start a duplicate.",
+      "notes": [
+        "Disable remote sends, but allow local draft editing.",
+        "Do not claim the process has exited because SSH is unavailable.",
+        "Preserve fixed terminal geometry through the reconnect overlay."
+      ],
+      "source": "Session: Reconnecting",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "session-ended",
+      "index": 48,
+      "title": "Session ended",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "hetzner \u00b7 pocketshell",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Terminal in pocketshell has ended.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "The workspace is still here. Open another session or start a new one.",
+          "tone": "secondary"
+        },
+        {
+          "type": "section",
+          "title": "Other sessions",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Terminal 2",
+          "subtitle": "Shell \u00b7 Running",
+          "route": "terminal",
+          "icon": "terminal",
+          "trailing": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "New session",
+          "route": "new-session",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Back to workspace",
+          "route": "workspace",
+          "variant": "text"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "An ended process cannot be fixed by a generic retry.",
+      "job": "Continue after a session exits.",
+      "notes": [
+        "No active composer when its target no longer exists.",
+        "Only show an exit code when supplied by the host; absence is not zero."
+      ],
+      "source": "Session: ended",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "send-uncertain",
+      "index": 49,
+      "title": "Review before resending",
+      "group": "03 \u00b7 Start & use terminals",
+      "subtitle": "",
+      "back": "terminal",
+      "blocks": [
+        {
+          "type": "alert",
+          "title": "Delivery could not be confirmed",
+          "text": "The connection dropped while input was being sent. It may have reached the terminal. Your draft was kept.",
+          "tone": "warning",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "field",
+          "label": "Draft",
+          "value": "Run the unit tests before committing.",
+          "placeholder": "",
+          "id": "draft",
+          "helper": "",
+          "kind": "multiline"
+        },
+        {
+          "type": "text",
+          "text": "Reconnect and inspect the terminal before sending again.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Reconnect and inspect",
+          "route": "terminal",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "No false delivered claim and no dangerous automatic resend.",
+      "job": "Avoid duplicate command execution.",
+      "notes": [
+        "PTY writes are not equivalent to agent acknowledgement.",
+        "No automatic queued resend after reconnect.",
+        "Keep the draft and distinguish not sent from delivery unknown."
+      ],
+      "source": "Composer: delivery state",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "files",
+      "index": 50,
+      "title": "Files",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "hetzner \u00b7 ~/git",
+      "back": "workspace",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "pocketshell",
+          "action": "Up",
+          "route": "files-parent"
+        },
+        {
+          "type": "search",
+          "placeholder": "Find a file",
+          "id": "files-search"
+        },
+        {
+          "type": "row",
+          "title": "app2",
+          "subtitle": "Folder",
+          "route": "files-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "shared",
+          "subtitle": "Folder",
+          "route": "files-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "docs",
+          "subtitle": "Folder",
+          "route": "files-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "README.md",
+          "subtitle": "8 KB",
+          "route": "markdown",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "build.gradle.kts",
+          "subtitle": "4 KB",
+          "route": "source",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "workspace.png",
+          "subtitle": "128 KB",
+          "route": "image-view",
+          "icon": "image",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The same flat row language, starting at the current workspace.",
+      "job": "Find and inspect a remote file.",
+      "notes": [
+        "Location is shown once, not repeated on every file row.",
+        "Long press or the viewer overflow opens file actions.",
+        "For host-scope entry the start folder is host home, not an unrelated project."
+      ],
+      "source": "Files",
+      "headerAction": "more",
+      "headerRoute": "file-tools",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "files-folder",
+      "index": 51,
+      "title": "Files",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "pocketshell \u00b7 app2",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "app2",
+          "action": "Up",
+          "route": "files"
+        },
+        {
+          "type": "search",
+          "placeholder": "Find a file",
+          "id": "files-search"
+        },
+        {
+          "type": "row",
+          "title": "src",
+          "subtitle": "Folder",
+          "route": "files-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "build.gradle.kts",
+          "subtitle": "4 KB",
+          "route": "source",
+          "icon": "file",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A deeper directory keeps the file-browser navigation model.",
+      "job": "Browse into a workspace folder.",
+      "notes": [
+        "Back and Up return to the parent directory without switching to a folder-selection flow.",
+        "Remember each directory\u2019s scroll position."
+      ],
+      "source": "Files: directory state",
+      "headerAction": "more",
+      "headerRoute": "file-tools",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "files-parent",
+      "index": 52,
+      "title": "Files",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "hetzner",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "search",
+          "placeholder": "Find a file",
+          "id": "files-search"
+        },
+        {
+          "type": "row",
+          "title": "pocketshell",
+          "subtitle": "Folder",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "pocketshell-desktop",
+          "subtitle": "Folder",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "experiments",
+          "subtitle": "Folder",
+          "route": "files",
+          "icon": "folder",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The parent location remains in the file browser.",
+      "job": "Move up without entering workspace selection.",
+      "notes": [
+        "Up changes only the remote file-browser path. It does not open Add workspace.",
+        "The full current path is useful here because the user is navigating the filesystem."
+      ],
+      "source": "Files: directory state",
+      "headerAction": "more",
+      "headerRoute": "file-tools",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "file-tools",
+      "index": 53,
+      "title": "Files",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Upload files",
+          "subtitle": "Android document picker",
+          "route": "transfers",
+          "icon": "upload",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Create folder",
+          "subtitle": "",
+          "route": "create-file-folder",
+          "icon": "folder",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "New text file",
+          "subtitle": "",
+          "route": "editor",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Transfers",
+          "subtitle": "",
+          "route": "transfers",
+          "icon": "ports",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Sort by name",
+          "subtitle": "",
+          "route": "toast:Sorted by name",
+          "icon": "sliders",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Show hidden files",
+          "subtitle": "",
+          "route": "toast:Hidden files shown (demo)",
+          "icon": "eye",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "files",
+      "description": "File actions do not become six header buttons.",
+      "job": "Manage file operations.",
+      "notes": [
+        "Keep native picker appearance owned by Android.",
+        "Creating a folder here creates in the current file-browser location; it need not pin a workspace."
+      ],
+      "source": "Files: overflow",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "create-file-folder",
+      "index": 54,
+      "title": "Create folder",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "location",
+          "path": "~/git/pocketshell"
+        },
+        {
+          "type": "field",
+          "label": "Folder name",
+          "value": "notes",
+          "placeholder": "",
+          "id": "file-folder-name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "text",
+          "text": "Creates ~/git/pocketshell/notes on hetzner.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Create folder",
+          "route": "action:create-file-folder",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Cancel",
+          "route": "back",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "files",
+      "description": "Folder creation is not workspace registration.",
+      "job": "Create a remote directory while browsing files.",
+      "notes": [
+        "Create a directory only; do not add a workspace or launch a terminal.",
+        "Name and parent remain intact on a permission or connection failure."
+      ],
+      "source": "Files: create folder",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "file-actions",
+      "index": 55,
+      "title": "README.md",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Preview",
+          "subtitle": "",
+          "route": "markdown",
+          "icon": "eye",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Edit",
+          "subtitle": "",
+          "route": "editor",
+          "icon": "edit",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Download",
+          "subtitle": "",
+          "route": "transfers",
+          "icon": "download",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Copy path",
+          "subtitle": "",
+          "route": "toast:File path copied (demo)",
+          "icon": "copy",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Rename",
+          "subtitle": "",
+          "route": "rename-file",
+          "icon": "edit",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Delete\u2026",
+          "subtitle": "",
+          "route": "delete-file",
+          "icon": "trash",
+          "trailing": "",
+          "danger": true
+        }
+      ],
+      "footer": [],
+      "layout": "sheet",
+      "base": "files",
+      "description": "Save is not an ambiguous substitute for Download.",
+      "job": "Act on a selected file.",
+      "notes": [
+        "Edit saves back to the remote host; Download copies to the phone.",
+        "Hide unsupported actions for binary files."
+      ],
+      "source": "Files / FileViewer: actions",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "markdown",
+      "index": 56,
+      "title": "README.md",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "pocketshell",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "tabs",
+          "items": [
+            {
+              "label": "Preview",
+              "route": "markdown",
+              "active": true
+            },
+            {
+              "label": "Source",
+              "route": "source",
+              "active": false
+            }
+          ]
+        },
+        {
+          "type": "document",
+          "title": "PocketShell",
+          "paragraphs": [
+            "Keep working on your development machine from your phone.",
+            "Workspaces organize folders. Each workspace can hold multiple terminals."
+          ],
+          "heading": "Getting started",
+          "code": "pocketshell sessions list",
+          "after": "Open a workspace, then choose a terminal. Your work lives on the host."
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Document content is readable without adding card layers.",
+      "job": "Read formatted text.",
+      "notes": [
+        "Document typography is content, distinct from app chrome.",
+        "Tables scroll within the document; they must not widen the entire screen."
+      ],
+      "source": "FileViewer: markdown",
+      "headerAction": "more",
+      "headerRoute": "file-actions",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "source",
+      "index": 57,
+      "title": "README.md",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "pocketshell",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "tabs",
+          "items": [
+            {
+              "label": "Preview",
+              "route": "markdown",
+              "active": false
+            },
+            {
+              "label": "Source",
+              "route": "source",
+              "active": true
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "text": "# PocketShell\n\nKeep working from your phone.\n\n## Getting started\n\npocketshell sessions list\n\n- Open a workspace\n- Choose a terminal\n- Continue your work"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Edit file",
+          "route": "editor",
+          "variant": "secondary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Source is a file mode, never a session mode.",
+      "job": "Inspect raw file content.",
+      "notes": [
+        "No Terminal/Conversation tabs anywhere. These tabs are strictly file Preview/Source."
+      ],
+      "source": "FileViewer: source",
+      "headerAction": "more",
+      "headerRoute": "file-actions",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "editor",
+      "index": 58,
+      "title": "Edit README.md",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "pocketshell",
+      "back": "unsaved",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Unsaved changes",
+          "tone": "secondary"
+        },
+        {
+          "type": "field",
+          "label": "Contents",
+          "value": "# PocketShell\n\nWorkspaces first.\nTerminals stay terminals.\n\n## Usage\nOpen your workspace and start a session.",
+          "placeholder": "",
+          "id": "file-contents",
+          "helper": "",
+          "kind": "editor"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Save to host",
+          "route": "markdown",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Editing is an explicit mode with a clear remote save.",
+      "job": "Update a file on hetzner.",
+      "notes": [
+        "Back with a dirty buffer asks before discarding.",
+        "Production saves compare remote modification metadata and surface conflicts."
+      ],
+      "source": "FileViewer: edit",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "unsaved",
+      "index": 59,
+      "title": "Keep your changes?",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "editor",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "README.md has unsaved edits. Leaving now will not update the file on hetzner.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Save to host",
+          "route": "markdown",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Discard edits",
+          "route": "files",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep editing",
+          "route": "editor",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "editor",
+      "description": "Local edits are not silently thrown away.",
+      "job": "Leave an editor safely.",
+      "notes": [
+        "Saving failures leave the buffer open and unchanged."
+      ],
+      "source": "FileViewer: dirty buffer",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "image-view",
+      "index": 60,
+      "title": "workspace.png",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "pocketshell",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "imagepreview"
+        },
+        {
+          "type": "text",
+          "text": "Pinch to zoom \u00b7 Double tap to fit",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The image owns the viewport.",
+      "job": "Inspect a remote image.",
+      "notes": [
+        "No disabled Edit button.",
+        "Browser demo supports zoom with a tap; Android uses native gesture handling."
+      ],
+      "source": "FileViewer: image",
+      "headerAction": "more",
+      "headerRoute": "file-actions",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "rename-file",
+      "index": 61,
+      "title": "Rename file",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "field",
+          "label": "File name",
+          "value": "README.md",
+          "placeholder": "",
+          "id": "rename-file",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "text",
+          "text": "In ~/git/pocketshell",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Rename",
+          "route": "files",
+          "variant": "primary"
+        }
+      ],
+      "layout": "sheet",
+      "base": "files",
+      "description": "A small form uses the same field and action rules.",
+      "job": "Change a remote filename.",
+      "notes": [
+        "Existing path conflicts and lost connections keep this field intact."
+      ],
+      "source": "Files: rename",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "delete-file",
+      "index": 62,
+      "title": "Delete README.md?",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "This permanently deletes the file from ~/git/pocketshell on hetzner.",
+          "tone": "secondary"
+        },
+        {
+          "type": "text",
+          "text": "This is not a download removal. There is no undo.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Delete file",
+          "route": "files",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep file",
+          "route": "files",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "files",
+      "description": "The host and directory remove scope ambiguity.",
+      "job": "Delete a remote file deliberately.",
+      "notes": [
+        "Only show this for a selected file, not an entire workspace by accident."
+      ],
+      "source": "Files: delete",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "file-conflict",
+      "index": 63,
+      "title": "File changed on host",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "",
+      "back": "editor",
+      "blocks": [
+        {
+          "type": "alert",
+          "title": "README.md has newer changes",
+          "text": "Your edits have not overwritten the remote file.",
+          "tone": "warning",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "button",
+          "label": "Save as a copy",
+          "route": "rename-file",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Reload remote version",
+          "route": "markdown",
+          "variant": "secondary"
+        },
+        {
+          "type": "button",
+          "label": "Keep editing",
+          "route": "editor",
+          "variant": "text"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Preserve both versions by default.",
+      "job": "Avoid overwriting concurrent changes.",
+      "notes": [
+        "A force overwrite, if offered in production, needs a separate explicit confirmation."
+      ],
+      "source": "New: file conflict",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "transfers",
+      "index": 64,
+      "title": "Transfers",
+      "group": "04 \u00b7 Files & transfers",
+      "subtitle": "hetzner",
+      "back": "files",
+      "blocks": [
+        {
+          "type": "section",
+          "title": "In progress",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "transfer",
+          "title": "workspace.png",
+          "text": "Uploading to pocketshell",
+          "percent": 65
+        },
+        {
+          "type": "section",
+          "title": "Completed",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "README.md",
+          "subtitle": "Downloaded to this device",
+          "route": "toast:Open with Android file viewer",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "All values on this screen are sample data.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Progress means measured bytes, not an animated guess.",
+      "job": "Understand upload/download state.",
+      "notes": [
+        "Unknown duration uses an indeterminate indicator.",
+        "Failed transfers retain Retry and show source/destination."
+      ],
+      "source": "Files: transfer states",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "services",
+      "index": 65,
+      "title": "Services & tunnels",
+      "group": "05 \u00b7 Services & usage",
+      "subtitle": "hetzner",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "toggle",
+          "title": "Discover services",
+          "value": false,
+          "subtitle": "Look for listening ports on this host."
+        },
+        {
+          "type": "empty",
+          "icon": "ports",
+          "title": "No active tunnels",
+          "text": "Turn on discovery or add a tunnel manually."
+        },
+        {
+          "type": "row",
+          "title": "Show discovered services",
+          "subtitle": "Preview example listeners",
+          "route": "services-active",
+          "icon": "search",
+          "trailing": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Add tunnel",
+          "route": "add-tunnel",
+          "variant": "secondary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Discovery and a running tunnel are separate states.",
+      "job": "Choose how to expose a remote service locally.",
+      "notes": [
+        "Show discovered services is a prototype-only example control.",
+        "Forwarding remains host-scoped and may outlive a terminal."
+      ],
+      "source": "Ports: discovery off",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "services-active",
+      "index": 66,
+      "title": "Services & tunnels",
+      "group": "05 \u00b7 Services & usage",
+      "subtitle": "hetzner",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "toggle",
+          "title": "Discover services",
+          "value": true,
+          "subtitle": ""
+        },
+        {
+          "type": "section",
+          "title": "Active tunnels",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Development server",
+          "subtitle": "localhost:5173",
+          "route": "tunnel-detail",
+          "icon": "ports",
+          "trailing": "Open"
+        },
+        {
+          "type": "section",
+          "title": "Available on hetzner",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Port 8000",
+          "subtitle": "Python \u00b7 Not forwarded",
+          "route": "add-tunnel",
+          "icon": "ports",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Port 3000",
+          "subtitle": "Node \u00b7 Not forwarded",
+          "route": "add-tunnel",
+          "icon": "ports",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Available versus active is visible without a port table.",
+      "job": "Forward a service and open its local address.",
+      "notes": [
+        "Open is only offered for a verified HTTP(S) service.",
+        "No localhost address is opened by this prototype."
+      ],
+      "source": "Ports: discovery on",
+      "headerAction": "plus",
+      "headerRoute": "add-tunnel",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "tunnel-detail",
+      "index": 67,
+      "title": "Development server",
+      "group": "05 \u00b7 Services & usage",
+      "subtitle": "hetzner",
+      "back": "services-active",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Remote",
+          "subtitle": "127.0.0.1:5173",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "On this phone",
+          "subtitle": "127.0.0.1:5173",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "State",
+          "subtitle": "Forwarding",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "button",
+          "label": "Open in browser",
+          "route": "toast:Demo only: would open http://127.0.0.1:5173",
+          "variant": "primary"
+        },
+        {
+          "type": "button",
+          "label": "Copy local address",
+          "route": "toast:Local address copied (demo)",
+          "variant": "secondary"
+        },
+        {
+          "type": "row",
+          "title": "Stop tunnel",
+          "subtitle": "",
+          "route": "services",
+          "icon": "stop",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Addresses and exposure are inspectable before use.",
+      "job": "Use or stop one active tunnel.",
+      "notes": [
+        "A real tunnel\u2019s lifecycle is controlled by the foreground service.",
+        "Stopping a tunnel does not end its associated shell or agent."
+      ],
+      "source": "Ports: details",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "add-tunnel",
+      "index": 68,
+      "title": "Add tunnel",
+      "group": "05 \u00b7 Services & usage",
+      "subtitle": "",
+      "back": "services-active",
+      "blocks": [
+        {
+          "type": "field",
+          "label": "Name",
+          "value": "Development server",
+          "placeholder": "",
+          "id": "name",
+          "helper": "",
+          "kind": "text"
+        },
+        {
+          "type": "field",
+          "label": "Remote port",
+          "value": "8000",
+          "placeholder": "",
+          "id": "remote-port",
+          "helper": "",
+          "kind": "number"
+        },
+        {
+          "type": "field",
+          "label": "Local port",
+          "value": "8000",
+          "placeholder": "",
+          "id": "local-port",
+          "helper": "",
+          "kind": "number"
+        },
+        {
+          "type": "text",
+          "text": "Local connections only: 127.0.0.1",
+          "tone": "secondary"
+        },
+        {
+          "type": "disclosure",
+          "title": "More options",
+          "children": [
+            {
+              "type": "field",
+              "label": "Remote address",
+              "value": "127.0.0.1",
+              "placeholder": "",
+              "id": "remote-address",
+              "helper": "",
+              "kind": "text"
+            },
+            {
+              "type": "text",
+              "text": "Changing the local bind address can expose this service to other devices.",
+              "tone": "secondary"
+            }
+          ]
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Start tunnel",
+          "route": "services-active",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Safe defaults without hiding the mapping.",
+      "job": "Create a local port forward.",
+      "notes": [
+        "Validate ranges and local port collisions.",
+        "Non-loopback binds require explicit exposure confirmation."
+      ],
+      "source": "Ports: add",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "usage",
+      "index": 69,
+      "title": "Usage",
+      "group": "05 \u00b7 Services & usage",
+      "subtitle": "hetzner",
+      "back": "workspaces",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Last checked just now \u00b7 Example readings",
+          "tone": "secondary"
+        },
+        {
+          "type": "quota",
+          "title": "Claude Code",
+          "percent": 42,
+          "detail": "42% used \u00b7 Resets in 3h 20m",
+          "icon": "hexagon"
+        },
+        {
+          "type": "quota",
+          "title": "Codex",
+          "percent": 18,
+          "detail": "18% used \u00b7 Resets in 4h 10m",
+          "icon": "code"
+        },
+        {
+          "type": "row",
+          "title": "OpenCode",
+          "subtitle": "No reading available",
+          "route": "toast:Provider did not supply usage",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Grok",
+          "subtitle": "No reading available",
+          "route": "toast:Provider did not supply usage",
+          "icon": "zap",
+          "trailing": ""
+        },
+        {
+          "type": "disclosure",
+          "title": "Display options",
+          "children": [
+            {
+              "type": "text",
+              "text": "Warn when a quota is near its limit.",
+              "tone": "secondary"
+            },
+            {
+              "type": "slider",
+              "title": "Warn at",
+              "value": 80,
+              "min": 50,
+              "max": 95,
+              "unit": "%"
+            }
+          ]
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Quota gets a destination, not duplicate header chrome.",
+      "job": "Check remaining provider capacity.",
+      "notes": [
+        "Sample percentages and reset times are illustrative, not live account data.",
+        "Unknown reading is never rendered as zero usage.",
+        "Provider credentials remain on the host; no credential entry on this screen."
+      ],
+      "source": "Usage",
+      "headerAction": "refresh",
+      "headerRoute": "toast:Example readings refreshed",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "settings",
+      "index": 70,
+      "title": "Settings",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "hosts",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Terminal",
+          "subtitle": "Text and input",
+          "route": "terminal-settings",
+          "icon": "terminal",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Voice",
+          "subtitle": "Language and dictation",
+          "route": "voice-settings",
+          "icon": "mic",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Connections",
+          "subtitle": "App switching and recovery",
+          "route": "connection-settings",
+          "icon": "server",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Advanced",
+          "subtitle": "Timing and compatibility",
+          "route": "advanced-settings",
+          "icon": "sliders",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Diagnostics",
+          "subtitle": "Local reports",
+          "route": "diagnostics",
+          "icon": "info",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "About",
+          "subtitle": "Build and updates",
+          "route": "about",
+          "icon": "",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A short index, not six expanded configuration panels.",
+      "job": "Find a preference.",
+      "notes": [
+        "Root management stays with the host; it is not renamed Pinned projects.",
+        "No theme selector or density carousel until there is a real product need."
+      ],
+      "source": "Settings",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "terminal-settings",
+      "index": 71,
+      "title": "Terminal",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "section",
+          "title": "Reading",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "slider",
+          "title": "Terminal text size",
+          "value": 16,
+          "min": 12,
+          "max": 24,
+          "unit": "sp"
+        },
+        {
+          "type": "code",
+          "text": "$ git status\nOn branch main\nWorking tree clean"
+        },
+        {
+          "type": "text",
+          "text": "App text follows your Android font-size setting.",
+          "tone": "secondary"
+        },
+        {
+          "type": "section",
+          "title": "Input",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "toggle",
+          "title": "Show common keys",
+          "value": true,
+          "subtitle": "Esc, Tab, Ctrl and arrows when typing."
+        },
+        {
+          "type": "text",
+          "text": "The keyboard overlays the terminal without resizing its grid.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A live reading sample instead of a raw pixel setting.",
+      "job": "Make terminal output comfortable to read.",
+      "notes": [
+        "The emulator may require px: convert user-facing sp to pixels through current density.",
+        "Changing app typography must not silently alter remote PTY columns."
+      ],
+      "source": "Settings: terminal",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "voice-settings",
+      "index": 72,
+      "title": "Voice",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Language",
+          "subtitle": "English",
+          "route": "language",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Review before sending",
+          "subtitle": "Dictation always stops into an editable draft.",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Speech recognition",
+          "subtitle": "System recognizer",
+          "route": "toast:Uses configured speech provider",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "PocketShell asks for microphone access when you start dictating.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Everyday voice choices; technical silence windows stay elsewhere.",
+      "job": "Configure dictation.",
+      "notes": [
+        "Review before sending is a safety policy in this design, not an invitation to auto-run shell commands.",
+        "Reuse existing voice providers; no new provider credentials model is implied."
+      ],
+      "source": "Settings: voice",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "language",
+      "index": 73,
+      "title": "Dictation language",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "voice-settings",
+      "blocks": [
+        {
+          "type": "choice",
+          "title": "Automatic",
+          "subtitle": "Use device language",
+          "selected": false,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "English",
+          "subtitle": "",
+          "selected": true,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "German",
+          "subtitle": "",
+          "selected": false,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "Russian",
+          "subtitle": "",
+          "selected": false,
+          "icon": "",
+          "value": "",
+          "route": ""
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Done",
+          "route": "voice-settings",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "A focused, accessible list instead of inline radio clutter.",
+      "job": "Choose a language.",
+      "notes": [
+        "Language choices must come from the supported recognizer configuration."
+      ],
+      "source": "Settings: voice language",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "connection-settings",
+      "index": 74,
+      "title": "Connections",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Keep connection after leaving",
+          "subtitle": "30 seconds",
+          "route": "grace",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "This controls the phone\u2019s connection. Remote sessions are not deliberately ended when the app leaves the foreground.",
+          "tone": "secondary"
+        },
+        {
+          "type": "toggle",
+          "title": "Reconnect when I return",
+          "value": true,
+          "subtitle": ""
+        },
+        {
+          "type": "row",
+          "title": "Manage saved hosts",
+          "subtitle": "",
+          "route": "hosts",
+          "icon": "server",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Transport lifetime is not process lifetime.",
+      "job": "Tune mobile app switching behavior.",
+      "notes": [
+        "Do not promise indefinite background connectivity on Android.",
+        "Active tunnels use their existing foreground-service policy."
+      ],
+      "source": "Settings: background grace",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "grace",
+      "index": 75,
+      "title": "Keep connection",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "connection-settings",
+      "blocks": [
+        {
+          "type": "choice",
+          "title": "Disconnect immediately",
+          "subtitle": "",
+          "selected": false,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "30 seconds",
+          "subtitle": "Good for switching apps",
+          "selected": true,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "choice",
+          "title": "2 minutes",
+          "subtitle": "More time between app switches",
+          "selected": false,
+          "icon": "",
+          "value": "",
+          "route": ""
+        },
+        {
+          "type": "text",
+          "text": "Your remote sessions are not ended by this setting.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Done",
+          "route": "connection-settings",
+          "variant": "primary"
+        }
+      ],
+      "layout": "sheet",
+      "base": "connection-settings",
+      "description": "A understandable duration picker.",
+      "job": "Choose a connection grace period.",
+      "notes": [
+        "Available durations are a design fixture; reconcile with existing supported values during implementation."
+      ],
+      "source": "Settings: grace picker",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "advanced-settings",
+      "index": 76,
+      "title": "Advanced",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "slider",
+          "title": "Enter-key delay",
+          "value": 300,
+          "min": 0,
+          "max": 1000,
+          "unit": "ms"
+        },
+        {
+          "type": "text",
+          "text": "Pause after pasted input before sending Enter. Change only if input is left unsubmitted.",
+          "tone": "secondary"
+        },
+        {
+          "type": "slider",
+          "title": "Silence window",
+          "value": 3,
+          "min": 1,
+          "max": 10,
+          "unit": "s"
+        },
+        {
+          "type": "text",
+          "text": "Speech-recognizer pause handling. Recording still ends when you tap Stop.",
+          "tone": "secondary"
+        },
+        {
+          "type": "button",
+          "label": "Reset advanced defaults",
+          "route": "toast:Defaults restored (demo)",
+          "variant": "secondary"
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Failure-recovery knobs leave the main path.",
+      "job": "Adjust compatibility settings deliberately.",
+      "notes": [
+        "Host-specific versus global storage must match existing ownership.",
+        "Do not ship a control whose value is not read by the runtime."
+      ],
+      "source": "Settings: advanced",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "diagnostics",
+      "index": 77,
+      "title": "Diagnostics",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Latest report",
+          "subtitle": "Today \u00b7 Connection lost",
+          "route": "report",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Earlier report",
+          "subtitle": "Yesterday \u00b7 Agent launch",
+          "route": "report",
+          "icon": "file",
+          "trailing": ""
+        },
+        {
+          "type": "section",
+          "title": "Sharing",
+          "action": "",
+          "route": ""
+        },
+        {
+          "type": "row",
+          "title": "Export latest report",
+          "subtitle": "Review before sharing",
+          "route": "report",
+          "icon": "upload",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Clear local reports\u2026",
+          "subtitle": "",
+          "route": "clear-reports",
+          "icon": "trash",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Understand and review before exporting.",
+      "job": "Find useful evidence after a failure.",
+      "notes": [
+        "Never silently send reports.",
+        "Redact sensitive fields by default and let the user inspect export contents."
+      ],
+      "source": "CrashReports",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "report",
+      "index": 78,
+      "title": "Connection report",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "diagnostics",
+      "blocks": [
+        {
+          "type": "row",
+          "title": "Time",
+          "subtitle": "Today, 09:28",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Screen",
+          "subtitle": "Terminal",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Summary",
+          "subtitle": "SSH connection interrupted",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "disclosure",
+          "title": "Technical details",
+          "children": [
+            {
+              "type": "code",
+              "text": "ConnectionClosed\nSession: git-pocketshell\nHost alias: hetzner\nTransport: disconnected"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "Review before sharing. Reports may contain hostnames, paths or terminal excerpts.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Share report",
+          "route": "toast:Would open Android Sharesheet",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Plain-language summary with optional trace.",
+      "job": "Inspect and share a support report.",
+      "notes": [
+        "Report text is a synthetic fixture, not an extracted crash.",
+        "Android Sharesheet remains system-owned."
+      ],
+      "source": "CrashReports: detail",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "clear-reports",
+      "index": 79,
+      "title": "Clear local reports?",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "diagnostics",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "This removes saved diagnostic reports from this device. Your hosts, keys and remote sessions are unchanged.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Clear reports",
+          "route": "diagnostics",
+          "variant": "danger"
+        },
+        {
+          "type": "button",
+          "label": "Keep reports",
+          "route": "diagnostics",
+          "variant": "text"
+        }
+      ],
+      "layout": "sheet",
+      "base": "diagnostics",
+      "description": "A consistent destructive-action pattern.",
+      "job": "Remove local diagnostics.",
+      "notes": [
+        "The action does not delete server-side logs."
+      ],
+      "source": "CrashReports: clear",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "about",
+      "index": 80,
+      "title": "About PocketShell",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "settings",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Workspaces first. Terminals stay terminals.",
+          "tone": "secondary"
+        },
+        {
+          "type": "row",
+          "title": "Installed version",
+          "subtitle": "Shown from this build at runtime",
+          "route": "",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Check for updates",
+          "subtitle": "",
+          "route": "update",
+          "icon": "refresh",
+          "trailing": ""
+        },
+        {
+          "type": "row",
+          "title": "Open-source licenses",
+          "subtitle": "",
+          "route": "toast:Open licenses in the Android implementation",
+          "icon": "file",
+          "trailing": ""
+        }
+      ],
+      "footer": [],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "Build identity without outdated fixture version claims.",
+      "job": "Check the installed build.",
+      "notes": [
+        "Use PackageManager for version. Never hard-code a release version from this mock.",
+        "The design-system version is not the app version."
+      ],
+      "source": "Settings: About",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    },
+    {
+      "id": "update",
+      "index": 81,
+      "title": "Update available",
+      "group": "06 \u00b7 Settings & support",
+      "subtitle": "",
+      "back": "about",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "A newer PocketShell build is available.",
+          "tone": "secondary"
+        },
+        {
+          "type": "row",
+          "title": "Release notes",
+          "subtitle": "Review changes before updating",
+          "route": "toast:Would open release notes",
+          "icon": "",
+          "trailing": ""
+        },
+        {
+          "type": "text",
+          "text": "Keep the app and host helper on compatible versions.",
+          "tone": "secondary"
+        }
+      ],
+      "footer": [
+        {
+          "type": "button",
+          "label": "Open release",
+          "route": "toast:Would open the verified GitHub release",
+          "variant": "primary"
+        }
+      ],
+      "layout": "page",
+      "base": "workspaces",
+      "description": "The update path is separate from ordinary workspace use.",
+      "job": "Review a new release.",
+      "notes": [
+        "Only show this state after the release checker returns verified release metadata.",
+        "No network lookup runs from this offline prototype."
+      ],
+      "source": "Settings: update",
+      "headerAction": "",
+      "headerRoute": "",
+      "status": "",
+      "keyflow": ""
+    }
+  ]
+}

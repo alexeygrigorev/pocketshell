@@ -14,6 +14,7 @@ import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.nav.Destination
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -814,7 +815,187 @@ class SessionTreeViewModelTest {
         )
     }
 
+    // --- post-mutation refresh must win (issue #2553 gap 2) ---------------
+
+    @Test
+    fun `a Stop confirmed during an in-flight listing still drops the row`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            val listing = GatedListing()
+            answerGatedListAndKill(listing)
+            val viewModel = viewModel(hostId)
+
+            // 1. A first, ungated listing so the tree is `loaded` and painted.
+            viewModel.refresh()
+            advanceUntilIdle()
+            assertTrue(
+                "precondition: claude-main is on the tree",
+                rowNames(viewModel).contains("claude-main"),
+            )
+
+            // 2. A second listing (an ON_START / pull refresh) that PARKS on
+            //    the host, having already taken its pre-kill snapshot.
+            listing.gateCallNumber = 2
+            viewModel.refresh()
+            advanceUntilIdle()
+            assertTrue("the second listing must be parked", listing.isParked)
+
+            // 3. The user confirms Stop WHILE that listing is in flight. The
+            //    kill reaches the host and succeeds.
+            viewModel.requestStopSession("claude-main")
+            viewModel.confirmStopSession()
+            advanceUntilIdle()
+            assertEquals(
+                "pocketshell sessions kill -- 'claude-main'",
+                connection().executedCommands.single { "kill" in it },
+            )
+
+            // 4. Only now does the parked listing answer — with its PRE-kill
+            //    payload, which still contains the session that was just
+            //    killed. Before #2553 the post-kill refresh was swallowed by
+            //    `refresh()`'s in-flight guard, so this stale answer was the
+            //    LAST word and the dead session stayed on screen and tappable.
+            listing.release()
+            advanceUntilIdle()
+
+            assertFalse(
+                "a successful Stop must not leave the killed session on the " +
+                    "tree just because a listing was in flight when it landed",
+                rowNames(viewModel).contains("claude-main"),
+            )
+            assertEquals(
+                "the post-kill refresh must actually reach the host",
+                3,
+                listing.listCalls,
+            )
+            assertNull(viewModel.state.value.failure)
+            assertFalse(
+                "the tree must settle, not stay stuck on a spinner",
+                viewModel.state.value.refreshing,
+            )
+        }
+
+    @Test
+    fun `a create finishing during an in-flight listing still shows the new session`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            val listing = GatedListing(
+                before = LISTING_WITHOUT_CLAUDE,
+                after = HEALTHY_LISTING,
+                mutationPrefix = "pocketshell sessions create",
+                mutationStdout = """{"schema": 2, "name": "claude-main", "manager": "tmux", "id": null, "created": true}""",
+            )
+            answerGatedListAndKill(listing)
+            val viewModel = viewModel(hostId)
+
+            viewModel.refresh()
+            advanceUntilIdle()
+            assertFalse(rowNames(viewModel).contains("claude-main"))
+
+            listing.gateCallNumber = 2
+            viewModel.refresh()
+            advanceUntilIdle()
+            assertTrue(listing.isParked)
+
+            viewModel.createSession(CreateSessionRequest(name = "claude-main", cwd = null))
+            advanceUntilIdle()
+            listing.release()
+            advanceUntilIdle()
+
+            assertTrue(
+                "a create is a mutation too: its refresh must outlive a stale " +
+                    "listing that was already in flight",
+                rowNames(viewModel).contains("claude-main"),
+            )
+        }
+
+    @Test
+    fun `an ordinary refresh during an in-flight listing is still collapsed`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            val listing = GatedListing()
+            answerGatedListAndKill(listing)
+            val viewModel = viewModel(hostId)
+
+            listing.gateCallNumber = 1
+            viewModel.refresh()
+            advanceUntilIdle()
+            assertTrue(listing.isParked)
+
+            // Pull-to-refresh, twice, while the first read is parked.
+            viewModel.refresh()
+            viewModel.refresh()
+            advanceUntilIdle()
+            listing.release()
+            advanceUntilIdle()
+
+            assertEquals(
+                "the ordinary de-duplication is deliberate and must stay: " +
+                    "only a MUTATION's refresh overrides it (#2553 non-goal)",
+                1,
+                listing.listCalls,
+            )
+        }
+
     // --- helpers ----------------------------------------------------------
+
+    private fun rowNames(viewModel: SessionTreeViewModel): List<String> =
+        viewModel.state.value.roots.flatMap { it.folders }.flatMap { it.rows }.map { it.name }
+
+    /**
+     * A scripted listing whose Nth answer PARKS until the test releases it.
+     *
+     * The park is a [CompletableDeferred], not a delay: the whole race is
+     * driven by explicit, virtual-time-free hand-offs, so the test is
+     * deterministic rather than a timing band that happens to pass.
+     *
+     * The payload is chosen BEFORE the park, which is the point — a real host
+     * that answered `sessions list` before the kill landed sends PRE-kill
+     * bytes, however late they arrive. Deciding it after the park would make
+     * the test pass against the unfixed ViewModel.
+     */
+    private class GatedListing(
+        val before: String = HEALTHY_LISTING,
+        val after: String = LISTING_WITHOUT_CLAUDE,
+        val mutationPrefix: String = "pocketshell sessions kill",
+        val mutationStdout: String = "",
+    ) {
+        /** Which `sessions list` call parks; 0 (default) parks none. */
+        var gateCallNumber: Int = 0
+        var listCalls: Int = 0
+            private set
+
+        private var mutated = false
+        private var gate: CompletableDeferred<Unit>? = null
+
+        val isParked: Boolean get() = gate?.isActive == true
+
+        fun release() {
+            gate?.complete(Unit)
+        }
+
+        suspend fun answer(command: String): ExecResult {
+            if (command.startsWith(mutationPrefix)) {
+                mutated = true
+                return ExecResult(0, mutationStdout, "", false)
+            }
+            listCalls += 1
+            val payload = if (mutated) after else before
+            if (listCalls == gateCallNumber) {
+                CompletableDeferred<Unit>().also { gate = it }.await()
+            }
+            return ExecResult(0, payload, "", false)
+        }
+    }
+
+    private fun answerGatedListAndKill(listing: GatedListing) {
+        stack.factory.script = { connection ->
+            connection.onExecMatching("gated list + mutation", once = false, { true }) { command ->
+                listing.answer(command)
+            }
+        }
+    }
+
 
     private fun viewModel(hostId: Long) = SessionTreeViewModel(
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),

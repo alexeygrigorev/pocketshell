@@ -163,6 +163,13 @@ data class CreateSessionState(
  * collapse: a refresh arriving while one is in flight is dropped rather than
  * queued, so a user who pulls during the `ON_START` load gets one listing, not
  * two, and cannot stack execs on the connection.
+ *
+ * The ONE exception is a refresh that follows a mutation this screen just made
+ * — a create, a stop, and any future one. That listing carries information the
+ * in-flight read cannot have (it was snapshotted on the host before the
+ * mutation landed), so it is queued instead of dropped; see
+ * `refreshAfterMutation` for the mechanism and issue #2553 for the bug that
+ * dropping it caused.
  */
 @HiltViewModel
 class SessionTreeViewModel @Inject constructor(
@@ -185,18 +192,83 @@ class SessionTreeViewModel @Inject constructor(
     private var stopInFlight: Job? = null
 
     /**
+     * Set when a mutation finished while [inFlight] was still reading, and
+     * cleared by the read loop that honours it. See [refreshAfterMutation].
+     *
+     * A plain `var` is enough because every writer and reader runs on the
+     * ViewModel's confined dispatcher (`Dispatchers.Main.immediate` in
+     * production, one test dispatcher under `runTest`): a mutation coroutine
+     * can only observe/set it at a point where the read loop is suspended, so
+     * there is no window between the loop's last check and the job completing
+     * in which a set could be lost.
+     */
+    private var mutationRefreshPending = false
+
+    /**
      * Re-reads the host's session list. Safe to call from `ON_START` and from
      * the pull gesture; a call made while a read is in flight is ignored.
      */
     fun refresh() {
         if (inFlight?.isActive == true) return
+        markReading()
+        inFlight = viewModelScope.launch { readUntilSettled() }
+    }
+
+    /**
+     * A refresh that MUST reflect a mutation this ViewModel just made — the
+     * one case where [refresh]'s de-duplication is wrong (issue #2553).
+     *
+     * The ordinary collapse is correct: two `ON_START`/pull refreshes want one
+     * listing, not two. But a listing that was already in flight when a kill
+     * (or create, or rename) landed took its snapshot on the host BEFORE the
+     * mutation, so letting it be the last word repaints PRE-mutation truth —
+     * a stopped session stays on screen and stays tappable, and a successful
+     * destructive action looks like it failed.
+     *
+     * So a mutation's refresh is never dropped: if nothing is reading it
+     * starts one, and if a read is in flight it raises [mutationRefreshPending],
+     * which [readUntilSettled] re-checks after the stale read completes and
+     * answers with one more listing. Restarting after, rather than cancelling
+     * mid-read, keeps the connection's exec accounting simple — the stale
+     * answer is allowed to arrive, it just stops being the final one.
+     *
+     * Every mutation goes through here, so a new one (rename, #2567) needs no
+     * new machinery: call this instead of [refresh] on its success path.
+     */
+    private fun refreshAfterMutation() {
+        if (inFlight?.isActive == true) {
+            mutationRefreshPending = true
+            return
+        }
+        refresh()
+    }
+
+    /**
+     * Reads the listing, then reads it again for as long as a mutation asked
+     * for a fresh one while the previous read was running.
+     *
+     * Terminates: [mutationRefreshPending] is only ever raised by
+     * [refreshAfterMutation], i.e. by a completed user-driven mutation, and is
+     * cleared before each read — so the loop runs at most once per mutation
+     * and cannot spin.
+     */
+    private suspend fun readUntilSettled() {
+        while (true) {
+            mutationRefreshPending = false
+            load()
+            if (!mutationRefreshPending) return
+            markReading()
+        }
+    }
+
+    /** Flags the read as in progress: first load vs. refresh over content. */
+    private fun markReading() {
         _state.update { current ->
             current.copy(
                 loading = !current.loaded,
                 refreshing = current.loaded,
             )
         }
-        inFlight = viewModelScope.launch { load() }
     }
 
     // --- create (task U-6) -------------------------------------------------
@@ -372,7 +444,10 @@ class SessionTreeViewModel @Inject constructor(
                             openRequest = created.name,
                         )
                     }
-                    refresh()
+                    // Same reason as the kill path: the new session must not
+                    // be missing from the tree because a pre-create listing
+                    // was in flight when the create returned (#2553).
+                    refreshAfterMutation()
                 },
                 onFailure = { error ->
                     failCreate(userMessage(error, "Could not create the session on the host: "))
@@ -394,7 +469,10 @@ class SessionTreeViewModel @Inject constructor(
             }
         }
         clients.create(connection).killSession(name).fold(
-            onSuccess = { refresh() },
+            // Not `refresh()`: a listing already in flight when the kill
+            // landed would otherwise be the last word and put the dead
+            // session back on screen (#2553).
+            onSuccess = { refreshAfterMutation() },
             onFailure = { error ->
                 fail(userMessage(error, "Could not stop the session on the host: "))
             },

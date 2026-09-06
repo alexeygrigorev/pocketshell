@@ -95,16 +95,139 @@ def test_bundled_worker_ships_next_to_bundled_a(tmp_path: Path) -> None:
     assert report.worker == str(bin_dir / "aplexer")
 
 
-def test_bundled_a_without_sibling_worker_is_reported(tmp_path: Path) -> None:
-    """A half-installed bundle (``a`` only) is resolvable but worker-less."""
+def test_bundled_a_without_sibling_worker_is_a_packaging_integrity_failure(
+    tmp_path: Path,
+) -> None:
+    """A half-installed bundle (``a``, no worker) must NOT resolve (#2553 gap 1).
+
+    ``aplexer/src/lib.rs::worker_executable`` looks for the ``aplexer`` worker
+    next to ``current_exe`` and, failing that, runs a BARE ``aplexer`` off
+    ``PATH``. So handing a worker-less ``a`` back to the caller re-opens the
+    separate-install hole #2543 closed one level down: the CLI would be pinned
+    but its worker would not. The pinned wheel always ships both binaries, so
+    "``a`` without its worker" is a packaging-integrity failure and must fail
+    the same loud, candidate-naming way an absent ``a`` does.
+    """
     bin_dir = _fake_interpreter_dir(tmp_path, with_a=True)
     (bin_dir / "aplexer").unlink()
 
     with patch.object(sys, "executable", str(bin_dir / "python")):
         report = _aplexer.resolve_a({"PATH": ""})
+        resolved = _aplexer.which_a({"PATH": ""})
 
-    assert report.path == str(bin_dir / "a")
+    assert report.path is None, (
+        "an `a` whose sibling `aplexer` worker is missing must not be handed "
+        "out — it would start with an unpinned worker off PATH"
+    )
+    assert report.source is None
     assert report.worker is None
+    assert resolved is None
+    tried = " ".join(report.tried)
+    assert str(bin_dir / "a") in tried, "the failure must name the half-installed candidate"
+    assert "worker" in tried, f"the failure must say WHY it was rejected: {report.tried}"
+
+
+def test_half_installed_bundle_never_falls_back_to_a_path_copy(tmp_path: Path) -> None:
+    """The integrity failure is a hard stop, not a reason to search PATH (D22).
+
+    Rejecting the half-installed bundle must not quietly promote a complete
+    ``a``/``aplexer`` pair sitting on ``PATH`` — that separately-installed copy
+    being load-bearing is the exact bug #2543 existed to kill.
+    """
+    bin_dir = _fake_interpreter_dir(tmp_path, with_a=True)
+    (bin_dir / "aplexer").unlink()
+    path_dir = tmp_path / "elsewhere"
+    path_dir.mkdir()
+    for name in ("a", "aplexer"):
+        binary = path_dir / name
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+
+    with patch.object(sys, "executable", str(bin_dir / "python")):
+        report = _aplexer.resolve_a({"PATH": str(path_dir)})
+
+    assert report.path is None
+    assert str(path_dir) not in " ".join(report.tried)
+
+
+def test_half_installed_second_candidate_dir_is_also_rejected(tmp_path: Path) -> None:
+    """The check covers BOTH bundled candidate dirs, not just the first.
+
+    ``_bundled_bin_dirs`` keeps a second, resolved-symlink candidate; a check
+    written into only the first branch would let the same worker-less ``a``
+    through on the venv layout where ``bin/python`` is a real file.
+    """
+    real_dir = tmp_path / "real" / "bin"
+    real_dir.mkdir(parents=True)
+    (real_dir / "python").write_text("#!/bin/sh\n")
+    (real_dir / "a").write_text("#!/bin/sh\n")
+    (real_dir / "a").chmod(0o755)
+    link_dir = tmp_path / "link" / "bin"
+    link_dir.mkdir(parents=True)
+    (link_dir / "python").symlink_to(real_dir / "python")
+
+    with patch.object(sys, "executable", str(link_dir / "python")):
+        report = _aplexer.resolve_a({"PATH": ""})
+
+    assert report.path is None, "the resolved-dir candidate needs the same worker check"
+    assert "worker" in " ".join(report.tried)
+
+
+def test_aplexer_bin_override_is_exempt_from_the_worker_check(tmp_path: Path) -> None:
+    """``APLEXER_BIN`` still resolves whatever it points at (#2553 judgment call).
+
+    The integrity check is about the BUNDLE — "the pinned wheel ships both
+    console-scripts, so one without the other means a broken install, go
+    reinstall". ``APLEXER_BIN`` is the one explicit debug/test override; its
+    whole contract is "run exactly this binary", the reinstall advice does not
+    apply to it, and the helper suite's stub ``a`` (``conftest.install_fake_a``)
+    has no sibling worker by design.
+    """
+    override = tmp_path / "custom-a"
+    override.write_text("#!/bin/sh\n")
+    override.chmod(0o755)
+
+    report = _aplexer.resolve_a({"APLEXER_BIN": str(override), "PATH": ""})
+
+    assert report.path == str(override)
+    assert report.worker is None
+
+
+# ---------------------------------------------------------------------------
+# The half-installed bundle reaching the USER (#2553 gap 1)
+# ---------------------------------------------------------------------------
+
+
+def test_half_installed_bundle_fails_create_with_the_candidate_naming_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End of the chain: a worker-less bundle must produce #2543's message.
+
+    Without the check, `sessions create --backend aplexer` would EXEC the
+    worker-less `a`, which starts a bare `aplexer` off PATH (unpinned worker)
+    or dies with a low-level worker-startup error. The user must instead get
+    the packaging-integrity message that names every candidate, so "reinstall
+    pocketshell" is an obvious next step.
+    """
+    from click.testing import CliRunner
+
+    from pocketshell.sessions import sessions_group
+
+    bin_dir = _fake_interpreter_dir(tmp_path, with_a=True)
+    (bin_dir / "aplexer").unlink()
+    monkeypatch.delenv("APLEXER_BIN", raising=False)
+
+    with patch.object(sys, "executable", str(bin_dir / "python")):
+        result = CliRunner().invoke(
+            sessions_group, ["create", "work", "--backend", "aplexer", "--json"]
+        )
+
+    assert result.exit_code == 127, result.output
+    message = json.loads(result.output)["error"]
+    assert "could not resolve the `a` (aplexer) binary" in message
+    assert "uv tool install --force pocketshell" in message
+    assert str(bin_dir / "a") in message, "the message must name the broken candidate"
+    assert "worker" in message, f"and say what was wrong with it: {message}"
 
 
 # ---------------------------------------------------------------------------

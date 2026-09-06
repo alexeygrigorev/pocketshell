@@ -40,8 +40,10 @@ import kotlin.math.ceil
  *
  * [terminalCells] and [measureTerminalCellMetrics] mirror
  * `TerminalView.updateSize()` and `TerminalRenderer`'s constructor, which live
- * in `shared/core-terminal` and are pinned byte-identical to upstream (see its
- * `VENDORED.md`). They cannot call into them: both the metric fields and
+ * in the vendored `shared/core-terminal` (see its `VENDORED.md` for the
+ * upstream pin and `PATCHES.md` for the local deviations — the row-pitch
+ * formula mirrored here is itself one of them, #241). They cannot call into
+ * them: both the metric fields and
  * `LINE_SPACING_MULTIPLIER` are package-private to `com.termux.view`. If a
  * Termux refresh changes either formula, the worst case here is an estimate
  * that is off by a row or two and gets corrected by the first frame — the same

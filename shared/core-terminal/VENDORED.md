@@ -42,15 +42,18 @@ modifications).
 
 | Path | Source | Notes |
 |---|---|---|
-| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator`, `TerminalSession`, `TerminalBuffer`, `TerminalRow`; every deviation is listed in `PATCHES.md`. Rest byte-identical. |
-| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer`, `TerminalView`, `TerminalViewClient`; every deviation is listed in `PATCHES.md`. Rest byte-identical. |
+| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator`, `TerminalBuffer`, `TerminalRow`, `TerminalSession`, `TextStyle`; every deviation is listed in `PATCHES.md`. Rest (including `ByteQueue`, `TerminalSessionClient`) byte-identical. |
+| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer`, `TerminalView`, `TerminalViewClient`; every deviation is listed in `PATCHES.md`. Rest (including the `textselection` package) byte-identical. |
 | `src/main/res/drawable/text_select_handle_*.xml` | upstream `terminal-view/src/main/res/drawable/` | byte-identical |
 | `src/main/res/values/strings.xml` | upstream `terminal-view/src/main/res/values/strings.xml` | byte-identical |
 | `src/main/jni/termux.c`, `src/main/jni/Android.mk` | upstream `terminal-emulator/src/main/jni/` | **not compiled** — see "JNI handling" |
-| `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | patched — adds #259 CR-overwrite cases and `testQueryResponsesAreAnswered` to `TerminalTest.java`; rest byte-identical |
+| `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | **patched** — adds cases (never modifies upstream ones) to `TerminalTest`, `OperatingSystemControlTest`, `RectangularAreasTest`, `TextStyleTest`; listed in `PATCHES.md`. Rest byte-identical. |
 
 If we ever deviate from upstream — even a one-character patch — record it in
-`PATCHES.md` alongside this file.
+`PATCHES.md` alongside this file. `PATCHES.md`'s file list is authoritative and
+was produced by diffing the whole vendored tree against the pin; regenerate it
+the same way (step 5 of the refresh procedure) rather than editing it from
+memory.
 
 ## Namespace handling
 
@@ -147,8 +150,9 @@ When #9 lands, it will either:
 - Vendor a fresh fork of `TerminalSession` (non-final) into our own
   package that drives `TerminalEmulator` + `TerminalBuffer` from
   SSH-attached PTY bytes, bypassing JNI entirely. The vendored
-  `TerminalSession` source stays byte-identical to upstream as
-  refresh-tracking parity; our fork lives under `com.pocketshell.core.terminal.*`.
+  `TerminalSession` source stays as close to upstream as possible for
+  refresh-tracking parity (its actual deviations are listed in `PATCHES.md`);
+  our fork lives under `com.pocketshell.core.terminal.*`.
 
 Either path keeps the #8 public API stable.
 
@@ -156,7 +160,8 @@ Either path keeps the #8 public API stable.
 
 `com.pocketshell.core.terminal.bridge.SshTerminalBridge` (in this module) is
 intentionally kept outside the `com.termux.terminal` package so the vendored
-sources stay byte-identical to upstream. To do that without forking Termux,
+sources need as few local patches as possible. To do that without forking
+Termux,
 the bridge reaches into a handful of package-private members of
 [`TerminalSession`](src/main/java/com/termux/terminal/TerminalSession.java)
 and [`ByteQueue`](src/main/java/com/termux/terminal/ByteQueue.java) via
@@ -259,9 +264,13 @@ When a future Termux release fixes a bug or adds a CSI sequence we care about:
    cp -r /tmp/termux-app/terminal-emulator/src/test/java/com/termux \
          shared/core-terminal/src/test/java/com/termux
    ```
-5. Diff against the previous pin; if the upstream `androidx.annotation`
-   version changed, bump `androidx-annotation` in `gradle/libs.versions.toml`
-   to match.
+5. Diff the whole vendored tree against the new pin (`diff -rq` of
+   `src/main/java/com/termux`, `src/test/java/com/termux`, `src/main/res` and
+   `src/main/jni` against the upstream checkout) and **regenerate `PATCHES.md`
+   from that diff**, not from memory — its file list is the record a future
+   refresh re-applies from, and it has been wrong before. If the upstream
+   `androidx.annotation` version changed, bump `androidx-annotation` in
+   `gradle/libs.versions.toml` to match.
 6. Re-read upstream `LICENSE.md` — if the `terminal-emulator` /
    `terminal-view` license stops being Apache 2.0, update `LICENSE.txt` and
    `app/src/main/res/raw/third_party_licenses.txt`.

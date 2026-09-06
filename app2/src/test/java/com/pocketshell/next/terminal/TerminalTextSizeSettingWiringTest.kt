@@ -218,9 +218,9 @@ class TerminalTextSizeSettingWiringTest {
     /**
      * The size [TerminalView.setTextSize] actually built a renderer at.
      *
-     * [com.termux.view.TerminalRenderer.mTextSize] is package-private (the
-     * vendored class is pinned byte-identical to upstream), so this is a
-     * reflective read of the field `setTextSize` writes — the same field
+     * [com.termux.view.TerminalRenderer.mTextSize] is package-private in the
+     * vendored Termux source, which we keep as close to its upstream pin as we
+     * can, so this is a reflective read of the field `setTextSize` writes — the same field
      * `setTypeface` then reads. A test that stubbed `setTextSize` would still
      * pass with the factory hard-coding 28.
      */

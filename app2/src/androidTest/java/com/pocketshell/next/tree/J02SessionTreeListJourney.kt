@@ -143,6 +143,16 @@ class J02SessionTreeListJourney {
     private fun seedHostSessions(description: Description) {
         val partial = description.methodName.contains("partial", ignoreCase = true)
         val now = System.currentTimeMillis() / 1000
+        // Issue #2586: the live-enumeration marker is per-user state in a
+        // container the WHOLE suite shares (#2474 runs it unfiltered, one
+        // process, one fixture), and nothing expires it — a journey that opted
+        // into live mode leaves it behind for everyone after it. Marker + the
+        // seed this journey writes is a deliberate rc-78 mode conflict, so the
+        // app would receive no listing at all and every assertion below would
+        // fail as a bare 60-second Compose timeout that names nothing. Cleared
+        // unconditionally, BEFORE the partial branch: the deterministic arm
+        // defends itself rather than trusting the previous journey's teardown.
+        AgentsFixture.exec("rm -f $LIVE_MARKER")
         AgentsFixture.writeFile(
             DETAIL_FILE,
             """
@@ -379,6 +389,13 @@ class J02SessionTreeListJourney {
         const val DETAIL_FILE = "\$HOME/.pocketshell-fixture-session-detail.json"
         const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
+
+        /**
+         * The opt-in marker for the fixture's LIVE aplexer arm (issue #2586).
+         * This journey drives the deterministic seed arm and must therefore
+         * remove it — see [seedHostSessions].
+         */
+        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
 
         val HOST_IDS: Map<String, Long> = mapOf(
             "connectingToAHostListsItsRealSessionsGroupedByWorkspace" to 9_201L,

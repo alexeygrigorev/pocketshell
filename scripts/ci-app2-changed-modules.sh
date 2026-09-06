@@ -28,9 +28,31 @@
 #
 # SHARED-INFRASTRUCTURE PATHS also select everything: the version catalog,
 # settings/root build script, the Gradle wrapper, this script, the workflow
-# itself, and tests/docker/** (the Testcontainers sshd image the transport
-# integration lane builds). A catalog bump touches no module directory but can
-# break every lane.
+# itself, tests/docker/** (the Testcontainers sshd image the transport
+# integration lane builds) and tools/pocketshell/** (the fixture images COPY it
+# — see below). A catalog bump touches no module directory but can break every
+# lane.
+#
+# A FIXTURE INPUT DOES NOT HAVE TO LIVE UNDER tests/docker/ (issue #2592).
+# tests/docker/Dockerfile.agents — the image the app2-journey lane runs its
+# WHOLE instrumented suite against — builds from repo paths outside its own
+# directory: `COPY tools/pocketshell/pyproject.toml` (the file the build then
+# derives the pinned aplexer release from, and curls that release's binaries)
+# and `COPY tools/pocketshell/src/` (the fixture runs the REAL CLI);
+# Dockerfile.agents-daemon COPYs the whole `tools/pocketshell/` tree. So a
+# CLI-side change rebuilds the fixture while touching nothing under
+# tests/docker/. Before #2592 that selected NO lane: the aplexer pin bump
+# (#2588, d09471e2b) produced a green app2 run in which every app2 job skipped.
+# The prefix is the directory, not the two files, because the whole-tree COPY
+# makes the whole tree an image input — measured cost of the wider prefix over
+# 200 `main` commits: 3 extra fan-outs (19 commits touch tools/pocketshell/, 16
+# of them already in src/ or pyproject.toml).
+#
+# This is not a list anyone has to remember to update: --self-test parses every
+# COPY/ADD in tests/docker/Dockerfile.*, and any source resolving outside
+# tests/docker/ that SHARED_PREFIXES does not cover fails the selector's own
+# gate. The next fixture input added from elsewhere in the repo reddens here
+# instead of silently under-selecting.
 #
 # USAGE
 #   ci-app2-changed-modules.sh --base <sha|ref>      # push: github.event.before
@@ -65,6 +87,12 @@ declare -a SHARED_PREFIXES=(
   "gradlew"
   "gradlew.bat"
   "tests/docker/"
+  # Issue #2592: COPY source of tests/docker/Dockerfile.agents (pyproject.toml
+  # -> the derived aplexer download; src/ -> the real CLI the fixture runs) and,
+  # whole-tree, of Dockerfile.agents-daemon. Changing it rebuilds the image the
+  # journey lane runs against without touching tests/docker/ at all. The
+  # --self-test COPY-source guard keeps this entry honest.
+  "tools/pocketshell/"
   ".github/workflows/app2.yml"
   "scripts/ci-app2-changed-modules.sh"
   "scripts/check-app2-lane-execution.py"
@@ -74,6 +102,116 @@ declare -a SHARED_PREFIXES=(
   # itself (the runner path is not under app2/).
   "scripts/ci-app2-journey-suite.sh"
 )
+
+# True when <path> is at or under any of the remaining arguments (prefix list).
+# A prefix ending in "/" is a directory; a bare filename matches exactly (and,
+# harmlessly, anything that extends it — no two entries here are prefixes of a
+# different real path).
+matches_any_prefix() {
+  local path="$1"
+  shift
+  local prefix
+  for prefix in "$@"; do
+    [[ -z "$prefix" ]] && continue
+    if [[ "$path" == "$prefix" || "$path" == "$prefix"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Issue #2592 — the anti-drift half of the COPY-source rule.
+#
+# Prints, one per line, every repo path that a tests/docker/Dockerfile.* COPYs
+# (or ADDs) into a fixture image, normalised to repo-root-relative form. The
+# fixture Dockerfiles use two different build contexts: the compose services
+# built from the repo root spell their sources "tests/docker/..." / "tools/...",
+# while the ones built with tests/docker as context spell them bare
+# ("sshd_config"). Both are resolved here, and anything that resolves to
+# NEITHER is a hard failure rather than a silent skip — an unparsed COPY is
+# exactly the invisible input this guard exists to stop.
+fixture_copy_sources() {
+  local root="$1"
+  local -a files=()
+  local df
+  while IFS= read -r df; do
+    [[ -n "$df" ]] && files+=("$df")
+  done < <(find "$root/tests/docker" -maxdepth 1 -name 'Dockerfile.*' -type f 2>/dev/null | sort)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "fixture_copy_sources: no tests/docker/Dockerfile.* under '${root}'" >&2
+    return 2
+  fi
+
+  local line n src i first last
+  local -a tok=()
+  for df in "${files[@]}"; do
+    n=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      n=$((n + 1))
+      line="${line%$'\r'}"
+      [[ "$line" =~ ^[[:space:]]*(COPY|ADD)[[:space:]] ]] || continue
+      if [[ "$line" == *'<<'* || "$line" == *'['* || "$line" =~ \\[[:space:]]*$ ]]; then
+        echo "fixture_copy_sources: unsupported COPY form at ${df}:${n}: ${line}" >&2
+        return 2
+      fi
+      tok=()
+      read -r -a tok <<<"$line"
+      first=1
+      local from_stage=0
+      while [[ $first -lt ${#tok[@]} && "${tok[first]}" == --* ]]; do
+        # `COPY --from=<stage|image> ...` copies out of another build stage, not
+        # out of the repo: its sources are container paths and must not be
+        # resolved against the checkout.
+        [[ "${tok[first]}" == --from=* ]] && from_stage=1
+        first=$((first + 1))
+      done
+      if [[ $from_stage -eq 1 ]]; then
+        continue
+      fi
+      last=$((${#tok[@]} - 2)) # the final token is the destination
+      if [[ $last -lt $first ]]; then
+        echo "fixture_copy_sources: cannot parse sources at ${df}:${n}: ${line}" >&2
+        return 2
+      fi
+      for ((i = first; i <= last; i++)); do
+        src="${tok[i]}"
+        src="${src#./}"
+        # A glob widens to its directory: coverage of the directory covers
+        # every file the glob could pick up.
+        if [[ "$src" == *[*?]* ]]; then
+          src="$(dirname "$src")/"
+        fi
+        if [[ -e "$root/$src" ]]; then
+          printf '%s\n' "$src"
+        elif [[ -e "$root/tests/docker/$src" ]]; then
+          printf '%s\n' "tests/docker/$src"
+        else
+          echo "fixture_copy_sources: COPY source '${src}' at ${df}:${n} resolves to no repo path" >&2
+          return 2
+        fi
+      done
+    done <"$df"
+  done
+}
+
+# Fails (rc 1) when a fixture-image COPY source is NOT covered by the prefix
+# list passed after <root>. rc 2 means the Dockerfiles could not be read/parsed.
+check_fixture_copy_sources_covered() {
+  local root="$1"
+  shift
+  local -a prefixes=("$@")
+  local srcs src rc=0
+  srcs="$(fixture_copy_sources "$root")" || return 2
+  while IFS= read -r src; do
+    [[ -z "$src" ]] && continue
+    if ! matches_any_prefix "$src" "${prefixes[@]}"; then
+      echo "fixture COPY source '${src}' is not covered by SHARED_PREFIXES -> a change to it would rebuild a fixture image while selecting NO lane (issue #2592)" >&2
+      rc=1
+    fi
+  done <<<"$srcs"
+  return $rc
+}
 
 emit() {
   # emit <hostapi> <transport> <portfwd> <app2>
@@ -113,16 +251,14 @@ plan() {
 
   # NUL-safe-ish: iterate line by line (git diff --name-only is one path per
   # line) rather than word-splitting, so a path containing a space is one path.
-  local path prefix
+  local path
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
-    for prefix in "${SHARED_PREFIXES[@]}"; do
-      if [[ "$path" == "$prefix" || "$path" == "$prefix"* ]]; then
-        echo "app2 lane selection: shared path '${path}' changed -> selecting ALL lanes" >&2
-        emit true true true true
-        return 0
-      fi
-    done
+    if matches_any_prefix "$path" "${SHARED_PREFIXES[@]}"; then
+      echo "app2 lane selection: shared path '${path}' changed -> selecting ALL lanes" >&2
+      emit true true true true
+      return 0
+    fi
   done <<<"$changed"
 
   local -a hit=(false false false false)
@@ -237,6 +373,25 @@ self_test() {
   commit_file "scripts/ci-app2-journey-suite.sh"
   check "the journey runner (shared)" true true true true
 
+  # Issue #2592: tools/pocketshell/ is a COPY source of the fixture images the
+  # app2 lanes run against, so a CLI-side change rebuilds them while touching
+  # nothing under tests/docker/. The aplexer pin bump (#2588, d09471e2b) is the
+  # instance: it selected NOTHING and produced a green app2 run in which no app2
+  # job executed. Both halves of Dockerfile.agents' COPY set get a case.
+  git -C "$tmp" reset -q --hard "$base"
+  commit_file "tools/pocketshell/pyproject.toml"
+  check "CLI pyproject (Dockerfile.agents COPY source, shared)" true true true true
+
+  git -C "$tmp" reset -q --hard "$base"
+  commit_file "tools/pocketshell/src/pocketshell/cli.py"
+  check "CLI source (Dockerfile.agents COPY source, shared)" true true true true
+
+  # Discriminator: the prefix is tools/pocketshell/, not tools/. A sibling tool
+  # is no fixture input and must not fan the lanes out.
+  git -C "$tmp" reset -q --hard "$base"
+  commit_file "tools/some-other-tool/x.py"
+  check "an unrelated tools/ path is not shared" false false false false
+
   git -C "$tmp" reset -q --hard "$base"
   commit_file "shared/core-hostapi/x.kt"
   commit_file "app2/y.kt"
@@ -250,6 +405,52 @@ self_test() {
   git -C "$tmp" reset -q --hard "$base"
   commit_file "docs/notes on app2/summary.md"
   check "space in path is not two paths" false false false false
+
+  # Issue #2592 — the anti-drift property, asserted against the REAL tree: every
+  # path a fixture Dockerfile COPYs from outside tests/docker/ must be covered by
+  # SHARED_PREFIXES. This is what stops the list going stale the next time a
+  # fixture grows an input from elsewhere in the repo.
+  local -a pruned=()
+  local prefix grc
+  checks=$((checks + 2))
+  if check_fixture_copy_sources_covered "$REPO_ROOT" "${SHARED_PREFIXES[@]}"; then
+    echo "ok   [every fixture COPY source is covered by SHARED_PREFIXES]"
+  else
+    echo "FAIL [fixture COPY source not covered by SHARED_PREFIXES] (see above)" >&2
+    status=1
+  fi
+
+  # ...and the guard is LIVE: strip the tools/ prefixes and it must go red.
+  # A guard that cannot fail is decoration (G6).
+  for prefix in "${SHARED_PREFIXES[@]}"; do
+    [[ "$prefix" == tools/* ]] && continue
+    pruned+=("$prefix")
+  done
+  check_fixture_copy_sources_covered "$REPO_ROOT" "${pruned[@]}" 2>/dev/null
+  grc=$?
+  if [[ $grc -eq 1 ]]; then
+    echo "ok   [COPY-source guard reddens when the tools/ prefix is removed]"
+  else
+    echo "FAIL [COPY-source guard did not redden without the tools/ prefix: rc=$grc]" >&2
+    status=1
+  fi
+
+  # ...and a fixture input added from ELSEWHERE IN THE REPO reddens too — the
+  # literal drift scenario #2592 is about, on a synthetic tree so it stays true
+  # after tools/pocketshell/ is covered.
+  mkdir -p "$tmp/fixture-drift/tests/docker" "$tmp/fixture-drift/tools/newthing"
+  echo x >"$tmp/fixture-drift/tools/newthing/x.txt"
+  printf 'FROM scratch\nCOPY tools/newthing/x.txt /x\n' \
+    >"$tmp/fixture-drift/tests/docker/Dockerfile.fake"
+  checks=$((checks + 1))
+  check_fixture_copy_sources_covered "$tmp/fixture-drift" "${SHARED_PREFIXES[@]}" 2>/dev/null
+  grc=$?
+  if [[ $grc -eq 1 ]]; then
+    echo "ok   [a NEW fixture COPY source outside the prefix list reddens the guard]"
+  else
+    echo "FAIL [drift of a new fixture COPY source went undetected: rc=$grc]" >&2
+    status=1
+  fi
 
   # Fail-open: an unusable base selects everything.
   checks=$((checks + 3))
@@ -277,9 +478,11 @@ self_test() {
     echo "ok   [unknown base fails open]"
   fi
 
-  # Bumped 13 -> 14 by issue #2474's journey-runner case.
-  if [[ $checks -ne 14 ]]; then
-    echo "FAIL: expected 14 checks, ran $checks" >&2
+  # Bumped 13 -> 14 by issue #2474's journey-runner case, 14 -> 20 by issue
+  # #2592's three tools/pocketshell diff cases plus the three COPY-source
+  # drift-guard checks.
+  if [[ $checks -ne 20 ]]; then
+    echo "FAIL: expected 20 checks, ran $checks" >&2
     status=1
   fi
 
@@ -292,6 +495,9 @@ self_test() {
 }
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# The real checkout, for the --self-test COPY-source drift guard only. `plan`
+# never reads it: selection must stay pure git so it works on any checkout.
+REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 
 BASE=""
 MODE="plan"
@@ -306,7 +512,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,45p' "$SELF" | sed 's/^# \{0,1\}//'
+      # The whole leading comment block, however long it grows — a fixed line
+      # range silently truncated --help the moment the header did (issue #2592).
+      awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$SELF"
       exit 0
       ;;
     *)

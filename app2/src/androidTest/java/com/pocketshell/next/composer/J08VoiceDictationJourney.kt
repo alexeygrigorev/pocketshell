@@ -10,6 +10,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -204,6 +205,86 @@ class J08VoiceDictationJourney {
         assertEquals(emptyList<Any>(), remaining)
     }
 
+    /**
+     * #2598, the maintainer's report, end to end: dictate, tap Send while the
+     * mic is still live, then reopen the composer.
+     *
+     * On the broken build the send dropped the recognizer with the SILENT
+     * release meant for a composer that is going away, so the state stayed
+     * [RecordingState.Recording] for good — every later open of the sheet
+     * came up on a waveform with no recognizer behind it, over the draft
+     * field, with Discard and the sheet's dismiss both no-ops. Here the
+     * reopened composer must be an ordinary editable composer.
+     */
+    @Test
+    fun sendingWhileDictatingLeavesTheComposerEditable() {
+        openSession()
+        grantRecordAudio()
+        openComposer()
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        awaitTag(COMPOSER_WAVEFORM_TAG, "the recording surface")
+        ScriptedSpeechRecognitionProvider.partial(SENT_WHILE_RECORDING)
+        compose.awaitIdle("after a partial transcript")
+        JourneyScreenshots.capture("04-recording-before-send", JOURNEY)
+
+        // Send is enabled mid-dictation — this is the ordinary voice flow.
+        compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
+        compose.awaitIdle("after sending mid-dictation")
+        awaitGone(COMPOSER_TAG, "the composer sheet after a send")
+
+        // The bytes really left: the dictated text is on the remote pane.
+        awaitPaneText(SENT_WHILE_RECORDING)
+
+        openComposer()
+        JourneyScreenshots.capture("05-reopened-after-voice-send", JOURNEY)
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
+        compose.onAllNodesWithTag(COMPOSER_WAVEFORM_TAG).assertCountEquals(0)
+        compose.onAllNodesWithTag(COMPOSER_TIMER_TAG).assertCountEquals(0)
+        compose.onAllNodesWithTag(COMPOSER_DISCARD_RECORDING_TAG).assertCountEquals(0)
+        // ...and the idle chrome is back, mic included.
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
+
+        // The composer is usable again: type and the field takes it.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(TYPED_AFTER_SEND)
+        compose.awaitIdle("after typing into the reopened composer")
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
+            .assertTextContains(TYPED_AFTER_SEND, substring = true)
+    }
+
+    /**
+     * The other half of #2598 ("no way to stop it"): the recording surface's
+     * Stop control ends the dictation and hands the transcript back as an
+     * editable draft — Recording → Transcribing → Idle — without throwing the
+     * text away the way Discard does.
+     */
+    @Test
+    fun theStopControlEndsTheDictationAndKeepsTheText() {
+        openSession()
+        grantRecordAudio()
+        openComposer()
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        awaitTag(COMPOSER_WAVEFORM_TAG, "the recording surface")
+        ScriptedSpeechRecognitionProvider.partial(STOPPED_TRANSCRIPT)
+        compose.awaitIdle("after a partial transcript")
+
+        compose.onNodeWithTag(COMPOSER_STOP_RECORDING_TAG).performClick()
+        compose.awaitIdle("after tapping stop")
+        // The recognizer was asked to transcribe, not abandoned.
+        awaitTag(COMPOSER_TRANSCRIBING_TAG, "the transcribing surface")
+
+        ScriptedSpeechRecognitionProvider.final(STOPPED_TRANSCRIPT)
+        compose.awaitIdle("after the final transcript")
+        JourneyScreenshots.capture("06-stopped-editable", JOURNEY)
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
+            .assertTextContains(STOPPED_TRANSCRIPT, substring = true)
+        compose.onAllNodesWithTag(COMPOSER_WAVEFORM_TAG).assertCountEquals(0)
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
+    }
+
     // --- helpers ----------------------------------------------------------
 
     private fun openSession() {
@@ -227,6 +308,33 @@ class J08VoiceDictationJourney {
             instrumentation.targetContext.packageName,
             Manifest.permission.RECORD_AUDIO,
         )
+    }
+
+    /** Waits for [tag] to leave the tree (a sheet closing, a surface going away). */
+    private fun awaitGone(tag: String, what: String = tag) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.awaitIdle("gone poll: $what")
+            if (compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()) return
+            SystemClock.sleep(POLL_MS)
+        }
+        val shot = JourneyScreenshots.capture("failure-gone-${what.replace(' ', '-')}", JOURNEY)
+        throw AssertionError("$what never went away within ${TIMEOUT_MS}ms. Screenshot: ${shot.absolutePath}")
+    }
+
+    /**
+     * The independent oracle: what the REMOTE pane holds, read over its own
+     * SSH connection rather than off the device's screen.
+     */
+    private fun awaitPaneText(text: String) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var pane = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            pane = AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:'")
+            if (pane.contains(text)) return
+            SystemClock.sleep(POLL_MS)
+        }
+        throw AssertionError("the pane never showed \"$text\". Last capture:\n$pane")
     }
 
     private fun awaitTag(tag: String, what: String = tag) {
@@ -254,9 +362,16 @@ class J08VoiceDictationJourney {
         const val DEFAULT_OFFLINE_TRANSCRIPT = "unused-default-transcript"
         const val OFFLINE_TRANSCRIPT = "queued while the subway had no signal"
 
+        /** #2598: dictated, then sent while the mic was still live. */
+        const val SENT_WHILE_RECORDING = "echo j08-sent-mid-dictation"
+        const val TYPED_AFTER_SEND = "typed after the voice send"
+        const val STOPPED_TRANSCRIPT = "stop but keep what I said"
+
         val HOST_IDS: Map<String, Long> = mapOf(
             "micTapDictatesIntoTheComposerDraft" to 9_801L,
             "aQueuedOfflineDictationDeliversOnForegroundResume" to 9_802L,
+            "sendingWhileDictatingLeavesTheComposerEditable" to 9_803L,
+            "theStopControlEndsTheDictationAndKeepsTheText" to 9_804L,
         )
     }
 }

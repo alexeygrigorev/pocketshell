@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -15,6 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 
 /**
  * The rendered composer on the host JVM (Robolectric).
@@ -259,7 +261,100 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertDoesNotExist()
 
-        assertSameRow(COMPOSER_DISCARD_RECORDING_TAG, COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG)
+        assertSameRow(
+            COMPOSER_DISCARD_RECORDING_TAG,
+            COMPOSER_INSERT_TAG,
+            COMPOSER_SEND_TAG,
+            COMPOSER_STOP_RECORDING_TAG,
+        )
+    }
+
+    /**
+     * #2598: "there is no way to stop it". The recording row shipped
+     * Discard / Insert / Send and no stop control, so a dictation could only
+     * be ended by throwing the text away or committing it — never by handing
+     * it back as an editable draft.
+     */
+    @Test
+    fun `the recording row has a stop control that is not discard`() {
+        var micTaps = 0
+        var discards = 0
+        setContent(
+            ComposerUiState(recording = RecordingState.Recording, micAvailable = true),
+            onMicTap = { micTaps += 1 },
+            onCancelRecording = { discards += 1 },
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_STOP_RECORDING_TAG).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(COMPOSER_STOP_RECORDING_DESCRIPTION)
+            .assertIsDisplayed()
+
+        composeRule.onNodeWithTag(COMPOSER_STOP_RECORDING_TAG).performClick()
+
+        assertEquals("stop ends the dictation", 1, micTaps)
+        assertEquals("stop is not discard", 0, discards)
+
+        composeRule.onNodeWithTag(COMPOSER_DISCARD_RECORDING_TAG).performClick()
+        assertEquals(1, discards)
+        assertEquals(1, micTaps)
+    }
+
+    /**
+     * Transcribing is its own surface, and the recording controls that only
+     * make sense while the mic is live are gone from it — Cancel is the way
+     * out, not a second stop.
+     */
+    @Test
+    fun `transcribing shows its own surface without the recording controls`() {
+        setContent(ComposerUiState(recording = RecordingState.Transcribing, micAvailable = true))
+
+        composeRule.onNodeWithTag(COMPOSER_TRANSCRIBING_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_WAVEFORM_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_STOP_RECORDING_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_DISCARD_RECORDING_TAG).assertIsDisplayed()
+    }
+
+    /**
+     * The stop control has to FIT: a `Row` does not overflow, it SQUASHES —
+     * a recording row one button too wide for a phone silently shrinks its
+     * last child instead of pushing it off-screen, which would be the same
+     * "no way out" bug with a stop button too small to hit.
+     *
+     * Stop is measured last, so its full 44dp square is the canary for the
+     * whole row having room.
+     */
+    @Test
+    @Config(qualifiers = "w360dp-h800dp")
+    fun `the recording row fits a phone width`() {
+        setContent(ComposerUiState(recording = RecordingState.Recording, micAvailable = true))
+
+        val row = composeRule.onNodeWithTag(COMPOSER_CONTROLS_ROW_TAG)
+            .fetchSemanticsNode().boundsInRoot
+        val density = composeRule.density.density
+        val controls = listOf(
+            COMPOSER_DISCARD_RECORDING_TAG,
+            COMPOSER_INSERT_TAG,
+            COMPOSER_SEND_TAG,
+            COMPOSER_STOP_RECORDING_TAG,
+        ).associateWith { tag ->
+            composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+        }
+
+        controls.forEach { (tag, bounds) ->
+            assertTrue(
+                "$tag is outside the controls row: $bounds vs $row",
+                bounds.left >= row.left - 0.5f && bounds.right <= row.right + 0.5f,
+            )
+        }
+        val stop = controls.getValue(COMPOSER_STOP_RECORDING_TAG)
+        assertEquals(
+            "the stop control is squashed — the recording row has run out of width",
+            44f,
+            stop.width / density,
+            0.5f,
+        )
+        assertEquals(44f, stop.height / density, 0.5f)
     }
 
     @Test
@@ -285,6 +380,8 @@ class ComposerBarTest {
         onInsert: () -> Unit = {},
         onRemoveAttachment: (String) -> Unit = {},
         onToggleHistory: () -> Unit = {},
+        onMicTap: () -> Unit = {},
+        onCancelRecording: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -294,8 +391,8 @@ class ComposerBarTest {
                     onSend = onSend,
                     onInsert = onInsert,
                     onAttach = {},
-                    onMicTap = {},
-                    onCancelRecording = {},
+                    onMicTap = onMicTap,
+                    onCancelRecording = onCancelRecording,
                     onToggleHistory = onToggleHistory,
                     onTogglePreview = {},
                     onRemoveAttachment = onRemoveAttachment,

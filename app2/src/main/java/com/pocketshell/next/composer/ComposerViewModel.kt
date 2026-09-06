@@ -284,9 +284,12 @@ class ComposerViewModel @Inject constructor(
         if (!current.canSend || current.busy) return
         val target = sink ?: return
         // Insert/Send while the mic is live must not leave a recognizer
-        // writing partials into the draft we are about to clear. Silent
-        // release keeps the on-screen text (including the latest partial).
-        dictation.release()
+        // writing partials into the draft we are about to clear — and must
+        // not leave the composer LOOKING like it is still recording either
+        // (#2598). The recognizer goes silently, keeping the on-screen text
+        // (including the latest partial); the composer, which is still on
+        // screen, goes back to Idle so the user gets their draft field back.
+        dictation.releaseToIdle()
 
         val body = ComposerText.compose(current.draft.trim(), current.attachments.map { it.remotePath })
         val delivered = target.isLive
@@ -376,12 +379,24 @@ class ComposerViewModel @Inject constructor(
 
     // --------------------------------------------------------------- dictation
 
-    /** Mic tap: start dictating, or stop and transcribe. */
+    /**
+     * Mic tap: start dictating, or stop and transcribe.
+     *
+     * The stop half is also the recording surface's Stop control — the
+     * "end this dictation and give me back an editable draft" action that
+     * #2598 found missing, distinct from Discard, which throws the transcript
+     * away.
+     *
+     * A tap while the state says recording but no recognizer is live
+     * normalises that state instead of starting a SECOND dictation on top of
+     * it: the only way out of a stale recording surface must never be another
+     * recording.
+     */
     fun onMicTap() {
-        if (dictation.isRecording) {
-            dictation.stop()
-        } else {
-            dictation.start(language = recognizerLanguage())
+        when {
+            dictation.isRecording -> dictation.stop()
+            _state.value.recording != RecordingState.Idle -> dictation.cancel()
+            else -> dictation.start(language = recognizerLanguage())
         }
     }
 
@@ -399,7 +414,14 @@ class ComposerViewModel @Inject constructor(
         notify(ComposerNotice.Problem(COMPOSER_RECORD_AUDIO_DENIED_TEXT))
     }
 
-    /** Discard the recording and restore the draft as it was before the mic opened. */
+    /**
+     * Discard the recording and restore the draft as it was before the mic
+     * opened.
+     *
+     * Also the sheet's dismiss path, and the one guaranteed way back to an
+     * ordinary composer: it ends at [RecordingState.Idle] whether or not a
+     * recognizer is live (#2598).
+     */
     fun cancelRecording() = dictation.cancel()
 
     /**

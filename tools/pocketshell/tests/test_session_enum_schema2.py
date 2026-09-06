@@ -15,6 +15,36 @@ The aplexer fixtures under ``tests/fixtures/aplexer/`` are REAL captures of
   started for the capture, one of which really ran ``a state-report
   waiting`` inside itself, so ``reported_state``/``reported_state_at_ms``
   are genuine aplexer output rather than invented keys.
+- ``snapshot-liveness-mix.json`` — a second isolated instance (issue #2554)
+  holding one live session, one killed session (``phase: exited``) and one
+  whose worker was ``SIGKILL``ed out from under it (``phase: running``,
+  ``worker_alive: false`` — the zombie class that sat in the maintainer's
+  tree for ten days). The fourth row, ``phase: failed``, is the ONE derived
+  record in these fixtures: a failed worker startup leaves no record behind
+  to capture (verified on the dev box), so it is the real ``exited`` capture
+  with aplexer's other terminal phase (``Phase::Failed``,
+  ``aplexer/src/lib.rs``) and its startup-failure ``error`` substituted in.
+- ``snapshot-post-kill-window.json`` — the same instance captured in the
+  window right after ``a kill``: the killed record is ``phase: exiting``
+  with ``worker_alive: true`` (the worker is still winding down). This is
+  the window that makes a fire-and-forget reap a no-op.
+- ``snapshot-mid-create.json`` — a record captured DURING ``a start``, by
+  polling ``a --json list`` through a real create: ``phase: starting`` with
+  no ``worker_pid`` yet and therefore ``worker_alive: false``, because
+  aplexer persists the record before the worker registers its pid
+  (``SessionRecord::worker_alive`` returns false for a ``None`` pid). Every
+  ``a start`` passes through this shape for tens of milliseconds. Calling it
+  dead hides a session that is being created — the #2547 symptom.
+- ``snapshot-crashed-start.json`` — the OTHER side of that boundary,
+  captured by SIGKILLing a real ``a start``'s process group inside the
+  pre-PID window: byte-identical in shape (``starting`` / no ``worker_pid``
+  / ``worker_alive: false``) and it never changes again. aplexer's own
+  ``a list`` renders it ``✗ broken``. The two fixtures differ only in age,
+  which is why age is the discriminator.
+
+Both were captured with the maintainer's ``a 0.1.3``; the key set was
+compared against the copy PINNED in this package's venv and is identical,
+and neither carries a ``state`` field (that is unreleased — see #2556).
 """
 
 from __future__ import annotations
@@ -47,12 +77,25 @@ SCHEMA2_ROW_KEYS = {
     "attached",
     "created_epoch",
     "activity_epoch",
+    # Issue #2554: the wire carries liveness explicitly, so a client never has
+    # to infer "is this row attachable" from the absence of a filter.
+    "phase",
+    "alive",
 }
 
 # ids from the real captures
 REPORTED_ID = "7813f1ca-891d-4b43-829f-aca6ee182f10"
 HEURISTIC_ID = "b95a85e9-6f71-4b33-b34a-a2344da72910"
 PLAIN_SHELL_ID = "97d6e5f9-3a92-41c5-bbe4-d367b5017415"
+# ids from snapshot-liveness-mix.json (issue #2554)
+LIVE_ID = "b3351d63-dce8-49cd-aab3-32e200901863"
+KILLED_ID = "dcef0eda-b4cf-4bde-9289-db45a11eea01"
+FAILED_ID = "f1a11ed0-0000-4000-8000-000000000001"
+ZOMBIE_ID = "c06513a5-ee94-4081-b4b1-6d4d39d22ac5"
+# id from snapshot-mid-create.json (real capture during `a start`)
+MID_CREATE_ID = "078e2bf5-8e37-44e6-b1cf-8f72e261495e"
+# id from snapshot-crashed-start.json (real capture of a killed `a start`)
+CRASHED_START_ID = "6b1ddabb-1b5c-4a76-b46b-1f7e70d78a9a"
 # Captured values, read back from the fixture rather than restated here.
 
 
@@ -137,10 +180,15 @@ def test_aplexer_only_host_emits_schema_2_rows() -> None:
 
 
 def test_both_managers_are_listed_together() -> None:
+    """Both managers contribute rows — from the LIVE records only (#2554).
+
+    ``snapshot-liveness-mix.json`` holds four aplexer records and exactly one
+    live one, so this also pins the union path against the dead-row leak.
+    """
     sessions, errors = session_enum.enumerate_live_sessions(
         tmuxctl_stdout=_tmuxctl_table(),
-        aplexer_payload=_load("snapshot.json"),
-        now_ms=1_788_409_006_000,
+        aplexer_payload=_load("snapshot-liveness-mix.json"),
+        now_ms=1_788_682_060_000,
     )
     payload = session_enum.json_payload(sessions, errors)
 
@@ -149,7 +197,7 @@ def test_both_managers_are_listed_together() -> None:
     assert payload["errors"] == []
     managers = [row["manager"] for row in payload["sessions"]]
     assert managers.count("tmux") == 2
-    assert managers.count("aplexer") == 4
+    assert managers.count("aplexer") == 1
     for row in payload["sessions"]:
         assert set(row) == SCHEMA2_ROW_KEYS
 
@@ -305,32 +353,369 @@ def test_plain_shell_session_reports_a_null_engine() -> None:
 
 
 def test_exited_session_has_no_agent_state() -> None:
+    """A terminal-phase record has no agent state — checked on the DEAD list.
+
+    Since #2554 an exited record never reaches the live listing, so the
+    assertion moved onto the dead projection, which is where such a row is
+    now visible.
+    """
     snapshot = _load("snapshot.json")
     exited = [row for row in snapshot if row["phase"] == "exited"]
     assert exited, "fixture must contain a terminal-phase row"
 
-    sessions = session_enum.sessions_from_aplexer_snapshot(
+    dead = session_enum.dead_sessions_from_aplexer_snapshot(
         snapshot, now_ms=1_788_409_006_000
     )
-    row = _by_name(sessions, "zcode-acp:zcodex-test")
+    row = _by_name(dead, "zcode-acp:zcodex-test")
     assert row.agent_state is None
     assert row.agent_state_source is None
+    assert row.phase == "exited"
+    assert row.alive is False
 
 
 def test_aplexer_rows_are_not_attached_without_a_snapshot_field() -> None:
-    """aplexer 0.1.1 exposes no attached-client count; the row says False."""
-    snapshot = _load("snapshot.json")
+    """aplexer 0.1.3 exposes no attached-client count; the row says False."""
+    snapshot = _load("snapshot-liveness-mix.json")
     assert all("attached_clients" not in row for row in snapshot)
     sessions = session_enum.sessions_from_aplexer_snapshot(
-        snapshot, now_ms=1_788_409_006_000
+        snapshot, now_ms=1_788_682_060_000
     )
+    assert sessions, "fixture must contain a live row"
     assert all(row.attached is False for row in sessions)
 
     # ...and starts telling the truth the moment aplexer grows the field.
-    grown = [dict(snapshot[0], attached_clients=2)]
+    live = _row(snapshot, LIVE_ID)
+    grown = [dict(live, attached_clients=2)]
     assert session_enum.sessions_from_aplexer_snapshot(
-        grown, now_ms=1_788_409_006_000
+        grown, now_ms=1_788_682_060_000
     )[0].attached is True
+
+
+# ---------------------------------------------------------------------------
+# liveness — a dead aplexer record is never an attachable row (issue #2554)
+# ---------------------------------------------------------------------------
+#
+# Reported from the phone: the tree kept offering `pocketshell:pocketshell`,
+# a record aplexer had already reaped the worker for. Tapping it ran
+# `a attach <id>`, which answers "session … has already exited" and exits 1,
+# so the app showed `Session "…" ended (exit 1)`.
+
+
+def test_only_the_live_record_is_listed_from_a_mixed_snapshot() -> None:
+    """exited + failed + zombie + live -> one row (the live one)."""
+    snapshot = _load("snapshot-liveness-mix.json")
+    assert {row["id"] for row in snapshot} == {
+        LIVE_ID,
+        KILLED_ID,
+        FAILED_ID,
+        ZOMBIE_ID,
+    }
+    # The four states this filter has to tell apart, straight off the capture.
+    assert (_row(snapshot, KILLED_ID)["phase"], _row(snapshot, KILLED_ID)["worker_alive"]) == ("exited", False)
+    assert (_row(snapshot, FAILED_ID)["phase"], _row(snapshot, FAILED_ID)["worker_alive"]) == ("failed", False)
+    assert (_row(snapshot, ZOMBIE_ID)["phase"], _row(snapshot, ZOMBIE_ID)["worker_alive"]) == ("running", False)
+    assert (_row(snapshot, LIVE_ID)["phase"], _row(snapshot, LIVE_ID)["worker_alive"]) == ("running", True)
+
+    sessions = session_enum.sessions_from_aplexer_snapshot(
+        snapshot, now_ms=1_788_682_060_000
+    )
+
+    assert [row.aplexer_id for row in sessions] == [LIVE_ID]
+    assert [row.name for row in sessions] == ["ws:live"]
+    assert sessions[0].alive is True
+    assert sessions[0].phase == "running"
+
+
+def test_a_snapshot_of_only_dead_records_renders_zero_aplexer_sessions() -> None:
+    """The maintainer's actual tree state (issue #2554), replayed.
+
+    ``snapshot.json`` is a REAL host-wide capture in which every one of the
+    four records is dead: one killed session (``zcode-acp:zcodex-test``)
+    plus three ~10-day-old zombies whose workers died without recording an
+    exit (``aplexer-follow:{yolo,zsp,live}``). Before the fix all four
+    listed as ordinary, tappable rows — the same class as the
+    ``pocketshell:pocketshell`` row in the report's screenshot, which came
+    from the same host at a different moment and is not in this capture.
+    """
+    snapshot = _load("snapshot.json")
+    assert len(snapshot) == 4
+    assert all(
+        row["phase"] in {"exited", "failed"} or row["worker_alive"] is False
+        for row in snapshot
+    )
+
+    sessions, errors = session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=_tmuxctl_table(),
+        aplexer_payload=snapshot,
+        now_ms=1_788_409_006_000,
+    )
+    payload = session_enum.json_payload(sessions, errors)
+
+    assert [row["manager"] for row in payload["sessions"]] == ["tmux", "tmux"]
+    assert payload["managers"] == ["tmux"]
+    # Not an enumeration failure — aplexer answered, it just has nothing live.
+    assert payload["errors"] == []
+    # Gone by NAME, not merely by count: every dead row in the capture, named.
+    listed = {row["name"] for row in payload["sessions"]}
+    for gone in (
+        "zcode-acp:zcodex-test",
+        "aplexer-follow:yolo",
+        "aplexer-follow:zsp",
+        "aplexer-follow:live",
+    ):
+        assert gone not in listed
+
+
+def test_a_record_winding_down_after_a_kill_is_still_listed() -> None:
+    """``phase: exiting`` + a live worker is a live session, not a corpse.
+
+    Captured in the real window right after ``a kill``. Filtering it here
+    would make Stop look instant while ``a attach`` still works, and would
+    make the reap's retry loop untestable.
+    """
+    snapshot = _load("snapshot-post-kill-window.json")
+    winding_down = [row for row in snapshot if row["phase"] == "exiting"]
+    assert len(winding_down) == 1
+    assert winding_down[0]["worker_alive"] is True
+
+    sessions = session_enum.sessions_from_aplexer_snapshot(
+        snapshot, now_ms=1_788_682_060_000
+    )
+    assert sorted(row.name for row in sessions) == ["ws:doomed", "ws:live"]
+
+
+def test_a_session_being_created_is_listed_not_hidden() -> None:
+    """The real mid-create shape must stay visible (#2547's symptom class).
+
+    aplexer writes the record before the worker registers its pid, and
+    ``worker_alive`` is derived from that pid — so ``a --json list`` really
+    emits ``phase: starting`` / no ``worker_pid`` / ``worker_alive: false``
+    for tens of milliseconds on EVERY create. A predicate that reads
+    ``worker_alive: false`` as "dead" blanks the session the user is
+    watching appear, refuses to attach to it, and — worse — makes it an
+    `a forget --force` target for a retried create.
+
+    ``worker_alive: false`` is only a corpse when the worker had a pid to
+    lose. With no pid the record is INDETERMINATE, and this filter fails
+    open on indeterminate by design.
+    """
+    snapshot = _load("snapshot-mid-create.json")
+    record = _row(snapshot, MID_CREATE_ID)
+    # The capture really is the shape the fix has to survive.
+    assert record["phase"] == "starting"
+    assert record.get("worker_pid") is None
+    assert record["worker_alive"] is False
+
+    # Replayed at the age it really had: the record was observed in this
+    # shape from t+29 ms to t+46 ms of a real `a start` before the pid
+    # appeared, so the whole measured window must read alive.
+    for age_ms in (0, 29, 46, 100):
+        now_ms = record["updated_at_ms"] + age_ms
+        assert session_enum.aplexer_record_is_alive(record, now_ms) is True, age_ms
+        sessions = session_enum.sessions_from_aplexer_snapshot(snapshot, now_ms=now_ms)
+        assert [row.name for row in sessions] == ["ws:midcreate"]
+        assert sessions[0].alive is True
+        assert sessions[0].phase == "starting"
+        # ...and it is never offered up as something to reap.
+        assert (
+            session_enum.dead_sessions_from_aplexer_snapshot(snapshot, now_ms=now_ms)
+            == []
+        )
+
+
+def test_a_start_killed_in_the_pre_pid_window_does_not_stay_alive_forever() -> None:
+    """The other side of the boundary — a REAL crashed start (issue #2554 r3).
+
+    SIGKILLing an ``a start`` inside the pre-PID window leaves a record at
+    ``phase: starting`` / no ``worker_pid`` / ``worker_alive: false``
+    PERMANENTLY — byte-identical in shape to the mid-create record above,
+    and aplexer's own ``a list`` renders it ``✗ broken``. Exempting the
+    pre-PID shape unconditionally therefore re-opened both halves of this
+    issue through a different door: the tree offered it as a tappable row
+    whose attach exits 1, and ``sessions create`` handed its id back as an
+    existing session.
+
+    Age is the discriminator. It is the same record shape; it is not the
+    same age.
+    """
+    snapshot = _load("snapshot-crashed-start.json")
+    record = _row(snapshot, CRASHED_START_ID)
+    assert record["phase"] == "starting"
+    assert record.get("worker_pid") is None
+    assert record["worker_alive"] is False
+    # A crashed start never writes again, so created == updated forever.
+    assert record["updated_at_ms"] == record["created_at_ms"]
+
+    stale = record["updated_at_ms"] + session_enum.APLEXER_STARTING_GRACE_MS + 1
+    assert session_enum.aplexer_record_is_alive(record, stale) is False
+    assert session_enum.sessions_from_aplexer_snapshot(snapshot, now_ms=stale) == []
+    dead = session_enum.dead_sessions_from_aplexer_snapshot(snapshot, now_ms=stale)
+    assert [(row.name, row.phase, row.alive) for row in dead] == [
+        ("ws:crashed1", "starting", False)
+    ]
+
+
+def test_the_starting_grace_is_the_only_thing_between_the_two_captures() -> None:
+    """Both real fixtures, one predicate, one boundary.
+
+    Nothing but ``updated_at_ms`` distinguishes them — asserted here rather
+    than described, so a future change that finds some other discriminator
+    has to update this test on purpose.
+    """
+    mid = _load("snapshot-mid-create.json")[0]
+    crashed = _load("snapshot-crashed-start.json")[0]
+    differing = {
+        key
+        for key in set(mid) | set(crashed)
+        if mid.get(key) != crashed.get(key)
+    }
+    # Identity/paths/timestamps differ; the LIVENESS fields do not.
+    assert differing.isdisjoint({"phase", "worker_pid", "worker_alive"})
+
+    grace = session_enum.APLEXER_STARTING_GRACE_MS
+    for record in (mid, crashed):
+        base = record["updated_at_ms"]
+        assert session_enum.aplexer_record_is_alive(record, base) is True
+        assert session_enum.aplexer_record_is_alive(record, base + grace) is True
+        assert session_enum.aplexer_record_is_alive(record, base + grace + 1) is False
+
+
+def test_the_starting_grace_leaves_orders_of_magnitude_of_headroom() -> None:
+    """The threshold must stay far above a real spawn and above aplexer's own patience.
+
+    Measured pre-PID window on the dev box: 26-46 ms. aplexer gives up on a
+    worker after ``--startup-timeout-ms`` (default 10 s, ``a.rs``), and this
+    CLI abandons `a start` after ``_APLEXER_START_TIMEOUT_S``. A record older
+    than both cannot still be legitimately starting.
+    """
+    from pocketshell import sessions as _sessions
+
+    assert session_enum.APLEXER_STARTING_GRACE_MS >= 1_000 * 46  # >=1000x measured
+    assert session_enum.APLEXER_STARTING_GRACE_MS >= 6 * 10_000  # >=6x aplexer's own
+    assert (
+        session_enum.APLEXER_STARTING_GRACE_MS
+        >= 3 * 1000 * _sessions._APLEXER_START_TIMEOUT_S
+    )
+
+
+def test_a_pre_pid_record_without_a_usable_timestamp_fails_open() -> None:
+    """No age, no verdict: an un-aged pre-PID record stays listed."""
+    record = _load("snapshot-crashed-start.json")[0]
+    ancient = record["updated_at_ms"] + session_enum.APLEXER_STARTING_GRACE_MS + 1
+
+    missing = {k: v for k, v in record.items() if k != "updated_at_ms"}
+    assert session_enum.aplexer_record_is_alive(missing, ancient) is True
+
+    for junk in ("", None, "soon", 0, -1):
+        assert (
+            session_enum.aplexer_record_is_alive(
+                dict(record, updated_at_ms=junk), ancient
+            )
+            is True
+        ), junk
+
+
+def test_a_worker_that_had_a_pid_and_lost_it_is_still_dead() -> None:
+    """The correction must not swallow the zombie it was written to catch."""
+    snapshot = _load("snapshot-liveness-mix.json")
+    zombie = _row(snapshot, ZOMBIE_ID)
+    assert zombie["phase"] == "running"
+    assert zombie["worker_alive"] is False
+    assert isinstance(zombie["worker_pid"], int)  # it HAD a worker
+
+    assert session_enum.aplexer_record_is_alive(zombie) is False
+
+
+def test_a_pre_pid_record_in_a_terminal_phase_is_still_dead() -> None:
+    """A pid never arriving does not outrank an explicitly recorded ending.
+
+    aplexer's own launcher writes ``Phase::Failed`` with no ``worker_pid``
+    when a worker dies before completing startup
+    (``api.rs::persist_independent_cleanup_proof``), so the terminal-phase
+    test has to win over the pre-PID exemption.
+    """
+    record = _load("snapshot-mid-create.json")[0]
+    failed = dict(record, phase="failed", error="worker did not complete startup")
+    assert session_enum.aplexer_record_is_alive(failed) is False
+
+    exited = dict(record, phase="exited")
+    assert session_enum.aplexer_record_is_alive(exited) is False
+
+
+def test_a_record_with_no_liveness_keys_is_kept() -> None:
+    """Fail OPEN: an unknown/older record shape must never lose its row.
+
+    Only an explicit terminal phase or an explicit ``worker_alive: false``
+    means dead. A snapshot that carries neither key (a hand-rolled fixture, a
+    future aplexer that renames them) still lists — the failure mode of this
+    filter must be "shows a stale row", never "hides a live session".
+    """
+    minimal = [{"id": "abc123", "tag": "codex", "workspace": "/home/a/git/toy"}]
+    sessions = session_enum.sessions_from_aplexer_snapshot(minimal)
+    assert [row.name for row in sessions] == ["toy:codex"]
+    assert sessions[0].alive is True
+    assert sessions[0].phase is None
+
+
+def test_dead_projection_reports_every_dead_record_with_its_state() -> None:
+    """``sessions attach`` needs the dead rows to explain itself."""
+    snapshot = _load("snapshot-liveness-mix.json")
+    dead = session_enum.dead_sessions_from_aplexer_snapshot(
+        snapshot, now_ms=1_788_682_060_000
+    )
+    assert {row.aplexer_id: row.phase for row in dead} == {
+        KILLED_ID: "exited",
+        FAILED_ID: "failed",
+        ZOMBIE_ID: "running",
+    }
+    assert all(row.alive is False for row in dead)
+
+
+def test_schema_2_carries_liveness_on_every_row() -> None:
+    """Schema 2's "every key, always" contract covers the new pair too."""
+    sessions, errors = session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=_tmuxctl_table(),
+        aplexer_payload=_load("snapshot-liveness-mix.json"),
+        now_ms=1_788_682_060_000,
+    )
+    payload = session_enum.json_payload(sessions, errors)
+
+    for row in payload["sessions"]:
+        assert set(row) == SCHEMA2_ROW_KEYS
+        assert row["alive"] is True
+
+    tmux_row = next(row for row in payload["sessions"] if row["manager"] == "tmux")
+    # tmux has no aplexer phase vocabulary; explicit null, not an absent key.
+    assert tmux_row["phase"] is None
+
+    aplexer_row = next(
+        row for row in payload["sessions"] if row["manager"] == "aplexer"
+    )
+    assert aplexer_row["phase"] == "running"
+
+    # A dead row still serialises the pair truthfully when one is asked for.
+    dead = session_enum.dead_sessions_from_aplexer_snapshot(
+        _load("snapshot-liveness-mix.json"), now_ms=1_788_682_060_000
+    )
+    dead_payload = _by_name(dead, "ws:doomed").to_payload(schema=2)
+    assert set(dead_payload) == SCHEMA2_ROW_KEYS
+    assert (dead_payload["phase"], dead_payload["alive"]) == ("exited", False)
+
+
+def test_cli_list_json_hides_dead_aplexer_records(install_fake_a) -> None:
+    """End to end through the CLI: the tree cannot be offered a dead row."""
+    install_fake_a(snapshot=_load("snapshot.json"))
+
+    result = _invoke_list_json(tmuxctl_stdout=_tmuxctl_table())
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["errors"] == []
+    assert [row["name"] for row in payload["sessions"]] == [
+        "git-pocketshell",
+        "git-aplexer",
+    ]
+    assert all(row["manager"] == "tmux" for row in payload["sessions"])
 
 
 # ---------------------------------------------------------------------------

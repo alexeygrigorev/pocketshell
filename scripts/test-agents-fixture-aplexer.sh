@@ -436,10 +436,22 @@ ssh_exec "pocketshell sessions list --json" > "$tmp_dir/live-before.json" \
 ok "baseline: unseeded fixture reports zero aplexer rows"
 
 # THE SESSION. Created over the app's own channel, through the fixture shim.
-# No --memory: `a start --memory` fails closed in this unprivileged container
-# (no cgroup delegation), so a limit here would test the fixture's plumbing
-# rather than its enumeration.
-live_create="$(ssh_exec "pocketshell sessions create '$LIVE_TAG' --backend aplexer --cwd /home/testuser --json")" \
+# `--mem none` for the same reason POSITIVE 1 passes it (line ~292): `a start
+# --memory` fails closed in this unprivileged container (no cgroup
+# delegation), so a limit here would test the fixture's plumbing rather than
+# its enumeration.
+#
+# It is EXPLICIT rather than omitted, and that distinction is the bug this
+# line once had. #2586 wrote this check when `sessions create` passed no
+# memory parameter at all, so omitting the flag was the same as declining a
+# cap. #2562 then made the CLI resolve a cap from `cgroups.toml` and pass
+# `--memory` by default -- correct, and the whole point of that issue -- at
+# which point the omission started requesting a limit this container cannot
+# grant. Neither PR could see it: they were written in parallel, and
+# `Integration tests (Docker)` is hard-gated off on pull requests
+# (tests.yml, `if: github.event_name != 'pull_request'`), so the interaction
+# first ran on `main`.
+live_create="$(ssh_exec "pocketshell sessions create '$LIVE_TAG' --backend aplexer --cwd /home/testuser --mem none --json")" \
   || fail "\`pocketshell sessions create --backend aplexer\` failed through the fixture shim"
 LIVE_NAME="$(printf '%s' "$live_create" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))')"
 [[ -n "$LIVE_NAME" ]] || fail "fixture create envelope carried no name: $live_create"

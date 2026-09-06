@@ -85,6 +85,22 @@ check and only the new check.
 
 ## Process discipline
 
+- Narrowing a gap isn't closing it — ask whether a fix is *admissible*, not
+  just whether the gap is small. #2565 (finger drag does nothing on an
+  alt-screen workload) was first argued down by measurement: no agent CLI is
+  affected, only `less`/`vim` without mouse. That shrank it but left it open
+  as a small enhancement. What actually closed it was a discriminator
+  argument: "alternate screen active, mouse tracking off" is the identical
+  state for `less` and for an aplexer attach onto an agent TUI, so there is
+  no condition to key a conditional on, and re-adding the arrow-synthesising
+  branch for the one re-breaks the other (#2555 verbatim — scrolling back
+  through an agent's output rewriting what the user was typing). That is why
+  #2589 deleted the branch rather than narrowing it. When an issue proposes
+  restoring behaviour a previous fix deliberately deleted, find the
+  discriminator before estimating the work; if the two cases are
+  indistinguishable at that layer, the answer is won't-do regardless of how
+  cheap the patch looks. Close with the workarounds and a reopen condition
+  recorded, not flat.
 - File CI failures as issues, don't retry silently. Recurring classes (e.g.
   AVD contention) get one tracking issue, not one per occurrence.
 - Reconcile completed agents against actual state, not memory — dispatched

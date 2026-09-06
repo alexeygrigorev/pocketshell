@@ -98,12 +98,42 @@ dependencies = [
     # so the pinned wheel is the ONLY aplexer this CLI can run. Bumping the
     # pin is a deliberate, reviewed change.
     #
-    # 0.1.2 (not 0.1.1) is required, and the version string alone cannot tell
-    # you why: aplexer HEAD sat 143 commits past the v0.1.1 tag while STILL
-    # self-reporting `a --version` as 0.1.1, so the published 0.1.1 wheel and
-    # the build every PocketShell host actually ran were indistinguishable by
-    # version. Pinning 0.1.1 under the hard cut would have silently DOWNGRADED
-    # every host to a build missing two fixes the real create-agent path needs:
+    # 0.1.3 is required for a USER-VISIBLE session-tree defect, not for
+    # version hygiene (aplexer#2 / aplexer#3). Through 0.1.2, aplexer's
+    # `list_records` treated a session directory containing no `session.json`
+    # as a CORRUPT REGISTRY and failed the entire scan:
+    #
+    #     a: load session registry entry <dir>: read <dir>/session.json:
+    #     No such file or directory (os error 2)          exit=1
+    #
+    # But `start_session` creates that directory 26-43 ms BEFORE it writes the
+    # record, on every single `a start`. The window is therefore on the normal
+    # create path, and every reader that does not hold the registry lock can
+    # land in it — which is every reader PocketShell has. `a watch` died on it
+    # (1 run in 60 on an idle box) and `a list` was bricked outright for the
+    # duration.
+    #
+    # That reaches the phone directly. `session_enum.py::_probe_aplexer` and
+    # `sessions.py::_aplexer_snapshot` both probe `a --json snapshot` and fall
+    # back to `a --json list`; the fallback cannot help, because the failure
+    # is in the shared registry scan underneath both. `aplexer.run_json`
+    # collapses any failure to None, so while a session was being created the
+    # session tree silently lost EVERY aplexer row. Worse, a record-less
+    # directory that outlives the window (a killed/crashed `a start`) bricks
+    # 0.1.2's registry permanently — including `a start` itself, which runs
+    # the same scan under the lock, so `sessions create --backend aplexer`
+    # stops working until someone manually `rmdir`s it.
+    # tests/test_aplexer_contract.py drives the bundled binary through both
+    # production probes with exactly that on-disk shape; verified red on
+    # published 0.1.2, green on 0.1.3.
+    #
+    # 0.1.2 (not 0.1.1) was the previous floor, and the version string alone
+    # could not tell you why: aplexer HEAD sat 143 commits past the v0.1.1 tag
+    # while STILL self-reporting `a --version` as 0.1.1, so the published
+    # 0.1.1 wheel and the build every PocketShell host actually ran were
+    # indistinguishable by version. Pinning 0.1.1 under the hard cut would
+    # have silently DOWNGRADED every host to a build missing two fixes the
+    # real create-agent path needs:
     #   * aplexer ee4b957 — profile `executable` override (argv[0]) for Codex
     #     variants. Without it, `[profiles.zcodex] engine="codex",
     #     executable="zcodex"` resolves argv[0] to `codex`, and `pocketshell
@@ -113,10 +143,10 @@ dependencies = [
     #   * aplexer d13ecb2 — preserve the provider environment for plain
     #     `shell` launches (0.1.1 stripped 71 provider vars from every shell
     #     session).
-    # tests/test_aplexer_contract.py pins BOTH behaviours against the BUNDLED
-    # binary, because `a --version` demonstrably cannot: a future pin that
-    # regresses to a build without them fails that test loudly instead of
-    # shipping a silent downgrade. Re-run it whenever this pin moves.
+    # tests/test_aplexer_contract.py pins ALL of these behaviours against the
+    # BUNDLED binary, because `a --version` demonstrably cannot: a future pin
+    # that regresses to a build without them fails that test loudly instead
+    # of shipping a silent downgrade. Re-run it whenever this pin moves.
     #
     # There is no separate release-time guard for the aplexer version itself
     # (scripts/check-pypi-version.sh only couples pocketshell's OWN version to
@@ -132,12 +162,12 @@ dependencies = [
     # fails loud (there is no PATH fallback — D22) while tmux, the default
     # backend, keeps working.
     #
-    # Install-surface note (0.1.2): the wheels moved from manylinux_2_17 to
-    # manylinux_2_28, raising the minimum glibc from 2.17 to 2.28. Linux hosts
-    # older than that (CentOS 7, Ubuntu 18.04) can no longer install
-    # pocketshell at all now that aplexer is a hard dependency. Flagged, not
-    # solved here — see docs/aplexer-integration.md.
-    "aplexer==0.1.2; sys_platform == 'linux'",
+    # Install-surface note (unchanged in 0.1.3): as of 0.1.2 the wheels moved
+    # from manylinux_2_17 to manylinux_2_28, raising the minimum glibc from
+    # 2.17 to 2.28. Linux hosts older than that (CentOS 7, Ubuntu 18.04) can
+    # no longer install pocketshell at all now that aplexer is a hard
+    # dependency. Flagged, not solved here — see docs/aplexer-integration.md.
+    "aplexer==0.1.3; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -198,8 +228,10 @@ required-version = "==0.10.11"
 # runtime dep landed at 22:38:04Z) for issue #2543. A package uploaded after
 # the cutoff is simply invisible to `uv lock`, which reads like a broken index
 # rather than a stale cutoff, so this value moves in lock-step with every new
-# pin — and the `uv.lock` options cutoff must be moved to match.
-exclude-newer = "2026-09-05T23:00:00Z"
+# pin — and the `uv.lock` options cutoff must be moved to match. Now past
+# aplexer 0.1.3's 2026-09-06T00:32:09Z PyPI upload (its `aplexer-client`
+# runtime dep landed at 00:32:04Z) for the session-tree regression fix above.
+exclude-newer = "2026-09-06T01:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

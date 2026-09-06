@@ -36,7 +36,7 @@ aplexer is **not installed separately**. `tools/pocketshell/pyproject.toml`
 carries a pinned, Linux-marked hard dependency:
 
 ```toml
-"aplexer==0.1.2; sys_platform == 'linux'"
+"aplexer==0.1.3; sys_platform == 'linux'"
 ```
 
 so the documented host install — `uv tool install pocketshell` — also delivers
@@ -132,9 +132,54 @@ BEHAVIOUR the CLI depends on:
   `launch-spec --engine/--cwd/--profile/--no-skip-permissions`,
   `attach`, `kill`) exists in the bundled build.
 
+- a session directory with **no `session.json`** — the state `a start` leaves
+  on disk for 26-43 ms on every create — is SKIPPED, not treated as a corrupt
+  registry, by `a list` / `a snapshot`, by `session_enum._probe_aplexer` and
+  `sessions._aplexer_snapshot` driving the real binary, and by a concurrent
+  `a start` (see "0.1.3" below).
+
 Those assertions were verified to fail against published 0.1.1 and pass
-against 0.1.2. **Re-run that file whenever the pin moves** — it is what a bump
-has to re-verify, in place of a version check that cannot see the difference.
+against 0.1.2 (the `executable` / shell-env pair), and to fail against 0.1.2
+and pass against 0.1.3 (the registry-scan trio). **Re-run that file whenever
+the pin moves** — it is what a bump has to re-verify, in place of a version
+check that cannot see the difference.
+
+### 0.1.3 — a session being created must not blank the session tree
+
+aplexer#2 / aplexer#3. Through 0.1.2, `list_records` treated a session
+directory containing no `session.json` as a corrupt registry and failed the
+whole scan:
+
+```text
+a: load session registry entry <dir>: read <dir>/session.json:
+No such file or directory (os error 2)          exit=1
+```
+
+`start_session` creates that directory 26-43 ms *before* it writes the record,
+on every `a start`, so this is the normal create path, not an exotic state.
+Both writes happen under the registry lock, so no other `a start` could
+observe the gap — but every reader that does NOT take that lock can, and that
+is every reader PocketShell has. `a watch` polls forever and died on it (1 run
+in 60 on an idle box); `a list` was bricked outright for the duration.
+
+It reached the phone directly. `session_enum.py::_probe_aplexer` and
+`sessions.py::_aplexer_snapshot` both probe `a --json snapshot` and fall back
+to `a --json list`; that fallback cannot help, because the failure is in the
+shared registry scan underneath both. `aplexer.run_json` then collapses the
+failure to `None`, so while any session was being created the session tree
+lost **every** aplexer row.
+
+A record-less directory that outlives the window — a killed or crashed
+`a start` — is worse: it bricks a 0.1.2 registry permanently, including
+`a start` itself (the same scan runs under the lock), so
+`sessions create --backend aplexer` stops working until someone manually
+`rmdir`s the directory.
+
+Pinned behaviour, in `test_aplexer_contract.py`: with that exact on-disk shape
+present, `a --json list` succeeds, `_probe_aplexer` returns a list with no
+error, `_aplexer_snapshot` is not `None`, a live session stays listed, and a
+second `a start` still succeeds. Verified red on published 0.1.2, green on
+0.1.3.
 
 ### Lock cutoff
 
@@ -142,9 +187,20 @@ has to re-verify, in place of a version check that cannot see the difference.
 `uv.lock`'s `[options]`) is a project-local reproducibility cutoff, and a
 package uploaded *after* it is simply invisible to `uv lock` — which looks
 like a broken index rather than a stale cutoff. So it moves in lock-step with
-every new pin: past quse 0.0.15 (#2293), now past aplexer 0.1.2's
-2026-09-05T22:38:08Z upload (its `aplexer-client` runtime dependency landed at
-22:38:04Z). Bump both places together, or `uv lock --check` fails.
+every new pin: past quse 0.0.15 (#2293), then past aplexer 0.1.2's
+2026-09-05T22:38:08Z upload (#2543), now past aplexer 0.1.3's
+2026-09-06T00:32:09Z upload (its `aplexer-client` runtime dependency landed at
+00:32:04Z). Bump both places together, or `uv lock --check` fails.
+
+Two host-level traps when re-locking: this box carries a rolling global
+`exclude-newer = "7 days"` in `~/.config/uv/uv.toml`, so a local `uv lock` /
+`uv pip install` needs an explicit `--exclude-newer <cutoff>` to see a
+just-published pin; and PyPI's JSON API can list a release minutes before the
+simple index serves it, so a resolution failure claiming the version does not
+exist is worth one `--refresh` retry before concluding anything is wrong.
+After the bump, read the lock diff: moving the cutoff forward is exactly when
+an *unrelated* dependency can drift in unnoticed, so the diff should be the
+new pin and nothing else.
 
 ---
 

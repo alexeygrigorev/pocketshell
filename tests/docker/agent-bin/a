@@ -39,6 +39,21 @@ for arg in "$@"; do
 done
 
 case "$verb" in
+  attach)
+    # Issue #2555: the aplexer-backed ATTACH path, which this fixture had no
+    # answer for at all (`pocketshell sessions attach` used to exit 3 for an
+    # aplexer row, so no connected journey could ever be on an aplexer PTY).
+    #
+    # Real `a attach` is a passthrough: it prints a one-line attach banner and
+    # then relays the workload's own bytes, including the workload's
+    # `CSI ? 1049 h` when it takes the alternate screen — and it never enables
+    # mouse tracking of its own. That combination (alt screen active, mouse
+    # tracking inactive) is exactly the host state #2555 is about, verified
+    # against real aplexer 0.1.3 on the dev box, so the fixture reproduces it
+    # by running an alt-screen workload and relaying it the same way.
+    printf '[aplexer attached; Ctrl-b d detaches]\n'
+    exec /usr/local/bin/pocketshell-altscreen-tui
+    ;;
   sessions)
     if [ "$json" != true ]; then
       printf 'aplexer fixture only implements `a --json sessions`\n' >&2

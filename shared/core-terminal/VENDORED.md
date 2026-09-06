@@ -43,11 +43,13 @@ modifications).
 | Path | Source | Notes |
 |---|---|---|
 | `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator.java` carries the #259 CR-overwrite fix; see `PATCHES.md`. Rest byte-identical. |
-| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer.java` carries #172/#241/#259 changes; see `PATCHES.md`. Rest byte-identical. |
+| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer.java` carries #172/#241/#259 changes and `TerminalView.java` carries the #2555 alt-screen scroll change; see `PATCHES.md`. Rest byte-identical. |
 | `src/main/res/drawable/text_select_handle_*.xml` | upstream `terminal-view/src/main/res/drawable/` | byte-identical |
 | `src/main/res/values/strings.xml` | upstream `terminal-view/src/main/res/values/strings.xml` | byte-identical |
 | `src/main/jni/termux.c`, `src/main/jni/Android.mk` | upstream `terminal-emulator/src/main/jni/` | **not compiled** — see "JNI handling" |
 | `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | patched — adds #259 CR-overwrite cases to `TerminalTest.java`; rest byte-identical |
+| `src/test/java/com/termux/view/**` | **PocketShell-authored, not vendored** | Upstream `terminal-view` ships no unit tests, so this package is ours: `TerminalScrollGestureTest.kt` (#2555) lives here because it needs package-private access to `TerminalView.doScroll`. Delete nothing here on a refresh. |
+| `src/test/resources/pocketshell/**` | **PocketShell-authored, not vendored** | Real PTY attach captures used as fixtures; see the README next to them. |
 
 If we ever deviate from upstream — even a one-character patch — record it in
 `PATCHES.md` alongside this file.

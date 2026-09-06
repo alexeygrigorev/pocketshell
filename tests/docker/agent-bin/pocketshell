@@ -580,9 +580,14 @@ case "${1:-}" in
       #
       # Deliberately NOT delegating to the real Python CLI: the image ships the
       # deterministic shims, and the enumeration half of this fixture already
-      # reimplements §B.1 the same way. Only the tmux arm exists here — the `a`
-      # fixture binary hosts no attachable process, so an aplexer name is a
-      # clean exit 3 rather than a hang.
+      # reimplements §B.1 the same way.
+      #
+      # Issue #2555 added the SECOND arm the real CLI has always had: a name
+      # that belongs to an aplexer row `execvp`s `a attach <id>`, exactly as
+      # `sessions.py::sessions_attach` does. Before that, every aplexer row was
+      # a clean exit 3, so no connected journey could ever be on an aplexer PTY
+      # — which is why the alt-screen-without-mouse-tracking scroll bug had no
+      # device reproduction on that backend.
       attach_hide_status=0
       attach_name=""
       while [ "$#" -gt 0 ]; do
@@ -597,6 +602,31 @@ case "${1:-}" in
       if [ -z "$attach_name" ]; then
         printf 'pocketshell: attach needs a session name\n' >&2
         exit 64
+      fi
+      # The aplexer arm first, for the reason the real CLI resolves managers in
+      # one pass: a name that belongs to `a` has no tmux socket to find, and
+      # falling through to the sweep would report it as a vanished session.
+      attach_aplexer_snapshot="${POCKETSHELL_FIXTURE_APLEXER_FILE:-$HOME/.pocketshell-fixture-aplexer.json}"
+      if [ -r "$attach_aplexer_snapshot" ]; then
+        attach_aplexer_id="$(
+          POCKETSHELL_ATTACH_NAME="$attach_name" python3 - "$attach_aplexer_snapshot" <<'PYEOF' || true
+import json, os, sys
+
+want = os.environ["POCKETSHELL_ATTACH_NAME"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+for row in (payload or {}).get("sessions", []):
+    if row.get("name") == want and row.get("id"):
+        print(row["id"])
+        break
+PYEOF
+        )"
+        if [ -n "$attach_aplexer_id" ]; then
+          exec /usr/local/bin/a attach "$attach_aplexer_id"
+        fi
       fi
       attach_socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
       attach_socket=""

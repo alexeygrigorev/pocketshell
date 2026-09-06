@@ -75,6 +75,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/tmux \
         /usr/local/bin/tmuxctl \
         /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-altscreen-tui \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
     && rm -f /usr/local/bin/pocketshell \

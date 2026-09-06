@@ -70,6 +70,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/uv \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-altscreen-tui \
         /usr/local/bin/pocketshell-agent-entrypoint \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && printf '%s\n' "$OLD_CLI_FIXTURE_VERSION" > /opt/pocketshell-agent-fixture-version \

@@ -48,3 +48,36 @@ Not byte-identical to upstream.
 `com.termux.view.TerminalView` and the rest of `com.termux.terminal.**` remain
 byte-identical to upstream — see `TerminalRendererSpinnerRewriteInstrumentedTest`
 for the render-side coverage.
+
+## `src/main/java/com/termux/view/TerminalView.java`
+
+Not byte-identical to upstream.
+
+- **#2555** — `doScroll` no longer synthesises arrow keys on the alternate
+  screen. Upstream's middle branch answered a drag/wheel with
+  `handleKeyCode(KEYCODE_DPAD_UP/DOWN)` whenever the alternate buffer was
+  active and mouse tracking was not — the trick desktop terminals use so
+  scrolling works in `less`. On a phone that default is destructive and it is
+  reached constantly: tmux puts its *client* terminal on the alternate screen
+  for the whole of an attach, aplexer forwards an alt-screen workload's
+  `CSI ? 1049 h`, and tmux's `mouse` option is **off** by default — so on a
+  stock host every finger drag wrote `ESC O A` / `ESC [ A` into the session.
+  In a shell or an agent TUI that is command/prompt history, so the maintainer
+  scrolling back through an agent's output silently rewrote what he was
+  typing (the #2555 report).
+
+  The branch is DELETED rather than made conditional (D22 hard cut, no
+  "restore the old scrolling" flag). The alternate screen keeps no transcript,
+  so once there is no mouse tracking to forward a wheel event to there is
+  nothing truthful left to scroll; doing nothing is strictly better than
+  sending a keystroke the user never pressed, and `less`-style paging still
+  has real, deliberate arrows on the key bar's ARROWS page. The two branches
+  that DO have a defined meaning are untouched: mouse tracking active still
+  sends SGR wheel events (which is how a `set -g mouse on` tmux scrolls its
+  own scrollback in copy mode), and the normal buffer still moves `mTopRow`
+  through the local transcript.
+
+  Covered by `src/test/java/com/termux/view/TerminalScrollGestureTest.kt`
+  (real PTY captures of four attach paths, see
+  `src/test/resources/pocketshell/scroll/README.md`) and by
+  `app2/src/androidTest/.../J15TerminalScrollJourney.kt` on a device.

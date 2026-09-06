@@ -5,11 +5,15 @@
 # confidence gate) use --no-daemon --no-build-cache --max-workers=1 so a
 # release APK is reproducible and cannot OOM the box. That profile is the wrong
 # default for "put this build on the phone": it throws away the Gradle daemon
-# and the build cache, serialises every module, and compiles all four native
-# ABIs plus androidTest.
+# and the build cache, serialises every module, and compiles androidTest.
 #
-# This script keeps the daemon, keeps the cache, raises the Kotlin heap, and
-# optionally compiles only the connected device ABI.
+# This script keeps the daemon, keeps the cache, and raises the Kotlin heap.
+#
+# Issue #2570: the `--abi` option and the `-PpocketshellAbiFilters` property it
+# passed are gone. They existed to compile only the connected device's ABI of
+# `shared/core-terminal`'s JNI; #2566 deleted that native build, so the property
+# was read by no Gradle file any more and the flag saved nothing. A flag nobody
+# reads is worse than no flag (D22).
 
 set -euo pipefail
 
@@ -20,11 +24,9 @@ source "$ROOT_DIR/scripts/lib/scope-run.sh"
 
 ANDROID_SDK="${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/home/alexey/Android/Sdk}}}"
 ADB="${ASSEMBLE_DEBUG_ADB:-${ADB:-$ANDROID_SDK/platform-tools/adb}}"
-ABI_MODE="auto"
 WITH_ANDROID_TEST=0
 INSTALL=0
 PRINT_COMMAND=0
-ALLOWED_ABIS='arm64-v8a|armeabi-v7a|x86|x86_64'
 
 usage() {
   cat <<'USAGE'
@@ -33,9 +35,6 @@ Usage: scripts/assemble-debug.sh [options]
 Fast local :app2:assembleDebug. Keeps the Gradle daemon and build cache.
 
 Options:
-  --abi auto|all|<abi>  Native ABI to compile (default: auto).
-                        auto = the connected device's ABI when exactly one
-                        device (or ANDROID_SERIAL) is available, otherwise all.
   --android-test        Also assemble the androidTest APK.
   --install             adb install -r the debug APK after a successful build.
   --print-command       Print the Gradle command and exit (no build).
@@ -44,7 +43,7 @@ Options:
 Environment:
   ANDROID_SDK / ANDROID_HOME / ANDROID_SDK_ROOT
   ADB / ASSEMBLE_DEBUG_ADB
-  ANDROID_SERIAL          pin which device --abi auto and --install use
+  ANDROID_SERIAL          pin which device --install uses
   POCKETSHELL_TEST_MEM    cgroup MemoryMax (default 24G for this script)
 USAGE
 }
@@ -59,15 +58,6 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       usage
       exit 0
-      ;;
-    --abi)
-      [[ $# -ge 2 ]] || fail "--abi needs a value"
-      ABI_MODE="$2"
-      shift 2
-      ;;
-    --abi=*)
-      ABI_MODE="${1#--abi=}"
-      shift
       ;;
     --android-test)
       WITH_ANDROID_TEST=1
@@ -87,61 +77,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-adb_cmd() {
-  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-    "$ADB" -s "$ANDROID_SERIAL" "$@"
-  else
-    "$ADB" "$@"
-  fi
-}
-
-connected_serials() {
-  # `adb devices` header plus optional trailing blank line. Missing adb, or
-  # no devices, must fall through to "all ABIs" rather than abort --print-command.
-  adb_cmd devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { print $1 }' || true
-}
-
-device_abi() {
-  adb_cmd shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r' || true
-}
-
-resolve_abi_filter() {
-  local mode="$1"
-  local serials serial count abi
-  case "$mode" in
-    all)
-      return 1
-      ;;
-    auto)
-      mapfile -t serials < <(connected_serials)
-      count="${#serials[@]}"
-      if [[ -n "${ANDROID_SERIAL:-}" ]]; then
-        abi="$(device_abi)"
-      elif [[ "$count" -eq 1 ]]; then
-        serial="${serials[0]}"
-        abi="$("$ADB" -s "$serial" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
-      else
-        return 1
-      fi
-      [[ -n "$abi" ]] || return 1
-      printf '%s\n' "$abi"
-      return 0
-      ;;
-    *)
-      printf '%s\n' "$mode"
-      return 0
-      ;;
-  esac
-}
-
-ABI_FILTER=""
-if ABI_FILTER="$(resolve_abi_filter "$ABI_MODE")"; then
-  [[ "$ABI_FILTER" =~ ^($ALLOWED_ABIS)$ ]] || \
-    fail "unsupported ABI '$ABI_FILTER' (want $ALLOWED_ABIS)"
-else
-  ABI_FILTER=""
-fi
-
 GRADLE_ARGS=(
   --parallel
   --max-workers=4
@@ -151,9 +86,6 @@ GRADLE_ARGS=(
 )
 if [[ "$WITH_ANDROID_TEST" -eq 1 ]]; then
   GRADLE_ARGS+=(:app2:assembleDebugAndroidTest)
-fi
-if [[ -n "$ABI_FILTER" ]]; then
-  GRADLE_ARGS+=(-PpocketshellAbiFilters="$ABI_FILTER")
 fi
 GRADLE_ARGS+=(--stacktrace)
 
@@ -169,7 +101,6 @@ export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_SDK}"
 export POCKETSHELL_TEST_MEM="${POCKETSHELL_TEST_MEM:-24G}"
 
 printf 'PocketShell local debug APK\n'
-printf '  abi: %s\n' "${ABI_FILTER:-all}"
 printf '  androidTest: %s\n' "$([[ "$WITH_ANDROID_TEST" -eq 1 ]] && echo yes || echo no)"
 printf '  MemoryMax: %s\n' "$POCKETSHELL_TEST_MEM"
 

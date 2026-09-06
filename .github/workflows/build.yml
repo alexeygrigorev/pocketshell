@@ -60,21 +60,14 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # Issue #1581: Gradle auto-installs NDK 27.0.12077973 (AGP's default NDK)
-      # on demand when it configures :shared:core-terminal, and the GitHub
-      # runner intermittently receives a corrupt/incomplete NDK archive
-      # ("Error on ZipFile unknown archive"), failing the release-critical Build
-      # with no code change. Re-running over the same partial download does NOT
-      # help; the wrapper clears the partial download between attempts so a
-      # single corrupted-download attempt self-heals instead of needing a manual
-      # re-run. It only retries the specific corrupted-NDK signature, so a real
-      # compile/regression failure still fails immediately (never masked). The
-      # produced APK is unchanged. Retry/clear logic is proven by
-      # scripts/test-ci-ndk-retry.sh in the Tests workflow's Unit job.
+      # Issue #2570: a plain assemble. This used to run through
+      # scripts/ci-assemble-with-ndk-retry.sh, which cleared a partial NDK
+      # download and retried when Gradle's on-demand NDK install produced a
+      # corrupt archive (#1581). #2566 deleted the last `externalNativeBuild`
+      # in the build, so no NDK is ever downloaded and the wrapper was dead
+      # weight; scripts/check-no-native-build.sh keeps it that way.
       - name: Assemble debug APK
-        run: |
-          chmod +x scripts/ci-assemble-with-ndk-retry.sh
-          scripts/ci-assemble-with-ndk-retry.sh
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Rename APK
         run: |

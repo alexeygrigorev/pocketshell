@@ -229,15 +229,15 @@ Common commands:
 
 ```bash
 scripts/assemble-debug.sh                 # fast local debug APK (daemon + cache)
-scripts/assemble-debug.sh --abi auto --install
+scripts/assemble-debug.sh --install
 scripts/full-jvm-gate.py
 scripts/connected-test.sh
 scripts/capture-walkthrough-screenshots.sh
 ```
 
 `scripts/assemble-debug.sh` is the local APK path: it keeps the Gradle daemon
-and build cache, compiles only the connected device ABI when it can, and does
-not build androidTest. The release/visual-audit wrappers still use
+and build cache, pins the Kotlin daemon heap, and does not build androidTest.
+The release/visual-audit wrappers still use
 `--no-daemon --no-build-cache --max-workers=1` on purpose.
 
 The test matrix and Docker/emulator setup are in

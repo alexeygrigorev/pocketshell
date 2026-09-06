@@ -162,8 +162,13 @@ _SIGNATURE_PATTERNS = [
 
 # Known infra/flake signatures. If the captured signature matches one of these,
 # tag likely_infra so the on-call knows to re-run rather than debug.
+#
+# Issue #2570: the NDK-install signature is gone. It classified a failed
+# on-demand NDK download as infra, and #2566 deleted the last
+# `externalNativeBuild` in the build, so CI never installs an NDK any more. A
+# signature for an impossible failure can only mislabel a real one as
+# "just re-run it"; scripts/check-no-native-build.sh keeps the premise true.
 _INFRA_SIGNATURE_PATTERNS = [
-    re.compile(r"\bNDK\b.*\b(install|installation)\b", re.IGNORECASE),
     re.compile(r"No compose hierarchies", re.IGNORECASE),
     re.compile(r"UiAutomation.*while connecting", re.IGNORECASE),
     re.compile(r"Process crashed", re.IGNORECASE),

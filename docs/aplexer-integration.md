@@ -449,6 +449,20 @@ fixture therefore cannot prove capping; the real-transport proof lives in
 CLI against an isolated aplexer instance and reads `memory.max` back out of the
 kernel.
 
+GitHub's hosted runners fail the same way for a different reason (PR #2590): the
+scope is created, but the runner's process tree lives outside
+`user@<uid>.service`, so cgroup-v2's common-ancestor rule denies moving the
+workload into it — `a start --memory` exits with `spawn workload: Permission
+denied`. The kernel proof therefore probes that exact capability first and skips
+naming it when it is absent, CI keeps an environment-independent proof that the
+resolved cap reaches `a start`'s argv, and `scripts/check-cgroup-cap-proof.sh`
+re-imposes the kernel proof on a host that can delegate — asserting the reported
+test counts rather than pytest's exit code, which is 0 for a skip. That script
+is a step in `scripts/pre-release-confidence-gate.sh`, so a release cut from
+this box re-proves the cap against the kernel every time; a bumped aplexer pin
+that stopped honouring `--memory` would be caught there rather than by whoever
+remembered to run a script (see `docs/testing.md`, "Session memory-cap proof").
+
 ---
 
 ## Product defaults (unless the maintainer says otherwise)

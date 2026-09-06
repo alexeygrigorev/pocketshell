@@ -897,9 +897,16 @@ jobs:
         working-directory: tools/pocketshell
         run: uv sync --frozen --group dev
 
+      # `-rs` prints the REASON for every skipped test in the summary. Issue
+      # #2562: the kernel-level session-cap proof can only run on a host that
+      # delegates a cgroup-v2 user scope, which this runner does not, so it
+      # skips here by design — and a bare "SKIPPED" line is indistinguishable
+      # from a test that quietly stopped running. With `-rs` the log names the
+      # missing capability. `scripts/check-cgroup-cap-proof.sh` is what turns
+      # that skip back into a hard failure on a host that CAN run it.
       - name: Run pytest
         working-directory: tools/pocketshell
-        run: uv run --frozen pytest -v
+        run: uv run --frozen pytest -v -rs
 
       # Issue #2430 / audit F22: this proof used to be an uncalled top-level
       # script. It removes the missing-window production guard in a copied tree,

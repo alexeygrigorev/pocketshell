@@ -235,6 +235,33 @@ discriminator the gate emits alongside it — for this one,
 the shard verdict token and in the aggregate's annotations. A signature with
 no discriminator is a defect in the gate's evidence, not a mystery.
 
+## A guard's own self-test fixtures read as real failures in a grep
+
+The counterpart to the section below, and the one that costs triage time
+rather than coverage. A guard that proves it can go red does so by running
+deliberately malformed fixtures, and those emit exactly the strings someone
+scanning a log greps for. Two independent instances in one evening
+(2026-09-06), both requiring an agent to stop and disambiguate:
+
+- `scripts/check-app2-lane-execution.py --self-test` emits
+  `red: files=1 tests=5 ... failures=1` and several `FAIL few/stale/multi`
+  lines under both app2 jobs, ending in `self-test: 10 checks PASSED`.
+- `scripts/check-executed-test-counts.sh`'s self-test emits a block of
+  `FAIL empty: ... FAIL few: ... FAIL multi:` inside an otherwise green
+  `core-transport` integration job whose real verdict is
+  `tests=23 executed=23 failures=0`.
+
+A naive `grep -E 'FAIL|failures=[1-9]'` over either log reports a failing
+run. Both are the guard working — the same discipline as a reviewer's
+mutation check, just built in and always on.
+
+So: never conclude "this run failed" from a grep for failure shapes alone.
+Find the job's own verdict line, and check whether a `self-test` /
+`PASSED` summary immediately follows the block you matched. When you cite a
+failure, cite the verdict line, not the first red-looking string in the log
+— and if you are writing a guard, put its self-test output behind a marker
+that a scan can exclude.
+
 ## Untriggered guards: a self-test that runs nowhere proves nothing
 
 `scripts/test-*.sh` are ordinary scripts, not Gradle tests, so nothing runs

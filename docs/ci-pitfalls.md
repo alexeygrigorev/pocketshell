@@ -168,6 +168,33 @@ contention loses the race.
 - A `Process crashed`/signal-9 through the AVD-lock/connected-test wrapper
   is now a real signal (the lock is machine-anchored, not per-worktree) —
   capture the signature, don't just re-run it away.
+- **Elapsed time is not a property of the code alone.** Record the load
+  average at both ends of any timing measurement you intend to cite, and
+  state it in the verdict. A duration measured on a contended box is a
+  superimposition of two things — what the code did, and what the host had
+  left to give — and the two are not separable after the fact.
+
+  Worked example (#2549, 2026-09-06): a journey method parked for **961 s**
+  against a 15 s budget, with the emulator logging `app_time_stats
+  avg=60012.00ms` — a 60-second Choreographer frame. That was measured at
+  box load 47, while a sibling project's session recorded the same evening
+  peaking near 55 with six of its runs OOM-killed. Part defect, part
+  starvation, and the run alone cannot say how much of each.
+
+  Two consequences that pull in opposite directions, so hold both:
+  1. **It does not excuse the defect.** The bound has to fire regardless of
+     *why* a frame is slow; a starved host producing 60 s frames is exactly
+     the condition the bound exists to survive. "It was only slow because
+     the box was loaded" is not a defence for an unbounded wait.
+  2. **It does weaken the after-measurement.** A clean number at load 14 is
+     not comparable to a 961 s outlier at load 47 — those are effectively
+     different machines. Report "outlier absent under lighter load" when
+     that is what the evidence supports, not "outlier fixed".
+
+  The same shape appears without an emulator: a sibling project's agents saw
+  120 s `faulthandler` dumps mid-run the same evening and correctly
+  attributed them to CPU starvation rather than product hangs; the tests
+  passed on rerun. A timeout on a shared box is a hypothesis, not a verdict.
 
 ## Shared-literal / default-flip regressions that no per-PR check catches
 

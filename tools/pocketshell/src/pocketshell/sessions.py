@@ -52,6 +52,7 @@ import click
 
 from . import aplexer as _aplexer
 from . import config as _config
+from . import memcap as _memcap
 from . import resume as _resume
 from . import session_enum as _session_enum
 
@@ -486,7 +487,10 @@ def sessions_resume(
 # (tmuxctl >= 0.3.0), which wraps the session shell in a memory-capped
 # cgroup-v2 systemd `--user` scope under `robust.slice`, so sessions
 # PocketShell starts can never trigger the OOM-kill cascade that wiped the
-# agent team. `create-detached` is already idempotent (a no-op when the
+# agent team. The aplexer arm gets the SAME guarantee from the same
+# `cgroups.toml` policy via `a start --memory` (issue #2562, `memcap.py`);
+# until then it passed no memory parameter at all and every aplexer-backed
+# session ran uncapped. `create-detached` is already idempotent (a no-op when the
 # session exists) — that contract is tmuxctl's, not re-implemented here.
 #
 # Since the aplexer adoption (simplification plan §B.3) the same command is
@@ -645,6 +649,17 @@ def _create_on_tmux(
     unparseable (observed on the dev box, not hypothetical). Its output is
     relayed to stderr instead, so nothing is lost.
     """
+    if _memcap.is_uncapped(mem):
+        # `--mem none` is the aplexer arm's explicit "this host cannot enforce
+        # a cap" escape hatch (issue #2562). tmuxctl has no such spelling —
+        # forwarding it would make tmuxctl reject the size, and DROPPING it
+        # would quietly create a session capped at the project default while
+        # the caller believes they asked for no cap. Refuse instead.
+        raise _CreateError(
+            "pocketshell: `--mem none` is only supported on the aplexer "
+            "backend; the tmux arm is always capped by tmuxctl.",
+            exit_code=2,
+        )
     tmuxctl_path = _resolve_tmuxctl_binary()
     if tmuxctl_path is None:
         raise _CreateError(_tmuxctl_missing_message(), exit_code=127)
@@ -752,6 +767,7 @@ def aplexer_start_argv(
     tag: str,
     engine: Optional[str],
     profile: Optional[str],
+    memory_bytes: Optional[int],
 ) -> list[str]:
     """Build ``a --json start --workspace <ws> --tag <tag> [--engine …]``.
 
@@ -759,12 +775,24 @@ def aplexer_start_argv(
     subcommand exactly like :func:`pocketshell.aplexer.run_json` does — one
     spelling across the codebase. ``--engine`` is omitted for a plain shell
     session so aplexer applies its own configured default.
+
+    ``memory_bytes`` is the resolved per-session cap (issue #2562), handed to
+    aplexer as ``--memory <bytes>`` so it wraps the workload in a cgroup-v2
+    scope with that ``MemoryMax`` — the containment the tmux arm has had since
+    #726 and this arm had none of. A byte COUNT rather than the raw ``30G``
+    string because aplexer's own size parser is narrower than the one that
+    read the project file (no fractional sizes), and a cap must never be
+    silently reinterpreted between the file and the kernel. ``None`` means the
+    caller asked for an uncapped session with ``--mem none``; that is the only
+    way this argv comes out without ``--memory``.
     """
     argv = [aplexer_path, "--json", "start", "--workspace", workspace, "--tag", tag]
     if engine:
         argv.extend(["--engine", engine])
     if profile:
         argv.extend(["--profile", profile])
+    if memory_bytes is not None:
+        argv.extend(["--memory", str(memory_bytes)])
     return argv
 
 
@@ -903,10 +931,34 @@ def _reap_aplexer_blockers(
     )
 
 
+def _cap_unenforceable_hint(memory_bytes: Optional[int], detail: str) -> str:
+    """Explain an `a start` that failed BECAUSE the host cannot enforce a cap.
+
+    aplexer's limits fail closed (``lib.rs::Cgroup::create``): with no
+    delegated cgroup-v2 user scope — an unprivileged container, a host with no
+    user systemd — ``--memory`` turns the start into an error rather than a
+    silently uncapped session. That is the right default (issue #2562), but
+    the raw message ("systemd did not delegate the memory controller") does
+    not tell the operator what to do, so name the one deliberate escape hatch.
+    """
+    if memory_bytes is None:
+        return ""
+    lowered = detail.lower()
+    if "fail closed" not in lowered and "delegate" not in lowered:
+        return ""
+    return (
+        f" This host could not enforce the {memory_bytes}-byte session memory "
+        "cap (no delegated cgroup-v2 user scope). Fix the host's systemd "
+        "--user setup, or create the session explicitly uncapped with "
+        "`--mem none`."
+    )
+
+
 def _create_on_aplexer(
     *,
     name: str,
     cwd: Optional[str],
+    mem: Optional[str],
     engine: Optional[str],
     profile: Optional[str],
 ) -> dict[str, Any]:
@@ -919,6 +971,13 @@ def _create_on_aplexer(
     ``name`` is the row's listing name (``<workspace-basename>:<tag>``, from
     ``session_enum.aplexer_display_name``) so it round-trips with what
     `sessions list --json` shows.
+
+    The session's memory cap (issue #2562) is resolved from the workspace's
+    project policy — the very ``cgroups.toml`` the tmux arm's cap comes from —
+    BEFORE anything is started, reaped or probed: an unresolvable cap must
+    refuse the create outright, not fail halfway through it, and certainly not
+    produce an uncapped session (which is what this arm did for every session
+    it ever created).
     """
     resolution = _aplexer.resolve_a()
     aplexer_path = resolution.path
@@ -941,6 +1000,13 @@ def _create_on_aplexer(
             exit_code=127,
         )
     workspace = cwd or os.getcwd()
+    try:
+        memory_bytes = _memcap.resolve_session_mem_bytes(flag=mem, workspace=workspace)
+    except _memcap.MemCapError as exc:
+        raise _CreateError(
+            f"pocketshell: cannot create {name!r} in {workspace!r}: {exc}",
+            exit_code=2,
+        ) from exc
 
     snapshot = _aplexer_snapshot()
     existing = _aplexer_existing_record(snapshot, workspace=workspace, tag=name)
@@ -988,6 +1054,7 @@ def _create_on_aplexer(
         tag=name,
         engine=engine,
         profile=profile,
+        memory_bytes=memory_bytes,
     )
     code, stdout, stderr = _run_aplexer(argv)
     if code != 0:
@@ -1009,7 +1076,8 @@ def _create_on_aplexer(
                 exit_code=code,
             )
         raise _CreateError(
-            f"pocketshell: `a start --tag {name}` exited {code}: {detail}",
+            f"pocketshell: `a start --tag {name}` exited {code}: {detail}"
+            + _cap_unenforceable_hint(memory_bytes, detail),
             exit_code=code,
         )
     try:
@@ -1069,9 +1137,12 @@ def _emit_create_failure(
     "--mem",
     default=None,
     help=(
-        "Memory cap for the session's tmuxctl scope, e.g. 24G. "
-        "DEFAULT: unset — tmuxctl resolves the per-project cap from the repo's "
-        "cgroups.toml (PocketShell's is 30G). Only pass this to override that policy."
+        "Memory cap for the new session, e.g. 24G. DEFAULT: unset — the "
+        "per-project cap is resolved from the workspace's cgroups.toml "
+        "(PocketShell's is 30G), falling back to 12G for a project that "
+        "declares none. Only pass this to override that policy. `--mem none` "
+        "creates an UNCAPPED session and is only accepted on the aplexer "
+        "backend, for hosts that cannot delegate a cgroup-v2 user scope."
     ),
 )
 @click.option(
@@ -1130,11 +1201,16 @@ def sessions_create(
     `[backends].agent` and a plain session `[backends].shell` from
     `~/.config/pocketshell/config.toml` (both default to tmux).
 
-    On tmux the session is created inside tmuxctl's cgroup-v2 systemd `--user`
-    scope (capped under `robust.slice`); with `--engine` the agent launch line
-    is then sent into it server-side. `--mem` is intentionally UNSET by
-    default so tmuxctl resolves the per-project cap from the repo's
-    `cgroups.toml` (PocketShell's is 30G).
+    Both backends cap the session's memory (issue #2562). On tmux the session
+    is created inside tmuxctl's cgroup-v2 systemd `--user` scope (capped under
+    `robust.slice`), with tmuxctl resolving the per-project cap; on aplexer the
+    same `cgroups.toml` cap is resolved here (`pocketshell.memcap`) and passed
+    as `a start --memory`, which wraps the workload in its own capped scope.
+    `--mem` is intentionally UNSET by default so the repo's committed policy
+    (PocketShell's `cgroups.toml` says 30G) is what applies; a cap that cannot
+    be resolved refuses the create rather than starting an uncapped session.
+    With `--engine` the agent launch line is then sent into the tmux session
+    server-side.
 
     The create is idempotent: an existing session is a success that reports
     `"created": false` and starts no second agent in it.
@@ -1144,7 +1220,7 @@ def sessions_create(
         resolved = _route_backend(engine, backend, config)
         if resolved == _config.BACKEND_APLEXER:
             result = _create_on_aplexer(
-                name=name, cwd=cwd, engine=engine, profile=profile
+                name=name, cwd=cwd, mem=mem, engine=engine, profile=profile
             )
         elif resolved == _config.BACKEND_TMUX:
             result = _create_on_tmux(

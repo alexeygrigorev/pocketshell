@@ -32,9 +32,16 @@ import pytest
 from click.testing import CliRunner
 
 from pocketshell import config as psconfig
+from pocketshell import memcap as psmemcap
 from pocketshell import session_enum
 from pocketshell import sessions
 from pocketshell.sessions import _route_backend, sessions_group
+
+#: The cap a workspace with no project policy of its own resolves to
+#: (issue #2562). Derived from the production constant, not retyped.
+FALLBACK_CAP_BYTES = psmemcap.parse_size(
+    psmemcap.DEFAULT_MEM, source="the built-in default cap"
+)
 
 
 # ----- fixtures -------------------------------------------------------
@@ -723,6 +730,11 @@ def test_aplexer_arm_start_argv(monkeypatch: pytest.MonkeyPatch) -> None:
             "--tag", "work",
             "--engine", "claude",
             "--profile", "work",
+            # Issue #2562: every aplexer create carries the resolved memory
+            # cap. This workspace does not exist, so no project `cgroups.toml`
+            # applies and the documented fallback does — never "no cap".
+            # `tests/test_sessions_mem_cap.py` owns the resolution itself.
+            "--memory", str(FALLBACK_CAP_BYTES),
         ]
     ]
 
@@ -740,7 +752,12 @@ def test_aplexer_arm_omits_engine_for_a_shell_session(
 
     assert result.exit_code == 0, result.output
     assert start.calls == [
-        ["/fake/a", "--json", "start", "--workspace", "/home/me/proj", "--tag", "work"]
+        [
+            "/fake/a", "--json", "start",
+            "--workspace", "/home/me/proj",
+            "--tag", "work",
+            "--memory", str(FALLBACK_CAP_BYTES),
+        ]
     ]
 
 
@@ -1219,7 +1236,10 @@ def test_cli_engine_routes_via_backends_agent_config(
     assert result.exit_code == 0, result.output
     assert envelope(result)["manager"] == "aplexer"
     assert len(start.calls) == 1
-    assert tmuxctl.calls == []
+    # Nothing was routed to tmuxctl. (`subprocess.run` is patched process-wide
+    # here, so the cap resolver's `git rev-parse --show-toplevel` workspace
+    # probe lands in this stub too — filter on the binary, not on emptiness.)
+    assert [call for call in tmuxctl.calls if call[0] == "/fake/tmuxctl"] == []
 
 
 def test_cli_shell_session_ignores_backends_agent_config(

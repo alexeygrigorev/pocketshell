@@ -202,7 +202,22 @@ def check_lifecycle(binary: str) -> None:
     workspace = _home()
 
     created = run_cli(
-        ["sessions", "create", tag, "--backend", "aplexer", "--cwd", workspace, "--json"],
+        # `--mem none` (issue #2562): every session PocketShell creates is
+        # memory-capped, and aplexer's limits FAIL CLOSED — with no delegated
+        # cgroup-v2 user scope, `a start --memory` errors instead of quietly
+        # running uncapped. This container has no user systemd
+        # ("Failed to connect to user scope bus ... $XDG_RUNTIME_DIR not
+        # defined"), so the fixture opts out EXPLICITLY, at the call site,
+        # rather than the CLI silently dropping the cap for everyone. Capping
+        # itself cannot be proven here; `tools/pocketshell/tests/
+        # test_sessions_mem_cap.py` proves it against a real delegated scope.
+        [
+            "sessions", "create", tag,
+            "--backend", "aplexer",
+            "--cwd", workspace,
+            "--mem", "none",
+            "--json",
+        ],
         timeout=CREATE_TIMEOUT_S,
     )
     if created.returncode != 0:

@@ -43,6 +43,16 @@ dirs (e.g. ``~/bin/a``) was invisible, and the error said "not installed".
 ``worker_executable`` resolves it next to ``current_exe``, else bare
 ``aplexer`` on PATH). The pinned wheel always ships both into the same dir, so
 :class:`AplexerResolution` reports the worker it found next to ``a``.
+
+A BUNDLED ``a`` with no sibling worker is therefore a packaging-integrity
+failure, not a usable resolution (issue #2553): accepting it would let the
+pinned CLI start an UNPINNED worker off ``PATH`` — the same separate-install
+hazard #2543 removed, one level down. Such a candidate is skipped with a
+``tried`` entry saying why, so the caller's existing "could not resolve `a`;
+tried …" message explains it instead of a low-level worker-startup error.
+``APLEXER_BIN`` is deliberately exempt: it is the one explicit override ("run
+exactly this binary"), the reinstall advice does not apply to it, and it is
+the seam the test suite's stub ``a`` uses.
 """
 
 from __future__ import annotations
@@ -136,6 +146,8 @@ def resolve_a(env: Optional[Mapping[str, str]] = None) -> AplexerResolution:
     so a separately-installed ``a`` can never be load-bearing. Never raises —
     an unresolvable ``a`` comes back as a report whose ``path`` is ``None``
     and whose ``tried`` lists every candidate, for the caller's error message.
+    A bundled ``a`` missing its sibling ``aplexer`` worker counts as
+    unresolvable (#2553), for the reason the module docstring gives.
     """
     source = env_map(env)
     tried: list[str] = []
@@ -153,10 +165,25 @@ def resolve_a(env: Optional[Mapping[str, str]] = None) -> AplexerResolution:
     for bin_dir in _bundled_bin_dirs():
         candidate = bin_dir / "a"
         if candidate.exists():
+            worker = _sibling_worker(str(candidate))
+            if worker is None:
+                # HALF-INSTALLED BUNDLE (#2553). `a` alone is not usable:
+                # `aplexer/src/lib.rs::worker_executable` resolves the worker
+                # next to `current_exe` and, failing that, runs a BARE
+                # `aplexer` off PATH — so returning this `a` would either
+                # start an unpinned worker (the separate-install hazard #2543
+                # removed, one level down) or die with a low-level startup
+                # error. Treated exactly like an absent `a`: keep looking, and
+                # if nothing answers, fail loud with this candidate named.
+                tried.append(
+                    f"{candidate} (bundled, found; sibling `aplexer` worker "
+                    "missing — half-installed)"
+                )
+                continue
             return AplexerResolution(
                 path=str(candidate),
                 source="bundled",
-                worker=_sibling_worker(str(candidate)),
+                worker=worker,
                 tried=tuple([*tried, f"{candidate} (bundled, found)"]),
             )
         tried.append(f"{candidate} (bundled, missing)")

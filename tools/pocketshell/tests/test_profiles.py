@@ -556,6 +556,12 @@ def test_aplexer_profile_probe_uses_the_bundled_a(fake_home, tmp_path, monkeypat
     bundled = bin_dir / "a"
     bundled.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
     bundled.chmod(bundled.stat().st_mode | stat.S_IEXEC)
+    # A COMPLETE bundle: the pinned wheel ships `a` AND the `aplexer` worker
+    # into the same bin dir, and since #2553 a bundle missing the worker is
+    # rejected as a packaging-integrity failure rather than probed.
+    worker = bin_dir / "aplexer"
+    worker.write_text("#!/bin/sh\n", encoding="utf-8")
+    worker.chmod(worker.stat().st_mode | stat.S_IEXEC)
     environment = {
         # No aplexer anywhere on PATH — only the system dirs the stub's own
         # `/bin/sh` body needs. Resolution must come from the bundled copy.

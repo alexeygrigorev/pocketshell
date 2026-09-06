@@ -61,7 +61,6 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/opencode \
         /usr/local/bin/pocketshell \
         /usr/local/bin/pocketshell-fixture-sessions \
-        /usr/local/bin/a \
         /usr/local/lib/pocketshell-real-fixture \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \

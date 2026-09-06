@@ -580,9 +580,17 @@ case "${1:-}" in
       #
       # Deliberately NOT delegating to the real Python CLI: the image ships the
       # deterministic shims, and the enumeration half of this fixture already
-      # reimplements §B.1 the same way. Only the tmux arm exists here — the `a`
-      # fixture binary hosts no attachable process, so an aplexer name is a
-      # clean exit 3 rather than a hang.
+      # reimplements §B.1 the same way. Only the tmux arm exists here, so an
+      # aplexer name is a clean exit 3 rather than a hang.
+      #
+      # Issue #2563: the `agents` image DOES now host real, attachable aplexer
+      # sessions (the pinned `a` + worker live next to /usr/bin/python3, and
+      # the build proves a full create/list/attach/kill lifecycle through the
+      # real CLI). Reaching them means driving the REAL CLI — `a attach`, or
+      # `pocketshell-real-send sessions attach` — not this shim. Migrating the
+      # journeys onto that path is slice 2 of #2561; until then this arm's
+      # tmux-only scope is deliberate, not a claim that aplexer has nothing to
+      # attach to.
       attach_hide_status=0
       attach_name=""
       while [ "$#" -gt 0 ]; do

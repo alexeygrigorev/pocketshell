@@ -551,6 +551,20 @@ jobs:
       - name: "Shared SSH/tmux fixture health guard (issue #2143)"
         run: chmod +x scripts/test-ci-journey-fixture-health.sh && scripts/test-ci-journey-fixture-health.sh
 
+      # Issue #2563 (slice 1 of #2561): the Docker `agents` fixture now runs the
+      # REAL, pinned aplexer instead of a 61-line shell stub. The failure mode
+      # this guards is not "aplexer broke" but "aplexer went missing and nothing
+      # said so": `pocketshell.aplexer` resolves `a` next to `sys.executable`
+      # and nowhere else (PATH is a D22 hard cut, #2543), so an `a` that is only
+      # on PATH makes `sessions list --json` report managers ["tmux"], zero
+      # aplexer rows and exit 0 — every downstream journey stays green while
+      # proving nothing. Static half here (no Docker, < 1 s); the real-container
+      # positive + negative cases run in `Integration tests (Docker)`.
+      - name: "Agents-fixture real-aplexer guard, static half (issue #2563)"
+        run: |
+          chmod +x scripts/test-agents-fixture-aplexer.sh
+          scripts/test-agents-fixture-aplexer.sh
+
       # Issue #2007: connected-test.sh and full-jvm-gate.py are both canonical
       # wrappers around ./gradlew and both rewrite the SAME app/build graph of
       # the checkout they run from. Nothing stopped them overlapping, so during
@@ -997,6 +1011,31 @@ jobs:
       # Quoted: an unquoted ` #2143)` is a YAML comment and truncates the name.
       - name: "Shared SSH/tmux fixture health on a REAL fixture (issue #2143)"
         run: POCKETSHELL_FIXTURE_HEALTH_REAL_DOCKER=1 scripts/test-ci-journey-fixture-health.sh
+
+      # Issue #2563: the `agents` fixture must run a REAL aplexer, and must fail
+      # LOUDLY when it stops. Builds the image, publishes an EPHEMERAL SSH port,
+      # and drives everything over that port — sshd's non-interactive `exec`
+      # channel and a real PTY, i.e. the two channels the app itself uses, not
+      # `docker exec`. Positive arms: the build-time self-check; the REAL
+      # `pocketshell` CLI through create -> list(manager=aplexer, phase=running)
+      # -> PTY attach with a typed marker confirmed by `a capture` on a THIRD
+      # connection -> detach-does-not-kill -> kill(killed,reaped) -> gone; bare
+      # `a start` seen by a second independent channel plus a bare `a attach`;
+      # and tmux still working. Negative arms: a worker-less bundle (#2553) and
+      # `a` reachable on PATH but NOT next to sys.executable, each required to
+      # go red with a named [placement] diagnostic from the self-check AND from
+      # a rebuild.
+      #
+      # The ATTACH arms are not decoration: attachability is the one property
+      # the deleted 61-line stub lacked ("hosts no attachable process"), so a
+      # gate stopping at create/list/kill would let an image whose `a attach` is
+      # broken build green and ship. Verified by mutation — an `a` whose attach
+      # is a no-op builds fine, passes the self-check, and reddens here.
+      #
+      # Needs Docker plus an `ssh` client (both present on ubuntu-latest) and
+      # HTTPS to the aplexer release. No extra compose service, no fixed port.
+      - name: "Agents-fixture real-aplexer guard on a REAL container (issue #2563)"
+        run: scripts/test-agents-fixture-aplexer.sh --docker
   # The `emulator-journey` and `emulator-journey-verdict` jobs were DELETED with
   # the per-class journey registry they drove (D22). Both ran
   # `scripts/ci-journey-suite.sh`, which iterated an explicit FQCN list of

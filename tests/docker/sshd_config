@@ -8,10 +8,16 @@ GatewayPorts no
 X11Forwarding no
 Subsystem sftp /usr/lib/ssh/sftp-server
 
-# Issue #2150: OpenSSH >= 9.8 enables PerSourcePenalties by default, and this
-# fleet's alpine base now ships 10.3p1. The feature blocks a SOURCE ADDRESS
-# after its penalties accumulate past `min:15s` (authfail:5s, noauth:1s,
-# crash:90s).
+# Issue #2150: OpenSSH >= 9.8 enables PerSourcePenalties by default, and every
+# image sharing this file is now past that line: the alpine-based fixtures ship
+# 10.3p1 and `Dockerfile.agents` (rebased onto debian:trixie-slim by #2563)
+# ships 10.0p2. The feature blocks a SOURCE ADDRESS after its penalties
+# accumulate past `min:15s` (authfail:5s, noauth:1s, crash:90s).
+#
+# The `PerSourcePenalties no` line below is ALSO why #2563's base had to be
+# trixie rather than bookworm: OpenSSH 9.2 predates the keyword and sshd
+# REFUSES TO START on an unknown one, so a bookworm-based consumer of this file
+# dies at container start rather than merely mis-penalising.
 #
 # That is correct on the public internet and actively harmful here, because a
 # test fixture has exactly ONE source. Every emulator/host client reaches a

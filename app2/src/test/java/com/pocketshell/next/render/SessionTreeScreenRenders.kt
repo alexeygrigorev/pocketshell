@@ -75,6 +75,7 @@ class SessionTreeScreenRenders {
                     tag = null,
                     engine = "claude",
                     profile = null,
+                    agent = null,
                     agentState = null,
                     agentStateSource = null,
                     attached = true,

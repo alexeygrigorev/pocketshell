@@ -540,6 +540,7 @@ class SessionTreeScreenTest {
         tag = tag,
         engine = engine,
         profile = null,
+        agent = null,
         agentState = agentState,
         agentStateSource = agentStateSource,
         attached = attached,

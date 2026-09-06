@@ -67,7 +67,41 @@ run_guard() {  # against the sandbox root + the real list
 # must be a real journey class (so the guard's registry accepts it) that the
 # shipped list does NOT quarantine, so a planted annotation is genuinely
 # untracked.
-FIXTURE_CLASS="com.pocketshell.next.usage.J12UsagePanelJourney"
+#
+# CHOSEN FROM THE TREE, NEVER HARD-CODED. A pinned class name is the same
+# "incidental dependency on what the shipped tree happens to contain" trap the
+# planting helper below documents, just pointing the other way: the day that one
+# class gets quarantined for real, its fixture assumption breaks and this whole
+# self-test hard-fails on a tree the guard is perfectly happy with. That is
+# exactly what happened when J12UsagePanelJourney — the previous hard-coded
+# value — was quarantined on #2586. Pick the first class (sorted, so the choice
+# is deterministic and the failure message reproducible) that carries a
+# plantable `@Test` and that no row in the shipped list names.
+quarantined_classes() {
+  grep -vE '^[[:space:]]*(#|$)' "$QUARANTINE_LIST" | cut -f1 | sed 's/#.*$//' |
+    LC_ALL=C sort -u
+}
+
+pick_fixture_class() {
+  local excluded f rel fqcn
+  excluded="$(quarantined_classes)"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    # The planter matches this exact line, so a class without it is unusable.
+    grep -qxF '    @Test' "$f" || continue
+    rel="${f#"$REAL_ROOT"/}"
+    rel="${rel#java/}"; rel="${rel#kotlin/}"; rel="${rel%.kt}"
+    fqcn="${rel//\//.}"
+    if [[ -n "$excluded" ]] && grep -qxF "$fqcn" <<<"$excluded"; then
+      continue
+    fi
+    printf '%s\n' "$fqcn"
+    return 0
+  done < <(find "$REAL_ROOT" -type f -name '*.kt' 2>/dev/null | LC_ALL=C sort)
+  return 1
+}
+
+FIXTURE_CLASS="$(pick_fixture_class)" || fail "no unquarantined journey class with a plantable @Test under $REAL_ROOT — cases (c) and (d) cannot be built"
 
 # Plants `@Ignore("silently parked")` on the first @Test method of
 # $FIXTURE_CLASS in the SANDBOX copy and echoes the method name it annotated.

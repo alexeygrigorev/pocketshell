@@ -221,6 +221,7 @@ class SessionsJsonEdgeCaseTest {
                 tag = null,
                 engine = null,
                 profile = null,
+                agent = null,
                 agentState = null,
                 agentStateSource = null,
                 attached = false,
@@ -229,5 +230,52 @@ class SessionsJsonEdgeCaseTest {
             ),
             row,
         )
+    }
+
+    // --- `agent` (issue #2579) --------------------------------------------
+
+    /**
+     * The three shapes a host can send for `agent`, all on the SAME parse so
+     * one lenient default cannot mask another: a row from a host CLI that
+     * never heard of the key, a row that reports it as an explicit null, and
+     * a row naming an agent this client build has never heard of.
+     *
+     * The unknown string is kept VERBATIM rather than mapped to an enum: the
+     * vocabulary belongs to aplexer's detector on the host, and a client that
+     * folded an unrecognised value to null would silently lose a focus the
+     * host had already resolved.
+     */
+    @Test
+    fun `agent is absent, null and unknown-string tolerant`() {
+        val raw = """
+            {"schema": 2, "sessions": [
+              {"name": "old-cli", "manager": "aplexer", "attached": false},
+              {"name": "explicit-null", "manager": "aplexer", "attached": false, "agent": null},
+              {"name": "blank", "manager": "aplexer", "attached": false, "agent": "  "},
+              {"name": "unknown", "manager": "aplexer", "attached": false, "agent": "mystery-9"},
+              {"name": "padded", "manager": "aplexer", "attached": false, "agent": " claude "}
+            ]}
+        """.trimIndent()
+
+        val rows = SessionsJson.parseSessionsList(raw).getOrThrow().sessions
+            .associateBy { it.name }
+
+        assertEquals(5, rows.size)
+        assertNull(rows.getValue("old-cli").agent)
+        assertNull(rows.getValue("explicit-null").agent)
+        // A blank string is "the host said nothing", not an agent named "".
+        assertNull(rows.getValue("blank").agent)
+        assertEquals("mystery-9", rows.getValue("unknown").agent)
+        assertEquals("claude", rows.getValue("padded").agent)
+    }
+
+    /** A non-string `agent` is a real defect, not something to shrug off. */
+    @Test
+    fun `a non-string agent fails the parse instead of silently nulling`() {
+        val raw =
+            """{"schema": 2, "sessions": [{"name": "s", "manager": "aplexer", """ +
+                """"attached": false, "agent": 7}]}"""
+
+        assertTrue(SessionsJson.parseSessionsList(raw).exceptionOrNull() is HostCliError.Malformed)
     }
 }

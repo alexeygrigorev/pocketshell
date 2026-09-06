@@ -61,6 +61,7 @@ class SessionsJsonRealCaptureTest {
                 tag = null,
                 engine = null,
                 profile = null,
+                agent = null,
                 agentState = null,
                 agentStateSource = null,
                 attached = true,
@@ -84,6 +85,7 @@ class SessionsJsonRealCaptureTest {
                 tag = "zsp",
                 engine = "claude",
                 profile = "zlaude",
+                agent = null,
                 agentState = AgentState.WAITING,
                 agentStateSource = AgentStateSource.HEURISTIC,
                 attached = false,
@@ -113,6 +115,69 @@ class SessionsJsonRealCaptureTest {
         assertEquals(listOf("git-pocketshell-2"), attached.map { it.name })
     }
 
+    /**
+     * The capture predates the `agent` key entirely (issue #2579): it was
+     * taken off a host CLI that never emitted it. That is precisely the
+     * "older host CLI keeps working" case, so it is pinned HERE, on a
+     * genuine old payload, rather than only on a hand-built fixture.
+     */
+    @Test
+    fun `a capture from a host CLI predating the agent key parses with a null agent`() {
+        val listing = listing()
+
+        assertTrue(listing.sessions.isNotEmpty())
+        assertTrue(listing.sessions.all { it.agent == null })
+        // Not a null-everything parse: the aplexer rows still carry engines.
+        assertEquals(
+            listOf("codex", "codex", "claude", "grok"),
+            listing.sessions.filter { it.backend == Backend.APLEXER }.map { it.engine },
+        )
+    }
+
+    // --- the agent-carrying capture ---------------------------------------
+
+    private fun agentListing(): SessionsListing =
+        SessionsJson.parseSessionsList(fixture("sessions-list-agent.json")).getOrThrow()
+
+    /**
+     * The shape the maintainer's box emits once aplexer detects the workload's
+     * agent (#2579/#2580): `engine` says "shell" — the session was started as
+     * `a start … -- /bin/bash -l` — while `agent` says "claude". A client that
+     * read `engine` to answer "which agent" would get the wrong answer here,
+     * which is the whole reason the field exists.
+     */
+    @Test
+    fun `an agent-carrying aplexer row maps agent independently of engine`() {
+        val row = agentListing().sessions.single { it.name == "pocketshell:git-pocketshell" }
+
+        assertEquals(
+            SessionRow(
+                name = "pocketshell:git-pocketshell",
+                backend = Backend.APLEXER,
+                id = "b31c7f21-4b40-4a1e-8d0f-4b2f5c9e77aa",
+                workspace = "/home/alexey/git/pocketshell",
+                tag = "git-pocketshell",
+                engine = "shell",
+                profile = null,
+                agent = "claude",
+                agentState = AgentState.WORKING,
+                agentStateSource = AgentStateSource.HEURISTIC,
+                attached = true,
+                createdEpoch = 1788381061L,
+                activityEpoch = 1788409253L,
+            ),
+            row,
+        )
+    }
+
+    @Test
+    fun `agent stays null for a tmux row and for an aplexer row with no detection`() {
+        val listing = agentListing()
+
+        assertNull(listing.sessions.single { it.name == "git-pocketshell" }.agent)
+        assertNull(listing.sessions.single { it.name == "aplexer-follow:idle" }.agent)
+    }
+
     @Test
     fun `real tmux rows carry no agent metadata at all`() {
         val tmuxRows = listing().sessions.filter { it.backend == Backend.TMUX }
@@ -122,6 +187,7 @@ class SessionsJsonRealCaptureTest {
         assertTrue(tmuxRows.all { it.tag == null })
         assertTrue(tmuxRows.all { it.engine == null })
         assertTrue(tmuxRows.all { it.profile == null })
+        assertTrue(tmuxRows.all { it.agent == null })
         assertTrue(tmuxRows.all { it.agentState == null })
         assertTrue(tmuxRows.all { it.agentStateSource == null })
         // ...but they do carry timestamps, so a null-everything bug can't hide

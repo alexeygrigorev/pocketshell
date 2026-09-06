@@ -19,6 +19,10 @@ import kotlinx.serialization.json.intOrNull
  * - An unrecognised `manager` keeps the row with [Backend.UNKNOWN]; an
  *   unrecognised `agent_state` / `agent_state_source` keeps the row with a
  *   `null` state. Forward compatibility never costs a row.
+ * - `agent` is carried through verbatim (issue #2579) — no enum, no
+ *   normalisation beyond trimming — because the vocabulary belongs to
+ *   aplexer's detector on the host. Missing, null or blank all become
+ *   `null`, so a host CLI that predates the key parses exactly as before.
  * - `errors[]` is mapped verbatim onto [SessionsListing.errors] and never
  *   dropped, even when it is the only thing in the document.
  * - Anything genuinely unreadable — non-JSON, a non-object root, a missing
@@ -122,6 +126,12 @@ object SessionsJson {
         val tag: String? = null,
         val engine: String? = null,
         val profile: String? = null,
+        /**
+         * `agent` (issue #2579). Absent OR explicitly null both decode to
+         * null, which is what keeps a host CLI predating the key working —
+         * the client's only reaction to null is "no agent focus".
+         */
+        val agent: String? = null,
         @SerialName("agent_state") val agentState: String? = null,
         @SerialName("agent_state_source") val agentStateSource: String? = null,
         @SerialName("created_epoch") val createdEpoch: Long? = null,
@@ -135,6 +145,10 @@ object SessionsJson {
             tag = tag,
             engine = engine,
             profile = profile,
+            // Verbatim, only trimmed/blank-collapsed: the vocabulary is the
+            // HOST's (aplexer's detector), so an unrecognised value must reach
+            // the caller intact rather than be mapped to an enum here and lost.
+            agent = agent?.trim()?.takeIf { it.isNotEmpty() },
             agentState = AgentState.fromWire(agentState),
             agentStateSource = AgentStateSource.fromWire(agentStateSource),
             attached = attached,

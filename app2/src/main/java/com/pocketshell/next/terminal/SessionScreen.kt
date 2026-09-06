@@ -107,7 +107,12 @@ fun SessionRoute(
     val stopFailure by viewModel.stopFailure.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
-    LifecycleEventEffect(Lifecycle.Event.ON_START) { usageGlanceViewModel.refresh() }
+    // Issue #2579: the pill on THIS screen is about THIS session's agent, so
+    // the refresh names the session. The tree's Usage affordance keeps calling
+    // the no-argument overload and keeps the cross-provider meaning.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        usageGlanceViewModel.refresh(hostId = hostId, sessionName = sessionName)
+    }
 
     LaunchedEffect(leaveAfterStop) {
         if (!leaveAfterStop) return@LaunchedEffect

@@ -372,6 +372,7 @@ Extends the EXISTING payload (`session_enum.py:245 json_payload`,
       "tag": null,
       "engine": "claude",
       "profile": "zai",
+      "agent": null,
       "agent_state": null,
       "agent_state_source": null,
       "attached": true,
@@ -386,6 +387,7 @@ Extends the EXISTING payload (`session_enum.py:245 json_payload`,
       "tag": "review",
       "engine": "codex",
       "profile": null,
+      "agent": "codex",
       "agent_state": "waiting",
       "agent_state_source": "reported",
       "attached": false,
@@ -405,6 +407,12 @@ Field rules:
 - `workspace`: absolute path string or `null` (tmux rows: `session_path` from the
   enrichment sweep; aplexer rows: record field).
 - `engine`: engine id string or `null` (= plain shell).
+- `agent`: `"claude" | "codex" | "opencode" | "grok" | null` — WHICH agent is
+  running inside the session, as aplexer 0.1.4 detects it from the workload's
+  descendant process tree (added after this plan, issue #2581). Not derivable
+  from `engine`: a PocketShell-created session is `engine: "shell"` with the
+  agent launched by hand inside it. `null` for `manager:"tmux"` rows and for
+  an aplexer older than 0.1.4, which omits the key.
 - `agent_state`: `"idle" | "waiting" | "working" | null`;
   `agent_state_source`: `"reported" | "heuristic" | null`. For `manager:"tmux"`
   both are `null` until APX-ADOPT (§B.5). For aplexer rows, map from the

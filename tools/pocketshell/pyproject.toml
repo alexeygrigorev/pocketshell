@@ -98,6 +98,28 @@ dependencies = [
     # so the pinned wheel is the ONLY aplexer this CLI can run. Bumping the
     # pin is a deliberate, reviewed change.
     #
+    # 0.1.4 is required for the session tree to say WHICH agent is running.
+    # Through 0.1.3 a snapshot row's only agent-ish field was `engine`, and
+    # `engine` cannot answer that question: every session PocketShell creates
+    # is `engine: "shell"` with the agent launched by hand inside it, so a
+    # tree full of claude/codex/opencode sessions is indistinguishable from a
+    # tree full of bare shells. 0.1.4 derives an `agent` field at QUERY time
+    # by walking the workload's descendant process tree (`workload_pid` plus
+    # `/proc/<pid>/task/*/children`, the same walk containment already uses)
+    # and classifying each `comm`/`cmdline` by whole-word command token —
+    # aplexer ca56fa5, spec.md section 18. It is present on every
+    # `a list --json` / `a snapshot` row (`null` when nothing recognisable is
+    # running) and never persisted, so it cannot go stale.
+    #
+    # `session_enum._aplexer_rows` reads that key straight onto
+    # `LiveSession.agent` and schema 2 emits it on every row. Against 0.1.3
+    # the key is simply absent and every row reports `agent: null` — the
+    # listing still works, it just cannot name an agent, which is the whole
+    # point of the bump. tests/test_aplexer_contract.py pins the behaviour
+    # against the bundled binary: a real session running a process named
+    # `claude` reports `agent == "claude"`, and `null` again once it exits.
+    # Verified red on published 0.1.3 (no `agent` key at all), green on 0.1.4.
+    #
     # 0.1.3 is required for a USER-VISIBLE session-tree defect, not for
     # version hygiene (aplexer#2 / aplexer#3). Through 0.1.2, aplexer's
     # `list_records` treated a session directory containing no `session.json`
@@ -162,12 +184,12 @@ dependencies = [
     # fails loud (there is no PATH fallback — D22) while tmux, the default
     # backend, keeps working.
     #
-    # Install-surface note (unchanged in 0.1.3): as of 0.1.2 the wheels moved
+    # Install-surface note (unchanged in 0.1.4): as of 0.1.2 the wheels moved
     # from manylinux_2_17 to manylinux_2_28, raising the minimum glibc from
     # 2.17 to 2.28. Linux hosts older than that (CentOS 7, Ubuntu 18.04) can
     # no longer install pocketshell at all now that aplexer is a hard
     # dependency. Flagged, not solved here — see docs/aplexer-integration.md.
-    "aplexer==0.1.3; sys_platform == 'linux'",
+    "aplexer==0.1.4; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -230,8 +252,10 @@ required-version = "==0.10.11"
 # rather than a stale cutoff, so this value moves in lock-step with every new
 # pin — and the `uv.lock` options cutoff must be moved to match. Now past
 # aplexer 0.1.3's 2026-09-06T00:32:09Z PyPI upload (its `aplexer-client`
-# runtime dep landed at 00:32:04Z) for the session-tree regression fix above.
-exclude-newer = "2026-09-06T01:00:00Z"
+# runtime dep landed at 00:32:04Z) for the session-tree regression fix above,
+# and now past aplexer 0.1.4's 2026-09-06T16:14:52Z PyPI upload (its
+# `aplexer-client` runtime dep landed at 16:14:48Z) for the `agent` field.
+exclude-newer = "2026-09-06T17:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

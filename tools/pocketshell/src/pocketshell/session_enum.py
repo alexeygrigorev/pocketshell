@@ -60,6 +60,31 @@ AGENT_STATES = (AGENT_STATE_IDLE, AGENT_STATE_WAITING, AGENT_STATE_WORKING)
 AGENT_STATE_SOURCE_REPORTED = "reported"
 AGENT_STATE_SOURCE_HEURISTIC = "heuristic"
 
+#: aplexer phases that mean the session is over (``Phase::Exited`` /
+#: ``Phase::Failed`` in aplexer's ``src/lib.rs``). ``starting``/``running``/
+#: ``exiting`` are all still-live phases.
+APLEXER_TERMINAL_PHASES = frozenset({"exited", "failed"})
+
+#: How long a record with no ``worker_pid`` yet is still credited as "being
+#: created" (issue #2554). See :func:`aplexer_record_is_alive`: a session
+#: mid-``a start`` and an ``a start`` that was killed inside the pre-PID
+#: window are the SAME record shape and differ only in age.
+#:
+#: 60 s is chosen to be generous in the safe direction, because calling a
+#: slow spawn dead is the #2547 regression while calling a corpse alive for
+#: another minute is a stale row. Three independent anchors, all measured or
+#: read off source rather than guessed:
+#:
+#: * the real pre-PID window on the dev box is 26-46 ms (polled through two
+#:   separate ``a start`` runs) — 60 s is >1000x that;
+#: * aplexer itself gives up on a worker after ``--startup-timeout-ms``,
+#:   default 10_000 (``aplexer/src/bin/a.rs``) — 60 s is 6x its own patience;
+#: * this CLI abandons ``a start`` after ``sessions._APLEXER_START_TIMEOUT_S``
+#:   (20 s) — 60 s is 3x that.
+#:
+#: A record older than all three cannot still be legitimately starting.
+APLEXER_STARTING_GRACE_MS = 60_000
+
 # Both constants mirror aplexer's ``a watch`` (aplexer/src/watch.rs):
 # ACTIVITY_THRESHOLD_MS is how long a PTY must stay quiet before the
 # recency heuristic calls a session "waiting"; REPORTED_STATE_STALE_MS is
@@ -102,6 +127,14 @@ class LiveSession:
     agent_state_source: Optional[str] = None
     attached: bool = False
     activity_epoch: Optional[int] = None
+    #: aplexer's lifecycle phase for this record (``starting``/``running``/
+    #: ``exiting``/``exited``/``failed``), or ``None`` for a tmux row, which
+    #: has no such vocabulary. Descriptive only — ``alive`` is the decision.
+    phase: Optional[str] = None
+    #: Whether this session can actually be attached. A tmux row only exists
+    #: because ``tmuxctl list`` just listed it, so it defaults to ``True``;
+    #: an aplexer row gets :func:`aplexer_record_is_alive`'s verdict.
+    alive: bool = True
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     def to_payload(self, schema: int = 1) -> dict[str, Any]:
@@ -125,6 +158,13 @@ class LiveSession:
                 "attached": bool(self.attached),
                 "created_epoch": self.created_epoch,
                 "activity_epoch": self.activity_epoch,
+                # Issue #2554: liveness travels on the wire. The host already
+                # filters dead records out of the listing, so a client seeing
+                # ``alive: false`` means it asked for the dead projection on
+                # purpose — but the field is emitted on EVERY row, dead or
+                # live, tmux or aplexer, per schema 2's "every key, always".
+                "phase": self.phase,
+                "alive": bool(self.alive),
             }
         payload: dict[str, Any] = {
             "name": self.name,
@@ -341,8 +381,8 @@ def aplexer_agent_state(
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
-    phase = str(raw.get("phase") or "").strip().lower()
-    if phase in {"exited", "failed"}:
+    phase = aplexer_phase(raw)
+    if phase in APLEXER_TERMINAL_PHASES:
         return None, None
     if phase == "starting":
         return AGENT_STATE_WORKING, AGENT_STATE_SOURCE_HEURISTIC
@@ -369,9 +409,119 @@ def _coerce_ms(value: Any) -> Optional[int]:
     return ms if ms > 0 else None
 
 
-def sessions_from_aplexer_snapshot(
-    payload: Any, *, now_ms: Optional[int] = None
-) -> list[LiveSession]:
+def aplexer_phase(raw: Mapping[str, Any]) -> Optional[str]:
+    """Normalised aplexer lifecycle phase, or ``None`` when absent."""
+    phase = str(raw.get("phase") or "").strip().lower()
+    return phase or None
+
+
+def aplexer_record_is_alive(
+    raw: Mapping[str, Any], now_ms: Optional[int] = None
+) -> bool:
+    """Whether an ``a list --json`` record is still an attachable session.
+
+    Issue #2554. aplexer keeps a record after its session dies, and nothing
+    ever removed those: a killed session stays at ``phase: exited`` forever,
+    and a worker that died without recording an exit leaves ``phase:
+    running`` with ``worker_alive: false`` (``a prune`` in 0.1.3 cannot reap
+    that shape at all — verified on the dev box, three such records were ten
+    days old). Listing them made the tree offer rows whose attach answers
+    "session ... has already exited" and exits 1.
+
+    A record is DEAD when either:
+
+    * its ``phase`` is terminal — ``exited`` or ``failed`` (aplexer's
+      ``Phase::Exited``/``Phase::Failed``). This wins over everything else:
+      aplexer's launcher writes ``failed`` with no ``worker_pid`` when a
+      worker dies before completing startup
+      (``api.rs::persist_independent_cleanup_proof``); or
+    * it HAD a worker and lost it — ``worker_pid`` is set and
+      ``worker_alive`` is false. That is the zombie: nothing serves its
+      control socket, so ``a attach`` cannot succeed.
+
+    Everything else is alive, including two shapes that are deliberately NOT
+    dead:
+
+    * **``exiting`` with a live worker** — the real window right after
+      ``a kill``, where ``a attach`` still works.
+    * **a RECENT non-terminal phase with NO ``worker_pid``** — the record
+      aplexer writes at the very start of ``a start``, before the worker
+      registers its pid. ``SessionRecord::worker_alive``
+      (``aplexer/src/lib.rs``) returns false for a ``None`` pid, so EVERY
+      create passes through ``phase: starting`` / ``worker_alive: false``
+      for tens of milliseconds. Reading that as a corpse blanks the session
+      the user is watching appear (the #2547 symptom), refuses to attach to
+      it, and makes a retried create force-forget an in-flight worker. With
+      no pid, ``worker_alive: false`` is not evidence of death — it is
+      absence of evidence, which aplexer's own ``display_state`` calls
+      "broken" (indeterminate), not "exited".
+
+      That exemption is bounded by :data:`APLEXER_STARTING_GRACE_MS`,
+      because an ``a start`` KILLED inside the pre-PID window leaves exactly
+      this shape forever. The two are indistinguishable in one snapshot but
+      not in time: a real create is tens of milliseconds old, while a
+      crashed one keeps its original ``updated_at_ms`` and ages without
+      bound. Without the bound, that permanent corpse is listed as an
+      attachable row whose attach exits 1 and is handed back by
+      ``sessions create`` as an existing session — this issue's two reported
+      symptoms, through a different door.
+
+    Fails OPEN on every indeterminate shape: a record carrying no liveness
+    keys at all, and a pre-PID record whose ``updated_at_ms`` is missing or
+    unreadable (no age, no verdict). The cost of a stale row is a confusing
+    tap, while the cost of a wrong "dead" verdict is a live session the user
+    cannot reach — and, on the create path, one that gets force-forgotten.
+    """
+    if aplexer_phase(raw) in APLEXER_TERMINAL_PHASES:
+        return False
+    if _aplexer_worker_alive_flag(raw):
+        return True
+    # Only a worker that registered a pid can have provably lost it.
+    if aplexer_worker_pid(raw) is not None:
+        return False
+    return _aplexer_within_starting_grace(raw, now_ms)
+
+
+def _aplexer_within_starting_grace(
+    raw: Mapping[str, Any], now_ms: Optional[int]
+) -> bool:
+    """Whether a pre-PID record is young enough to still be starting."""
+    updated = _coerce_ms(raw.get("updated_at_ms"))
+    if updated is None:
+        return True  # no age, no verdict
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    # A clock skew that puts the record in the future reads as brand new,
+    # which is the fail-open direction.
+    return now_ms - updated <= APLEXER_STARTING_GRACE_MS
+
+
+def aplexer_worker_pid(raw: Mapping[str, Any]) -> Optional[int]:
+    """The record's worker pid, or ``None`` when it has not registered one.
+
+    Absent and ``null`` mean the same thing here: aplexer omits the key
+    entirely on a record whose worker has not started yet (verified on a
+    real mid-``a start`` capture, ``snapshot-mid-create.json``).
+    """
+    try:
+        pid = int(raw["worker_pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _aplexer_worker_alive_flag(raw: Mapping[str, Any]) -> bool:
+    """``worker_alive`` as a bool; a missing key reads as alive (fail open)."""
+    worker_alive = raw.get("worker_alive")
+    if isinstance(worker_alive, bool):
+        return worker_alive
+    if isinstance(worker_alive, int):
+        return worker_alive > 0
+    return True
+
+
+def _aplexer_rows(payload: Any, now_ms: Optional[int]) -> list[LiveSession]:
+    """Every snapshot record as a :class:`LiveSession`, liveness included."""
     if not isinstance(payload, list):
         return []
     if now_ms is None:
@@ -411,9 +561,37 @@ def sessions_from_aplexer_snapshot(
                 agent_state_source=state_source,
                 attached=_aplexer_attached(raw),
                 activity_epoch=_created_epoch_from_ms(raw.get("last_activity_ms")),
+                phase=aplexer_phase(raw),
+                alive=aplexer_record_is_alive(raw, now_ms),
             )
         )
     return rows
+
+
+def sessions_from_aplexer_snapshot(
+    payload: Any, *, now_ms: Optional[int] = None
+) -> list[LiveSession]:
+    """The ATTACHABLE aplexer rows of a snapshot (issue #2554).
+
+    A dead record is not a session with a flag on it — it is a leftover, and
+    presenting it as an ordinary row is what put an un-attachable
+    `pocketshell:pocketshell` in the maintainer's tree. Use
+    :func:`dead_sessions_from_aplexer_snapshot` when the leftovers are the
+    point (explaining a stale attach, say).
+    """
+    return [row for row in _aplexer_rows(payload, now_ms) if row.alive]
+
+
+def dead_sessions_from_aplexer_snapshot(
+    payload: Any, *, now_ms: Optional[int] = None
+) -> list[LiveSession]:
+    """The rows :func:`sessions_from_aplexer_snapshot` refuses to list.
+
+    Each carries its ``phase`` and ``alive=False``, so a caller can say what
+    happened to a name instead of handing it to ``a attach`` and relaying a
+    bare exit 1.
+    """
+    return [row for row in _aplexer_rows(payload, now_ms) if not row.alive]
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +792,11 @@ def enumerate_live_sessions(
     ``enrich_tmux`` additionally asks each tmux session's own server for
     workspace/attached/activity (schema 2's tmux fields); the human-table
     path leaves it off so it costs nothing there.
+
+    Only LIVE aplexer records are unioned in: aplexer keeps a record after
+    its session dies, and listing those made the tree offer rows that attach
+    with exit 1 (issue #2554, :func:`aplexer_record_is_alive`). Every row
+    this returns is therefore ``alive``.
     """
     errors: list[dict[str, str]] = []
     tmux_rows = (

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -31,6 +32,7 @@ import pytest
 from click.testing import CliRunner
 
 from pocketshell import config as psconfig
+from pocketshell import session_enum
 from pocketshell import sessions
 from pocketshell.sessions import _route_backend, sessions_group
 
@@ -134,6 +136,65 @@ class AplexerStub:
         return 0, json.dumps(self.record or {}), ""
 
 
+class ForgetStub:
+    """Stub for `sessions._run_session_kill` — here, the reap's `a forget`.
+
+    Issue #2554: a dead aplexer record holds its workspace+tag hostage, so
+    `_create_on_aplexer` reaps it before `a start`. This stubs the process
+    call, NOT `_reap_aplexer_record`, so the real retry/refusal handling is
+    the code under test.
+    """
+
+    def __init__(
+        self,
+        *,
+        refusals: int = 0,
+        always_refuses: bool = False,
+        workload_may_survive: bool = False,
+    ):
+        self.refusals = refusals
+        self.always_refuses = always_refuses
+        # `a --json forget` reports whether the record's containment was
+        # proven empty; false means processes may have outlived it.
+        self.workload_may_survive = workload_may_survive
+        self.calls: list[list[str]] = []
+
+    @property
+    def forgotten_ids(self) -> list[str]:
+        return [argv[-1] for argv in self.calls if "forget" in argv]
+
+    def __call__(self, argv: Sequence[str]) -> Any:
+        args = [str(item) for item in argv]
+        self.calls.append(args)
+        attempts = sum(1 for call in self.calls if call[-1] == args[-1])
+        if self.always_refuses or attempts <= self.refusals:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=1,
+                stdout="",
+                # aplexer/src/api.rs::forget_session, verbatim.
+                stderr=(
+                    f"a: session {args[-1]} still has a live worker; "
+                    "refusing to forget it\n"
+                ),
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "id": args[-1],
+                    "forgotten": True,
+                    "signalled": False,
+                    "containment_proven_empty": not self.workload_may_survive,
+                    "workload_may_survive": self.workload_may_survive,
+                }
+            )
+            + "\n",
+            stderr="",
+        )
+
+
 def use_tmux_backend(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -150,6 +211,7 @@ def use_aplexer_backend(
     *,
     start: AplexerStub,
     snapshot: Any = None,
+    forget: Optional[ForgetStub] = None,
 ) -> None:
     monkeypatch.setattr(
         sessions._aplexer,
@@ -161,6 +223,10 @@ def use_aplexer_backend(
     monkeypatch.setattr(sessions._aplexer, "which_a", lambda env=None: "/fake/a")
     monkeypatch.setattr(sessions, "_aplexer_snapshot", lambda: snapshot)
     monkeypatch.setattr(sessions, "_run_aplexer", start)
+    # The reap seam is always stubbed so no test can reach a real `a`, and
+    # its retry pause is stubbed so the refusal window costs no wall-clock.
+    monkeypatch.setattr(sessions, "_run_session_kill", forget or ForgetStub())
+    monkeypatch.setattr(sessions, "_reap_wait", lambda: None)
 
 
 def envelope(result) -> dict:
@@ -754,6 +820,367 @@ def test_aplexer_arm_other_workspace_same_tag_still_creates(
     assert result.exit_code == 0, result.output
     assert envelope(result)["created"] is True
     assert len(start.calls) == 1
+
+
+# ----- a dead record holds its workspace+tag hostage (issue #2554) ----
+#
+# Reported from the phone alongside the dead-row symptom: "can't create an
+# agent session". aplexer keys a session by workspace+tag, and a DEAD record
+# keeps holding that pair — verified against real aplexer 0.1.3:
+#
+#   $ a --json start --workspace /tmp/ws --tag zt
+#   a: workspace+tag already belongs to session 57e5a6ba-...; rename it or
+#      choose a different tag
+#   exit=1
+#
+# `_aplexer_existing_record` used to skip only `exited`/`failed`, so the
+# `phase: running` / `worker_alive: false` zombie was reported as an
+# already-existing session and the app attached to a corpse. Skipping it
+# alone would only swap pocketshell's wrong answer for aplexer's refusal
+# above, so the blocking record is REAPED before `a start`.
+
+
+def _zombie(ident: str = "zombie-0001") -> dict:
+    """A record whose worker died without recording an exit.
+
+    ``worker_pid`` is set on purpose: aplexer only reports ``worker_alive:
+    false`` for a worker that HAD a pid to lose. A record with no pid in a
+    non-terminal phase is a session being CREATED, not a corpse — see
+    ``test_aplexer_arm_session_being_created_is_existing_not_reaped``.
+    """
+    return dict(
+        _record(ident), phase="running", worker_pid=4_151_890, worker_alive=False
+    )
+
+
+def _live(ident: str = "live-0001") -> dict:
+    return dict(
+        _record(ident), phase="running", worker_pid=4_151_890, worker_alive=True
+    )
+
+
+def test_aplexer_arm_zombie_held_pair_is_reaped_and_recreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported failure: a zombie must not block (or impersonate) a create."""
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(
+        monkeypatch, start=start, snapshot=[_zombie()], forget=forget
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = envelope(result)
+    # A NEW session, not the corpse's id handed back as "already exists".
+    assert payload["created"] is True
+    assert payload["id"] == "fresh-0002"
+    # ...because the record holding the pair was reaped first.
+    assert forget.calls == [
+        # `--json` so aplexer's containment verdict comes back as data.
+        ["/fake/a", "--json", "forget", "--force", "zombie-0001"]
+    ]
+    assert len(start.calls) == 1
+    # Reap BEFORE start, or `a start` would still collide.
+    assert start.calls[0][0] == "/fake/a"
+
+
+def test_aplexer_arm_exited_held_pair_is_reaped_and_recreated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record `a kill` leaves behind blocks the same pair the same way."""
+    exited = dict(
+        _record("exited-0001"), phase="exited", worker_pid=4_151_890, worker_alive=False
+    )
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(monkeypatch, start=start, snapshot=[exited], forget=forget)
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = envelope(result)
+    assert payload["created"] is True
+    assert payload["id"] == "fresh-0002"
+    assert forget.forgotten_ids == ["exited-0001"]
+
+
+def test_aplexer_arm_live_record_is_never_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotency contract, unchanged: a live pair is reused, not destroyed.
+
+    Green both before and after the fix. A reap here would kill the user's
+    running session and hand back a different one.
+    """
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(monkeypatch, start=start, snapshot=[_live()], forget=forget)
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = envelope(result)
+    assert payload["created"] is False
+    assert payload["id"] == "live-0001"
+    assert start.calls == []
+    assert forget.calls == []
+
+
+def test_aplexer_arm_session_being_created_is_existing_not_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried create must not force-forget the in-flight session (#2547).
+
+    aplexer persists the record before the worker registers its pid, so a
+    real `a --json list` reports `phase: starting` / no `worker_pid` /
+    `worker_alive: false` for tens of milliseconds on every create. Reading
+    that as dead makes a double-tapped or retried create reap the session
+    the first tap is still starting — and `a forget` fences exactly that
+    case by taking the worker lock, so the starting worker is aborted.
+    """
+    mid_create = {
+        "id": "starting-0001",
+        "workspace": "/home/me/proj",
+        "tag": "work",
+        "engine": "shell",
+        "phase": "starting",
+        # `worker_pid` ABSENT, exactly as the real capture has it, and
+        # written just now — a create in progress is happening now.
+        "worker_alive": False,
+        "updated_at_ms": int(time.time() * 1000),
+    }
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(monkeypatch, start=start, snapshot=[mid_create], forget=forget)
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = envelope(result)
+    assert payload["created"] is False
+    assert payload["id"] == "starting-0001"
+    assert start.calls == []
+    # The load-bearing one: no `a forget --force` against a starting worker.
+    assert forget.calls == []
+
+
+def test_aplexer_arm_crashed_start_is_reaped_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-PID record that never progressed holds the pair like any corpse.
+
+    Same shape as the in-flight record above, but older than any create
+    could still be running (an `a start` SIGKILLed inside the pre-PID
+    window leaves it forever). Returning its id as an existing session is
+    "can't create an agent session" verbatim — the app then attaches to a
+    corpse.
+    """
+    crashed = {
+        "id": "crashed-0001",
+        "workspace": "/home/me/proj",
+        "tag": "work",
+        "engine": "shell",
+        "phase": "starting",
+        "worker_alive": False,
+        "updated_at_ms": int(time.time() * 1000)
+        - session_enum.APLEXER_STARTING_GRACE_MS
+        - 1,
+    }
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(monkeypatch, start=start, snapshot=[crashed], forget=forget)
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = envelope(result)
+    assert payload["created"] is True
+    assert payload["id"] == "fresh-0002"
+    assert forget.forgotten_ids == ["crashed-0001"]
+
+
+def test_aplexer_arm_reap_only_touches_the_pair_being_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blast radius: another workspace's corpse is none of this create's business."""
+    elsewhere = dict(_zombie("elsewhere-0001"), workspace="/home/me/elsewhere")
+    other_tag = dict(_zombie("othertag-0001"), tag="notwork")
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(
+        monkeypatch,
+        start=start,
+        snapshot=[elsewhere, other_tag, _zombie()],
+        forget=forget,
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["created"] is True
+    assert forget.forgotten_ids == ["zombie-0001"]
+
+
+def test_aplexer_arm_reap_survives_the_winding_down_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aplexer refuses to forget a record whose worker is still winding down."""
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub(refusals=2)
+    use_aplexer_backend(
+        monkeypatch, start=start, snapshot=[_zombie()], forget=forget
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["created"] is True
+    assert len(forget.calls) == 3
+    assert len(start.calls) == 1
+
+
+def test_aplexer_arm_refuses_to_reap_a_record_whose_workload_is_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`a forget --force` does not claim the workload stopped — so check it.
+
+    aplexer's own `a prune` retains any record whose `workload_pid` is still
+    alive. Forgetting one destroys the only handle onto a running process:
+    the create looks clean while an unreachable workload keeps running.
+    """
+    holder = dict(
+        _zombie("workload-0001"),
+        # This process, so the liveness probe is answering about something
+        # genuinely alive rather than a pid that happens to be free.
+        workload_pid=os.getpid(),
+    )
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()
+    use_aplexer_backend(monkeypatch, start=start, snapshot=[holder], forget=forget)
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code != 0
+    message = envelope(result)["error"]
+    assert "workload-0001" in message
+    assert str(os.getpid()) in message
+    assert "still running" in message
+    # Neither destroyed nor blindly retried.
+    assert forget.calls == []
+    assert start.calls == []
+
+
+def test_aplexer_arm_warns_when_the_reaped_record_may_have_survivors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aplexer's `workload_may_survive` must reach the user, not be swallowed.
+
+    The dangerous shape is a setsid'd grandchild: the recorded
+    `workload_pid` is already dead, so the pid gate above says nothing, but
+    aplexer reports `containment_proven_empty: false`. Reproduced against
+    real `a 0.1.3` — a detached `sleep` outlived its record.
+    """
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub(workload_may_survive=True)
+    use_aplexer_backend(
+        monkeypatch, start=start, snapshot=[_zombie()], forget=forget
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    # The create still succeeds — the pair WAS reclaimed.
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["created"] is True
+    # ...but the user is told, on stderr, that something may have outlived it.
+    warning = result.stderr
+    assert "zombie-0001" in warning
+    assert "may still be running" in warning
+
+
+def test_aplexer_arm_quiet_when_containment_was_proven_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No warning for the ordinary case, or the real one stops being read."""
+    start = AplexerStub(record=_record("fresh-0002"))
+    forget = ForgetStub()  # workload_may_survive defaults to False
+    use_aplexer_backend(
+        monkeypatch, start=start, snapshot=[_zombie()], forget=forget
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["created"] is True
+    assert "may still be running" not in result.stderr
+
+
+def test_aplexer_arm_failed_reap_is_explained_not_disguised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reap that never wins must say WHY the create then failed.
+
+    Relaying only aplexer's "workspace+tag already belongs to session X"
+    tells the user to rename a session they cannot see, since the listing no
+    longer shows the dead record. The error has to name the corpse and the
+    command that clears it.
+    """
+    start = AplexerStub(
+        returncode=1,
+        stderr=(
+            "a: workspace+tag already belongs to session zombie-0001; "
+            "rename it or choose a different tag"
+        ),
+    )
+    forget = ForgetStub(always_refuses=True)
+    use_aplexer_backend(
+        monkeypatch, start=start, snapshot=[_zombie()], forget=forget
+    )
+
+    result = CliRunner().invoke(
+        sessions_group,
+        ["create", "work", "--cwd", "/home/me/proj", "--backend", "aplexer", "--json"],
+    )
+
+    assert result.exit_code != 0
+    message = envelope(result)["error"]
+    assert "zombie-0001" in message
+    assert "could not be reaped" in message
+    assert "a forget --force zombie-0001" in message
+    # aplexer's own words are still there, not swallowed.
+    assert "already belongs" in message
+    assert len(forget.calls) > 1
 
 
 def test_aplexer_arm_start_failure_json_error_envelope(

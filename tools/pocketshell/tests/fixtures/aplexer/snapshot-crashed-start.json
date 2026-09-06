@@ -1,0 +1,25 @@
+[
+  {
+    "command": [
+      "/bin/bash",
+      "-l"
+    ],
+    "containment_empty": false,
+    "created_at_ms": 1788686781148,
+    "cwd": "/tmp/i2554r4/ws",
+    "engine": "shell",
+    "env": {},
+    "env_unset": [],
+    "history_bytes": 4194304,
+    "history_path": "/tmp/i2554r4/state/aplexer/sessions/6b1ddabb-1b5c-4a76-b46b-1f7e70d78a9a/history.bin",
+    "id": "6b1ddabb-1b5c-4a76-b46b-1f7e70d78a9a",
+    "limits": {},
+    "phase": "starting",
+    "schema_version": 1,
+    "socket_path": "/tmp/i2554r4/rt/aplexer/sessions/6b1ddabb-1b5c-4a76-b46b-1f7e70d78a9a/control.sock",
+    "tag": "crashed1",
+    "updated_at_ms": 1788686781148,
+    "worker_alive": false,
+    "workspace": "/tmp/i2554r4/ws"
+  }
+]

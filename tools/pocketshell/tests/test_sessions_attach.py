@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 from unittest.mock import patch
@@ -29,6 +30,7 @@ import pytest
 from click.testing import CliRunner
 
 from pocketshell import aplexer as _aplexer
+from pocketshell import session_enum
 from pocketshell.sessions import sessions_group
 
 FAKE_TMUXCTL = "/fake/tmuxctl"
@@ -484,3 +486,167 @@ def test_exec_seam_calls_execvp() -> None:
     execvp.assert_called_once_with(
         "tmux", ["tmux", "-S", "/tmp/sock", "attach-session"]
     )
+
+
+# ---------------------------------------------------------------------------
+# dead aplexer records (issue #2554)
+# ---------------------------------------------------------------------------
+#
+# The listing no longer offers a dead record, so attach can only reach one
+# through a stale name the caller kept. It must then SAY what happened
+# instead of handing the name to `a attach`, which answers
+# "session … has already exited" on stderr and exits 1 — the bare
+# `Session "…" ended (exit 1).` the phone showed.
+
+
+# Every entry carries a `worker_pid`, because every real dead record does:
+# aplexer only reports `worker_alive: false` for a worker that HAD a pid, and
+# a record with no pid yet is a session being created, not a corpse (#2554
+# round 3). A pid-less zombie is not a shape `a --json list` can emit.
+DEAD_STATES = [
+    ("exited", False, "has already exited", "phase: exited"),
+    ("failed", False, "failed to start", "phase: failed"),
+    ("running", False, "has no live worker", "worker_alive: false"),
+]
+
+
+@pytest.mark.parametrize("phase,worker_alive,summary,detail", DEAD_STATES)
+def test_attach_to_a_dead_record_names_the_state(
+    install_fake_a, socket_dir, phase, worker_alive, summary, detail
+) -> None:
+    install_fake_a(
+        snapshot=[
+            {
+                "id": "sess-abc12345",
+                "tag": "codex",
+                "engine": "codex",
+                "workspace": "/home/alexey/git/toyaikit",
+                "created_at_ms": 1_700_000_000_000,
+                "phase": phase,
+                "worker_pid": 4_151_890,
+                "worker_alive": worker_alive,
+            }
+        ]
+    )
+    harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
+
+    result = _invoke(harness, ["attach", "toyaikit:codex"])
+
+    assert result.exit_code == 3, result.output
+    assert summary in result.output
+    assert detail in result.output
+    assert "toyaikit:codex" in result.output
+    # The load-bearing part: `a attach` is never handed a corpse.
+    assert harness.exec_calls == []
+
+
+def test_attach_to_a_dead_record_by_id_prefix_names_the_state(
+    install_fake_a, socket_dir
+) -> None:
+    install_fake_a(
+        snapshot=[
+            {
+                "id": "abcdef0123456789",
+                "tag": "codex",
+                "workspace": "/home/alexey/git/toyaikit",
+                "phase": "exited",
+                "worker_pid": 4_151_890,
+                "worker_alive": False,
+            }
+        ]
+    )
+    harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
+
+    result = _invoke(harness, ["attach", "abcdef01"])
+
+    assert result.exit_code == 3, result.output
+    assert "has already exited" in result.output
+    assert harness.exec_calls == []
+
+
+def test_attach_to_a_genuinely_unknown_name_keeps_the_plain_message(
+    install_fake_a, socket_dir
+) -> None:
+    """The dead-row explanation must not swallow the ordinary not-found path."""
+    install_fake_a(snapshot=[])
+    harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
+
+    result = _invoke(harness, ["attach", "nope-session"])
+
+    assert result.exit_code == 3, result.output
+    assert "no session named 'nope-session'" in result.output
+    assert "exited" not in result.output
+    assert harness.exec_calls == []
+
+
+def test_attach_to_a_session_being_created_is_not_refused(
+    install_fake_a, socket_dir
+) -> None:
+    """The real mid-create shape must still attach (#2547's class).
+
+    aplexer writes the record before the worker registers its pid, so
+    `a --json list` reports `phase: starting` with no `worker_pid` and
+    therefore `worker_alive: false` for tens of milliseconds on EVERY
+    create. Reading that as a corpse turns a session the user is watching
+    appear into an exit-3 "it has no live worker".
+    """
+    script = install_fake_a(
+        snapshot=[
+            {
+                "id": "sess-abc12345",
+                "tag": "codex",
+                "engine": "codex",
+                "workspace": "/home/alexey/git/toyaikit",
+                "created_at_ms": 1_700_000_000_000,
+                # Verbatim shape of tests/fixtures/aplexer/snapshot-mid-create.json:
+                # phase starting, `worker_pid` absent, worker_alive false —
+                # and written just now, because a create in progress is by
+                # definition happening now.
+                "phase": "starting",
+                "worker_alive": False,
+                "updated_at_ms": int(time.time() * 1000),
+            }
+        ]
+    )
+    harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
+
+    result = _invoke(harness, ["attach", "toyaikit:codex"])
+
+    assert result.exit_code == 0, result.output
+    assert harness.exec_calls == [[str(script), "attach", "sess-abc12345"]]
+
+
+def test_attach_to_a_crashed_start_names_the_state(install_fake_a, socket_dir) -> None:
+    """A pre-PID record that never progressed is a corpse, not a create.
+
+    An `a start` SIGKILLed inside the pre-PID window leaves this shape
+    forever (captured: tests/fixtures/aplexer/snapshot-crashed-start.json).
+    Handing it to `a attach` is the reported symptom verbatim — aplexer
+    answers "worker is not running (state: broken)" and exits 1.
+    """
+    install_fake_a(
+        snapshot=[
+            {
+                "id": "sess-abc12345",
+                "tag": "codex",
+                "engine": "codex",
+                "workspace": "/home/alexey/git/toyaikit",
+                "created_at_ms": 1_700_000_000_000,
+                "phase": "starting",
+                "worker_alive": False,
+                # Same shape as the mid-create record above; only older than
+                # any create could still be running.
+                "updated_at_ms": int(time.time() * 1000)
+                - session_enum.APLEXER_STARTING_GRACE_MS
+                - 1,
+            }
+        ]
+    )
+    harness = Harness(_table("git-tmuxcli"), lambda sock, name: False)
+
+    result = _invoke(harness, ["attach", "toyaikit:codex"])
+
+    assert result.exit_code == 3, result.output
+    assert "has no live worker" in result.output
+    assert "phase: starting" in result.output
+    assert harness.exec_calls == []

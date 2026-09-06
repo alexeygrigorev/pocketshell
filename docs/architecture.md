@@ -200,9 +200,83 @@ terminated with `--`.
 
 `sessions list --json` schema 2 rows carry `{name, manager, id, workspace, tag,
 engine, profile, agent_state, agent_state_source, attached, created_epoch,
-activity_epoch}` plus a first-class `errors[]` array. A backend that fails to
-enumerate **must** appear in `errors` rather than silently shortening the list;
-the tree renders that as a "some sessions may be missing" banner.
+activity_epoch, phase, alive}` plus a first-class `errors[]` array. A backend
+that fails to enumerate **must** appear in `errors` rather than silently
+shortening the list; the tree renders that as a "some sessions may be missing"
+banner.
+
+`phase`/`alive` are the liveness pair (#2554). aplexer keeps a session record
+after the session dies — a killed one stays at `phase: exited` forever, and a
+worker that died without recording an exit leaves `phase: running` with
+`worker_alive: false`, which `a prune` (0.1.3) cannot reap. Those records used
+to list as ordinary rows, so the tree offered sessions whose attach answered
+`a: session … has already exited` and exited 1. The host now filters them out
+of the listing (`session_enum.aplexer_record_is_alive`), so every row it emits
+is `alive: true`; the pair is on the wire so the truth is explicit rather than
+implied by a filter the client cannot see. `phase` is `null` for tmux rows,
+which have no such vocabulary.
+
+A record counts as dead on exactly two shapes: a terminal `phase`
+(`exited`/`failed`), or a `worker_pid` that is set while `worker_alive` is
+false (it *had* a worker and lost it). Everything else fails OPEN, and two of
+those exemptions are load-bearing rather than defensive:
+
+- `phase: exiting` with a live worker is the window right after `a kill`, where
+  `a attach` still works.
+- **A RECENT non-terminal phase with no `worker_pid` is a session being
+  CREATED.** aplexer persists the record before the worker registers its pid,
+  and `SessionRecord::worker_alive` returns false for a `None` pid, so every
+  `a start` emits `phase: starting` / `worker_alive: false` for tens of
+  milliseconds. Treating that as dead blanks the session the user is watching
+  appear (the #2547 symptom), refuses to attach to it, and makes a retried
+  create force-forget an in-flight worker. `worker_alive: false` with no pid is
+  absence of evidence, not evidence of death — aplexer's own `display_state`
+  calls it "broken" (indeterminate), never "exited".
+
+  That exemption is **bounded by `APLEXER_STARTING_GRACE_MS` (60 s)**, because
+  an `a start` killed inside the pre-PID window leaves the identical shape
+  *forever*. The two are indistinguishable in one snapshot but not in time: a
+  real create is tens of milliseconds old, a crashed one ages without bound.
+  60 s is deliberately generous in the safe direction — >1000x the measured
+  26–46 ms window, 6x aplexer's own 10 s `--startup-timeout-ms`, and 3x this
+  CLI's 20 s `a start` timeout — because calling a slow spawn dead is the
+  #2547 regression, while calling a corpse alive for one more minute is only a
+  stale row. A pre-PID record whose `updated_at_ms` is missing or unreadable
+  fails open (no age, no verdict).
+
+Deriving liveness here is a stopgap: aplexer computes the same answer and, as
+of `355db6e`, emits it as `state` on every `a list --json` row (`broken` for
+exactly the crashed-start record above). This CLI pins aplexer 0.1.3, where
+that field does not exist, so the predicate stays local until a release carries
+it — see #2556's sibling follow-up, which replaces it outright rather than
+adding a fallback (D22). `sessions kill` on an aplexer row reaps the record with
+`a forget --force <id>` (retried while the worker winds down) so Stop removes
+the row instead of leaving a dead one, and `sessions attach` on a stale dead
+name says what happened instead of relaying aplexer's exit 1.
+
+A dead record also **holds its workspace+tag hostage** — aplexer keys a session
+by that pair and refuses `a start` with "workspace+tag already belongs to
+session `<id>`" for a corpse just as firmly as for a live session, which is the
+"can't create an agent session" half of #2554. `sessions create`'s aplexer arm
+therefore reuses the same liveness predicate (a record with no live worker is
+not an existing session) and reaps whatever dead record holds the target pair
+before calling `a start`. A live record is still reused, never reaped — the
+`created: false` idempotency contract is unchanged. If the reap cannot win, the
+create error names the blocking record and the `a forget --force <id>` that
+clears it, rather than relaying aplexer's "rename it" advice about a session
+the listing no longer shows.
+
+The reap is gated on the workload, not just the record. `a forget --force`
+forgets a record explicitly *without* claiming its workloads stopped, so a
+record whose `workload_pid` is still alive is never reaped — the create fails
+instead, naming that pid, mirroring `a prune`'s own retention rule
+(`a.rs::cmd_prune`). `a kill` is not an alternative on that shape: for a record
+whose worker died it answers "no authoritative containment locator" and changes
+nothing. When a reap does proceed and aplexer reports
+`workload_may_survive: true` (containment never proven empty — a setsid'd
+grandchild outlives its worker), both `sessions kill` and `sessions create`
+print that on stderr instead of swallowing it; after an ordinary `a kill` the
+verdict is `false`, so the warning stays silent on the normal path.
 
 ### Session tree
 

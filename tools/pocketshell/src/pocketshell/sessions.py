@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -767,18 +768,20 @@ def aplexer_start_argv(
     return argv
 
 
-def _aplexer_existing_record(
+def _aplexer_records_holding(
     payload: Any, *, workspace: str, tag: str
-) -> Optional[Mapping[str, Any]]:
-    """Find a live aplexer session already holding ``workspace`` + ``tag``.
+) -> list[Mapping[str, Any]]:
+    """Every snapshot record holding the ``workspace`` + ``tag`` pair.
 
-    aplexer keys a session by exactly that pair (`a start` refuses a second
-    one), so it is the identity to match on. A finished session does not
-    count: `a start` reclaims that pair, i.e. it really does create.
+    aplexer keys a session by exactly that pair, so it is the identity to
+    match on — and, critically, a DEAD record keeps holding it: `a start`
+    answers "workspace+tag already belongs to session <id>" and exits 1
+    (verified against aplexer 0.1.3). Liveness is the caller's split.
     """
     if not isinstance(payload, list):
-        return None
+        return []
     target = os.path.realpath(workspace)
+    held: list[Mapping[str, Any]] = []
     for raw in payload:
         if not isinstance(raw, Mapping):
             continue
@@ -787,10 +790,117 @@ def _aplexer_existing_record(
         raw_workspace = raw.get("workspace") or raw.get("cwd") or ""
         if os.path.realpath(str(raw_workspace)) != target:
             continue
-        if str(raw.get("phase") or "").strip().lower() in {"exited", "failed"}:
-            continue
-        return raw
+        held.append(raw)
+    return held
+
+
+def _aplexer_existing_record(
+    payload: Any, *, workspace: str, tag: str
+) -> Optional[Mapping[str, Any]]:
+    """Find a LIVE aplexer session already holding ``workspace`` + ``tag``.
+
+    A finished session does not count: `a start` reclaims that pair once the
+    record is gone, i.e. it really does create. Liveness is
+    :func:`session_enum.aplexer_record_is_alive` — the one implementation of
+    that rule (issue #2554). The local copy this replaced only skipped
+    ``exited``/``failed``, so the ``phase: running`` / ``worker_alive:
+    false`` zombie was reported as an already-existing session and the app
+    attached to a corpse.
+    """
+    for raw in _aplexer_records_holding(payload, workspace=workspace, tag=tag):
+        if _session_enum.aplexer_record_is_alive(raw):
+            return raw
     return None
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether ``pid`` names a live process.
+
+    The same pessimistic check aplexer's ``process_alive`` makes: existence,
+    not identity. A recycled pid reads as alive, which errs toward NOT
+    destroying a record — the safe direction here.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists, owned by someone else.
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _aplexer_live_workload_pid(raw: Mapping[str, Any]) -> Optional[int]:
+    """The record's ``workload_pid`` if that process is still running."""
+    try:
+        pid = int(raw["workload_pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    return pid if _process_alive(pid) else None
+
+
+@dataclass(frozen=True)
+class _BlockerReap:
+    """Outcome of clearing the dead records holding one workspace+tag."""
+
+    #: ``(id, workload_pid)`` for records NOT reaped because their workload
+    #: is still running. Reaping one destroys the only handle onto it.
+    workload_alive: tuple[tuple[str, int], ...] = ()
+    #: Records that were reaped but whose containment aplexer could not
+    #: prove empty — something may have outlived them.
+    may_survive: tuple[str, ...] = ()
+    #: Dead records the reap could not clear at all.
+    unreaped: tuple[str, ...] = ()
+
+
+def _reap_aplexer_blockers(
+    payload: Any, *, aplexer_path: str, workspace: str, tag: str
+) -> _BlockerReap:
+    """Reap the dead records holding ``workspace`` + ``tag``.
+
+    Called only after :func:`_aplexer_existing_record` came back empty, and
+    each record is re-checked with the same predicate here, so a live
+    session is never a candidate however this is called.
+
+    A record whose ``workload_pid`` is still ALIVE is deliberately left
+    alone: ``a forget --force`` is documented as forgetting a record
+    "without claiming its workloads stopped", so reaping one destroys the
+    only handle onto a running process. aplexer's own ``a prune`` refuses
+    exactly this case (``a.rs::cmd_prune`` retains any record with a live
+    ``workload_pid``); this mirrors that rule rather than inventing a
+    laxer one.
+
+    Reaping still discards the record's durable history — the same trade
+    `sessions kill` makes, and the user is explicitly asking for this exact
+    pair back.
+    """
+    workload_alive: list[tuple[str, int]] = []
+    may_survive: list[str] = []
+    unreaped: list[str] = []
+    for raw in _aplexer_records_holding(payload, workspace=workspace, tag=tag):
+        ident = str(raw.get("id") or "").strip()
+        if not ident:
+            continue
+        if _session_enum.aplexer_record_is_alive(raw):
+            continue
+        pid = _aplexer_live_workload_pid(raw)
+        if pid is not None:
+            workload_alive.append((ident, pid))
+            continue
+        outcome = _reap_aplexer_record(aplexer_path, ident)
+        if not outcome.reaped:
+            unreaped.append(ident)
+        elif outcome.workload_may_survive:
+            may_survive.append(ident)
+    return _BlockerReap(
+        workload_alive=tuple(workload_alive),
+        may_survive=tuple(may_survive),
+        unreaped=tuple(unreaped),
+    )
 
 
 def _create_on_aplexer(
@@ -832,9 +942,8 @@ def _create_on_aplexer(
         )
     workspace = cwd or os.getcwd()
 
-    existing = _aplexer_existing_record(
-        _aplexer_snapshot(), workspace=workspace, tag=name
-    )
+    snapshot = _aplexer_snapshot()
+    existing = _aplexer_existing_record(snapshot, workspace=workspace, tag=name)
     if existing is not None:
         return {
             "name": _session_enum.aplexer_display_name(existing) or name,
@@ -842,6 +951,36 @@ def _create_on_aplexer(
             "id": str(existing.get("id") or "") or None,
             "created": False,
         }
+
+    # Nothing LIVE holds the pair — but a dead record still holds it hostage:
+    # aplexer refuses `a start` with "workspace+tag already belongs to session
+    # <id>" for a corpse just as firmly as for a running session, and since
+    # #2554 that corpse is not even in the listing for the user to see. Clear
+    # it first (issue #2554: "can't create an agent session").
+    blockers = _reap_aplexer_blockers(
+        snapshot, aplexer_path=aplexer_path, workspace=workspace, tag=name
+    )
+    if blockers.workload_alive:
+        # Refuse rather than orphan. `a forget --force` would reclaim the
+        # pair and report a clean create while an untracked process kept
+        # running with nothing left pointing at it. aplexer's own `a prune`
+        # refuses this exact case; `a kill` cannot help either — on a record
+        # whose worker died it answers "no authoritative containment
+        # locator" and changes nothing (both verified against `a 0.1.3`).
+        detail = "; ".join(
+            f"record {ident} still has workload pid {pid} running"
+            for ident, pid in blockers.workload_alive
+        )
+        manual = " ".join(
+            f"`kill {pid}` then `a forget --force {ident}`"
+            for ident, pid in blockers.workload_alive
+        )
+        raise _CreateError(
+            f"pocketshell: cannot create {name!r} in {workspace!r}: a dead "
+            f"aplexer record still holds that workspace+tag and its workload "
+            f"is still running ({detail}); reclaiming the pair would leave "
+            f"that process untracked. Stop it first — {manual} — and retry."
+        )
 
     argv = aplexer_start_argv(
         aplexer_path=aplexer_path,
@@ -852,9 +991,25 @@ def _create_on_aplexer(
     )
     code, stdout, stderr = _run_aplexer(argv)
     if code != 0:
+        detail = stderr.strip() or stdout.strip() or "no output"
+        if blockers.unreaped:
+            # Never relay aplexer's bare "rename it or choose a different
+            # tag": the session it names is a corpse the listing no longer
+            # shows, so that advice sends the user hunting for something
+            # invisible. Name the record and the command that clears it.
+            stuck = ", ".join(blockers.unreaped)
+            manual = " ".join(
+                f"`a forget --force {ident}`" for ident in blockers.unreaped
+            )
+            raise _CreateError(
+                f"pocketshell: cannot create {name!r} in {workspace!r}: a dead "
+                f"aplexer record ({stuck}) still holds that workspace+tag "
+                f"and could not be reaped; run {manual} and retry "
+                f"(`a start` exited {code}: {detail})",
+                exit_code=code,
+            )
         raise _CreateError(
-            f"pocketshell: `a start --tag {name}` exited {code}: "
-            f"{stderr.strip() or stdout.strip() or 'no output'}",
+            f"pocketshell: `a start --tag {name}` exited {code}: {detail}",
             exit_code=code,
         )
     try:
@@ -868,6 +1023,12 @@ def _create_on_aplexer(
             "pocketshell: `a --json start` returned "
             f"{type(record).__name__}, expected a session record"
         )
+    for ident in blockers.may_survive:
+        # aplexer could not prove the reclaimed record's containment was
+        # empty. The create succeeded — the pair IS ours now — but something
+        # may have outlived it (a setsid'd grandchild survives the worker),
+        # and this is the last moment anyone knows the id it belonged to.
+        click.echo(_workload_survivor_warning(name, ident), err=True)
     return {
         "name": _session_enum.aplexer_display_name(record) or name,
         "manager": _session_enum.MANAGER_APLEXER,
@@ -1215,6 +1376,41 @@ def _attach_live_rows() -> tuple[list[_session_enum.LiveSession], list[dict[str,
     )
 
 
+def _dead_row_detail(row: _session_enum.LiveSession) -> str:
+    """One clause saying what actually happened to a dead aplexer record."""
+    phase = row.phase or "unknown"
+    if phase == "exited":
+        return f"it has already exited (aplexer phase: {phase})"
+    if phase == "failed":
+        return f"it failed to start (aplexer phase: {phase})"
+    # The zombie: the record still claims a live phase, but nothing serves
+    # its control socket, so `a attach` cannot succeed.
+    return (
+        f"it has no live worker (aplexer phase: {phase}, worker_alive: false)"
+    )
+
+
+def _not_attachable_message(name: str) -> str:
+    """Why NAME cannot be attached — naming the state when it is a corpse.
+
+    Issue #2554: the listing no longer offers dead aplexer records, so the
+    only way to reach one is a name the caller kept from an older listing.
+    Passing it to `a attach` anyway produces "session ... has already
+    exited" on aplexer's stderr and exit 1, which the phone rendered as a
+    bare `Session "..." ended (exit 1).` — a crash-shaped message for an
+    ordinary "this is gone". A genuinely unknown name keeps the plain
+    not-found wording.
+    """
+    dead = _session_enum.dead_sessions_from_aplexer_snapshot(_aplexer_snapshot())
+    for row in _match_attach_target(dead, name):
+        return (
+            f"pocketshell: aplexer session {row.name!r} is no longer running: "
+            f"{_dead_row_detail(row)}. It cannot be attached; "
+            "run `pocketshell sessions list` for the live ones."
+        )
+    return f"no session named {name!r}"
+
+
 def _describe_candidate(row: _session_enum.LiveSession) -> str:
     if row.manager == _session_enum.MANAGER_APLEXER and row.aplexer_id:
         return f"  {row.name}  ({row.manager} {row.aplexer_id})"
@@ -1253,7 +1449,7 @@ def sessions_attach(ctx: click.Context, name: str, hide_status: bool) -> None:
     rows, _errors = _attach_live_rows()
     matches = _match_attach_target(rows, name)
     if not matches:
-        click.echo(f"no session named {name!r}", err=True)
+        click.echo(_not_attachable_message(name), err=True)
         ctx.exit(ATTACH_EXIT_NOT_FOUND)
         return
     if len(matches) > 1:
@@ -1369,13 +1565,139 @@ def _emit_kill_failure(
 
 
 def _run_session_kill(argv: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run one kill argv (tmux kill-session or ``a kill``). Never kill-server."""
+    """Run one kill/reap argv (``tmux kill-session``, ``a kill``, ``a forget``).
+
+    Never ``tmux kill-server``.
+    """
     return subprocess.run(
         argv,
         check=False,
         capture_output=True,
         text=True,
         timeout=_TMUX_TIMEOUT_S,
+    )
+
+
+# ---------------------------------------------------------------------------
+# reaping an aplexer record after a kill (issue #2554)
+# ---------------------------------------------------------------------------
+#
+# `a kill` signals the workload; it does NOT remove the session record.
+# aplexer keeps it at `phase: exited` indefinitely, and the tree used to
+# render that leftover as an ordinary, tappable row whose attach answered
+# "session ... has already exited" and exited 1. Stop therefore left a corpse
+# behind every single time.
+#
+# Why `a forget --force <id>` and not `a prune` (both measured on the dev box
+# against the shipped aplexer 0.1.3):
+#
+#   * `a prune` only removes records aplexer considers reclaimable. A record
+#     whose worker died without recording an exit (`phase: running`,
+#     `worker_alive: false`) is NOT reclaimable: prune answered
+#     `{"removed": [], "retained_count": 2}` and left it in place. That is
+#     the same zombie class this fix filters out of the listing, so a
+#     prune-based reap would be structurally unable to clean up after itself.
+#   * `a prune` is host-wide. Reaping one stopped session must not also
+#     delete the durable history of every other dead session on the box.
+#   * `a forget --force <id>` is targeted and unconditional once the worker
+#     is gone, and its refusal is precise enough to retry on.
+#
+# Both paths share one race: immediately after `a kill` the record is
+# terminal but its worker is still winding down, and aplexer refuses
+# ("session ... still has a live worker; refusing to forget it"). A single
+# fire-and-forget attempt loses that window and silently leaves the row. So
+# the reap retries until the worker is gone or the budget runs out.
+
+#: Substring of aplexer's refusal while the worker is still winding down
+#: (aplexer/src/api.rs::forget_session).
+_REAP_WORKER_STILL_LIVE = "still has a live worker"
+#: Substring of aplexer's answer when the record is already gone. The goal
+#: state, so it counts as reaped rather than as a failure.
+_REAP_ALREADY_GONE = "no matching session"
+_REAP_MAX_ATTEMPTS = 30
+_REAP_POLL_S = 0.1
+_REAP_BUDGET_S = 3.0
+
+
+def _reap_wait() -> None:
+    """Pause between reap attempts.
+
+    Its own seam so the unit suite can exercise the retry window at full
+    speed instead of wall-clock.
+    """
+    time.sleep(_REAP_POLL_S)
+
+
+@dataclass(frozen=True)
+class _ReapOutcome:
+    """What one ``a forget --force`` attempt actually achieved.
+
+    ``workload_may_survive`` is aplexer's OWN verdict, read off
+    ``a --json forget``'s payload rather than guessed: ``a forget`` never
+    claims the workload stopped, and reports
+    ``containment_proven_empty: false`` when processes may have outlived the
+    record. Swallowing that (it goes to stderr in human mode) is how a reap
+    can silently orphan a running process.
+    """
+
+    reaped: bool
+    workload_may_survive: bool = False
+
+
+def _reap_aplexer_record(aplexer_path: str, aplexer_id: str) -> _ReapOutcome:
+    """Remove the aplexer record for a session that was just killed.
+
+    Best effort by design: the workload is already dead, so a stuck reap must
+    never turn a successful kill into a reported failure — it only means the
+    row survives until the next `a prune`/manual `a forget`.
+
+    ``--json`` is passed so the containment verdict comes back as data on
+    stdout (the human warning goes to stderr) instead of having to be
+    string-matched.
+    """
+    deadline = time.monotonic() + _REAP_BUDGET_S
+    argv = [aplexer_path, "--json", "forget", "--force", str(aplexer_id)]
+    for attempt in range(_REAP_MAX_ATTEMPTS):
+        try:
+            completed = _run_session_kill(argv)
+        except (subprocess.TimeoutExpired, OSError):
+            return _ReapOutcome(reaped=False)
+        if completed.returncode == 0:
+            return _ReapOutcome(
+                reaped=True,
+                workload_may_survive=_reap_workload_may_survive(completed.stdout),
+            )
+        detail = f"{completed.stderr or ''}{completed.stdout or ''}"
+        if _REAP_ALREADY_GONE in detail:
+            # A newer aplexer may reap inside `a kill`; nothing left to do.
+            return _ReapOutcome(reaped=True)
+        if _REAP_WORKER_STILL_LIVE not in detail:
+            # Any other refusal is not something waiting will fix.
+            return _ReapOutcome(reaped=False)
+        if attempt + 1 >= _REAP_MAX_ATTEMPTS or time.monotonic() >= deadline:
+            return _ReapOutcome(reaped=False)
+        _reap_wait()
+    return _ReapOutcome(reaped=False)
+
+
+def _reap_workload_may_survive(stdout: Optional[str]) -> bool:
+    """Read ``workload_may_survive`` off ``a --json forget``'s payload.
+
+    Unreadable output means "no claim made", not "may survive": a warning
+    nobody can act on, fired on every ordinary Stop, stops being read.
+    """
+    try:
+        payload = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(payload, Mapping) and bool(payload.get("workload_may_survive"))
+
+
+def _workload_survivor_warning(name: str, aplexer_id: str) -> str:
+    return (
+        f"pocketshell: reclaimed {name!r} from aplexer record {aplexer_id}, but "
+        "aplexer could not prove its containment was empty — its workload "
+        "processes may still be running and are no longer tracked."
     )
 
 
@@ -1391,7 +1713,7 @@ def _run_session_kill(argv: list[str]) -> subprocess.CompletedProcess[str]:
     default=False,
     help=(
         "Emit the schema-2 kill envelope "
-        '{"schema","name","manager","id","killed"} on stdout.'
+        '{"schema","name","manager","id","killed","reaped"} on stdout.'
     ),
 )
 @click.pass_context
@@ -1406,7 +1728,9 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
 
     tmux sessions are killed with `tmux -S <socket> kill-session -t '=NAME'`
     on the socket `_find_tmux_socket` located. aplexer sessions are killed
-    with `a kill <id>`. This never runs `tmux kill-server`.
+    with `a kill <id>` and then REAPED with `a forget --force <id>`, because
+    `a kill` alone leaves the record behind and the tree would keep offering
+    a dead row (#2554). This never runs `tmux kill-server`.
 
     Exit 3 = no such session, 4 = ambiguous, 5 = tmux session found but its
     socket could not be located, 127 = the kill binary is missing.
@@ -1488,6 +1812,25 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
                 as_json=as_json,
             )
             return
+        # The kill only signalled the workload; the record still has to go,
+        # or the very next listing hands the tree a dead, tappable row
+        # (issue #2554).
+        outcome = _reap_aplexer_record(resolution.path, str(aplexer_id))
+        reaped = outcome.reaped
+        if outcome.workload_may_survive:
+            click.echo(
+                _workload_survivor_warning(row.name, str(aplexer_id)), err=True
+            )
+        if not reaped:
+            # Never fatal — the session IS dead, only its record survives.
+            # Said out loud so a lingering row is explained rather than
+            # looking like the kill silently failed.
+            click.echo(
+                f"pocketshell: killed {row.name!r}, but its aplexer record "
+                f"could not be reaped; run `a forget --force {aplexer_id}` "
+                "if it keeps showing up.",
+                err=True,
+            )
         if as_json:
             click.echo(
                 json.dumps(
@@ -1497,6 +1840,7 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
                         "manager": row.manager,
                         "id": aplexer_id,
                         "killed": True,
+                        "reaped": reaped,
                     },
                     indent=2,
                 )
@@ -1562,6 +1906,9 @@ def sessions_kill(ctx: click.Context, name: str, as_json: bool) -> None:
                     "manager": row.manager,
                     "id": row.aplexer_id,
                     "killed": True,
+                    # tmux keeps no record of a killed session: kill-session
+                    # IS the removal, so the row is always gone (#2554).
+                    "reaped": True,
                 },
                 indent=2,
             )

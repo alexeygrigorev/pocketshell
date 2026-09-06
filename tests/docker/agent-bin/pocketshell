@@ -580,17 +580,24 @@ case "${1:-}" in
       #
       # Deliberately NOT delegating to the real Python CLI: the image ships the
       # deterministic shims, and the enumeration half of this fixture already
-      # reimplements §B.1 the same way. Only the tmux arm exists here, so an
-      # aplexer name is a clean exit 3 rather than a hang.
+      # reimplements §B.1 the same way.
       #
-      # Issue #2563: the `agents` image DOES now host real, attachable aplexer
-      # sessions (the pinned `a` + worker live next to /usr/bin/python3, and
-      # the build proves a full create/list/attach/kill lifecycle through the
-      # real CLI). Reaching them means driving the REAL CLI — `a attach`, or
-      # `pocketshell-real-send sessions attach` — not this shim. Migrating the
-      # journeys onto that path is slice 2 of #2561; until then this arm's
-      # tmux-only scope is deliberate, not a claim that aplexer has nothing to
-      # attach to.
+      # TWO arms, matching the real CLI. Issue #2563 gave this image the REAL
+      # pinned aplexer (`a` + its worker next to /usr/bin/python3), so an
+      # aplexer name is no longer "nothing to attach to" — #2555 adds the arm
+      # that reaches it: resolve the row's aplexer id from the same seed file
+      # `pocketshell-fixture-sessions` enumerates, then `execvp` into the real
+      # `/usr/bin/a attach <id>`, exactly as `sessions.py::sessions_attach`
+      # does. Nothing here fakes an attach; the PTY on the other side is a real
+      # aplexer session's. Before #2555 every aplexer row was a clean exit 3,
+      # so no connected journey could ever be on an aplexer PTY — which is why
+      # the alt-screen-without-mouse-tracking scroll bug had no device
+      # reproduction on that backend.
+      #
+      # `/usr/bin/a` is spelled out rather than looked up on PATH for the
+      # reason the Dockerfile gives: exactly one copy exists, next to the
+      # interpreter, and a PATH-facing `a` is the shape that made this fixture
+      # green-and-empty before.
       attach_hide_status=0
       attach_name=""
       while [ "$#" -gt 0 ]; do
@@ -605,6 +612,31 @@ case "${1:-}" in
       if [ -z "$attach_name" ]; then
         printf 'pocketshell: attach needs a session name\n' >&2
         exit 64
+      fi
+      # The aplexer arm first, for the reason the real CLI resolves managers in
+      # one pass: a name that belongs to `a` has no tmux socket to find, and
+      # falling through to the sweep would report it as a vanished session.
+      attach_aplexer_snapshot="${POCKETSHELL_FIXTURE_APLEXER_FILE:-$HOME/.pocketshell-fixture-aplexer.json}"
+      if [ -r "$attach_aplexer_snapshot" ]; then
+        attach_aplexer_id="$(
+          POCKETSHELL_ATTACH_NAME="$attach_name" python3 - "$attach_aplexer_snapshot" <<'PYEOF' || true
+import json, os, sys
+
+want = os.environ["POCKETSHELL_ATTACH_NAME"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+for row in (payload or {}).get("sessions", []):
+    if row.get("name") == want and row.get("id"):
+        print(row["id"])
+        break
+PYEOF
+        )"
+        if [ -n "$attach_aplexer_id" ]; then
+          exec /usr/bin/a attach "$attach_aplexer_id"
+        fi
       fi
       attach_socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
       attach_socket=""

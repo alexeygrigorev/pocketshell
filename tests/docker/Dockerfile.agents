@@ -182,6 +182,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/uv \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-altscreen-tui \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
         /usr/local/bin/pocketshell-fixture-aplexer-selfcheck \

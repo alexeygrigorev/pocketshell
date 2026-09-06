@@ -885,6 +885,151 @@ class ComposerViewModelTest {
         assertEquals(null, stack.speech.lastLanguage)
     }
 
+    // -------------------------------------- a dictation always ends at Idle
+
+    /**
+     * #2598 reproduce-first: the ordinary voice flow — dictate, tap Send —
+     * left `recording` on [RecordingState.Recording] for good.
+     *
+     * `deliver()` dropped the recognizer with the SILENT release meant for a
+     * composer that is going away, so the session was gone while the state
+     * still said "listening". Reopening the sheet then showed a live-looking
+     * waveform with nothing behind it, over the draft field the user needed,
+     * and no control on that surface could get back out of it.
+     */
+    @Test
+    fun `a send while dictating ends the recording instead of wedging the composer`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onMicTap()
+            stack.speech.partial("ship the fix")
+            advanceUntilIdle()
+            assertEquals(RecordingState.Recording, viewModel.state.value.recording)
+
+            viewModel.send()
+            advanceUntilIdle()
+
+            assertEquals(
+                "a send while dictating must leave the composer editable again",
+                RecordingState.Idle,
+                viewModel.state.value.recording,
+            )
+            assertEquals(listOf("ship the fix", "\r"), sink.sentText())
+            assertEquals("", viewModel.state.value.draft)
+            assertTrue("the recognizer must really be released", stack.speech.cancelled)
+        }
+
+    /** Insert takes the same path, and the sheet stays open on the draft field. */
+    @Test
+    fun `an insert while dictating ends the recording too`() = runTest(dispatcher) {
+        val viewModel = bound()
+        viewModel.onMicTap()
+        stack.speech.partial("ship the fix")
+        advanceUntilIdle()
+
+        viewModel.insert()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, viewModel.state.value.recording)
+        assertEquals(listOf("ship the fix"), sink.sentText())
+        assertEquals("", viewModel.state.value.draft)
+    }
+
+    /**
+     * The second half of the wedge: once the state was a ghost, `Discard` and
+     * the sheet's dismiss (both [ComposerViewModel.cancelRecording]) did
+     * nothing at all, because the delegate early-returned on a null session.
+     *
+     * Cancelling with no recognizer live must normalise the state AND leave
+     * the draft alone — there is no pre-dictation text to restore, so
+     * restoring one would delete what the user typed after the send.
+     */
+    @Test
+    fun `discarding after a send that ended the dictation cannot leave a ghost recording`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onMicTap()
+            stack.speech.partial("ship the fix")
+            advanceUntilIdle()
+            viewModel.send()
+            advanceUntilIdle()
+
+            viewModel.onDraftChange("and now type something else")
+            viewModel.cancelRecording()
+            advanceUntilIdle()
+
+            assertEquals(RecordingState.Idle, viewModel.state.value.recording)
+            assertEquals("and now type something else", viewModel.state.value.draft)
+        }
+
+    /**
+     * The stop affordance (#2598): end the dictation, KEEP what was heard, and
+     * hand the text back as an editable draft — Recording → Transcribing →
+     * Idle. Distinct from Discard, which throws the transcript away.
+     */
+    @Test
+    fun `stopping a dictation keeps the transcript and returns to the editable draft`() =
+        runTest(dispatcher) {
+            val viewModel = bound()
+            viewModel.onMicTap()
+            stack.speech.partial("run the tests")
+            advanceUntilIdle()
+
+            viewModel.onMicTap()
+            advanceUntilIdle()
+            assertTrue("the recognizer must be asked to transcribe", stack.speech.stopped)
+            assertEquals(RecordingState.Transcribing, viewModel.state.value.recording)
+
+            stack.speech.final("run the tests now")
+            advanceUntilIdle()
+
+            assertEquals(RecordingState.Idle, viewModel.state.value.recording)
+            assertEquals("run the tests now", viewModel.state.value.draft)
+        }
+
+    /**
+     * G2 class coverage for #2598: it is not the send that has to end at
+     * [RecordingState.Idle], it is EVERY way out of a dictation. A composer
+     * left in any other state is a composer with no draft field and no way
+     * back to one.
+     */
+    @Test
+    fun `every exit from a live dictation ends at Idle`() = runTest(dispatcher) {
+        val exits: List<Pair<String, (ComposerViewModel) -> Unit>> = listOf(
+            "a final transcript" to { _: ComposerViewModel -> stack.speech.final("all done") },
+            "a recognizer error" to { _: ComposerViewModel -> stack.speech.error("recognizer died") },
+            "discard" to { vm: ComposerViewModel -> vm.cancelRecording() },
+            // The sheet's dismiss is exactly this call (PromptComposerSheet).
+            "the sheet being dismissed" to { vm: ComposerViewModel -> vm.cancelRecording() },
+            "insert" to { vm: ComposerViewModel -> vm.insert() },
+            "send" to { vm: ComposerViewModel -> vm.send() },
+            "a session hand-off" to { vm: ComposerViewModel -> vm.bind(hostId, OTHER_SESSION, sink) },
+        )
+
+        for ((what, exit) in exits) {
+            val viewModel = bound()
+            viewModel.onDraftChange("something to send")
+            advanceUntilIdle()
+            viewModel.onMicTap()
+            stack.speech.partial("and something dictated")
+            advanceUntilIdle()
+            assertEquals(
+                "precondition: $what must start from a live dictation",
+                RecordingState.Recording,
+                viewModel.state.value.recording,
+            )
+
+            exit(viewModel)
+            advanceUntilIdle()
+
+            assertEquals(
+                "$what must leave the composer at Idle",
+                RecordingState.Idle,
+                viewModel.state.value.recording,
+            )
+        }
+    }
+
     // ------------------------------------------------ offline-queued dictation
 
     /**

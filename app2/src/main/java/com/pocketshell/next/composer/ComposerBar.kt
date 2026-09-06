@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -61,6 +62,7 @@ const val COMPOSER_INSERT_TAG: String = "composer-insert"
 const val COMPOSER_ATTACH_TAG: String = "composer-attach"
 const val COMPOSER_MIC_TAG: String = "composer-mic"
 const val COMPOSER_DISCARD_RECORDING_TAG: String = "composer-discard-recording"
+const val COMPOSER_STOP_RECORDING_TAG: String = "composer-stop-recording"
 const val COMPOSER_HISTORY_TAG: String = "composer-history"
 const val COMPOSER_PREVIEW_TAG: String = "composer-preview"
 const val COMPOSER_PREVIEW_VIEW_TAG: String = "composer-preview-view"
@@ -72,12 +74,21 @@ const val COMPOSER_SLASH_TAG: String = "composer-slash"
 const val COMPOSER_SLASH_TRIGGER_TAG: String = "composer-slash-trigger"
 const val COMPOSER_TIMER_TAG: String = "composer-timer"
 const val COMPOSER_WAVEFORM_TAG: String = "composer-waveform"
+const val COMPOSER_TRANSCRIBING_TAG: String = "composer-transcribing"
 const val COMPOSER_CONTROLS_ROW_TAG: String = "composer-controls-row"
 
 fun composerSlashRowTag(command: String): String = "composer-slash-row:$command"
 
 /** The text a send that never left the device puts on screen. */
 const val COMPOSER_UNDELIVERED_TEXT: String = "Not delivered — session offline. Your draft was kept."
+
+/**
+ * The Stop control's accessible name (#2598).
+ *
+ * Spelled out because "stop" alone reads like Discard's twin: this is the one
+ * that KEEPS what was heard and hands it back as an editable draft.
+ */
+const val COMPOSER_STOP_RECORDING_DESCRIPTION: String = "Stop dictating and keep the text"
 
 /** Shown when RECORD_AUDIO is denied; dictation is not started. */
 const val COMPOSER_RECORD_AUDIO_DENIED_TEXT: String =
@@ -387,6 +398,14 @@ private fun ControlsRow(
                     recording = true,
                     modifier = Modifier.testTag(COMPOSER_SEND_TAG),
                 )
+                // #2598: the way out that keeps the text. It sits in the mic's
+                // own slot — the trailing edge — because that is where the
+                // thumb that started the dictation already is, and a tap here
+                // is the same mic toggle, now meaning "stop".
+                StopRecordingButton(
+                    onClick = onMicTap,
+                    modifier = Modifier.testTag(COMPOSER_STOP_RECORDING_TAG),
+                )
             }
             RecordingState.Transcribing -> {
                 DiscardRecordingButton(
@@ -556,6 +575,40 @@ private fun DiscardRecordingButton(
     }
 }
 
+/**
+ * Ends a dictation and keeps the transcript (#2598).
+ *
+ * A filled accent disc with a stop square, in the same slot and at the same
+ * size as [MicTriggerButton]: the mic turns into its own stop, which is the
+ * idiom every voice recorder uses. Deliberately NOT the [DiscardRecordingButton]
+ * outline — one of these two throws the user's words away and the other keeps
+ * them, so they must not look alike.
+ */
+@Composable
+private fun StopRecordingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(ComposerIdlePillHeight)
+            .clip(CircleShape)
+            .background(color = PocketShellColors.Accent, shape = CircleShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = COMPOSER_STOP_RECORDING_DESCRIPTION },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(COMPOSER_STOP_GLYPH_SIZE)
+                .background(
+                    color = PocketShellColors.OnAccent,
+                    shape = RoundedCornerShape(COMPOSER_STOP_GLYPH_RADIUS),
+                ),
+        )
+    }
+}
+
 @Composable
 private fun MicTriggerButton(
     onClick: () -> Unit,
@@ -577,6 +630,8 @@ private val ComposerDraftFontSize = 15.sp
 private val ComposerIdlePillHeight = 44.dp
 private val ComposerRecordingPillHeight = 48.dp
 private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp
+private val COMPOSER_STOP_GLYPH_SIZE = 15.dp
+private val COMPOSER_STOP_GLYPH_RADIUS = 3.dp
 
 /**
  * The `/`-command list, rendered above the field so it never sits under the

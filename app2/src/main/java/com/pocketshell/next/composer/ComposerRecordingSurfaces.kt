@@ -114,6 +114,7 @@ internal fun TranscribingSurface(modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .testTag(COMPOSER_TRANSCRIBING_TAG)
             .heightIn(min = 68.dp)
             .background(
                 color = PocketShellColors.SurfaceElev,

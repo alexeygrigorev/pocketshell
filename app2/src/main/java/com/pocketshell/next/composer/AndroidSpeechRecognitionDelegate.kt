@@ -107,30 +107,77 @@ internal class AndroidSpeechRecognitionDelegate(
         callbacks.onState(RecordingState.Recording)
     }
 
-    /** The user tapped stop: transcribe what was said. */
+    /**
+     * The user tapped stop: transcribe what was said.
+     *
+     * With no recognizer left, this reports [RecordingState.Idle] rather than
+     * doing nothing — see [cancel] for why a live composer is never left
+     * holding a state the delegate cannot end (#2598).
+     */
     fun stop() {
-        val running = session ?: return
+        val running = session
+        if (running == null) {
+            callbacks.onState(RecordingState.Idle)
+            return
+        }
         callbacks.onState(RecordingState.Transcribing)
         runCatching { running.stopListening() }.onFailure { failure ->
             fail(failure.message ?: UNAVAILABLE_MESSAGE)
         }
     }
 
-    /** The user tapped discard: drop the recording AND everything it typed. */
+    /**
+     * The user tapped discard: drop the recording AND everything it typed.
+     *
+     * ALWAYS ends at [RecordingState.Idle], recognizer or not. This used to
+     * early-return on a null session, which made Discard — and the sheet's
+     * dismiss, which is the same call — a no-op whenever the composer's state
+     * said "recording" but the recognizer was already gone. That combination
+     * is #2598: a waveform over the draft field with nothing behind it and no
+     * control that could put it away.
+     *
+     * The pre-dictation draft is restored only when a recording was genuinely
+     * live. Without a session there is no [baseDraft] to go back to (it is
+     * cleared with the recognizer), so writing it would delete whatever the
+     * user has typed since.
+     */
     fun cancel() {
-        if (session == null) return
-        val restored = baseDraft
+        val restored = baseDraft.takeIf { session != null }
         clear()
-        callbacks.onDraft(restored)
+        restored?.let(callbacks::onDraft)
         callbacks.onState(RecordingState.Idle)
     }
 
-    /** The screen went away. Silent — no state callbacks into a dead composer. */
+    /**
+     * The screen went away. Silent — no state callbacks into a dead composer.
+     *
+     * For a composer that is still on screen, use [releaseToIdle]: silence is
+     * correct only when nothing is left to tell.
+     */
     fun release() {
         val running = session
         session = null
         generation += 1
         runCatching { running?.cancel() }
+    }
+
+    /**
+     * The draft is being committed while the mic is live (Insert / Send).
+     *
+     * Same silent drop of the recognizer as [release] — no late partial may
+     * type into a draft that is about to be cleared — but the composer is
+     * still on screen, so it is told the dictation is over. [release]'s
+     * silence here is exactly what wedged the composer in #2598: the session
+     * went, the state stayed [RecordingState.Recording], and every reopen of
+     * the sheet showed a recording surface for a recognizer that had been
+     * gone since the send.
+     *
+     * Whatever the transcript already put on screen stays; only the recognizer
+     * goes.
+     */
+    fun releaseToIdle() {
+        clear()
+        callbacks.onState(RecordingState.Idle)
     }
 
     private fun isCurrent(candidate: Long): Boolean = session != null && generation == candidate

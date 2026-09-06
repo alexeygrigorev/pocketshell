@@ -335,6 +335,9 @@ fun createRemoteTerminalSession(
         /* transcriptRows = */ transcriptRows,
         /* client = */ client,
     )
+    // Before the emulator: its constructor copies the default scheme into the
+    // live palette, and every later reset copies it again.
+    installTerminalPalette()
     val emulator = TerminalEmulator(
         /* session = */ session,
         /* columns = */ cols,
@@ -379,11 +382,13 @@ class NoOpTerminalSessionClient : TerminalSessionClient {
  * touches, and nothing else.
  *
  * Reflection rather than a patch to the vendored source because
- * `shared/core-terminal` is pinned byte-identical to upstream Termux (its
- * `build.gradle.kts` states the "do not refactor" rule and `VENDORED.md`
- * documents the refresh procedure). A missing field fails loudly, naming the
- * refresh as the likely cause, instead of degrading into a silently dead
- * terminal.
+ * `shared/core-terminal` is pinned to an upstream Termux commit and every
+ * local deviation has to be re-applied by hand on a refresh (its
+ * `build.gradle.kts` states the "do not refactor" rule, `VENDORED.md`
+ * documents the refresh procedure, and `PATCHES.md` is the complete record of
+ * the patches we do carry). Keeping this out of the vendored source means one
+ * fewer hunk to re-apply. A missing field fails loudly, naming the refresh as
+ * the likely cause, instead of degrading into a silently dead terminal.
  */
 internal object TerminalSessionInternals {
 

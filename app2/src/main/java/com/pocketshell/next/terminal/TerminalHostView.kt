@@ -1,5 +1,8 @@
 package com.pocketshell.next.terminal
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
@@ -12,6 +15,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.next.settings.LocalAppSettings
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.termux.terminal.TerminalColors
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TextStyle
@@ -41,21 +45,43 @@ const val SESSION_TERMINAL_TAG: String = "session-terminal"
 internal const val TERMINAL_TEXT_SIZE_RAW_PX: Int = 28
 
 /**
- * The terminal's own palette entries, in ARGB.
+ * Makes the ui-kit tokens the vendored emulator's DEFAULT colour scheme.
  *
- * Two places need the background and both matter: `setDefaultBackgroundColor`
- * paints the View (including the strip below the last drawn row), while the
- * emulator's `mColors` decides what a cell with DEFAULT attributes is filled
+ * The scheme is what `TerminalColors.reset()` copies from, so it is both what
+ * a fresh emulator starts with and what it returns to on `ESC c` (the `reset`
+ * command), `OSC 104` and `OSC 110`–`112` (an app undoing the colours it set).
+ * Patching the live palette after the fact — what the pre-rewrite client did
+ * in `onEmulatorSet` and re-did on every `onColorsChanged` — held only until
+ * the first of those, after which the grid fell back to Termux's pure black
+ * against the app's near-black chrome, and it also undid colours an app had
+ * legitimately asked for. Installing the defaults once, before the emulator is
+ * built, leaves every reset and every app-chosen colour to the emulator.
+ *
+ * The scheme is one process-wide object upstream (`TerminalColors.COLOR_SCHEME`),
+ * which suits an app with one palette. Idempotent; called by
+ * [createRemoteTerminalSession].
+ */
+internal fun installTerminalPalette() {
+    val defaults = TerminalColors.COLOR_SCHEME.mDefaultColors
+    defaults[TextStyle.COLOR_INDEX_BACKGROUND] = PocketShellColors.Background.toArgb()
+    defaults[TextStyle.COLOR_INDEX_FOREGROUND] = PocketShellColors.Text.toArgb()
+    defaults[TextStyle.COLOR_INDEX_CURSOR] = PocketShellColors.Accent.toArgb()
+}
+
+/**
+ * Paints the View's own background from the session's CURRENT palette.
+ *
+ * Two places paint the background and both matter: `setDefaultBackgroundColor`
+ * fills the View (including the strip below the last drawn row), while the
+ * emulator's palette decides what a cell with DEFAULT attributes is filled
  * with — upstream's renderer skips painting a cell whose background equals the
  * palette default, so the two have to agree or the grid and the gutter end up
- * different blacks.
- *
- * They are the ui-kit tokens, not terminal-only constants: a third black next
- * to the app's chrome is exactly the seam a phone screen shows up.
+ * different colours. Called on attach and whenever the emulator reports the
+ * palette moved, so a background an app sets with `OSC 11` actually shows.
  */
-private val TERMINAL_BACKGROUND_ARGB: Int = PocketShellColors.Background.toArgb()
-private val TERMINAL_FOREGROUND_ARGB: Int = PocketShellColors.Text.toArgb()
-private val TERMINAL_CURSOR_ARGB: Int = PocketShellColors.Accent.toArgb()
+private fun TerminalView.paintBackgroundFrom(session: TerminalSession) {
+    setDefaultBackgroundColor(session.emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND])
+}
 
 /** `assets/` path of the face vendored inside `:shared:core-terminal`. */
 private const val TERMINAL_FONT_ASSET: String = "fonts/JetBrainsMono-Regular.ttf"
@@ -94,7 +120,8 @@ internal fun terminalTypeface(context: android.content.Context): android.graphic
  *  1. build the view, give it a client, attach the session;
  *  2. install a [TerminalSessionClient] that turns the emulator's
  *     "text changed" callback into a repaint — without it the vendored drain
- *     parses bytes into a grid nobody ever draws;
+ *     parses bytes into a grid nobody ever draws — and gives its palette and
+ *     clipboard callbacks a window and a clipboard ([HostedSessionClient]);
  *  3. report the size the view computes from its own font metrics back to the
  *     session layer, which is the ONLY path to `pty.resize`.
  *
@@ -134,7 +161,7 @@ fun TerminalHostView(
 ) {
     // Held across recompositions so a state change in the enclosing screen does
     // not detach and re-attach the terminal (which would reset the viewport).
-    val repaintClient = remember(session) { RepaintingSessionClient() }
+    val repaintClient = remember(session) { HostedSessionClient() }
 
     // The view's client is built once, inside `factory`, so it would otherwise
     // capture the FIRST composition's `ctrlArmed` value and never see another.
@@ -193,8 +220,8 @@ fun TerminalHostView(
                 setTextSize(textSizePx)
                 appliedTextSizePx[0] = textSizePx
                 setTypeface(terminalTypeface(context))
-                setDefaultBackgroundColor(TERMINAL_BACKGROUND_ARGB)
                 attachSession(session)
+                paintBackgroundFrom(session)
                 repaintClient.view = this
             }
         },
@@ -206,6 +233,7 @@ fun TerminalHostView(
             repaintClient.view = view
             if (view.currentSession !== session) {
                 view.attachSession(session)
+                view.paintBackgroundFrom(session)
             }
             // Focus is requested here rather than in `factory`: the view is not
             // attached to a window yet at construction time, so `requestFocus()`
@@ -219,12 +247,13 @@ fun TerminalHostView(
 }
 
 /**
- * Bridges the vendored session's "the grid changed" callback to the view's
- * repaint. Everything else stays a no-op for now: clipboard, bell and colour
- * changes belong to later polish tasks, and a wrong implementation of any of
- * them would be worse than none.
+ * The session's client while a view hosts it: the emulator's callbacks that
+ * need a screen, a clipboard or a window behind them. Every callback is inert
+ * when [view] is null (the session outlives the composition), and the bell
+ * stays a no-op — a phone vibrating on every `BEL` a TUI emits is worse than
+ * silence.
  */
-private class RepaintingSessionClient : TerminalSessionClient by NoOpTerminalSessionClient() {
+private class HostedSessionClient : TerminalSessionClient by NoOpTerminalSessionClient() {
 
     @Volatile
     var view: TerminalView? = null
@@ -232,7 +261,42 @@ private class RepaintingSessionClient : TerminalSessionClient by NoOpTerminalSes
     override fun onTextChanged(changedSession: TerminalSession) {
         view?.onScreenUpdated()
     }
+
+    /**
+     * `OSC 4/10/11/12` set, `OSC 104/110-112` reset or `ESC c`: the palette
+     * moved, so the View's own background has to follow it (see
+     * [paintBackgroundFrom]) and the grid needs a repaint.
+     */
+    override fun onColorsChanged(session: TerminalSession) {
+        view?.apply {
+            paintBackgroundFrom(session)
+            onScreenUpdated()
+        }
+    }
+
+    /** Copy in the long-press selection menu, and `OSC 52` from the remote. */
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {
+        val target = view ?: return
+        if (text.isNullOrEmpty()) return
+        target.context.clipboard?.setPrimaryClip(ClipData.newPlainText("Terminal", text))
+    }
+
+    /**
+     * Paste in the long-press selection menu. The emulator's own `paste`
+     * strips control bytes, turns newlines into carriage returns and brackets
+     * the text when the remote asked for that (`DECSET 2004`).
+     */
+    override fun onPasteTextFromClipboard(session: TerminalSession?) {
+        val target = view ?: return
+        val clip = target.context.clipboard?.primaryClip ?: return
+        if (clip.itemCount == 0) return
+        val text = clip.getItemAt(0).coerceToText(target.context) ?: return
+        session?.emulator?.paste(text.toString())
+    }
 }
+
+private val Context.clipboard: ClipboardManager?
+    get() = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 
 /**
  * The mutable seam between a Compose recomposition and the long-lived
@@ -334,13 +398,6 @@ private class SessionTerminalViewClient(
      */
     override fun onEmulatorSet() {
         val emulator = view.mEmulator ?: return
-        // The emulator does not exist until the view's first non-zero layout, so
-        // this — not the factory — is the only moment its palette can be set.
-        emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND] =
-            TERMINAL_BACKGROUND_ARGB
-        emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_FOREGROUND] =
-            TERMINAL_FOREGROUND_ARGB
-        emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] = TERMINAL_CURSOR_ARGB
         onResized(emulator.mColumns, emulator.mRows)
     }
 

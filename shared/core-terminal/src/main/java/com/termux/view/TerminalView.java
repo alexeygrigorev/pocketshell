@@ -6,15 +6,10 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.ContextWrapper;
-import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.Editable;
@@ -28,11 +23,9 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MotionEvent;
-import android.view.PixelCopy;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
-import android.view.Window;
 import android.view.accessibility.AccessibilityManager;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
@@ -43,16 +36,12 @@ import android.widget.Scroller;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
-import androidx.annotation.VisibleForTesting;
 
 import com.pocketshell.core.terminal.input.BracketedPaste;
 import com.termux.terminal.KeyHandler;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
 import com.termux.view.textselection.TextSelectionCursorController;
-
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /** View displaying and interacting with a {@link TerminalSession}. */
 public final class TerminalView extends View {
@@ -72,24 +61,6 @@ public final class TerminalView extends View {
     public TerminalRenderer mRenderer;
 
     public TerminalViewClient mClient;
-
-    /**
-     * Issue #1192 — reports, per painted frame, whether {@link #onDraw} painted the
-     * emulator content or the BLACK fallback (the {@code mEmulator == null} window or a
-     * render that threw). PocketShell's tmux ViewModel wires this to the pane's
-     * {@code TerminalSurfaceState} so its EXISTING gated stale-render watchdog can
-     * fingerprint a surface-only-black (model intact, on-screen surface black) — the one
-     * black-screen class the model-vs-tmux heal oracle cannot see. Null is a no-op.
-     */
-    public interface FramePaintObserver {
-        void onFramePainted(boolean paintedEmulatorContent, long atElapsedRealtimeMs);
-    }
-
-    private FramePaintObserver mFramePaintObserver;
-
-    public void setFramePaintObserver(FramePaintObserver observer) {
-        mFramePaintObserver = observer;
-    }
 
     private TextSelectionCursorController mTextSelectionCursorController;
 
@@ -203,259 +174,6 @@ public final class TerminalView extends View {
         }
         invalidate();
     }
-
-    /**
-     * Issue #1203 — force a SURFACE-level repaint that recovers a
-     * surface-only-black: the on-screen surface is black while the MODEL grid
-     * (the session/bridge emulator) still holds the frame. This is the sixth
-     * {@code black_frame_observed} class (#1192, {@code surface_black_model_intact}),
-     * the ONE the model-vs-tmux heal oracle cannot see — the model never diverges
-     * from tmux, so a model reseed (the manual Redraw / stale-render heal) restores
-     * NOTHING and the surface stays black.
-     *
-     * <p>{@link #forceFullRepaint()} (#721) CANNOT recover this class either: it
-     * only resets the renderer's dirty cache and issues {@code invalidate()}. When
-     * the surface is black because {@link #mEmulator} is {@code null} (the
-     * {@link #onDraw} BLACK fallback), a plain {@code invalidate()} just re-runs
-     * {@code onDraw}, finds {@code mEmulator == null} again, and paints the black
-     * fallback AGAIN. The View lost its emulator binding even though the session
-     * still holds a live emulator with the full grid — no amount of model reseeding
-     * repaints the surface.
-     *
-     * <p>This re-binds {@link #mEmulator} from the live {@link #mTermSession} (so the
-     * next {@code onDraw} takes the CONTENT path instead of {@code drawColor(black)}),
-     * then resets the renderer's dirty cache and forces a full-clip repaint of the
-     * whole surface straight from the buffer — covering both the {@code mEmulator ==
-     * null} case AND the case where the surface holds a stale black hardware buffer
-     * whose #469 dirty cache still thinks every row is painted.
-     */
-    public void forceSurfaceRepaint() {
-        // Re-bind the emulator the View paints from. When the View lost it
-        // (mEmulator == null → the onDraw BLACK fallback) but the session still
-        // holds a live emulator, re-fetch it so the next onDraw takes the content
-        // path instead of drawColor(black) — the surface_black_model_intact fix.
-        if (mEmulator == null && mTermSession != null) {
-            TerminalEmulator sessionEmulator = mTermSession.getEmulator();
-            if (sessionEmulator != null) {
-                mEmulator = sessionEmulator;
-                if (mTerminalCursorBlinkerRunnable != null) {
-                    mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
-                }
-            }
-        }
-        // Reset the renderer's dirty cache (a stale surface may hold a black
-        // hardware buffer whose cache still thinks every row is painted) and force
-        // a full-clip repaint straight from the buffer.
-        if (mRenderer != null) {
-            mRenderer.invalidateDirtyCache();
-        }
-        invalidate();
-    }
-
-    /**
-     * Issue #1443 — DIAGNOSTIC pixel-truth sample of the on-screen surface, for the
-     * one black-screen class the MODEL-derived detectors are blind to.
-     *
-     * <p>Every other surface-black signal (the #1192 paint-confirmation seam →
-     * {@link com.pocketshell.core.terminal.ui.TerminalSurfaceState#surfaceIsBlackWhileModelHasContent})
-     * is derived from the emulator MODEL: {@link #onDraw} reports
-     * {@code paintedEmulatorContent} from {@code hasNonBlankVisibleRow()}, a MODEL
-     * check with NO pixel readback (the explicit #1296 non-goal). A GENUINE
-     * pixel/GPU-layer black — the composited surface is black while the model still
-     * carries the frame (a lost HWUI hardware layer, a RenderNode that stopped
-     * compositing, a Compose layer that dropped this View's buffer) — is invisible
-     * to all of them. This bounded {@link PixelCopy} of the actual window surface is
-     * the only way to see it.
-     *
-     * <p><b>This is called ONLY on a suspicion trigger</b> — the app's stale-render
-     * watchdog tick when the MODEL reports content-present, via
-     * {@link com.pocketshell.core.terminal.ui.TerminalSurfaceState#probePixelBlackWhileModelHasContent}
-     * (itself rate-bounded). It is NEVER called from {@link #onDraw} / the per-frame
-     * render loop, so it does NOT reinstate the per-frame PixelCopy cost #1296
-     * rejected. It samples the whole view region SCALED into a small fixed
-     * {@value #PIXEL_SAMPLE_DIM}×{@value #PIXEL_SAMPLE_DIM} bitmap, so the readback
-     * cost is O({@value #PIXEL_SAMPLE_DIM}²) regardless of the view size.
-     *
-     * <p><b>Diagnostics only</b>: this NEVER heals/reseeds/reattaches anything and
-     * NEVER throws into a caller — any failure returns {@code null} ("no evidence").
-     *
-     * @return {@code Boolean.TRUE} when the sampled surface pixels are
-     *   (near-)uniformly the default background colour (a dead/black surface),
-     *   {@code Boolean.FALSE} when they carry visible content (a healthy surface),
-     *   and {@code null} when the surface could not be sampled (no host window,
-     *   0-size, PixelCopy error/timeout) — never fingerprinted by the caller.
-     */
-    @Nullable
-    public Boolean sampleSurfaceNearUniformBlack() {
-        return sampleSurfaceNearUniformBlack(PIXEL_SAMPLE_TIMEOUT_MS);
-    }
-
-    /**
-     * Issue #2003 — the timeout-parameterised body of {@link #sampleSurfaceNearUniformBlack()}.
-     *
-     * <p>The parameter exists ONLY so
-     * {@code TerminalViewPixelProbeAbandonedCopyInstrumentedTest} can force the
-     * abandon-while-in-flight path deterministically (a 0 ms wait always leaves the
-     * {@link PixelCopy} request queued on the HWUI RenderThread). Production always
-     * calls the no-arg overload with {@value #PIXEL_SAMPLE_TIMEOUT_MS} ms.
-     */
-    @VisibleForTesting
-    @Nullable
-    Boolean sampleSurfaceNearUniformBlack(long timeoutMs) {
-        try {
-            final int width = getWidth();
-            final int height = getHeight();
-            if (width <= 0 || height <= 0) return null;
-            final Window window = findHostWindow();
-            if (window == null || window.peekDecorView() == null) return null;
-
-            final int[] loc = new int[2];
-            getLocationInWindow(loc);
-            final Rect src = new Rect(loc[0], loc[1], loc[0] + width, loc[1] + height);
-
-            // PixelCopy scales srcRect INTO the destination bitmap, so a fixed small
-            // dest bounds the whole readback to O(dim^2) pixels regardless of the
-            // view's on-screen size — never a per-pixel full-surface scan (#1296/#1164).
-            final Bitmap dest =
-                Bitmap.createBitmap(PIXEL_SAMPLE_DIM, PIXEL_SAMPLE_DIM, Bitmap.Config.ARGB_8888);
-            // Issue #2003 — RenderThread OWNERSHIP of `dest`, not "always recycle".
-            //
-            // `PixelCopy.request` is ASYNCHRONOUS: it hands `dest` to HWUI, which
-            // resolves it on the RenderThread inside `Readback::copySurfaceInto` ->
-            // `CopyRequestAdapter::getDestinationBitmap` -> `android::bitmap::toBitmap`.
-            // `toBitmap` is `LOG_ALWAYS_FATAL` on a recycled bitmap ("Error, cannot
-            // access an invalid/free'd bitmap here!"), so recycling `dest` while the
-            // request is still queued ABORTS THE WHOLE APP PROCESS (SIGABRT on
-            // RenderThread) — a diagnostic probe killing the app, the exact inverse of
-            // "must NEVER destabilise the terminal". That is what the #2003 tombstone
-            // (`tombstone_16`, pid 9555 tid 9598 RenderThread) recorded, reached via
-            // the 250 ms `latch.await` timing out on a loaded device while the copy was
-            // still in flight.
-            //
-            // The callback firing is the ONLY signal that HWUI is done with `dest`
-            // (`Readback::copySurfaceInto` invokes it after the readback, on every
-            // result including errors). So recycle IF AND ONLY IF the latch was
-            // counted down. On the timeout / interrupt paths we simply drop the
-            // reference: the in-flight `CopyRequest` holds its own ref, so the GC frees
-            // the (1 KB, PIXEL_SAMPLE_DIM^2 ARGB_8888) sample only once HWUI is truly
-            // finished with it. `Bitmap.recycle()` is documented as not normally
-            // needed; a 1 KB deferred free is not worth a process abort.
-            boolean copyFinished = false;
-            try {
-                final CountDownLatch latch = new CountDownLatch(1);
-                final int[] status = {PixelCopy.ERROR_UNKNOWN};
-                // Reuse ONE process-wide handler thread for every probe (rate-limited to
-                // ≤1 per watchdog cycle) instead of spinning a HandlerThread up per call.
-                PixelCopy.request(window, src, dest, copyResult -> {
-                    status[0] = copyResult;
-                    latch.countDown();
-                }, pixelProbeHandler());
-                copyFinished = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
-                if (!copyFinished) {
-                    return null;
-                }
-                if (status[0] != PixelCopy.SUCCESS) {
-                    return null;
-                }
-                return Boolean.valueOf(isBitmapNearUniformBackground(dest));
-            } finally {
-                if (copyFinished) dest.recycle();
-            }
-        } catch (Throwable t) {
-            // A diagnostic probe must NEVER destabilise the terminal: any failure
-            // (no window, permission, driver refusal, interruption) is "no evidence".
-            return null;
-        }
-    }
-
-    /** Issue #1443 — one shared, lazily-started handler thread for all pixel probes. */
-    private static volatile Handler sPixelProbeHandler;
-
-    private static Handler pixelProbeHandler() {
-        Handler handler = sPixelProbeHandler;
-        if (handler == null) {
-            synchronized (TerminalView.class) {
-                handler = sPixelProbeHandler;
-                if (handler == null) {
-                    final HandlerThread thread = new HandlerThread("ps-pixel-probe");
-                    thread.start();
-                    handler = new Handler(thread.getLooper());
-                    sPixelProbeHandler = handler;
-                }
-            }
-        }
-        return handler;
-    }
-
-    /**
-     * Issue #1443 — walk the View's context chain to the hosting {@link Activity}'s
-     * {@link Window}, needed by {@link PixelCopy#request} (a plain HWUI View has no
-     * Surface of its own; the composited pixels live on the window surface). Returns
-     * {@code null} when the View is not hosted by an Activity window.
-     */
-    @Nullable
-    private Window findHostWindow() {
-        Context ctx = getContext();
-        while (ctx instanceof ContextWrapper) {
-            if (ctx instanceof Activity) {
-                return ((Activity) ctx).getWindow();
-            }
-            ctx = ((ContextWrapper) ctx).getBaseContext();
-        }
-        return null;
-    }
-
-    /**
-     * Issue #1443 — true when (near-)all sampled pixels are within
-     * {@value #PIXEL_BG_CHANNEL_TOLERANCE} per channel of the default background
-     * colour, i.e. the surface is (near-)uniformly the background (a dead/black
-     * surface) rather than carrying rendered glyphs.
-     *
-     * <p>The threshold ({@value #PIXEL_BG_UNIFORM_PERMILLE}‰) is deliberately very
-     * high: a genuine GPU-layer black is 100% background, while even a sparse but
-     * HEALTHY terminal frame lights up several of the {@value #PIXEL_SAMPLE_DIM}²
-     * sampled cells with glyph coverage. It is a conservative first cut for on-device
-     * tuning — a false positive here only emits a diagnostic event (never a heal), and
-     * the model-content gate in the caller already excludes the ordinary blank pane.
-     */
-    private boolean isBitmapNearUniformBackground(Bitmap bmp) {
-        final int bg = mDefaultBackgroundColor;
-        final int bgR = Color.red(bg);
-        final int bgG = Color.green(bg);
-        final int bgB = Color.blue(bg);
-        final int w = bmp.getWidth();
-        final int h = bmp.getHeight();
-        final int total = w * h;
-        if (total <= 0) return false;
-        int backgroundPixels = 0;
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                final int p = bmp.getPixel(x, y);
-                if (Math.abs(Color.red(p) - bgR) <= PIXEL_BG_CHANNEL_TOLERANCE
-                        && Math.abs(Color.green(p) - bgG) <= PIXEL_BG_CHANNEL_TOLERANCE
-                        && Math.abs(Color.blue(p) - bgB) <= PIXEL_BG_CHANNEL_TOLERANCE) {
-                    backgroundPixels++;
-                }
-            }
-        }
-        return (long) backgroundPixels * 1000L >= (long) total * PIXEL_BG_UNIFORM_PERMILLE;
-    }
-
-    /** Issue #1443 — the fixed downscaled dimension the surface is PixelCopy'd into. */
-    private static final int PIXEL_SAMPLE_DIM = 16;
-
-    /** Issue #1443 — max wait for the single-shot async PixelCopy callback. */
-    private static final long PIXEL_SAMPLE_TIMEOUT_MS = 250L;
-
-    /** Issue #1443 — per-channel tolerance for "this pixel equals the background". */
-    private static final int PIXEL_BG_CHANNEL_TOLERANCE = 16;
-
-    /**
-     * Issue #1443 — the ‰ of sampled pixels that must match the background for the
-     * surface to count as (near-)uniformly black. 990‰ (99%) targets a genuine
-     * full-black surface while leaving headroom for antialiasing fringe.
-     */
-    private static final int PIXEL_BG_UNIFORM_PERMILLE = 990;
 
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
@@ -1671,12 +1389,6 @@ public final class TerminalView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        // Issue #1192: track whether THIS frame painted emulator content (the normal
-        // render path) or the BLACK fallback (mEmulator == null, or a render that threw
-        // — the catch below). Reported to the paint-confirmation observer at the end so
-        // the tmux watchdog can fingerprint a surface-only-black (model intact, surface
-        // black). Defaults to false; only the successful render path sets it true.
-        boolean paintedEmulatorContent = false;
         try {
             if (mEmulator == null) {
                 canvas.drawColor(mDefaultBackgroundColor);
@@ -1691,21 +1403,6 @@ public final class TerminalView extends View {
 
                 // render the text selection handles
                 renderTextSelection();
-
-                // Issue #1296: only count this frame as a CONTENT paint when it
-                // actually rendered non-black glyph coverage. `mEmulator != null` is
-                // NOT enough: after forceSurfaceRepaint() (#1203) re-binds mEmulator,
-                // the NEXT onDraw on a 0-size / offscreen / still-blank surface would
-                // otherwise record a bogus content paint, flipping
-                // surfaceIsBlackWhileModelHasContent() false and silencing BOTH the
-                // heal oracle's surface-black detector AND the %output suspect-wake path
-                // while the pane sits visually black. Require nonzero view dimensions
-                // AND the emulator screen carrying at least one non-blank VISIBLE row
-                // (a model-level check — no PixelCopy/pixel readback, #1296 non-goal). A
-                // bound emulator that paints zero-size or fully-blank output records a
-                // BLANK paint so the watchdog/wake path stays armed and keeps retrying.
-                paintedEmulatorContent =
-                    getWidth() > 0 && getHeight() > 0 && mEmulator.getScreen().hasNonBlankVisibleRow();
             }
         } catch (Throwable t) {
             // Issues #966/#967: widen from RuntimeException to Throwable. An
@@ -1721,14 +1418,6 @@ public final class TerminalView extends View {
             // dirty-region cache (#469) no longer reflects what is on screen, so
             // force the next frame to repaint every row.
             if (mRenderer != null) mRenderer.invalidateDirtyCache();
-        }
-        // Issue #1192: report this frame's paint outcome to the surface-paint seam.
-        // `paintedEmulatorContent` is false for both the mEmulator == null fallback and
-        // a render that threw (the catch above). Cheap, best-effort; never throws into
-        // the draw path.
-        final FramePaintObserver observer = mFramePaintObserver;
-        if (observer != null) {
-            observer.onFramePainted(paintedEmulatorContent, android.os.SystemClock.elapsedRealtime());
         }
     }
 

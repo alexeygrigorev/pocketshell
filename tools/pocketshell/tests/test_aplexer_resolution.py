@@ -264,16 +264,25 @@ def _aplexer_requirement() -> str:
 def test_aplexer_is_pinned_exactly() -> None:
     """The pin is exact, like quse — a host upgrade must not reach us.
 
-    0.1.2, never 0.1.1: under the D22 hard cut the bundled wheel is the ONLY
-    aplexer this CLI can run, so pinning the older published wheel would
-    downgrade every host to a build missing the profile `executable` override
-    and the shell provider-env fix. ``test_aplexer_contract.py`` pins those
-    behaviours against the bundled binary, because `a --version` cannot
-    distinguish the two builds (both report 0.1.1).
+    Under the D22 hard cut the bundled wheel is the ONLY aplexer this CLI can
+    run, so the pin decides what every host gets and an older published wheel
+    is a silent DOWNGRADE, not merely stale:
+
+    * 0.1.2, never 0.1.1 — 0.1.1 lacks the profile `executable` override and
+      the shell provider-env fix, and `a --version` cannot distinguish the two
+      builds (both report 0.1.1).
+    * 0.1.3, never 0.1.2 — 0.1.2's `list_records` fails the whole registry
+      scan on a session directory that has no `session.json` yet, which is the
+      state every `a start` creates for 26-43 ms, so a session being created
+      blanked the phone's aplexer session rows (aplexer#2 / aplexer#3).
+
+    This assertion only guards the STRING. ``test_aplexer_contract.py`` pins
+    the behaviours themselves against the bundled binary, which is the part
+    a version comparison provably cannot do.
     """
     requirement = _aplexer_requirement()
     pin = requirement.split(";")[0].strip()
-    assert pin == "aplexer==0.1.2", pin
+    assert pin == "aplexer==0.1.3", pin
 
 
 def test_aplexer_dependency_marker_is_linux_only() -> None:

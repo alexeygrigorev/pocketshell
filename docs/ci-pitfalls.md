@@ -320,3 +320,52 @@ Two lessons, and the second matters more:
 See also [worktrees.md](worktrees.md) for merge-mechanics pitfalls and
 [review-standards.md](review-standards.md) for reviewer-side acceptance
 bars this catalogue feeds into.
+
+## A cheap fast push can cancel an expensive slow run and report green in its place
+
+A concurrency group that mixes cheap and expensive triggers turns any quick
+push into a silent cancellation of whatever heavy validation is in flight —
+and the replacement run reports `success` while proving strictly less.
+
+The 2026-09-06 shape: `.github/workflows/app2.yml` put `push` and
+`workflow_dispatch` in the SAME concurrency group with
+`cancel-in-progress: true` (only `schedule` had its own). The journey lane
+takes ~18 minutes. A docs-only push finishes in ~20 seconds with the journey
+lane correctly SKIPPED by lane selection — and reports `success`. Four
+commits landing ~90 seconds apart each killed the run validating an espresso
+3.5.0 → 3.6.1 bump, and each left a green in its place that said nothing
+about the journeys:
+
+```
+34058211101  1d95d26b3  CANCELLED at 9m47s, mid-journey
+34058728989  100e4bf2f  success — 20s, journey lane skipped
+34058966546  aade79892  success — journey lane skipped
+34059055948  316cfef90  success — journey lane skipped
+```
+
+It had already cost a real regression: #2595 merged with its own `Tests` run
+cancelled, shipping a broken fixture guard that turned
+`Integration tests (Docker)` red on `main` and kept it red across two
+commits.
+
+Two things make this hard to see. A cancelled run reads as "not failed"
+rather than failed, so it does not alarm anyone. And a run whose heavy lane
+was legitimately skipped is indistinguishable, from its conclusion alone,
+from a run that validated that lane — `success` means both.
+
+What to do:
+
+- Treat "did the lane actually run?" as a separate question from "was the run
+  green". Check the job list, not the conclusion. `schedule` having its own
+  group in `app2.yml:75-80` already makes this argument in a comment: a
+  cadence that silently does not run "would look green (cancelled, not
+  failed) while doing it."
+- Do not push to `main` while a validation you care about is in flight,
+  including docs-only commits. When several agents share a repo, say so
+  explicitly and hold the window — the burst that caused this was two
+  sessions landing small commits neither could see the other queueing.
+- When a merge needs its own post-merge run to mean something, let that run
+  finish before pushing anything behind it.
+
+`app2.yml`'s specific grouping is fixed by #2600; the shape recurs anywhere a
+concurrency group spans triggers with different costs.

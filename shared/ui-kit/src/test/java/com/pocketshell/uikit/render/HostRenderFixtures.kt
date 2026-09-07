@@ -31,11 +31,15 @@ import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.SessionAgentState
+import com.pocketshell.uikit.model.Tag
+import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
@@ -72,6 +76,45 @@ internal fun HostListScreenRender() {
             name = "edge",
             subtitle = "ci@edge.acme.io",
             status = HostStatus.ConnectionError,
+            onClick = {},
+        )
+    }
+}
+
+/**
+ * Quiet A1 visual anchor: an existing host surface followed by its existing
+ * session rows. It exercises the production [HostCard], [SessionRow],
+ * [SectionHeader], and [ScreenHeader] primitives under the updated theme so
+ * the palette/shape change is visible in one fresh render artifact.
+ */
+@Composable
+internal fun QuietHostSessionAnchorRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        ScreenHeader(
+            title = "hetzner",
+            subtitle = "Connected · 2 sessions",
+        )
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.Attached,
+            onClick = {},
+        )
+        SectionHeader(label = "~/git", count = 2)
+        SessionRow(
+            name = "pocketshell",
+            tags = listOf(
+                Tag("Claude", TagKind.Agent),
+                Tag("Attached", TagKind.Attached),
+            ),
+            onClick = {},
+        )
+        SessionRow(
+            name = "aplexer",
+            tags = listOf(
+                Tag("Terminal", TagKind.Default),
+                Tag("Detached", TagKind.Detached),
+            ),
             onClick = {},
         )
     }

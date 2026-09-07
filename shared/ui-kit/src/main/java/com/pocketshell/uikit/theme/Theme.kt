@@ -5,54 +5,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.graphics.Color
 
 /**
- * Dark `ColorScheme` mapping the PocketShell design tokens onto Material 3
- * slots.
+ * Material 3 mapping for the PocketShell Quiet tokens.
  *
- * Slot mapping (per issue #11's Scope section):
- *
- * - `background` -> [PocketShellColors.Background]
- * - `surface` -> [PocketShellColors.Surface]
- * - `surfaceVariant` -> [PocketShellColors.SurfaceElev]
- * - `primary` -> [PocketShellColors.Accent]
- * - `onPrimary` -> [PocketShellColors.OnAccent] (`#04101A`)
- * - `onBackground` / `onSurface` -> [PocketShellColors.Text]
- * - `outline` -> [PocketShellColors.Border]
- * - `outlineVariant` -> [PocketShellColors.BorderSoft]
- * - `error` -> [PocketShellColors.Red]
- * - `onError` -> [PocketShellColors.Text]
- *
- * #461 Slice 0 is a strict *zero-rendered-pixel* slice. It deliberately does
- * **not** fill the `surfaceContainer*` / `secondaryContainer` M3 slots, because
- * those are read by live components today and repointing them onto the dev-tool
- * palette would visibly shift rendered chrome:
- *
- * - `surfaceContainer` is `MenuTokens.ContainerColor`, so it paints all 5 of the
- *   app's `DropdownMenu` call sites (host kebab, add/edit host, two tmux pickers,
- *   session menu) — none override `containerColor`. M3 default `#211F26` ->
- *   `SurfaceElev #1C2129` would be a visible shift.
- * - `surfaceContainerHighest` is the unchecked `Switch` track key and the M3
- *   `Card` default container, both of which the app instantiates without a color
- *   override. Repointing it would shift those too.
- * - `secondaryContainer` / `onSecondaryContainer` are the M3 selected-state slots
- *   for chips, segmented buttons, and drawer items.
- *
- * Completing those slots onto the dev-tool palette is a real (intended) visual
- * change and is **deferred to Slice 1**, where the new menu / switch-track / chip
- * colors get an emulator visual audit + maintainer sign-off. See
- * `docs/design-system.md` §3.
- *
- * The only newly-filled slots kept in Slice 0 are the `inverse*` trio, which is
- * provably inert: the app instantiates no M3 `Snackbar` / `NavigationBar`
- * component, so nothing reads `inverseSurface` / `inverseOnSurface` /
- * `inversePrimary` today. They are filled now so Slice 1 doesn't have to.
- *
- * The non-M3 status/agent roles (Green/Amber/Purple/accentSoft…) live in
- * [PocketShellSemanticColors] and are carried via [LocalPocketShellSemantic],
- * since M3 has no slot for them. Those are colour values from the existing
- * palette and are not read by any component until a call site opts in, so they
- * also change nothing rendered today.
+ * This follows `docs/design-kit/android/PocketShellTheme.kt`: Quiet uses the
+ * raised surface for selected/primary containers, a strong neutral outline for
+ * fields, and the divider token for hairlines. The explicit mappings keep
+ * existing app2 screens on one shared theme as the palette changes.
  */
 private val PocketShellDarkColorScheme = darkColorScheme(
     background = PocketShellColors.Background,
@@ -60,17 +21,25 @@ private val PocketShellDarkColorScheme = darkColorScheme(
     surfaceVariant = PocketShellColors.SurfaceElev,
     primary = PocketShellColors.Accent,
     onPrimary = PocketShellColors.OnAccent,
+    primaryContainer = PocketShellColors.SurfaceElev,
+    onPrimaryContainer = PocketShellColors.Text,
+    secondary = PocketShellColors.TextSecondary,
+    onSecondary = PocketShellColors.Background,
+    secondaryContainer = PocketShellColors.SurfaceElev,
+    onSecondaryContainer = PocketShellColors.Text,
+    tertiary = PocketShellColors.TextSecondary,
+    onTertiary = PocketShellColors.Background,
     onBackground = PocketShellColors.Text,
     onSurface = PocketShellColors.Text,
+    onSurfaceVariant = PocketShellColors.TextSecondary,
+    surfaceTint = Color.Transparent,
     outline = PocketShellColors.Border,
     outlineVariant = PocketShellColors.BorderSoft,
-    // Inert in Slice 0: no Snackbar / NavigationBar is instantiated, so nothing
-    // reads these today. Filled now so Slice 1 doesn't re-touch them.
-    inverseSurface = PocketShellColors.SurfaceElev,
-    inverseOnSurface = PocketShellColors.Text,
-    inversePrimary = PocketShellColors.Accent,
     error = PocketShellColors.Red,
-    onError = PocketShellColors.Text,
+    onError = PocketShellColors.Background,
+    errorContainer = PocketShellColors.Surface,
+    onErrorContainer = PocketShellColors.Red,
+    scrim = Color.Black,
 )
 
 /**

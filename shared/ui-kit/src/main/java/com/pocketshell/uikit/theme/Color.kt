@@ -5,73 +5,55 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 /**
- * PocketShell design tokens — retained from the original static prototype and
- * maintained alongside `docs/design-language.md`.
+ * PocketShell Quiet colour tokens.
  *
- * Naming mirrors the original CSS variables:
+ * The source values are `docs/design-kit/design-system/tokens.json`. The
+ * production names remain stable so existing app2 screens receive the new
+ * system through [PocketShellTheme] without per-screen translation code.
  *
- * - CSS `--bg` -> [Background]
- * - CSS `--surface` -> [Surface]
- * - CSS `--surface-elev` -> [SurfaceElev]
- * - CSS `--border` -> [Border]
- * - CSS `--border-soft` -> [BorderSoft]
- * - CSS `--text` -> [Text]
- * - CSS `--text-secondary` -> [TextSecondary]
- * - CSS `--text-muted` -> [TextMuted]
- * - CSS `--accent` -> [Accent]
- * - CSS `--accent-soft` -> [AccentSoft]
- * - CSS `--accent-dim` -> [AccentDim]
- * - CSS `--green` / `--amber` / `--red` / `--purple` -> [Green] / [Amber] / [Red] / [Purple]
- * - CSS `--term-*` -> [TermBg], [TermText], [TermPrompt], [TermComment]
- *
- * These are raw tokens — they're mapped onto Material 3 [androidx.compose.material3.ColorScheme]
- * slots in [Theme]. Callers should prefer `MaterialTheme.colorScheme.*` for
- * semantic colour (background, surface, primary, etc). Reach for these raw
- * tokens only when Material's slot vocabulary doesn't cover the case — for
- * example, the terminal surface uses [TermBg] directly because xterm-style
- * "near-black" doesn't map onto any Material slot.
+ * The Quiet kit intentionally has no purple, accent-fill, or accent-border
+ * roles. The old names remain as neutral aliases below until the components
+ * that use those roles are redesigned in a later slice.
  */
 object PocketShellColors {
-    // Surface ramp.
-    val Background = Color(0xFF0D1117)
-    val Surface = Color(0xFF161B22)
-    val SurfaceElev = Color(0xFF1C2129)
-    val Border = Color(0xFF2D333B)
-    val BorderSoft = Color(0xFF21262D)
+    // Quiet surface ramp.
+    val Background = Color(0xFF10171E)
+    val Surface = Color(0xFF19222B)
+    val SurfaceElev = Color(0xFF222D38)
+    val Border = Color(0xFF64778A)
+    val BorderSoft = Color(0xFF2B3946)
 
-    // Text ramp.
-    val Text = Color(0xFFE6EDF3)
-    val TextSecondary = Color(0xFF8B949E)
-    val TextMuted = Color(0xFF6E7681)
+    // Quiet text ramp.
+    val Text = Color(0xFFF0F3F7)
+    val TextSecondary = Color(0xFFA6B2C1)
+    val TextMuted = Color(0xFF92A0B0)
 
-    // Accent + accent-derived.
-    val Accent = Color(0xFF22D3EE)
+    // Quiet action colours.
+    val Accent = Color(0xFF53D8EC)
+    val OnAccent = Color(0xFF082027)
 
-    // rgba(34, 211, 238, 0.12) -> ARGB 0x1F22D3EE. 0.12 * 255 = 30.6 -> 0x1F.
-    val AccentSoft = Color(0x1F22D3EE)
-    val AccentDim = Color(0xFF0891B2)
+    // The kit uses neutral boundaries and surfaces in place of the old
+    // accent-soft/accent-dim chip treatment. Keep these names source-compatible
+    // for components that will move to the Quiet primitives in later slices.
+    val AccentSoft = SurfaceElev
+    val AccentDim = Border
 
-    // Semantic / status colours. Used as dots, badges, progress states — never
-    // for chrome (design-language.md: "UI chrome stays neutral").
-    val Green = Color(0xFF22C55E)
-    val Amber = Color(0xFFF59E0B)
-    val Red = Color(0xFFEF4444)
-    val Purple = Color(0xFFA78BFA)
+    // Quiet semantic/status colours.
+    val Green = Color(0xFF5CDF89)
+    val Amber = Color(0xFFE6BC78)
+    val Red = Color(0xFFF3A1A1)
+    val Purple = TextMuted
 
-    // Terminal-specific. The terminal background is *blacker* than the app
-    // background on purpose (CSS `--term-bg: #010409`) — keeps the terminal
-    // surface visually distinct from the surrounding chrome.
-    val TermBg = Color(0xFF010409)
-    val TermText = Color(0xFFE6EDF3)
-    val TermPrompt = Color(0xFF22D3EE)
-    val TermComment = Color(0xFF6E7681)
+    // The terminal remains a separate surface and uses the Quiet terminal
+    // token. Its palette is installed as the emulator default by app2, so
+    // reset and OSC colour operations keep the same production contract.
+    val TermBg = Color(0xFF0B1117)
+    val TermText = Text
+    val TermPrompt = Accent
+    val TermComment = TextMuted
 
-    // Colour used on top of [Accent] (e.g. FAB icon, primary button label).
-    // Sourced from the mockup FAB / `.btn.primary` rule: `color: #04101A`.
-    // Exposed publicly because it's the value passed to `onPrimary` in the
-    // Material scheme, and downstream surfaces (FAB, mic button, primary
-    // buttons) read it through `MaterialTheme.colorScheme.onPrimary`.
-    val OnAccent = Color(0xFF04101A)
+    /** The Quiet scrim token (`#00000099`) for non-Material overlays. */
+    val Scrim = Color(0x99000000)
 }
 
 /**
@@ -79,9 +61,9 @@ object PocketShellColors {
  *
  * Material 3's `ColorScheme` has no slot for "status" or "agent" roles, so these
  * are carried alongside it via [LocalPocketShellSemantic]. Every value here is
- * sourced from the existing [PocketShellColors] palette — this type does **not**
- * introduce new colours, it just centralises the ones screens already use as raw
- * tokens so they can be reached through one named role vocabulary.
+ * sourced from the Quiet [PocketShellColors] palette — this type does **not**
+ * introduce new colours, it centralises the roles screens already use so they
+ * can be reached through one named vocabulary.
  *
  * Status colours are for dots, left-edge ticks, and badges only — never chrome or
  * text (`docs/design-language.md`: "UI chrome stays neutral"). The
@@ -100,7 +82,7 @@ data class PocketShellSemanticColors(
     val statusError: Color,
     /** Needs-setup attention. Amber (folds with idle precedence per HostCard §8). */
     val statusAttention: Color,
-    /** Agent / assistant role (conversation role glyph + agent bubble accent). Purple. */
+    /** Agent / assistant role; Quiet keeps session marks muted. */
     val agentAccent: Color,
     /** Active chip background / hint banner fill (paired with [accent] + [accentDim]). */
     val accentSoft: Color,
@@ -111,8 +93,9 @@ data class PocketShellSemanticColors(
 )
 
 /**
- * The PocketShell dark semantic roles, mapped 1:1 onto existing [PocketShellColors]
- * constants so nothing changes colour — they are just now reachable as named roles.
+ * The PocketShell Quiet semantic roles, mapped onto [PocketShellColors]. Roles
+ * that have no Quiet equivalent deliberately fall back to neutral surface/text
+ * tokens instead of retaining the old purple and filled-chip treatments.
  */
 val PocketShellDarkSemanticColors: PocketShellSemanticColors = PocketShellSemanticColors(
     statusActive = PocketShellColors.Green,
@@ -120,7 +103,7 @@ val PocketShellDarkSemanticColors: PocketShellSemanticColors = PocketShellSemant
     statusConnecting = PocketShellColors.Amber,
     statusError = PocketShellColors.Red,
     statusAttention = PocketShellColors.Amber,
-    agentAccent = PocketShellColors.Purple,
+    agentAccent = PocketShellColors.TextMuted,
     accentSoft = PocketShellColors.AccentSoft,
     accent = PocketShellColors.Accent,
     accentDim = PocketShellColors.AccentDim,

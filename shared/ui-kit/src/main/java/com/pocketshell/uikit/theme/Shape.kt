@@ -5,32 +5,15 @@ import androidx.compose.material3.Shapes
 import androidx.compose.ui.unit.dp
 
 /**
- * Corner-radius tokens retained from the original static prototype:
+ * Quiet shape tokens from `docs/design-kit/design-system/tokens.json` and the
+ * Android handoff theme.
  *
- * - `--r-card: 14px` -> 14dp (`.host-row`, `.session-row`, `.job-row`, `.usage-card`)
- * - `--r-chip: 8px` -> 8dp (`.chip`, `.key`, tag pills)
- * - `--r-fab: 28px` -> 28dp (`.fab`, `.mic-btn` — both are 56dp pills)
- * - `--r-sheet: 20px` -> 20dp (`.sheet` top corners)
- *
- * Material 3's [Shapes] only has five named slots; the mockup vocabulary is
- * wider. The mapping below covers the three slots with size semantics that
- * line up (small/medium/large), and exposes the remaining tokens as standalone
- * `Shape` constants so downstream call sites can opt in by name (`PocketShellShapes.fab`).
+ * The kit maps field and button corners to the Material `small` and `medium`
+ * slots, and sheet corners to `large`. The other Material slots keep their
+ * library defaults because Quiet defines no additional radius role.
  */
 val PocketShellShapes: Shapes = Shapes(
-    // 8dp — chip + key bar. Smallest interactive corner.
-    extraSmall = RoundedCornerShape(8.dp),
-    small = RoundedCornerShape(8.dp),
-
-    // 14dp — host / session / job / usage cards. The default for any
-    // "content tile" surface.
-    medium = RoundedCornerShape(14.dp),
-
-    // 20dp — bottom sheet top corners. Slightly softer than the cards because
-    // the sheet is a larger surface and sharper corners look chunky at scale.
-    large = RoundedCornerShape(20.dp),
-
-    // 28dp — FAB / mic button. Effectively a pill at the 56dp diameter the
-    // mockups use.
-    extraLarge = RoundedCornerShape(28.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(24.dp),
 )

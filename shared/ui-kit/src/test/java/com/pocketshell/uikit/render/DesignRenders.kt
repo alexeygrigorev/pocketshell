@@ -613,6 +613,12 @@ class DesignRenders {
         HostListScreenRender()
     }
 
+    /** Quiet A1: existing host/session primitives under the production Quiet theme. */
+    @Test
+    fun quietHostSessionAnchor() = render("quiet-host-session-anchor") {
+        QuietHostSessionAnchorRender()
+    }
+
     /**
      * Issue #1241: the landing app-bar with the new glanceable usage pill next
      * to the forwarding indicator + Settings gear. The real pill lives in the

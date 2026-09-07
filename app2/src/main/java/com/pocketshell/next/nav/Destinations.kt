@@ -25,10 +25,9 @@ import java.nio.charset.StandardCharsets
  * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
- * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus
- * [CrashReports] (task P-10's local crash-report browser, reached from
- * Settings → Diagnostics). A new screen is a new object here, never an ad-hoc
- * string at a call site.
+ * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus the categorized
+ * Settings/support routes from issue #2610. A new screen is a new object here,
+ * never an ad-hoc string at a call site.
  */
 sealed class Destination(val pattern: String) {
 
@@ -39,6 +38,57 @@ sealed class Destination(val pattern: String) {
 
     /** App settings. */
     data object Settings : Destination("settings") {
+        fun route(): String = pattern
+    }
+
+    /** Terminal reading settings. */
+    data object TerminalSettings : Destination("settings/terminal") {
+        fun route(): String = pattern
+    }
+
+    /** Dictation settings. */
+    data object VoiceSettings : Destination("settings/voice") {
+        fun route(): String = pattern
+    }
+
+    /** Focused dictation-language choice page. */
+    data object VoiceLanguage : Destination("settings/voice/language") {
+        fun route(): String = pattern
+    }
+
+    /** App-switching and connection-lifetime settings. */
+    data object ConnectionSettings : Destination("settings/connections") {
+        fun route(): String = pattern
+    }
+
+    /** Focused background-grace choice page. */
+    data object GraceSettings : Destination("settings/connections/grace") {
+        fun route(): String = pattern
+    }
+
+    /** Timing and compatibility settings. */
+    data object AdvancedSettings : Destination("settings/advanced") {
+        fun route(): String = pattern
+    }
+
+    /** Local diagnostics index. */
+    data object Diagnostics : Destination("diagnostics") {
+        fun route(): String = pattern
+    }
+
+    /** One report, loaded from the on-device crash-report store. */
+    data object DiagnosticReport : Destination("diagnostics/report/{$ARG_REPORT_ID}") {
+        fun route(reportId: String): String =
+            "diagnostics/report/${encodeSegment(reportId)}"
+    }
+
+    /** Installed build identity and update entry point. */
+    data object About : Destination("settings/about") {
+        fun route(): String = pattern
+    }
+
+    /** Real GitHub release-check state and native release handoffs. */
+    data object Update : Destination("settings/about/update") {
         fun route(): String = pattern
     }
 
@@ -149,21 +199,9 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "workspace-roots/$hostId"
     }
 
-    /**
-     * The local crash-report browser (task P-10), opened from Settings →
-     * Diagnostics.
-     *
-     * Argument-free on purpose: crash reports are captured by
-     * `CrashReporter.install()` into the app's own `filesDir`, so they belong to
-     * the installation rather than to any host or session. Nothing about the
-     * screen varies by route.
-     */
-    data object CrashReports : Destination("crash-reports") {
-        fun route(): String = pattern
-    }
-
     companion object {
         const val ARG_HOST_ID: String = "hostId"
+        const val ARG_REPORT_ID: String = "reportId"
 
         /**
          * "No host" for [HostForm]. `NavType.LongType` has no null, so Add
@@ -172,6 +210,15 @@ sealed class Destination(val pattern: String) {
         const val NO_HOST_ID: Long = -1L
         const val ARG_SESSION_NAME: String = "sessionName"
         const val ARG_PATH: String = "path"
+
+        /**
+         * Compatibility alias for the pre-#2610 name. The route itself is now
+         * [Diagnostics]; retaining the alias avoids creating a second
+         * crash-report destination for older callers.
+         */
+        @Deprecated("Use Destination.Diagnostics")
+        val CrashReports: Diagnostics
+            get() = Diagnostics
 
         /**
          * Every destination, in graph order.
@@ -188,8 +235,10 @@ sealed class Destination(val pattern: String) {
          */
         val all: List<Destination>
             get() = listOf(
-                Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
-                HostForm, SshKeys, QrScan, WorkspaceRoots, CrashReports,
+                Hosts, Tree, Session, Files, FileViewer, Ports, Settings,
+                TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
+                GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
+                About, Update, Usage, HostForm, SshKeys, QrScan, WorkspaceRoots,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

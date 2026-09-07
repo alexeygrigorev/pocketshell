@@ -25,7 +25,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
-import com.pocketshell.next.crash.CrashReportsScreen
+import com.pocketshell.next.crash.DiagnosticReportScreen
+import com.pocketshell.next.crash.DiagnosticsScreen
 import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
@@ -35,8 +36,17 @@ import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardRoute
 import com.pocketshell.next.settings.LocalAppSettings
+import com.pocketshell.next.settings.AboutRoute
+import com.pocketshell.next.settings.AdvancedSettingsRoute
+import com.pocketshell.next.settings.ConnectionSettingsRoute
+import com.pocketshell.next.settings.GraceSettingsRoute
+import com.pocketshell.next.settings.LanguageSettingsRoute
+import com.pocketshell.next.settings.SettingsNavigation
 import com.pocketshell.next.settings.SettingsRoute
 import com.pocketshell.next.settings.SettingsViewModel
+import com.pocketshell.next.settings.TerminalSettingsRoute
+import com.pocketshell.next.settings.UpdateRoute
+import com.pocketshell.next.settings.VoiceSettingsRoute
 import com.pocketshell.next.settings.WorkspaceRootsRoute
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
@@ -219,25 +229,57 @@ fun AppNavHost(
     },
     qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
-    settingsScreen: @Composable (
+    settingsScreen: @Composable (SettingsNavigation) -> Unit = { navigation ->
+        SettingsRoute(navigation = navigation)
+    },
+    terminalSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        TerminalSettingsRoute(onBack = onBack)
+    },
+    voiceSettingsScreen: @Composable (onBack: () -> Unit, onOpenLanguage: () -> Unit) -> Unit =
+        { onBack, onOpenLanguage ->
+            VoiceSettingsRoute(onBack = onBack, onOpenLanguage = onOpenLanguage)
+        },
+    languageSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        LanguageSettingsRoute(onBack = onBack)
+    },
+    connectionSettingsScreen: @Composable (
         onBack: () -> Unit,
+        onOpenGrace: () -> Unit,
         onOpenWorkspaceRoots: (Long) -> Unit,
-        onOpenCrashReports: () -> Unit,
-    ) -> Unit = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
-        SettingsRoute(
+    ) -> Unit = { onBack, onOpenGrace, onOpenWorkspaceRoots ->
+        ConnectionSettingsRoute(
             onBack = onBack,
+            onOpenGrace = onOpenGrace,
             onOpenWorkspaceRoots = onOpenWorkspaceRoots,
-            onOpenCrashReports = onOpenCrashReports,
-            updateCheckViewModel = hiltViewModel(),
         )
+    },
+    graceSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        GraceSettingsRoute(onBack = onBack)
+    },
+    advancedSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        AdvancedSettingsRoute(onBack = onBack)
+    },
+    diagnosticsScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenReport: (String) -> Unit,
+    ) -> Unit = { onBack, onOpenReport ->
+        DiagnosticsScreen(onBack = onBack, onOpenReport = onOpenReport)
+    },
+    diagnosticReportScreen: @Composable (reportId: String, onBack: () -> Unit) -> Unit =
+        { reportId, onBack ->
+            DiagnosticReportScreen(reportId = reportId, onBack = onBack)
+        },
+    aboutScreen: @Composable (onBack: () -> Unit, onOpenUpdate: () -> Unit) -> Unit =
+        { onBack, onOpenUpdate ->
+            AboutRoute(onBack = onBack, onOpenUpdate = onOpenUpdate)
+        },
+    updateScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        UpdateRoute(onBack = onBack)
     },
     workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =
         { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
     usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         UsageRoute(onBack = onBack)
-    },
-    crashReportsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
-        CrashReportsScreen(onBack = onBack)
     },
 ) {
     NavHost(
@@ -396,19 +438,64 @@ fun AppNavHost(
             portsScreen { navController.popBackStack() }
         }
         composable(Destination.Settings.pattern) {
-            // Task P-6: the real settings screen. Workspace roots is a
-            // per-host sub-screen rather than an inline expando, because its
-            // own add/delete actions and list need the vertical room a
-            // Settings row cannot spare.
             settingsScreen(
-                { navController.popBackStack() },
-                { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
-                // Issue #2476: the only entry point into the crash-report
-                // browser. Capture (`CrashReporter.install()` from
-                // `App.onCreate`) never depended on this route; what was
-                // missing was any way for a human to read what it recorded.
-                { navController.navigate(Destination.CrashReports.route()) },
+                SettingsNavigation(
+                    onBack = { navController.popBackStack() },
+                    onOpenTerminal = { navController.navigate(Destination.TerminalSettings.route()) },
+                    onOpenVoice = { navController.navigate(Destination.VoiceSettings.route()) },
+                    onOpenConnections = { navController.navigate(Destination.ConnectionSettings.route()) },
+                    onOpenAdvanced = { navController.navigate(Destination.AdvancedSettings.route()) },
+                    onOpenDiagnostics = { navController.navigate(Destination.Diagnostics.route()) },
+                    onOpenAbout = { navController.navigate(Destination.About.route()) },
+                ),
             )
+        }
+        composable(Destination.TerminalSettings.pattern) {
+            terminalSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.VoiceSettings.pattern) {
+            voiceSettingsScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.VoiceLanguage.route()) },
+            )
+        }
+        composable(Destination.VoiceLanguage.pattern) {
+            languageSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.ConnectionSettings.pattern) {
+            connectionSettingsScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.GraceSettings.route()) },
+                { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
+            )
+        }
+        composable(Destination.GraceSettings.pattern) {
+            graceSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.AdvancedSettings.pattern) {
+            advancedSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.Diagnostics.pattern) {
+            diagnosticsScreen(
+                { navController.popBackStack() },
+                { reportId -> navController.navigate(Destination.DiagnosticReport.route(reportId)) },
+            )
+        }
+        composable(
+            route = Destination.DiagnosticReport.pattern,
+            arguments = listOf(navArgument(Destination.ARG_REPORT_ID) { type = NavType.StringType }),
+        ) { entry ->
+            val reportId = entry.arguments?.getString(Destination.ARG_REPORT_ID).orEmpty()
+            diagnosticReportScreen(reportId) { navController.popBackStack() }
+        }
+        composable(Destination.About.pattern) {
+            aboutScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.Update.route()) },
+            )
+        }
+        composable(Destination.Update.pattern) {
+            updateScreen { navController.popBackStack() }
         }
         composable(
             route = Destination.WorkspaceRoots.pattern,
@@ -420,12 +507,6 @@ fun AppNavHost(
         composable(Destination.Usage.pattern) {
             // Task P-5: the real usage/quota panel.
             usageScreen { navController.popBackStack() }
-        }
-        composable(Destination.CrashReports.pattern) {
-            // Task P-10 / issue #2476: the local crash-report browser. Reached
-            // from Settings → Diagnostics; argument-free, because the reports
-            // are the installation's, not a host's.
-            crashReportsScreen { navController.popBackStack() }
         }
     }
 }

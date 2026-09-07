@@ -2,25 +2,15 @@ package com.pocketshell.next.crash
 
 import android.content.Intent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,98 +18,75 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pocketshell.uikit.components.Badge
-import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
+import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SpinnerSize
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-
-/**
- * Ported (unchanged behaviour, package only) from the old app's
- * `com.pocketshell.app.crash.CrashReportsScreen` (rewrite task P-10), and wired
- * into app2's navigation graph as [com.pocketshell.next.nav.Destination.CrashReports]
- * — reached from Settings → Diagnostics (issue #2476).
- */
-private val DialogScrimColor = Color(0xCC000000)
 
 internal const val CRASH_REPORTS_SHARE_ALL_TAG = "crash:shareAll"
 internal const val CRASH_REPORTS_DELETE_ALL_TAG = "crash:deleteAll"
 internal const val CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG = "crash:deleteAll:confirm"
 internal const val CRASH_REPORTS_DELETE_ALL_CANCEL_TAG = "crash:deleteAll:cancel"
 internal const val CRASH_REPORTS_BACK_TAG = "crash:back"
+internal const val CRASH_REPORT_SHARE_TAG = "crash:share"
+internal const val DIAGNOSTICS_PAGE_TAG = "diagnostics-page"
+internal const val DIAGNOSTIC_REPORT_PAGE_TAG = "diagnostic-report-page"
+
+fun diagnosticReportRowTag(reportId: String): String = "diagnostics-report-$reportId"
 
 /**
- * [viewModel] is a seam, exactly like every other app2 route composable
- * ([com.pocketshell.next.usage.UsageRoute],
- * [com.pocketshell.next.settings.WorkspaceRootsRoute], …): production resolves
- * it through `hiltViewModel()`, a Robolectric composition — which has no
- * Hilt-managed Activity to resolve against — hands in one built by hand. The
- * composable is `internal` because [CrashReportsViewModel] is; both are visible
- * to `MainActivity` (same module) and to the unit-test source set.
+ * Production Diagnostics route. It reads the installation's actual
+ * [CrashReportStore] through [CrashReportsViewModel]; the screen never invents
+ * reports or provider data.
  */
 @Composable
-internal fun CrashReportsScreen(
+internal fun DiagnosticsScreen(
     onBack: () -> Unit,
+    onOpenReport: (String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: CrashReportsViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
     val reports by viewModel.reports.collectAsStateWithLifecycle()
+    val loadState by viewModel.loadState.collectAsStateWithLifecycle()
     val shareAllState by viewModel.shareAllState.collectAsStateWithLifecycle()
-
-    var selectedId by remember(reports) { mutableStateOf(reports.firstOrNull()?.id) }
-    val selected = reports.firstOrNull { it.id == selectedId } ?: reports.firstOrNull()
-    val selectedBody = remember(selected) { selected?.let { viewModel.read(it) }.orEmpty() }
     var confirmDeleteAll by remember { mutableStateOf(false) }
 
-    // Re-list whenever the screen is (re)composed onto the back stack so a
-    // crash that happened mid-session shows up without a manual refresh.
     LaunchedEffect(Unit) { viewModel.reload() }
 
-    LaunchedEffect(shareAllState) {
-        val state = shareAllState as? ShareAllState.Prepared ?: return@LaunchedEffect
-        val result = runCatching {
-            shareReportsArchive(context, state.archive)
-        }
-        result.fold(
-            onSuccess = { viewModel.markShareAllLaunched() },
-            onFailure = { error ->
-                viewModel.shareAllLaunchFailed(
-                    error.message ?: "Could not open the Android share sheet.",
-                )
-            },
-        )
-    }
-
-    fun shareSelected() {
-        val body = selectedBody.takeIf { it.isNotBlank() } ?: return
-        val report = selected ?: return
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, crashReportShareSubject(report))
-            putExtra(Intent.EXTRA_TEXT, body)
-        }
-        context.startActivity(Intent.createChooser(intent, "Share crash report"))
+    fun launchPreparedShare(archive: java.io.File) {
+        runCatching { shareReportsArchive(context, archive) }
+            .fold(
+                onSuccess = { viewModel.markShareAllLaunched() },
+                onFailure = { error ->
+                    viewModel.shareAllLaunchFailed(
+                        error.message ?: "Could not open the Android share sheet.",
+                    )
+                },
+            )
     }
 
     Column(
@@ -127,74 +94,117 @@ internal fun CrashReportsScreen(
             .fillMaxSize()
             .background(PocketShellColors.Background),
     ) {
-        CrashReportsAppBar(onBack = onBack)
-
-        BulkActionsBar(
-            reportCount = reports.size,
-            shareAllState = shareAllState,
-            onShareAll = { viewModel.shareAll() },
-            onDeleteAll = { confirmDeleteAll = true },
-        )
-
-        if (reports.isEmpty()) {
-            EmptyCrashReports(modifier = Modifier.weight(1f))
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(
-                    horizontal = PocketShellDensity.rowPadH,
-                    vertical = PocketShellSpacing.md,
-                ),
-                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-            ) {
-                item {
-                    Text(
-                        text = "Reports are stored only on this device. " +
-                            "\"Share all\" zips every report and opens " +
-                            "Android's share sheet.",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.bodyDense,
+        DiagnosticsHeader(onBack = onBack)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag(DIAGNOSTICS_PAGE_TAG),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+        ) {
+            when (val state = loadState) {
+                CrashReportsLoadState.Loading -> item {
+                    LoadingIndicator.Spinner(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(PocketShellSpacing.lg),
+                        size = SpinnerSize.Medium,
+                        label = "Loading local reports…",
                     )
                 }
 
-                item {
-                    SectionHeader(label = "Reports", count = reports.size)
-                }
-
-                items(reports, key = { it.id }) { report ->
-                    CrashReportRow(
-                        report = report,
-                        selected = report.id == selected?.id,
-                        onClick = { selectedId = report.id },
-                    )
-                }
-
-                item {
-                    selected?.let { report ->
-                        CrashReportDetail(
-                            report = report,
-                            body = selectedBody,
-                            onShare = ::shareSelected,
-                            onDelete = { viewModel.deleteOne(report) },
+                is CrashReportsLoadState.Failed -> {
+                    item {
+                        Banner(
+                            text = state.message,
+                            role = BannerRole.Error,
+                            leadingIcon = PocketShellIcons.Warning,
+                            modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
                         )
+                    }
+                    item {
+                        PocketShellButton(
+                            text = "Retry loading reports",
+                            onClick = viewModel::reload,
+                            variant = ButtonVariant.Primary,
+                            modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
+                        )
+                    }
+                }
+
+                CrashReportsLoadState.Ready -> {
+                    item {
+                        DiagnosticsIntro(reportCount = reports.size)
+                    }
+                    if (reports.isEmpty()) {
+                        item {
+                            EmptyState(
+                                title = "No diagnostic reports",
+                                description = "Uncaught crashes are kept locally until you choose to share them.",
+                                icon = PocketShellIcons.File,
+                                modifier = Modifier.height(220.dp),
+                            )
+                        }
+                    } else {
+                        item { SectionHeader(label = "Reports", count = reports.size) }
+                        items(reports, key = { it.id }) { report ->
+                            ListRow(
+                                title = crashReportRowTitle(report),
+                                subtitle = crashReportRowSubtitle(report),
+                                leading = {
+                                    androidx.compose.material3.Icon(
+                                        PocketShellIcons.File,
+                                        contentDescription = null,
+                                        tint = PocketShellColors.TextSecondary,
+                                    )
+                                },
+                                trailing = { NavigationChevron() },
+                                onClick = { onOpenReport(report.id) },
+                                modifier = Modifier.testTag(diagnosticReportRowTag(report.id)),
+                            )
+                        }
+                    }
+                    item {
+                        DiagnosticsActions(
+                            reportCount = reports.size,
+                            shareAllState = shareAllState,
+                            onShareAll = {
+                                viewModel.shareAll(::launchPreparedShare)
+                            },
+                            onDeleteAll = { confirmDeleteAll = true },
+                        )
+                    }
+                    if (shareAllState is ShareAllState.Failed) {
+                        item {
+                            Banner(
+                                text = "Share failed: ${(shareAllState as ShareAllState.Failed).message}",
+                                role = BannerRole.Error,
+                                leadingIcon = PocketShellIcons.Warning,
+                                trailingContent = {
+                                    PocketShellButton(
+                                        text = "Dismiss",
+                                        onClick = viewModel::clearShareAllState,
+                                        variant = ButtonVariant.Text,
+                                        compact = true,
+                                    )
+                                },
+                                modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-    when (val state = shareAllState) {
-        is ShareAllState.Failed -> ShareAllResultDialog(
-            title = "Share failed",
-            message = "${state.message}\n\nReports were kept on this device.",
-            onDismiss = { viewModel.clearShareAllState() },
-        )
-        else -> Unit
-    }
-
     if (confirmDeleteAll) {
-        ConfirmDeleteAllDialog(
-            count = reports.size,
+        ConfirmDialog(
+            title = "Delete all reports?",
+            message = "This permanently removes ${reports.size} report(s) from this device.",
+            confirmLabel = "Delete all",
+            destructive = true,
+            confirmTestTag = CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG,
+            dismissTestTag = CRASH_REPORTS_DELETE_ALL_CANCEL_TAG,
             onConfirm = {
                 viewModel.deleteAll()
                 confirmDeleteAll = false
@@ -204,155 +214,154 @@ internal fun CrashReportsScreen(
     }
 }
 
+/** Compatibility wrapper for tests and callers that still use the old name. */
 @Composable
-private fun BulkActionsBar(
-    reportCount: Int,
-    shareAllState: ShareAllState,
-    onShareAll: () -> Unit,
-    onDeleteAll: () -> Unit,
+internal fun CrashReportsScreen(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: CrashReportsViewModel = hiltViewModel(),
 ) {
-    val preparing = shareAllState is ShareAllState.Preparing
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Background)
-            .padding(horizontal = PocketShellDensity.rowPadH, vertical = PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        val label = when {
-            preparing -> "Preparing..."
-            else -> "Share all ($reportCount)"
-        }
-        ActionButton(
-            label = label,
-            onClick = onShareAll,
-            enabled = reportCount > 0 && !preparing,
-            modifier = Modifier.testTag(CRASH_REPORTS_SHARE_ALL_TAG),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        ActionButton(
-            label = "Delete all",
-            onClick = onDeleteAll,
-            enabled = reportCount > 0 && !preparing,
-            modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_TAG),
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        Badge(
-            label = "$reportCount report(s)",
-            role = BadgeRole.Idle,
-            mono = false,
-        )
-    }
+    DiagnosticsScreen(
+        onBack = onBack,
+        onOpenReport = {},
+        modifier = modifier,
+        viewModel = viewModel,
+    )
 }
 
 @Composable
-private fun ShareAllResultDialog(
-    title: String,
-    message: String,
-    onDismiss: () -> Unit,
+internal fun DiagnosticReportScreen(
+    reportId: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: CrashReportsViewModel = hiltViewModel(),
 ) {
-    DialogScrim(onDismiss = onDismiss) {
-        Text(
-            text = title,
-            color = PocketShellColors.Text,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        Text(
-            text = message,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyMono,
-        )
-        Spacer(modifier = Modifier.height(14.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            ActionButton(label = "OK", onClick = onDismiss, enabled = true)
-        }
-    }
-}
+    val context = LocalContext.current
+    val reports by viewModel.reports.collectAsStateWithLifecycle()
+    val loadState by viewModel.loadState.collectAsStateWithLifecycle()
+    var confirmDelete by remember { mutableStateOf(false) }
+    val report = reports.firstOrNull { it.id == reportId }
+    val body = remember(report) { report?.let(viewModel::read).orEmpty() }
 
-@Composable
-internal fun ConfirmDeleteAllDialog(
-    count: Int,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    DialogScrim(onDismiss = onDismiss) {
-        Text(
-            text = "Delete all reports?",
-            color = PocketShellColors.Text,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        Text(
-            text = "This permanently removes $count report(s) from this device. " +
-                "Share them first if you want to keep a copy.",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-        )
-        Spacer(modifier = Modifier.height(14.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            PocketShellButton(
-                onClick = onDismiss,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_CANCEL_TAG),
-            ) {
-                Text(
-                    text = "Cancel",
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            ActionButton(
-                label = "Delete all",
-                onClick = onConfirm,
-                enabled = true,
-                modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG),
-            )
-        }
-    }
-}
+    LaunchedEffect(reportId) { viewModel.reload() }
 
-@Composable
-private fun DialogScrim(
-    onDismiss: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    Box(
-        modifier = Modifier
+    Column(
+        modifier = modifier
             .fillMaxSize()
-            .background(DialogScrimColor)
-            .clickable(role = Role.Button, onClick = onDismiss),
-        contentAlignment = Alignment.Center,
+            .background(PocketShellColors.Background),
     ) {
-        Column(
+        DiagnosticsHeader(title = "Diagnostic report", onBack = onBack)
+        LazyColumn(
             modifier = Modifier
-                .fillMaxWidth(0.9f)
-                .background(PocketShellColors.SurfaceElev, PocketShellShapes.medium)
-                .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
-                // Swallow clicks on the card so they don't dismiss the dialog.
-                .clickable(enabled = false) {}
-                .padding(16.dp),
+                .fillMaxSize()
+                .testTag(DIAGNOSTIC_REPORT_PAGE_TAG),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
-            content()
+            when {
+                loadState is CrashReportsLoadState.Loading -> item {
+                    LoadingIndicator.Spinner(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(PocketShellSpacing.lg),
+                        size = SpinnerSize.Medium,
+                        label = "Loading report…",
+                    )
+                }
+
+                loadState is CrashReportsLoadState.Failed -> item {
+                    Banner(
+                        text = (loadState as CrashReportsLoadState.Failed).message,
+                        role = BannerRole.Error,
+                        leadingIcon = PocketShellIcons.Warning,
+                        modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
+                    )
+                }
+
+                report == null -> item {
+                    EmptyState(
+                        title = "Report unavailable",
+                        description = "This local report may have been deleted.",
+                        icon = PocketShellIcons.File,
+                        modifier = Modifier.height(220.dp),
+                    )
+                }
+
+                else -> {
+                    item { SectionHeader(label = "Report") }
+                    item {
+                        ListRow(
+                            title = report.summary,
+                            subtitle = report.contextSummary,
+                            leading = {
+                                androidx.compose.material3.Icon(
+                                    PocketShellIcons.File,
+                                    contentDescription = null,
+                                    tint = PocketShellColors.TextSecondary,
+                                )
+                            },
+                        )
+                    }
+                    item { ReportMetadata(report = report) }
+                    item {
+                        Text(
+                            text = body.ifBlank { "Report contents are unavailable." },
+                            color = PocketShellColors.TextSecondary,
+                            style = PocketShellType.bodyMono,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = PocketShellDensity.rowPadH),
+                        )
+                    }
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = PocketShellDensity.rowPadH),
+                            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+                        ) {
+                            PocketShellButton(
+                                text = "Share report",
+                                onClick = { shareReport(context, report, body) },
+                                variant = ButtonVariant.Primary,
+                                modifier = Modifier.testTag(CRASH_REPORT_SHARE_TAG),
+                            )
+                            PocketShellButton(
+                                text = "Delete report",
+                                onClick = { confirmDelete = true },
+                                variant = ButtonVariant.Destructive,
+                                modifier = Modifier.testTag("crash:delete"),
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    if (confirmDelete && report != null) {
+        ConfirmDialog(
+            title = "Delete this report?",
+            message = "This permanently removes the local diagnostic report.",
+            confirmLabel = "Delete",
+            destructive = true,
+            onConfirm = {
+                viewModel.deleteOne(report)
+                confirmDelete = false
+                onBack()
+            },
+            onDismiss = { confirmDelete = false },
+        )
     }
 }
 
-/**
- * Crash reports header, routed through the shared [ScreenHeader] so the
- * screen reads as the tight dev-tool block — `bodyDense` SemiBold title +
- * a visible Back control in the leading slot (issue #2532).
- */
 @Composable
-private fun CrashReportsAppBar(onBack: () -> Unit) {
+private fun DiagnosticsHeader(
+    onBack: () -> Unit,
+    title: String = "Diagnostics",
+) {
     ScreenHeader(
-        title = "Crash reports",
-        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        title = title,
         leading = {
             PocketShellButton(
                 text = "Back",
@@ -365,138 +374,102 @@ private fun CrashReportsAppBar(onBack: () -> Unit) {
     )
 }
 
-/**
- * A single crash-report row. Routes through the shared [ListRow] for the
- * dense 44/8/12 row density + 48dp touch floor; the summary is the row title
- * with the crash timestamp in front, and the compact context summary stays
- * in the subtitle. The selected report keeps its accent-bordered card so the
- * user can still see which report the detail pane below reflects.
- */
 @Composable
-private fun CrashReportRow(
-    report: CrashReport,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    val border = if (selected) PocketShellColors.Accent else PocketShellColors.BorderSoft
-    ListRow(
-        title = crashReportRowTitle(report),
-        subtitle = crashReportRowSubtitle(report),
-        modifier = Modifier
-            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
-            .border(1.dp, border, PocketShellShapes.extraSmall),
-        onClick = onClick,
-    )
-}
-
-@Composable
-private fun CrashReportDetail(
-    report: CrashReport,
-    body: String,
-    onShare: () -> Unit,
-    onDelete: () -> Unit,
-) {
+private fun DiagnosticsIntro(reportCount: Int) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
-            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
-            .padding(12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = crashReportRowTitle(report),
-                    color = PocketShellColors.Text,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "id=${report.id}",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-                Text(
-                    text = "context=${report.contextSummary}",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-                Text(
-                    text = crashReportDetailMetadata(report),
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-            }
-            ActionButton(label = "Share", onClick = onShare, enabled = true)
-            Spacer(modifier = Modifier.width(8.dp))
-            ActionButton(label = "Delete", onClick = onDelete, enabled = true)
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(320.dp)
-                .background(PocketShellColors.Background, RoundedCornerShape(6.dp))
-                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
-                .verticalScroll(rememberScrollState())
-                .padding(10.dp),
-        ) {
-            // The crash stack body is the screen's mono content; the flat
-            // CrashReportRow only carries the summary + timestamp, so the
-            // stack text lives here in the detail pane.
-            Text(
-                text = body,
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyMono,
-            )
-        }
-    }
-}
-
-@Composable
-private fun EmptyCrashReports(modifier: Modifier = Modifier) {
-    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "No crash reports",
-                color = PocketShellColors.Text,
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
-            Text(
-                text = "Uncaught crashes will be saved locally.",
-                color = PocketShellColors.TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ActionButton(
-    label: String,
-    onClick: () -> Unit,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val background = if (enabled) PocketShellColors.Accent else PocketShellColors.BorderSoft
-    Box(
-        modifier = modifier
-            .height(36.dp)
-            .background(background, PocketShellShapes.extraSmall)
-            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp),
-        contentAlignment = Alignment.Center,
+            .padding(horizontal = PocketShellDensity.rowPadH),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
     ) {
         Text(
-            text = label,
-            color = PocketShellColors.OnAccent,
+            text = "Local reports",
+            color = PocketShellColors.Text,
             style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            text = if (reportCount == 0) {
+                "Reports stay on this device until you choose to share them."
+            } else {
+                "Reports stay on this device. Share them with support when needed."
+            },
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyDense,
         )
     }
+}
+
+@Composable
+private fun DiagnosticsActions(
+    reportCount: Int,
+    shareAllState: ShareAllState,
+    onShareAll: () -> Unit,
+    onDeleteAll: () -> Unit,
+) {
+    val preparing = shareAllState is ShareAllState.Preparing
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellDensity.rowPadH),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        SectionHeader(label = "Actions")
+        PocketShellButton(
+            text = if (preparing) "Preparing…" else "Share all ($reportCount)",
+            onClick = onShareAll,
+            enabled = reportCount > 0 && !preparing,
+            variant = ButtonVariant.Secondary,
+            modifier = Modifier.testTag(CRASH_REPORTS_SHARE_ALL_TAG),
+        )
+        PocketShellButton(
+            text = "Delete all",
+            onClick = onDeleteAll,
+            enabled = reportCount > 0 && !preparing,
+            variant = ButtonVariant.Destructive,
+            modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_TAG),
+        )
+    }
+}
+
+@Composable
+private fun ReportMetadata(report: CrashReport) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellDensity.rowPadH),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+    ) {
+        SectionHeader(label = "Details")
+        Text(
+            text = "Time · ${crashReportTimestamp(report)}",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyMono,
+        )
+        Text(
+            text = "Context · ${report.contextSummary}",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyMono,
+        )
+        Text(
+            text = crashReportDetailMetadata(report),
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyMono,
+        )
+    }
+}
+
+private fun shareReport(
+    context: android.content.Context,
+    report: CrashReport,
+    body: String,
+) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, crashReportShareSubject(report))
+        putExtra(Intent.EXTRA_TEXT, body)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share diagnostic report"))
 }
 
 private val ReportTimeFormatter: DateTimeFormatter =
@@ -533,10 +506,10 @@ internal fun crashReportShareSubject(
 
 private fun crashReportDetailMetadata(report: CrashReport): String =
     listOfNotNull(
-        report.appVersion?.takeIf { it.isNotBlank() }?.let { "app=$it" },
-        report.topFrame?.takeIf { it.isNotBlank() }?.let { "top=${it.toCrashReportTopFrameLabel()}" },
+        report.appVersion?.takeIf { it.isNotBlank() }?.let { "App version · $it" },
+        report.topFrame?.takeIf { it.isNotBlank() }?.let { "Top frame · ${it.toCrashReportTopFrameLabel()}" },
     ).joinToString(" · ")
-        .ifBlank { "metadata unavailable" }
+        .ifBlank { "Metadata unavailable" }
 
 private fun String.toCrashReportTopFrameLabel(): String {
     val sourceLocation = substringAfterLast('(', missingDelimiterValue = "")
@@ -559,7 +532,7 @@ private fun shareReportsArchive(context: android.content.Context, archive: java.
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(
-        Intent.createChooser(intent, "Share crash reports").apply {
+        Intent.createChooser(intent, "Share diagnostic reports").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         },
     )

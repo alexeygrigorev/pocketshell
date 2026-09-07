@@ -19,7 +19,8 @@ class DestinationsTest {
         assertEquals("hosts", Destination.Hosts.route())
         assertEquals("settings", Destination.Settings.route())
         assertEquals("usage", Destination.Usage.route())
-        assertEquals("crash-reports", Destination.CrashReports.route())
+        assertEquals("diagnostics", Destination.Diagnostics.route())
+        assertEquals(Destination.Diagnostics.route(), Destination.CrashReports.route())
     }
 
     @Test
@@ -38,11 +39,9 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 13 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
-        // the four remaining P-6 routes (HostForm, SshKeys, QrScan,
-        // WorkspaceRoots; HostQr share was removed in issue #2523), and
-        // CrashReports (issue #2476).
-        assertEquals(13, patterns.size)
+        // 22 = the core routes, host-management routes, and the categorized
+        // Settings/support routes from issue #2610.
+        assertEquals(22, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -63,6 +62,19 @@ class DestinationsTest {
             Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
+        assertMatchesPattern(Destination.TerminalSettings.pattern, Destination.TerminalSettings.route())
+        assertMatchesPattern(Destination.VoiceSettings.pattern, Destination.VoiceSettings.route())
+        assertMatchesPattern(Destination.VoiceLanguage.pattern, Destination.VoiceLanguage.route())
+        assertMatchesPattern(Destination.ConnectionSettings.pattern, Destination.ConnectionSettings.route())
+        assertMatchesPattern(Destination.GraceSettings.pattern, Destination.GraceSettings.route())
+        assertMatchesPattern(Destination.AdvancedSettings.pattern, Destination.AdvancedSettings.route())
+        assertMatchesPattern(Destination.Diagnostics.pattern, Destination.Diagnostics.route())
+        assertMatchesPattern(
+            Destination.DiagnosticReport.pattern,
+            Destination.DiagnosticReport.route("report 1"),
+        )
+        assertMatchesPattern(Destination.About.pattern, Destination.About.route())
+        assertMatchesPattern(Destination.Update.pattern, Destination.Update.route())
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route())
         assertMatchesPattern(

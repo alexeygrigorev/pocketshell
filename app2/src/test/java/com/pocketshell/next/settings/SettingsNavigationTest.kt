@@ -21,8 +21,8 @@ import com.pocketshell.next.crash.CRASH_REPORTS_BACK_TAG
 import com.pocketshell.next.crash.CRASH_REPORTS_SHARE_ALL_TAG
 import com.pocketshell.next.crash.CrashReportMetadata
 import com.pocketshell.next.crash.CrashReporter
-import com.pocketshell.next.crash.CrashReportsScreen
 import com.pocketshell.next.crash.CrashReportsViewModel
+import com.pocketshell.next.crash.DiagnosticsScreen
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -82,6 +82,8 @@ class SettingsNavigationTest {
         val nav = setContent()
 
         navigateToSettings(nav)
+        composeRule.onNodeWithTag(settingsCategoryTag("connections")).performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("hetzner").assertExists()
 
         composeRule.onNodeWithText("hetzner").performClick()
@@ -95,6 +97,8 @@ class SettingsNavigationTest {
     fun `adding a workspace root through the real screen persists it to Room`() {
         val nav = setContent()
         navigateToSettings(nav)
+        composeRule.onNodeWithTag(settingsCategoryTag("connections")).performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("hetzner").performClick()
         composeRule.waitForIdle()
 
@@ -113,10 +117,16 @@ class SettingsNavigationTest {
     fun `back from workspace roots returns to settings, and back from settings leaves the graph`() {
         val nav = setContent()
         navigateToSettings(nav)
+        composeRule.onNodeWithTag(settingsCategoryTag("connections")).performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("hetzner").performClick()
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_BACK_TAG).performClick()
+        composeRule.waitForIdle()
+        assertEquals(Destination.ConnectionSettings.pattern, nav.currentBackStackEntry?.destination?.route)
+
+        composeRule.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         composeRule.waitForIdle()
         assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
 
@@ -127,7 +137,7 @@ class SettingsNavigationTest {
 
     /**
      * Issue #2476 — the regression this suite exists to keep fixed:
-     * `CrashReportsScreen` was fully ported and unit-tested but had NO entry
+     * `DiagnosticsScreen` was fully ported and unit-tested but had NO entry
      * point, so a crash `CrashReporter` had already written to `filesDir` could
      * only be retrieved with `adb pull`. The assertion is deliberately the
      * user-visible one: from Settings, a tap reaches the browser AND the
@@ -140,10 +150,10 @@ class SettingsNavigationTest {
         val nav = setContent()
         navigateToSettings(nav)
 
-        composeRule.onNodeWithTag(SETTINGS_CRASH_REPORTS_TAG).performScrollTo().performClick()
+        composeRule.onNodeWithTag(settingsCategoryTag("diagnostics")).performScrollTo().performClick()
         composeRule.waitForIdle()
 
-        assertEquals(Destination.CrashReports.pattern, nav.currentBackStackEntry?.destination?.route)
+        assertEquals(Destination.Diagnostics.pattern, nav.currentBackStackEntry?.destination?.route)
         composeRule.onNodeWithTag(CRASH_REPORTS_SHARE_ALL_TAG).assertExists()
         composeRule.onNodeWithText("Share all (1)").assertExists()
         assertTrue(
@@ -158,7 +168,7 @@ class SettingsNavigationTest {
         seedCrashReport("kaboom-back")
         val nav = setContent()
         navigateToSettings(nav)
-        composeRule.onNodeWithTag(SETTINGS_CRASH_REPORTS_TAG).performScrollTo().performClick()
+        composeRule.onNodeWithTag(settingsCategoryTag("diagnostics")).performScrollTo().performClick()
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag(CRASH_REPORTS_BACK_TAG).assertExists()
@@ -207,11 +217,12 @@ class SettingsNavigationTest {
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
                 treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
-                settingsScreen = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
-                    SettingsRoute(
+                settingsScreen = { navigation -> SettingsRoute(navigation = navigation) },
+                connectionSettingsScreen = { onBack, onOpenGrace, onOpenWorkspaceRoots ->
+                    ConnectionSettingsRoute(
                         onBack = onBack,
+                        onOpenGrace = onOpenGrace,
                         onOpenWorkspaceRoots = onOpenWorkspaceRoots,
-                        onOpenCrashReports = onOpenCrashReports,
                         viewModel = SettingsViewModel(
                             SettingsRepository(ApplicationProvider.getApplicationContext()),
                             stack.db.hostDao(),
@@ -219,14 +230,15 @@ class SettingsNavigationTest {
                         ),
                     )
                 },
-                // Issue #2476: the REAL crash-report browser over the REAL
+                // Issue #2476: the REAL diagnostics browser over the REAL
                 // on-device store, so this suite proves a user can reach and
                 // read what `CrashReporter` recorded — not merely that a route
                 // string resolves to a stand-in. Only the ViewModel is built by
                 // hand, for the same Hilt reason as every other screen here.
-                crashReportsScreen = { onBack ->
-                    CrashReportsScreen(
+                diagnosticsScreen = { onBack, onOpenReport ->
+                    DiagnosticsScreen(
                         onBack = onBack,
+                        onOpenReport = onOpenReport,
                         viewModel = CrashReportsViewModel(
                             ApplicationProvider.getApplicationContext(),
                         ),

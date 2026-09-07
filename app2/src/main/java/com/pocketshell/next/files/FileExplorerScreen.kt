@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -44,6 +47,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.fileIconClassForName
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -329,10 +333,11 @@ private fun CrumbBar(crumbs: List<RemotePath.Crumb>, onNavigateTo: (String) -> U
                     .testTag(crumbTag(crumb.path)),
             )
             if (!isLast) {
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyMono,
+                Icon(
+                    imageVector = PocketShellIcons.Chevron,
+                    contentDescription = null,
+                    tint = PocketShellColors.TextMuted,
+                    modifier = Modifier.size(16.dp),
                 )
             }
         }
@@ -396,11 +401,11 @@ private fun FileRow(
                     modifier = Modifier.testTag(fileDownloadTag(entry.name)),
                 )
             } else {
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyDense,
-                    overflow = TextOverflow.Clip,
+                Icon(
+                    imageVector = PocketShellIcons.Chevron,
+                    contentDescription = null,
+                    tint = PocketShellColors.TextMuted,
+                    modifier = Modifier.size(16.dp),
                 )
             }
         },

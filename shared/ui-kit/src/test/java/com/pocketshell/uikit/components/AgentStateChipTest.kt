@@ -11,10 +11,10 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.PocketShellTheme
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -100,15 +100,8 @@ class AgentStateChipTest {
 
     @Test
     fun stateIconsKeepWorkingAndFinishedDistinctFromWaiting() {
-        assertTrue(agentStateIconFor(SessionAgentState.Idle)?.name.orEmpty().endsWith("CheckCircle"))
-        assertTrue(agentStateIconFor(SessionAgentState.Working)?.name.orEmpty().endsWith("Autorenew"))
-        assertTrue(
-            agentStateIconFor(SessionAgentState.WaitingForInput)?.name.orEmpty().endsWith("HourglassEmpty"),
-        )
-        assertNotEquals(
-            "working must not be represented by the finished/idle icon",
-            agentStateIconFor(SessionAgentState.Working),
-            agentStateIconFor(SessionAgentState.Idle),
-        )
+        assertEquals(PocketShellIcons.Check, agentStateIconFor(SessionAgentState.Idle))
+        assertEquals(PocketShellIcons.Refresh, agentStateIconFor(SessionAgentState.Working))
+        assertEquals(PocketShellIcons.Pause, agentStateIconFor(SessionAgentState.WaitingForInput))
     }
 }

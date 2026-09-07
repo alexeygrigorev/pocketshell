@@ -1,6 +1,5 @@
 package com.pocketshell.uikit.components
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,7 +17,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -26,6 +24,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -71,8 +70,7 @@ data class KebabItem(
  *
  * - The trigger is a 40dp circular [PocketShellColors.SurfaceElev] container
  *   with a 1dp [PocketShellColors.BorderSoft] hairline border (design-system §8
- *   "always-visible affordance"), holding the three-dot glyph drawn directly
- *   with [Canvas] (no `material-icons-extended` dependency for `MoreVert`). The
+ *   "always-visible affordance"), holding the Quiet registry's `more` vector.
  *   40dp container already clears the 48dp touch floor once `minimumInteractive`
  *   semantics expand around it; the explicit 40dp visible chrome matches the
  *   mockup.
@@ -184,26 +182,12 @@ fun KebabTrigger(
             .testTag(triggerTestTag),
         contentAlignment = Alignment.Center,
     ) {
-        KebabIcon()
-    }
-}
-
-/**
- * Three small dots stacked vertically — the classic "more" affordance. Drawn
- * with [Canvas] (3 filled circles) because `material-icons-core` (the only icon
- * ramp on the ui-kit classpath) does not ship `MoreVert`. Coloured
- * [PocketShellColors.TextSecondary] so it reads as chrome, not a primary
- * affordance.
- */
-@Composable
-private fun KebabIcon() {
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = Modifier.size(width = 4.dp, height = 18.dp)) {
-        val r = size.width / 2f
-        val gap = (size.height - 6f * r) / 2f
-        drawCircle(color = color, radius = r, center = Offset(r, r))
-        drawCircle(color = color, radius = r, center = Offset(r, 3f * r + gap))
-        drawCircle(color = color, radius = r, center = Offset(r, 5f * r + 2f * gap))
+        Icon(
+            imageVector = PocketShellIcons.More,
+            contentDescription = null,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 

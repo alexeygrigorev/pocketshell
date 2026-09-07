@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import java.util.Locale
 
@@ -41,12 +42,11 @@ enum class FileIconClass {
  * the file viewer (#714) — and any future browser — render the exact same glyphs
  * (design-consistency principle).
  *
- * The glyphs are hand-traced [ImageVector]s rather than pulled from
- * `material-icons-extended` — the ui-kit classpath only carries
- * `material-icons-core`, and the established pattern across the ui-kit is to
- * trace small glyphs inline (see [MicGlyphIcon] / `KebabIcon`). Folders are
- * accent-tinted (the primary navigational affordance); files/links/archives are
- * muted so they read as content, not chrome.
+ * Quiet-kit folder, image, code and file vectors come from
+ * [PocketShellIcons]. Symlink and archive remain local because the Quiet kit
+ * does not define those shapes. Folders are accent-tinted (the primary
+ * navigational affordance); files/links/archives are muted so they read as
+ * content, not chrome.
  *
  * [size] defaults to the 20dp leading-icon size; the row keeps every title's
  * left edge aligned because [ListRow] centres the leading slot in a fixed box.
@@ -129,12 +129,12 @@ private fun FileIconClass.contentDescription(): String = when (this) {
 }
 
 private fun FileIconClass.vector(): ImageVector = when (this) {
-    FileIconClass.FOLDER -> FolderGlyph
+    FileIconClass.FOLDER -> PocketShellIcons.Folder
     FileIconClass.SYMLINK -> SymlinkGlyph
-    FileIconClass.IMAGE -> ImageGlyph
-    FileIconClass.CODE -> CodeGlyph
+    FileIconClass.IMAGE -> PocketShellIcons.Image
+    FileIconClass.CODE -> PocketShellIcons.Code
     FileIconClass.ARCHIVE -> ArchiveGlyph
-    FileIconClass.BINARY -> FileGlyph
+    FileIconClass.BINARY -> PocketShellIcons.File
 }
 
 private fun glyph(name: String, trace: PathBuilder.() -> Unit): ImageVector =
@@ -149,44 +149,6 @@ private fun glyph(name: String, trace: PathBuilder.() -> Unit): ImageVector =
         builder.trace()
         addPath(pathData = builder.nodes, fill = SolidColor(Color.White))
     }.build()
-
-/** A classic Material folder silhouette: a tab + body, filled. */
-private val FolderGlyph: ImageVector = glyph("PsFolder") {
-    moveTo(4f, 5f)
-    lineTo(10f, 5f)
-    lineTo(12f, 7f)
-    lineTo(20f, 7f)
-    arcToRelative(2f, 2f, 0f, false, true, 2f, 2f)
-    lineTo(22f, 18f)
-    arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
-    lineTo(4f, 20f)
-    arcToRelative(2f, 2f, 0f, false, true, -2f, -2f)
-    lineTo(2f, 7f)
-    arcToRelative(2f, 2f, 0f, false, true, 2f, -2f)
-    close()
-}
-
-/**
- * Generic file (document) sheet with a folded top-right corner — the BINARY /
- * other fallback.
- */
-private val FileGlyph: ImageVector = glyph("PsFile") {
-    moveTo(6f, 2f)
-    lineTo(14f, 2f)
-    lineTo(20f, 8f)
-    lineTo(20f, 21f)
-    arcToRelative(1f, 1f, 0f, false, true, -1f, 1f)
-    lineTo(6f, 22f)
-    arcToRelative(1f, 1f, 0f, false, true, -1f, -1f)
-    lineTo(5f, 3f)
-    arcToRelative(1f, 1f, 0f, false, true, 1f, -1f)
-    close()
-    // Folded corner (cut back so the dog-ear reads).
-    moveTo(14f, 3f)
-    lineTo(14f, 8f)
-    lineTo(19f, 8f)
-    close()
-}
 
 /**
  * Symlink: a diagonal arrow pointing up-right — the classic "shortcut / link /
@@ -209,58 +171,6 @@ private val SymlinkGlyph: ImageVector = glyph("PsSymlink") {
     lineTo(12.5f, 14.5f)
     lineTo(9.5f, 11.5f)
     lineTo(12.5f, 8.5f)
-    close()
-}
-
-/** Image: a framed picture with a sun/mountain motif. */
-private val ImageGlyph: ImageVector = glyph("PsImage") {
-    // Frame.
-    moveTo(4f, 4f)
-    lineTo(20f, 4f)
-    arcToRelative(1f, 1f, 0f, false, true, 1f, 1f)
-    lineTo(21f, 19f)
-    arcToRelative(1f, 1f, 0f, false, true, -1f, 1f)
-    lineTo(4f, 20f)
-    arcToRelative(1f, 1f, 0f, false, true, -1f, -1f)
-    lineTo(3f, 5f)
-    arcToRelative(1f, 1f, 0f, false, true, 1f, -1f)
-    close()
-    // Punch out interior so it reads as a frame, not a filled block.
-    moveTo(5f, 6f)
-    lineTo(5f, 18f)
-    lineTo(19f, 18f)
-    lineTo(19f, 6f)
-    close()
-    // Sun.
-    moveTo(8f, 9.5f)
-    arcToRelative(1.3f, 1.3f, 0f, true, true, 0.01f, 0f)
-    close()
-    // Mountain.
-    moveTo(5.5f, 17f)
-    lineTo(10f, 11.5f)
-    lineTo(13f, 15f)
-    lineTo(15.5f, 12f)
-    lineTo(18.5f, 17f)
-    close()
-}
-
-/** Code/text: angle brackets `< >`. */
-private val CodeGlyph: ImageVector = glyph("PsCode") {
-    // Left chevron.
-    moveTo(8.5f, 6f)
-    lineTo(10f, 7.3f)
-    lineTo(5.8f, 12f)
-    lineTo(10f, 16.7f)
-    lineTo(8.5f, 18f)
-    lineTo(3f, 12f)
-    close()
-    // Right chevron.
-    moveTo(15.5f, 6f)
-    lineTo(21f, 12f)
-    lineTo(15.5f, 18f)
-    lineTo(14f, 16.7f)
-    lineTo(18.2f, 12f)
-    lineTo(14f, 7.3f)
     close()
 }
 

@@ -6,8 +6,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -40,6 +38,7 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -248,7 +247,7 @@ fun SessionTreeScreen(
                 .testTag(SESSION_TREE_CREATE_FAB_TAG),
         ) {
             Icon(
-                imageVector = Icons.Filled.Add,
+                imageVector = PocketShellIcons.Plus,
                 contentDescription = SESSION_TREE_CREATE_LABEL,
             )
         }

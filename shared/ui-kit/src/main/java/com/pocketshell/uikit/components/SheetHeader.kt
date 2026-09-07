@@ -8,9 +8,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -23,6 +23,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -111,12 +113,11 @@ private fun SheetCloseButton(
             .clickable(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "×",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = PocketShellSpacing.xs),
+        Icon(
+            imageVector = PocketShellIcons.Close,
+            contentDescription = null,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

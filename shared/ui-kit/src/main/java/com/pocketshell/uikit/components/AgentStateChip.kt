@@ -1,15 +1,12 @@
 package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.filled.Autorenew
-import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -62,9 +59,9 @@ fun AgentStateChip(
  * is not a user-controlled paused session, so it must not use a pause glyph.
  */
 internal fun agentStateIconFor(state: SessionAgentState): ImageVector? = when (state) {
-    SessionAgentState.WaitingForInput -> Icons.Outlined.HourglassEmpty
-    SessionAgentState.Working -> Icons.Filled.Autorenew
-    SessionAgentState.Idle -> Icons.Outlined.CheckCircle
+    SessionAgentState.WaitingForInput -> PocketShellIcons.Pause
+    SessionAgentState.Working -> PocketShellIcons.Refresh
+    SessionAgentState.Idle -> PocketShellIcons.Check
     SessionAgentState.Unknown -> null
 }
 

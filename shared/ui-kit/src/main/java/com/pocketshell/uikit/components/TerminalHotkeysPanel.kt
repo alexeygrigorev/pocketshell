@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
@@ -175,12 +177,21 @@ private fun HotkeysHeader(
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
-                Text(
-                    text = "‹ keys",
-                    color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = PocketShellIcons.Back,
+                        contentDescription = null,
+                        tint = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "keys",
+                        color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
             }
             Spacer(modifier = Modifier.width(12.dp))
         }
@@ -205,11 +216,11 @@ private fun HotkeysHeader(
                 .semantics { contentDescription = "Close terminal hotkeys" },
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = "×",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
+            Icon(
+                imageVector = PocketShellIcons.Close,
+                contentDescription = null,
+                tint = PocketShellColors.TextSecondary,
+                modifier = Modifier.size(18.dp),
             )
         }
     }

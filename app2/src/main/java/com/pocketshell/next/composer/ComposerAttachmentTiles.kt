@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -25,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import java.util.Locale
 
@@ -130,7 +132,12 @@ private fun AttachmentTile(attachment: StagedAttachment, onRemove: (String) -> U
                     .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = REMOVE_SHAPE),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(text = "×", color = PocketShellColors.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Icon(
+                    imageVector = PocketShellIcons.Close,
+                    contentDescription = null,
+                    tint = PocketShellColors.Text,
+                    modifier = Modifier.size(16.dp),
+                )
             }
         }
     }

@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -26,7 +28,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -63,7 +65,7 @@ fun Breadcrumb(
             .padding(start = PocketShellSpacing.xs, end = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LabeledGlyphButton(glyph = "‹", contentDescription = "Back", onClick = onBack)
+        LabeledGlyphButton(icon = PocketShellIcons.Back, contentDescription = "Back", onClick = onBack)
 
         if (liveDot) {
             Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
@@ -107,29 +109,30 @@ fun Breadcrumb(
                         .padding(horizontal = 2.dp, vertical = PocketShellSpacing.xs),
                 )
                 if (index < crumbs.lastIndex) {
-                    Text(
-                        text = "›",
-                        color = PocketShellColors.TextMuted,
-                        // #461: separator snaps onto the caption type rung (11sp).
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 2.dp),
+                    Icon(
+                        imageVector = PocketShellIcons.Chevron,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextMuted,
+                        modifier = Modifier
+                            .padding(horizontal = 2.dp)
+                            .size(16.dp),
                     )
                 }
             }
         }
 
-        LabeledGlyphButton(glyph = "⋮", contentDescription = "More options", onClick = onMore)
+        LabeledGlyphButton(icon = PocketShellIcons.More, contentDescription = "More options", onClick = onMore)
     }
 }
 
 /**
- * Shared 48dp semantic glyph control for breadcrumb and drawer chrome.
- * The visible glyph stays decorative; assistive technology receives the
+ * Shared 48dp semantic icon control for breadcrumb and drawer chrome.
+ * The visible icon stays decorative; assistive technology receives the
  * explicit [contentDescription] and button action instead of punctuation.
  */
 @Composable
 fun LabeledGlyphButton(
-    glyph: String,
+    icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -150,10 +153,11 @@ fun LabeledGlyphButton(
             .padding(PaddingValues(0.dp)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = glyph,
-            color = PocketShellColors.TextSecondary,
-            fontSize = 20.sp,
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier.size(20.dp),
         )
     }
 }

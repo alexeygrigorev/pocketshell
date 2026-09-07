@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,6 +51,7 @@ import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -425,7 +427,8 @@ private fun ControlsRow(
 }
 
 /**
- * v0.4.47 left tools pill: 📎 attach, `{}` history, `/` slash (#701 / #787 / #2529).
+ * v0.4.47 left tools pill: attachment, history and slash-command icons
+ * (#701 / #787 / #2529).
  */
 @Composable
 private fun ComposerEditingToolsGroup(
@@ -444,21 +447,21 @@ private fun ComposerEditingToolsGroup(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         ToolGlyphButton(
-            glyph = "📎",
+            icon = PocketShellIcons.Paperclip,
             contentDescription = "Attach files",
             onClick = onAttach,
             enabled = enabled,
             modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
         )
         ToolGlyphButton(
-            glyph = "{}",
+            icon = PocketShellIcons.History,
             contentDescription = "Message history",
             onClick = onHistory,
             enabled = enabled,
             modifier = Modifier.testTag(COMPOSER_HISTORY_TAG),
         )
         ToolGlyphButton(
-            glyph = "/",
+            icon = PocketShellIcons.Code,
             contentDescription = "Slash commands",
             onClick = onSlashTap,
             enabled = enabled,
@@ -469,7 +472,7 @@ private fun ComposerEditingToolsGroup(
 
 @Composable
 private fun ToolGlyphButton(
-    glyph: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
     enabled: Boolean,
@@ -482,11 +485,11 @@ private fun ToolGlyphButton(
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = glyph,
-            color = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
+            modifier = Modifier.size(18.dp),
         )
     }
 }
@@ -517,7 +520,12 @@ private fun SendButton(
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(text = "➤", color = contentColor, fontSize = 13.sp)
+        Icon(
+            imageVector = PocketShellIcons.Send,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
@@ -598,13 +606,11 @@ private fun StopRecordingButton(
             .semantics { contentDescription = COMPOSER_STOP_RECORDING_DESCRIPTION },
         contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(COMPOSER_STOP_GLYPH_SIZE)
-                .background(
-                    color = PocketShellColors.OnAccent,
-                    shape = RoundedCornerShape(COMPOSER_STOP_GLYPH_RADIUS),
-                ),
+        Icon(
+            imageVector = PocketShellIcons.Stop,
+            contentDescription = null,
+            tint = PocketShellColors.OnAccent,
+            modifier = Modifier.size(COMPOSER_STOP_GLYPH_SIZE),
         )
     }
 }
@@ -631,7 +637,6 @@ private val ComposerIdlePillHeight = 44.dp
 private val ComposerRecordingPillHeight = 48.dp
 private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp
 private val COMPOSER_STOP_GLYPH_SIZE = 15.dp
-private val COMPOSER_STOP_GLYPH_RADIUS = 3.dp
 
 /**
  * The `/`-command list, rendered above the field so it never sits under the

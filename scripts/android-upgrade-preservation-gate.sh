@@ -154,6 +154,8 @@ try:
             hasPassphrase INTEGER NOT NULL,
             createdAt INTEGER NOT NULL
         );
+        -- Historical pre-21 shape. `tmuxInstalled` is retained only so Room
+        -- can migrate an old on-disk database before 20->21 drops the column.
         CREATE TABLE hosts (
             id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
             name TEXT NOT NULL,

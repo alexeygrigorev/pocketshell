@@ -114,7 +114,7 @@ internal fun terminalTypeface(context: android.content.Context): android.graphic
  * Thin on purpose. The pre-rewrite client wrapped the same view in
  * `TerminalSurface` + `TerminalSurfaceState` (~2,900 lines of render
  * coalescing, heal watchdogs, black-frame detection and viewport bookkeeping)
- * because it fed the emulator from a racing pair of tmux sources. app2 feeds it
+ * because it fed the emulator from a racing pair of session sources. app2 feeds it
  * one PTY stream, so what is left is the interop itself:
  *
  *  1. build the view, give it a client, attach the session;

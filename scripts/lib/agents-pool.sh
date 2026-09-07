@@ -5,8 +5,8 @@
 # The emulator-lane half of parallel journey testing shipped in #674
 # (scripts/lib/avd-lock.sh `pocketshell_claim_pool_serial` claims a distinct
 # free emulator per caller). This file is the DOCKER half: a pool of isolated
-# deterministic `agents` SSH/tmux fixtures, each on its OWN host port, so two
-# emulator lanes never share one container's tmux state.
+# deterministic `agents` SSH/aplexer fixtures, each on its OWN host port, so two
+# emulator lanes never share one container's session state.
 #
 # The `agents` service in tests/docker/docker-compose.yml now takes two env
 # knobs (BOTH defaulted to the legacy single-lane values, so nothing changes
@@ -40,8 +40,8 @@ fi
 # --- configuration --------------------------------------------------------
 
 # Candidate host ports, first-free wins. 2243-2245 sit clear of the existing
-# fixture ports (sshd 2222, tmux 2224, flaky-agent 2226, network proxies
-# 2228/2229, bootstrap 2230-2236, real-agent 2240).
+# fixture ports (sshd/agents 2222, network proxies 2228/2229,
+# bootstrap 2230-2236, agents-old-cli 2238, agents-daemon 2239).
 #
 # ---------------------------------------------------------------------------
 # 2222 is NOT a pool candidate (issue #1842)
@@ -60,7 +60,7 @@ fi
 #
 # So a lock — however correctly anchored — cannot defend 2222. A `--pool` lane
 # that was handed 2222 held a lock nobody else consults while a sibling
-# `--no-pool` run wiped its tmux server (`Up 25 seconds` mid-loop; #1819 det2,
+# `--no-pool` run replaced its aplexer fixture (`Up 25 seconds` mid-loop; #1819 det2,
 # discarded as contaminated). The only fix that holds is to stop handing 2222
 # out as a lane: pool lanes claim ONLY ports whose sole writer is the pool.
 #
@@ -237,8 +237,15 @@ pocketshell_network_fault_fixture_up() {
     "$port" "$container" \
     "$(pocketshell_network_fault_ssh_port "$port")" \
     "$(pocketshell_toxiproxy_api_port "$port")" >&2
+  # Build only the proxy services. Running `up --build` for them asks Compose
+  # to reconcile the dependent agents service too; when the agents image has a
+  # fresh BuildKit identity, Compose recreates that container and destroys the
+  # aplexer registry the Android lane is asserting against (issue #2561).
   _pocketshell_agents_run_without_avd_lock_fd \
-    "${env_prefix[@]}" docker compose -f "$compose_file" up -d --build \
+    "${env_prefix[@]}" docker compose -f "$compose_file" build \
+    network-fault-proxy packet-loss-proxy >&2
+  _pocketshell_agents_run_without_avd_lock_fd \
+    "${env_prefix[@]}" docker compose -f "$compose_file" up -d --no-build --no-recreate \
     network-fault-proxy packet-loss-proxy >&2
 }
 
@@ -441,7 +448,7 @@ FAIL: AGENTS FIXTURE DISTURBED MID-RUN (pool isolation violated)
   now         : $actual
 
 Another process recreated or restarted THIS LANE's fixture container
-while the run was in progress. The tmux server this run was asserting
+while the run was in progress. The aplexer registry this run was asserting
 against no longer exists.
 
 DO NOT read this run's result as a product signal. In particular, an
@@ -464,7 +471,7 @@ POCKETSHELL_AGENTS_DISTURBED_RC=90
 # Issue #2128: fingerprint the per-lane network-fault-proxy the same way.
 # A wiped toxiproxy presents as ATTACH death / empty session list just like
 # a wiped agents fixture — the app attaches through 2228-equivalent onto a
-# proxy that no longer forwards to the seeded tmux. Same inoculation.
+# proxy that no longer forwards to the seeded aplexer PTY. Same inoculation.
 pocketshell_network_fault_fixture_identity() {
   local port="$1"
   local container
@@ -509,7 +516,7 @@ FAIL: NETWORK-FAULT FIXTURE DISTURBED MID-RUN (pool isolation violated)
 
 Another process recreated or restarted THIS LANE's network-fault-proxy
 while the run was in progress. The Toxiproxy this run was asserting
-against no longer exists (or no longer forwards to the seeded tmux).
+against no longer exists (or no longer forwards to the seeded aplexer PTY).
 
 DO NOT read this run's result as a product signal. In particular, an
 empty session list / "got []" / ATTACH death / a missing session in

@@ -585,7 +585,7 @@ private fun new_session() = MockupScreen(
         MockupNode.Choice("Codex", "Ready on hetzner", false, "code", ""),
         MockupNode.Choice("OpenCode", "Ready on hetzner", false, "terminal", ""),
         MockupNode.Choice("Grok", "Not available", false, "zap", "agent-unavailable"),
-        MockupNode.Row("More options", "Name, profile and backend", "session-options", "sliders", "", false),
+        MockupNode.Row("More options", "Name and profile", "session-options", "sliders", "", false),
     ),
     footer = listOf(
         MockupNode.Button("Start Claude Code", "action:start-session", "primary"),
@@ -599,7 +599,6 @@ private fun session_options() = MockupScreen(
     nodes = listOf(
         MockupNode.Field("Session name", "Terminal 3", "", "text"),
         MockupNode.Row("Profile", "Host default", "toast:Profile picker uses host registry", "", "", false),
-        MockupNode.Row("Backend", "Host default", "toast:Backend picker: host default, tmux, aplexer", "", "", false),
         MockupNode.Text("These options only affect the session you are about to start.", "secondary"),
     ),
     footer = listOf(
@@ -1284,4 +1283,3 @@ private fun update() = MockupScreen(
         MockupNode.Button("Open release", "toast:Would open the verified GitHub release", "primary"),
     ),
 )
-

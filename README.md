@@ -1,13 +1,13 @@
 # PocketShell
 
-PocketShell is a voice-first, tmux-native, agent-aware Android SSH client. It
+PocketShell is a voice-first, agent-aware Android SSH client. It
 connects your phone to the developer workstation you already use over SSH,
-attaches to your **tmux** sessions in control mode, and gives you a phone-shaped
-way to drive shells and AI coding agents (Claude Code, Codex, OpenCode, Grok
-Build) without typing everything by hand.
+attaches to host-managed aplexer sessions, and gives you a phone-shaped way to
+drive shells and AI coding agents (Claude Code, Codex, OpenCode, Grok Build)
+without typing everything by hand.
 
 It is built for one job: keep working on a dev box from a phone. Long-lived
-state lives on the box in tmux and a small server-side `pocketshell` helper;
+state lives on the box in aplexer and a small server-side `pocketshell` helper;
 the app reconnects when you bring it back to the foreground.
 
 ## Status
@@ -23,18 +23,22 @@ happy (locked decision [D22](docs/decisions.md)). Keep the Android app and the
 host `pocketshell` helper on the **same version**; a newer app talking to an
 older helper can hang on connect.
 
+## Current release note
+
+The next release removes the product's retired tmux session path. The host CLI,
+Android wire contract, Room storage, Docker fixtures, and journeys now use
+aplexer sessions only; old Room databases migrate forward and drop the obsolete
+host capability column.
+
 ## What it does
 
-- **tmux-native sessions.** Attaches with `tmux -CC` control mode and renders
-  one pane at a time in a real terminal emulator, instead of trying to read a
-  tiled tmux layout on a small screen. After you tap a host, a folder/session
+- **Persistent sessions.** Attaches through `pocketshell sessions attach`, which
+  resolves a live aplexer session and runs `a attach` on the host. After you tap a host, a folder/session
   tree shows watched projects and live sessions; swipe or tap to move between
   panes and sessions.
-- **Agent awareness.** Detects Claude Code, Codex, OpenCode, and Grok Build in
-  the visible tmux pane and opens a Conversation view of that agent's turns,
-  tool calls, and output. Agent sessions open on Conversation by default; the
-  Terminal tab is still there. The reply composer is always on screen and sends
-  back into the pane.
+- **Agent awareness.** The host session row reports the active Claude Code,
+  Codex, OpenCode, or Grok Build workload when aplexer can identify it. The
+  terminal remains the primary session surface.
 - **Voice-first input.** A composer with OpenAI Whisper and the Android speech
   recognizer turns dictation into commands or agent prompts. A key bar adds Esc,
   Tab, Ctrl, Alt, and arrows above the keyboard; per-host snippets and prompt
@@ -42,7 +46,7 @@ older helper can hang on connect.
 - **Host management.** Save SSH hosts, import or generate keys, unlock key
   passphrases biometrically, and import a host from a **QR code**.
 - **Server-side helpers, zero phone-side credentials.** Provider usage/quota,
-  the session tree, repo browsing, env files, jobs, and QR sharing run through
+  the session tree, repo browsing, env files, and QR sharing run through
   the `pocketshell` helper on the box. Provider credentials never move onto the
   phone.
 - **More.** Remote file browse/view, share a file from another Android app onto
@@ -62,12 +66,12 @@ Conversation is the production conversation pane with sample agent events.
   <tr>
     <td><img src="docs/screenshots/readme-host-list.png" alt="PocketShell host list" width="220"></td>
     <td><img src="docs/screenshots/readme-session-tree.png" alt="PocketShell host session tree" width="220"></td>
-    <td><img src="docs/screenshots/readme-terminal-session.png" alt="PocketShell tmux terminal session" width="220"></td>
+    <td><img src="docs/screenshots/readme-terminal-session.png" alt="PocketShell terminal session" width="220"></td>
   </tr>
   <tr>
     <td align="center">Hosts</td>
     <td align="center">Session tree</td>
-    <td align="center">tmux terminal</td>
+    <td align="center">Terminal session</td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/readme-conversation-view.png" alt="PocketShell agent conversation view" width="220"></td>
@@ -101,7 +105,7 @@ Requirements: Android 8.0 (API 26) or newer.
 ### 2. Install the server-side helper on the dev box
 
 The app drives a small Python helper named `pocketshell` on each box for
-usage/quota, the session tree, repos, env, jobs, and QR sharing. Install the
+usage/quota, the session tree, repos, env, and QR sharing. Install the
 same version as the app:
 
 ```bash
@@ -190,21 +194,21 @@ link are documented in [docs/ssh-qr-import.md](docs/ssh-qr-import.md).
 2. PocketShell connects, checks the `pocketshell` helper version (offering an
    install/upgrade command if needed), and shows the folder/session tree for
    that host.
-3. Open or create a tmux session. Use the mic/composer, key bar, snippets,
+3. Open or create an aplexer session. Use the mic/composer, key bar, snippets,
    Conversation tab, file browser, or port-forward panel as needed.
 
 ## How it fits together
 
 ```text
 Android phone                 SSH (sshj)              Dev box
-PocketShell UI   PTY: sessions attach ----------->   tmux / aplexer session
+PocketShell UI   PTY: sessions attach ----------->   aplexer session
 Compose + VT     exec: sessions list --json ----->   pocketshell helper
 foreground app   exec: usage, engines, … -------->   host-side registry
 ```
 
 Load-bearing choices: the client attaches through a host-side helper
-(`pocketshell sessions attach`) instead of speaking tmux's control protocol
-itself, so one code path covers both tmux and aplexer sessions; a host-side
+(`pocketshell sessions attach`) instead of implementing the session runtime in
+the app; a host-side
 session tree so ordering and folders survive reconnect and reinstall;
 server-side helpers so no provider credentials live on the phone; and a
 foreground-first model — the app does not schedule background phone work, it
@@ -249,11 +253,10 @@ ship a version (candidate branch, stabilize, fast-forward the exact SHA to main,
 
 ## Repository layout
 
-- `app/` — Android application.
-- `shared/core-ssh/` — sshj wrapper, leases, key management, remote file APIs.
-- `shared/core-connection/` — connect/attach/reattach/grace/reconnect controller.
+- `app2/` — Android application.
+- `shared/core-transport/` — sshj wrapper, connection lifecycle, and channels.
+- `shared/core-hostapi/` — the host `pocketshell` JSON contract.
 - `shared/core-portfwd/` — port forwarding.
-- `shared/core-tmux/` — tmux control-mode parsing and client behavior.
 - `shared/core-terminal/` — vendored Termux terminal emulator + Compose adapter.
 - `shared/core-agents/` — Claude Code, Codex, OpenCode, and Grok Build parsers.
 - `shared/core-assistant/` — in-app action assistant (OpenAI / Anthropic / ZAI).

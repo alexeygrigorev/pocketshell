@@ -1,16 +1,11 @@
 {
-  "schema": 2,
-  "managers": [
-    "tmux"
-  ],
+  "schema": 3,
   "sessions": [],
   "errors": [
     {
-      "manager": "tmux",
-      "message": "tmuxctl list failed: no server running on /tmp/tmux-1000/default"
+      "message": "a list --json failed: aplexer unavailable"
     },
     {
-      "manager": "aplexer",
       "message": "probe failed"
     }
   ]

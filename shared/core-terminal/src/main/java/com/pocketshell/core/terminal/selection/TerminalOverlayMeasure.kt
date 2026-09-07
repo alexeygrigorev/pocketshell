@@ -15,7 +15,7 @@ import androidx.compose.ui.unit.Constraints
  * naively called `layout(maxWidth.coerceAtLeast(0), maxHeight.coerceAtLeast(0))`,
  * which is fine under a normal bounded measure — but the overlay sits inside the
  * terminal pane, itself inside a
- * [androidx.compose.foundation.pager.Pager] (`TmuxTerminalPager`). The pager /
+ * [androidx.compose.foundation.pager.Pager] (the terminal pager). The pager /
  * lookahead runs intermittent measure passes with an **unbounded**
  * (`Constraints.Infinity`, i.e. `Int.MAX_VALUE`) maximum dimension.
  * `coerceAtLeast(0)` leaves that `Int.MAX_VALUE` intact, so

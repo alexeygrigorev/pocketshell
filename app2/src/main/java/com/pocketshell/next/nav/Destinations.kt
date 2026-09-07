@@ -109,7 +109,7 @@ sealed class Destination(val pattern: String) {
 
     /**
      * A live session on [ARG_HOST_ID], identified by its server-side
-     * [ARG_SESSION_NAME] (tmux session name, or aplexer `workspace:tag`).
+     * [ARG_SESSION_NAME] (aplexer session name, or aplexer `workspace:tag`).
      * The name is the identity the host CLI speaks — the client never
      * carries sockets or UUIDs (plan §B.0).
      */

@@ -10,8 +10,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.AgentStateSource
-import com.pocketshell.core.hostapi.Backend
-import com.pocketshell.core.hostapi.BackendError
+import com.pocketshell.core.hostapi.SessionListError
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
@@ -29,7 +28,7 @@ import org.junit.runner.RunWith
  * Journey J02 proves this screen works against a real host on a real device;
  * this suite pins the rendering rules that would otherwise only be caught by
  * looking at it: which banner appears for which state, that "empty" and
- * "broken" do not render the same, that an unknown manager still gets a row,
+ * "broken" do not render the same, that an implementation discriminator still gets a row,
  * and that a tap carries the session's own name.
  *
  * Every assertion is on the RENDERED tree (D29). [nowSec] is pinned so the
@@ -94,7 +93,7 @@ class SessionTreeScreenTest {
     }
 
     @Test
-    fun `a row shows relative activity and never engine, tag or manager text`() {
+    fun `a row shows relative activity and never engine, tag or implementation text`() {
         setContent(
             state(
                 loaded = true,
@@ -103,8 +102,7 @@ class SessionTreeScreenTest {
                         "aplexer-follow:yolo",
                         "/home/a/git/aplexer",
                         activity = NOW - 7_200,
-                        backend = Backend.APLEXER,
-                        tag = "yolo",
+                                                tag = "yolo",
                         engine = "codex",
                     ),
                 ),
@@ -117,18 +115,18 @@ class SessionTreeScreenTest {
     }
 
     @Test
-    fun `an unknown manager row is rendered, never hidden, and carries no manager badge`() {
+    fun `a session row is rendered without an implementation badge`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(
-                    row("from-the-future", "/home/a/git/w", activity = NOW, backend = Backend.UNKNOWN),
+                    row("from-the-future", "/home/a/git/w", activity = NOW),
                 ),
             ),
         )
 
         composeRule.onNodeWithTag(sessionRowTag("from-the-future")).assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("unknown manager").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("implementation discriminator").assertDoesNotExist()
     }
 
     /**
@@ -172,17 +170,17 @@ class SessionTreeScreenTest {
     }
 
     @Test
-    fun `a failing backend raises the partial banner naming that manager`() {
+    fun `a failing aplexer probe raises the partial banner with its message`() {
         setContent(
             state(
                 loaded = true,
                 sessions = listOf(row("claude-main", "/w", activity = NOW)),
-                errors = listOf(BackendError("aplexer", "a --json snapshot failed: exit 127")),
+                errors = listOf(SessionListError("a --json snapshot failed: exit 127")),
             ),
         )
 
         composeRule.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Some sessions may be missing: aplexer").assertIsDisplayed()
+        composeRule.onNodeWithText("Some sessions may be missing: a --json snapshot failed: exit 127").assertIsDisplayed()
         // The sessions that DID arrive are still listed.
         composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertDoesNotExist()
@@ -511,7 +509,7 @@ class SessionTreeScreenTest {
     private fun state(
         loaded: Boolean = false,
         sessions: List<SessionRow> = emptyList(),
-        errors: List<BackendError> = emptyList(),
+        errors: List<SessionListError> = emptyList(),
         failure: String? = null,
     ) = SessionTreeUiState(
         hostId = 7,
@@ -525,7 +523,6 @@ class SessionTreeScreenTest {
         name: String,
         workspace: String?,
         activity: Long?,
-        backend: Backend = Backend.TMUX,
         tag: String? = null,
         engine: String? = null,
         attached: Boolean = false,
@@ -534,7 +531,6 @@ class SessionTreeScreenTest {
         created: Long? = null,
     ) = SessionRow(
         name = name,
-        backend = backend,
         id = null,
         workspace = workspace,
         tag = tag,

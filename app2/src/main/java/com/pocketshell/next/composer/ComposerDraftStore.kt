@@ -55,7 +55,7 @@ data class ComposerDraft(
  * ## Ports of the old store that did NOT come across
  *
  * The old `ComposerDraftStore` also carried `promoteIdentity` (re-keying a
- * draft after the outbound queue proved a session's real tmux identity) and a
+ * draft after the outbound queue proved a session's real aplexer identity) and a
  * write-generation coalescer in a separate `ComposerDraftPersistence` class.
  * Both existed to keep a draft consistent with queue state that no longer
  * exists. Here every write comes from one ViewModel on one dispatcher, so

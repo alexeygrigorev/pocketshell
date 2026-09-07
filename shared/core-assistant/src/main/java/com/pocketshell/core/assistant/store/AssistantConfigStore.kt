@@ -73,7 +73,7 @@ public interface AssistantConfigStore {
  * Building [EncryptedSharedPreferences] eagerly in the constructor used to
  * run Tink / Android-Keystore init (~1.2-1.3s cold) **on the Main thread**,
  * because Hilt constructs this `@Singleton` the moment the activity's
- * `TmuxSessionViewModel` is first dereferenced — and that deref happens
+ * the session view model is first dereferenced — and that deref happens
  * inside the first `setContent {}` composition frame. The keystore build
  * froze the first frame on every cold launch.
  *

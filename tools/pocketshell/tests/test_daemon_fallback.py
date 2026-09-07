@@ -148,7 +148,7 @@ def test_old_daemon_method_not_found_is_supported_skew_with_versions(
 
 
 @pytest.mark.parametrize(
-    "wrapper", ["tree", "jobs", "sessions", "agent-kind", "usage", "repos"]
+    "wrapper", ["tree", "sessions", "agent-kind", "usage", "repos"]
 )
 def test_affected_wrappers_share_supported_skew_fallback(
     wrapper: str,
@@ -162,14 +162,10 @@ def test_affected_wrappers_share_supported_skew_fallback(
         from pocketshell import tree
 
         result = tree._try_daemon_call("tree.get", {"host": "h1"})
-    elif wrapper == "jobs":
-        from pocketshell import jobs
-
-        result = jobs._try_daemon_jobs_call("jobs.list", {})
     elif wrapper == "sessions":
         from pocketshell import sessions
 
-        result = sessions._try_daemon_sessions_list(sort_by=None, extra_args=[])
+        result = sessions._try_daemon_sessions_list(as_json=False)
     elif wrapper == "agent-kind":
         from pocketshell import agents_kind
 
@@ -224,7 +220,7 @@ def test_transport_timeout_is_typed_and_never_falls_back(
     with caplog.at_level(logging.INFO, logger="pocketshell.daemon"):
         with pytest.raises(daemon_mod.DaemonClientError) as exc_info:
             daemon_mod.try_call(
-                "jobs.add",
+                "sessions.create",
                 params={"message": "prompt=DO_NOT_LOG"},
                 socket_path=socket_path,
                 timeout=0.01,

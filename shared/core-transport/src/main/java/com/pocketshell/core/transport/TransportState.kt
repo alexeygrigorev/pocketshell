@@ -35,7 +35,7 @@ sealed interface TransportState {
  * cannot tell "the app let go of the link" from "the session is over" by
  * looking at the channel. It used to try, by reading `Closed` alone as
  * "somebody ended this on purpose"; that conflated the two cases below and
- * produced a false "the connection was closed" error over a tmux session that
+ * produced a false "the connection was closed" error over a host session that
  * was still perfectly alive on the host, every time a phone spent more than 90
  * seconds in a pocket (issue #2487).
  *
@@ -59,7 +59,7 @@ enum class CloseReason {
      * [HostConnection.scheduleGraceClose]'s deadline dropped the transport to
      * save the battery and the wake lock.
      *
-     * The remote is untouched: the tmux session the user was attached to is
+     * The remote is untouched: the host session the user was attached to is
      * still running on the host, and the rewrite plan's foreground-return
      * contract says coming back reattaches to it. So this is a RECONNECT case,
      * exactly like a dropped link, and not the end of anything.

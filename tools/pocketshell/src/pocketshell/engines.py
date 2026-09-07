@@ -275,7 +275,7 @@ def _effective_reason(item: EngineManifest, available: bool) -> Optional[str]:
 #
 # The manifest is built over the app's NON-interactive SSH `exec` channel
 # (`PocketshellCommand.wrap` -> `pocketshell engines list --json`), but the
-# harness itself is launched by `send-keys` into a tmux pane, i.e. from a
+# harness itself is launched by the session backend, i.e. from a
 # LOGIN shell.  Those two environments have different PATHs whenever a
 # harness is installed by a version manager: on the maintainer's host
 # `codex`/`opencode` live in `~/.nvm/versions/node/v24.13.1/bin`, which the
@@ -380,7 +380,7 @@ def clear_resolution_cache() -> None:
 def _login_shell_dirs(source: Mapping[str, str]) -> tuple[str, ...]:
     """Return the PATH entries a LOGIN shell exports, memoised per environment.
 
-    This is the environment the harness is actually launched in (tmux runs the
+    This is the environment the harness is actually launched in (the session
     user's shell as a login shell, and the create flow `send-keys`-types the
     wrapper into that pane).  Failures are silent: the caller still has the
     absolute-candidate ladder below.

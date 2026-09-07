@@ -2,7 +2,7 @@
 
 Launch a coding-agent CLI (``codex`` / ``claude`` / ``opencode`` / ``grok``) in a
 folder, server-side, replacing the giant inline ``env -u VAR1 -u VAR2 …``
-line the Android app used to type into the new tmux pane (issue #703).
+line the Android app used to type into a new session (issue #703).
 
 Why this exists
 ---------------
@@ -79,9 +79,6 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import sys
-import time
-import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -345,7 +342,7 @@ def _agent_missing_message(kind: str) -> str:
     """Friendly install hint shown when the agent CLI is not on PATH.
 
     Mirrors the missing-binary wording used by ``pocketshell.sessions`` /
-    ``pocketshell.usage`` / ``pocketshell.jobs`` so the user sees a
+    ``pocketshell.usage`` / ``pocketshell.sessions`` so the user sees a
     consistent ``127`` + install-hint message whichever subcommand
     surfaces the failure first, instead of a raw ``FileNotFoundError``
     traceback from ``os.execvpe``.
@@ -365,121 +362,6 @@ def _resolve_dir(ctx: click.Context, directory: str) -> Path:
         )
         ctx.exit(2)
     return path
-
-
-def record_agent_kind(
-    kind: str,
-    env: Optional[dict[str, str]] = None,
-    runner=None,
-    profile: Optional[str] = None,
-    resolve_target=None,
-) -> bool:
-    """Record the launched agent ``kind`` as a per-session tmux user option.
-
-    Workstream A / epic #821: the durable "what is this session running"
-    state lives **host-side** as the tmux user option ``@ps_agent_kind`` on
-    the session this wrapper runs in. Writing it here (in the same process
-    that becomes the agent) means the recorded kind cannot drift from what
-    actually launched, and it covers every launch caller — the folder
-    picker, the assistant, the repo browser — with zero Kotlin launch-exec
-    change. The client reads it back through its session enumeration
-    (``tmux list-sessions -F '…#{@ps_agent_kind}'``).
-
-    ``profile`` (issue #858) is the human label of the *non-default* profile
-    the agent was launched with — e.g. ``"Claude (Z.AI)"`` for a z.ai Claude
-    session, so the tree can distinguish it from a default Anthropic Claude.
-    It is the same launch-time-recordable dimension as the kind (the selected
-    profile name is known here, before ``os.execvpe``; #826 record-at-start
-    hard-cut — no detection/parse path). When set, it is written as the
-    per-session ``@ps_agent_profile`` user option alongside ``@ps_agent_kind``.
-    A default / no-profile launch passes ``None`` and the option is
-    RECONCILED to the current launch by UNSETTING it
-    (``tmux set-option -uq -t <target> @ps_agent_profile``), so a session
-    previously launched with a non-default profile and then relaunched as a
-    default agent in the SAME tmux session does not keep the stale profile
-    label (issue #889). ``@ps_agent_kind`` is always overwritten on every
-    launch so it has no equivalent stale hazard.
-
-    The options are session-scoped (not global) and **explicitly targeted**
-    (issue #2185, the same construction #2159 applied to the source watcher).
-    ``tmux set-option`` without ``-t`` infers "the current session" from
-    ambient ``$TMUX_PANE``; when that variable is absent tmux silently
-    resolves the **most-recently-used session on the server**. That is how a
-    write of the sole kind authority could mislabel an unrelated session
-    with no error surfaced. The target is therefore resolved HERE, in the
-    launching process where ``$TMUX_PANE`` is authoritative, and named on
-    every write. When the target cannot be resolved there is no safe write,
-    so this returns ``False`` rather than guessing (D22 — no ambient-
-    inference fallback).
-
-    Issue #2185 open thread: the *trigger* that left the maintainer's
-    session with a foreign MRU session on 2026-08-15 is still unproven.
-    The untargeted-write fix is correct regardless, but if a session-scoped
-    option is ever again observed landing on the wrong session, treat this
-    as that recurrence rather than starting a fresh issue.
-
-    tmux session options persist for the life of the session, so the
-    recorded kind/profile survives reconnect / app restart / app-kill /
-    reinstall — exactly the durability the epic requires.
-
-    No-op (returns ``False``) when not running inside tmux (``$TMUX``
-    unset) — e.g. a bare SSH ``pocketshell agent`` invocation — or when the
-    kind is unknown, or when the session target cannot be resolved. A
-    failure of the ``tmux`` call is swallowed: recording the kind must
-    never prevent the agent from launching.
-
-    ``runner`` is injected so tests can assert the exact ``tmux`` argv
-    without spawning a real process; production passes ``None`` and it
-    resolves to :func:`subprocess.run`. ``resolve_target`` is the same
-    seam :func:`record_agent_source` uses.
-    """
-    if not kind:
-        return False
-    source_env = os.environ if env is None else env
-    if not source_env.get("TMUX"):
-        # Not inside a tmux server — nothing to record onto.
-        return False
-    if runner is None:
-        runner = subprocess.run
-    if resolve_target is None:
-        resolve_target = _resolve_tmux_session_target
-    try:
-        # Issue #2185: resolve the tmux target HERE, in the launching
-        # process, where `$TMUX_PANE` is authoritative — then name it
-        # explicitly on every option write. Nothing on this path relies
-        # on tmux's ambient "current session" inference any more.
-        target = resolve_target(dict(source_env))
-        if not target:
-            return False
-        runner(
-            ["tmux", "set-option", "-t", target, "@ps_agent_kind", kind],
-            check=False,
-        )
-        if profile:
-            # A non-default profile is recorded so the tree shows its label.
-            runner(
-                ["tmux", "set-option", "-t", target, "@ps_agent_profile", profile],
-                check=False,
-            )
-        else:
-            # A default / no-profile launch must RECONCILE the option to the
-            # current launch by UNSETTING it (issue #889). tmux session
-            # options persist for the life of the session, so a session
-            # launched once with a non-default profile (e.g. z.ai) and then
-            # relaunched as a default agent in the SAME session would keep the
-            # stale @ps_agent_profile and be mislabelled in the tree. The
-            # ``-u`` unsets the session option; ``-q`` makes unsetting an
-            # already-absent option a no-op (a fresh default session stays
-            # clean). The kind itself (set above) is always overwritten, so it
-            # has no equivalent stale hazard.
-            runner(
-                ["tmux", "set-option", "-t", target, "-uq", "@ps_agent_profile"],
-                check=False,
-            )
-    except Exception:
-        # Recording the kind is best-effort; never block the launch on it.
-        return False
-    return True
 
 
 def _encode_agent_cwd(cwd: str) -> str:
@@ -612,204 +494,6 @@ def _latest_agent_source(
     return None
 
 
-def _watch_and_record_agent_source(
-    kind: str,
-    cwd: str,
-    started_at: str,
-    generation: str,
-    target: str,
-    timeout_seconds: str = "20",
-) -> int:
-    """Watch for this launch's transcript and record it on the tmux session.
-
-    The wrapper starts this helper immediately before ``execvpe``. The agent
-    process has not minted its transcript id yet, so this runs in a detached
-    host-side child and records ``@ps_agent_source`` once the source appears.
-
-    ``target`` is the tmux ``-t`` target of the session this launch belongs to,
-    resolved by the PARENT (issue #2159). It is not optional and there is no
-    ambient-inference fallback (D22 — hard cut).
-
-    Both tmux calls used to omit ``-t`` and let tmux infer "the current session"
-    from the child's environment. That inference is only correct while
-    ``$TMUX_PANE`` survives into the detached child; without it tmux silently
-    resolves the **most-recently-used session on the server**, which produced
-    the maintainer's exact host state: the guard read another session's
-    generation, saw a mismatch, and gave up without writing — leaving
-    ``@ps_agent_source_generation`` set (written by the parent, whose inference
-    IS authoritative) and ``@ps_agent_source`` absent. The other direction is
-    worse: the write itself could land on an unrelated session, handing it a
-    bogus recorded transcript (the #819/#2155 wrong-source class).
-
-    ``-u`` forces a UTF-8 tmux client on the read (#2160): a client without a
-    UTF-8 locale sanitises every byte it prints, so a bare read is only correct
-    on hosts whose environment happens to carry one.
-    """
-    if not target:
-        return 2
-    try:
-        started = float(started_at)
-        timeout = float(timeout_seconds)
-    except ValueError:
-        return 2
-    deadline = time.monotonic() + max(timeout, 0.0)
-    while time.monotonic() <= deadline:
-        source = _latest_agent_source(kind, cwd, started)
-        if source:
-            try:
-                current_generation = subprocess.run(
-                    [
-                        "tmux",
-                        "-u",
-                        "show-options",
-                        "-v",
-                        "-t",
-                        target,
-                        "@ps_agent_source_generation",
-                    ],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                ).stdout.strip()
-                if current_generation != generation:
-                    return 1
-                subprocess.run(
-                    [
-                        "tmux",
-                        "set-option",
-                        "-t",
-                        target,
-                        "@ps_agent_source",
-                        f"{generation}\t{source}",
-                    ],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return 0
-            except Exception:
-                return 1
-        time.sleep(0.25)
-    return 1
-
-
-def _resolve_tmux_session_target(env: dict[str, str]) -> Optional[str]:
-    """Resolve the tmux session id this launch belongs to (issue #2159).
-
-    Runs in the PARENT, where ``$TMUX_PANE`` is authoritative, and returns a
-    stable ``$N`` session id the detached watcher can pass to ``-t``. The
-    session id outlives pane churn inside the session, so it stays valid for the
-    whole watch window.
-
-    ``$TMUX_PANE`` is REQUIRED: it is the only honest evidence of which session
-    this launch belongs to. Without it, ``tmux display-message`` would answer
-    from the server's most-recently-used session — a confident, unrelated
-    answer, which is the very defect #2159 exists to kill one layer down. So an
-    absent pane resolves to ``None`` rather than to somebody else's session (no
-    ambient-inference fallback survives — D22).
-
-    Returns ``None`` when ``$TMUX_PANE`` is absent or tmux cannot name that
-    pane's session — the caller then refuses to start an untargeted watcher
-    rather than risk writing onto another session.
-    """
-    pane = env.get("TMUX_PANE", "").strip()
-    if not pane:
-        return None
-    argv = ["tmux", "display-message", "-p", "-t", pane, "#{session_id}"]
-    try:
-        result = subprocess.run(
-            argv,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=env,
-        )
-    except Exception:
-        return None
-    session_id = result.stdout.strip()
-    return session_id or None
-
-
-def record_agent_source(
-    kind: str,
-    cwd: str,
-    env: Optional[dict[str, str]] = None,
-    runner=None,
-    popen=None,
-    resolve_target=None,
-) -> bool:
-    """Start a best-effort recorder for this launch's transcript source.
-
-    ``@ps_agent_kind`` records the engine at launch. This sibling option records
-    the exact transcript identity once the launched CLI has created it, so the
-    Android conversation opener can prefer an exact source over same-kind mtime
-    selection. The old source option is cleared first; if the watcher never
-    finds a transcript, the client falls back to its current selector instead of
-    trusting a stale path from a previous relaunch in the same tmux session.
-    """
-    if not kind or not cwd:
-        return False
-    source_env = os.environ if env is None else env
-    if not source_env.get("TMUX"):
-        return False
-    if runner is None:
-        runner = subprocess.run
-    if popen is None:
-        popen = subprocess.Popen
-    if resolve_target is None:
-        resolve_target = _resolve_tmux_session_target
-    try:
-        # Issue #2159: resolve the tmux target HERE, in the launching process,
-        # where `$TMUX_PANE` is authoritative — then name it explicitly on every
-        # option write and hand it to the detached watcher. Nothing on this path
-        # relies on tmux's ambient "current session" inference any more; when the
-        # target cannot be resolved there is no safe write, so we do not start a
-        # watcher at all rather than risk recording onto another session (D22 —
-        # no ambient fallback branch survives).
-        target = resolve_target(dict(source_env))
-        if not target:
-            return False
-        generation = uuid.uuid4().hex
-        runner(
-            ["tmux", "set-option", "-t", target, "@ps_agent_source_generation", generation],
-            check=False,
-        )
-        runner(
-            ["tmux", "set-option", "-t", target, "-uq", "@ps_agent_source"],
-            check=False,
-        )
-        started_at = str(time.time() - 1.0)
-        popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "from pocketshell.agents import "
-                    "_watch_and_record_agent_source; import sys; "
-                    "raise SystemExit(_watch_and_record_agent_source("
-                    "sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], "
-                    "sys.argv[5]))"
-                ),
-                kind,
-                cwd,
-                started_at,
-                generation,
-                target,
-            ],
-            env=dict(source_env),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-        )
-    except Exception:
-        return False
-    return True
-
-
 def _aplexer_profile_id(config_dir: Optional[str]) -> Optional[str]:
     """Dir-stem aplexer uses as the profile id (``zlaude`` from ``~/.zlaude``)."""
     if not config_dir:
@@ -827,8 +511,8 @@ def _aplexer_launch_spec(
 ) -> Optional[dict]:
     """``a launch-spec --json`` or None on skip/failure.
 
-    PocketShell still owns folder ``.env`` merge, Claude trust seeding, and
-    ``@ps_*`` tmux options; this is only argv + provider-strip + engine env.
+    PocketShell still owns folder ``.env`` merge and Claude trust seeding;
+    this is only argv + provider-strip + engine env.
     """
     args = ["launch-spec", "--engine", kind, "--cwd", cwd]
     if not skip_permissions:
@@ -888,6 +572,21 @@ def _env_from_launch_spec(
     return env
 
 
+def record_agent_kind(*_args, **_kwargs) -> bool:
+    """Compatibility hook retained for callers of the pre-aplexer launcher.
+
+    Session metadata is owned by aplexer now. The old host-side option writer
+    was a second source of truth and has been removed; launch remains
+    successful when a caller still injects this optional hook in a test.
+    """
+    return False
+
+
+def record_agent_source(*_args, **_kwargs) -> bool:
+    """Compatibility hook for callers of the removed session source watcher."""
+    return False
+
+
 def launch_agent(
     ctx: click.Context,
     kind: str,
@@ -907,10 +606,8 @@ def launch_agent(
     #732); it layers onto the launch environment under the #703 provider
     strip (see :func:`build_env`).
 
-    ``profile`` (issue #858) is the human label of the *non-default* profile
-    the launch used (``None`` for the engine default). It is recorded
-    alongside the kind as the ``@ps_agent_profile`` tmux user option so the
-    session tree can distinguish e.g. a z.ai Claude from a default Claude.
+    ``profile`` is the human label of the selected non-default profile. It is
+    retained in this call boundary for profile-aware launch resolution.
 
     ``execvpe`` is injected so tests can assert the exact call without
     actually replacing the process. When ``None`` (production) it resolves
@@ -919,11 +616,9 @@ def launch_agent(
     argument would bind the original at def-time and bypass the patch).
     :func:`os.execvpe` never returns on success.
 
-    Before the exec, when running inside tmux, the launched ``kind`` is
-    recorded as the per-session ``@ps_agent_kind`` user option
-    (:func:`record_agent_kind`) so the client can read the agent type back
-    from the host without output-parsing detection (epic #821 Workstream A).
-    ``record_kind`` is injected the same way as ``execvpe`` for tests.
+    ``record_kind`` and ``record_source`` are compatibility injection points
+    for callers that still wrap launch instrumentation; aplexer owns session
+    metadata and the built-in hooks are no-ops.
     """
     if execvpe is None:
         execvpe = os.execvpe
@@ -991,10 +686,8 @@ def launch_agent(
     if kind == "claude":
         seed_claude_trust(claude_config_path(env), resolved_dir)
 
-    # Record the launched kind on the tmux session BEFORE the exec replaces
-    # this process (epic #821 Workstream A). Use this wrapper's own
-    # environment (os.environ) for the TMUX detection — `env` is the
-    # provider-stripped launch env that does not necessarily carry $TMUX.
+    # Keep the optional instrumentation boundary before exec. The default
+    # hooks are no-ops because aplexer owns the session metadata.
     record_kind(kind, dict(os.environ), profile=profile)
     record_source(kind, resolved_dir, dict(os.environ))
 

@@ -28,14 +28,14 @@ class CrashReportStoreTest {
         assertEquals("20260522-101530-000", report.id)
         assertEquals("IllegalArgumentException: bad host", report.summary)
         assertEquals(
-            "Tmux session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
+            "Session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
             report.contextSummary,
         )
         assertEquals("0.1.0", report.appVersion)
         assertTrue(report.topFrame?.contains("CrashReportStoreTest") == true)
         assertTrue(report.file.exists())
         assertTrue(store.read(report).contains("Thread: worker"))
-        assertTrue(store.read(report).contains("Screen: Tmux session"))
+        assertTrue(store.read(report).contains("Screen: Session"))
         assertTrue(store.read(report).contains("Session: agent-main"))
         assertTrue(store.read(report).contains("Top frame:"))
         assertTrue(store.read(report).contains("IllegalArgumentException: bad host"))
@@ -84,7 +84,7 @@ class CrashReportStoreTest {
         val report = store.list().single()
 
         assertEquals(
-            "Tmux session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
+            "Session · host=devbox · session=agent-main · cwd=/home/alexey/git/pocketshell",
             report.contextSummary,
         )
         assertEquals("0.1.0", report.appVersion)
@@ -105,7 +105,7 @@ class CrashReportStoreTest {
             device = "test-device",
         )
         val context = CrashReportContext(
-            screen = "Tmux session",
+            screen = "Session",
             hostName = "devbox",
             hostname = "dev.example",
             username = "alexey",

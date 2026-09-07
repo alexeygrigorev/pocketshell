@@ -3,7 +3,7 @@ package com.pocketshell.core.terminal.input
 import java.io.ByteArrayOutputStream
 
 /**
- * Shared bracketed-paste byte helpers for app-level tmux injection and the
+ * Shared bracketed-paste byte helpers for app-level session input and the
  * live TerminalView IME path.
  */
 object BracketedPaste {
@@ -70,7 +70,7 @@ object BracketedPaste {
      *
      * `TerminalView` frames a multi-line IME commit before writing it to the
      * session, because the raw-SSH terminal surface has no other framer. The
-     * tmux transport must therefore DELIVER such a block rather than [frame] it
+     * session transport must therefore DELIVER such a block rather than [frame] it
      * a second time — a doubled frame puts the inner markers into the receiving
      * program as literal content.
      */
@@ -127,7 +127,7 @@ object BracketedPaste {
      *    grows forward to that code point's end rather than splitting it, so
      *    the invariant holds at any chunk size.
      *
-     * Each chunk is a shell/tmux command ARGUMENT (single-quoted by the caller),
+     * Each chunk is a shell command ARGUMENT (single-quoted by the caller),
      * so — unlike the hex form — it carries the payload's raw bytes, including
      * the `\n` line breaks that are the whole point of a bracketed paste.
      */

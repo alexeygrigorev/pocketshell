@@ -51,7 +51,7 @@ question — does the text contain the literal ``openssh-server``? — so
 naming it, classified as non-sshd, skipped the anchor requirement, and would
 have shipped with ``PerSourcePenalties`` ON while the guard reported the tree
 fine. That is the same defect one level up from the usual wrong-cost trap, and
-it had already bitten once in #2150 (``Dockerfile.tmux`` was not scanned at all
+it had already bitten once in #2150 (a Docker fixture was not scanned at all
 on the first cut). Both were found by MUTATING the guard; neither was found by
 reading it.
 
@@ -86,19 +86,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKER_DIR = REPO_ROOT / "tests" / "docker"
 SHARED_SSHD_CONFIG = DOCKER_DIR / "sshd_config"
 
-# Fixtures that run an sshd but deliberately do NOT copy the shared config.
-# Each entry must state why, and the path must still exist (see test_c2_*).
-#
-# real-agent: Debian bookworm, OpenSSH 9.2 — predates PerSourcePenalties
-# entirely, where the directive is not "defaulted off" but an unknown keyword
-# ("Bad configuration option") that makes sshd refuse to start. Copying the
-# shared alpine config would also point Subsystem sftp at the wrong path. It is
-# covered instead by C3: its healthcheck asserts the effective config, so the
-# day it is rebased onto an OpenSSH >= 9.8 base it goes UNHEALTHY rather than
-# silently penalising every lane.
-SHARED_CONFIG_EXEMPT = {
-    "tests/docker/real-agent/Dockerfile": "Debian OpenSSH 9.2 predates PerSourcePenalties",
-}
+# All current sshd fixtures use the shared config. The old Debian exception was
+# removed with the retired fixture; keeping an exemption here would hide a
+# deleted path and make the guard less strict.
+SHARED_CONFIG_EXEMPT: dict[str, str] = {}
 
 # Dockerfiles under tests/docker that run NO sshd, so the anchor requirement
 # does not apply to them. This list exists to make C2's file selection
@@ -246,7 +237,7 @@ def _intree_image_dockerfiles(
     """Map ``pocketshell-test:<tag>`` to the in-tree Dockerfile that builds it.
 
     Compose is the source of truth for that mapping — tag names do not follow
-    a single convention (``real-agents`` vs ``real-agent/``, many
+    a single convention (top-level vs nested Dockerfiles, many
     ``bootstrap-*`` tags share ``Dockerfile.bootstrap``). A tag that does not
     appear here cannot satisfy the C2 anchor (issue #2168).
     """
@@ -395,7 +386,7 @@ def test_c1_shared_sshd_config_disables_per_source_penalties() -> None:
 def test_c2_sshd_fixtures_exist_to_check() -> None:
     """Guard the guard: a scan that finds nothing must not read as a pass."""
     dockerfiles = _sshd_fixture_dockerfiles()
-    assert len(dockerfiles) >= 7, (
+    assert len(dockerfiles) >= 6, (
         f"only found {len(dockerfiles)} sshd fixture Dockerfiles under "
         f"{DOCKER_DIR}; the scan is broken, not the tree."
     )
@@ -511,7 +502,7 @@ def test_c2_non_sshd_fixtures_are_genuinely_non_sshd(rel: str) -> None:
 _ALPINE_METAPACKAGE_FIXTURE = """\
 FROM alpine:latest
 
-RUN apk add --no-cache openssh tmux \\
+RUN apk add --no-cache openssh procps \\
     && ssh-keygen -A \\
     && adduser -D -s /bin/sh testuser
 
@@ -529,7 +520,7 @@ SSHD_SPELLINGS = {
     "apk_metapackage_no_flags": "FROM alpine:latest\nRUN apk add openssh\n",
     "apk_flag_before_verb": "FROM alpine:latest\nRUN apk --no-cache add openssh\n",
     "apk_metapackage_not_first": (
-        "FROM alpine:latest\nRUN apk add --no-cache tmux bash openssh procps\n"
+        "FROM alpine:latest\nRUN apk add --no-cache procps bash openssh\n"
     ),
     # -- explicit server package, the spelling #2150 already handled ----------
     "apk_server": "FROM alpine:latest\nRUN apk add --no-cache openssh-server openssh-client\n",
@@ -537,7 +528,7 @@ SSHD_SPELLINGS = {
     "apt_get_server": "FROM debian:bookworm-slim\nRUN apt-get install -y openssh-server\n",
     "apt_get_server_not_first": (
         "FROM debian:bookworm-slim\n"
-        "RUN apt-get install -y --no-install-recommends git openssh-server tmux\n"
+        "RUN apt-get install -y --no-install-recommends git openssh-server procps\n"
     ),
     "apt_get_flag_before_verb": (
         "FROM debian:bookworm-slim\nRUN apt-get -qq install openssh-server\n"
@@ -548,7 +539,7 @@ SSHD_SPELLINGS = {
         "    && apt-get install -y --no-install-recommends \\\n"
         "        bash \\\n"
         "        openssh-server \\\n"
-        "        tmux \\\n"
+        "        procps \\\n"
         "    && rm -rf /var/lib/apt/lists/*\n"
     ),
     "apt_debian_metapackage": "FROM debian:bookworm-slim\nRUN apt install -y ssh\n",
@@ -564,16 +555,16 @@ SSHD_SPELLINGS = {
     # -- shell-variable indirection (the Dockerfile.bootstrap shape) ----------
     "shell_variable_server": (
         "FROM alpine:latest\n"
-        'RUN packages="openssh-server tmux" \\\n'
+        'RUN packages="openssh-server procps" \\\n'
         "    && apk add --no-cache $packages\n"
     ),
     "shell_variable_metapackage": (
         "FROM alpine:latest\n"
-        'RUN packages="openssh tmux" \\\n'
+        'RUN packages="openssh procps" \\\n'
         "    && apk add --no-cache $packages\n"
     ),
     # -- inherited / copied daemons ------------------------------------------
-    "from_intree_fixture": "FROM pocketshell-test:ssh\nRUN apk add --no-cache tmux\n",
+    "from_intree_fixture": "FROM pocketshell-test:ssh\nRUN apk add --no-cache procps\n",
     "multi_stage_copy": (
         "FROM alpine:latest AS builder\nRUN apk add --no-cache build-base\n\n"
         "FROM alpine:latest\n"
@@ -766,11 +757,11 @@ def test_c2_from_unanchored_intree_base_probe_names_packet_loss_proxy() -> None:
 
 def test_c2_from_anchored_intree_base_stays_green() -> None:
     """Selectivity: a real shared-config base must still count as the anchor."""
-    text = "FROM pocketshell-test:ssh\nRUN apk add --no-cache tmux\n"
+    text = "FROM pocketshell-test:ssh\nRUN apk add --no-cache procps\n"
     assert _inherits_shared_config(text), (
         "FROM pocketshell-test:ssh must stay anchored — Dockerfile.ssh "
         "copies tests/docker/sshd_config. If this goes red, the resolver "
-        "is over-strict and will block Dockerfile.tmux and every other "
+        "is over-strict and will block the agents fixture and every other "
         "legitimate inherit (issue #2168)."
     )
 
@@ -792,36 +783,11 @@ def test_c2_unknown_intree_tag_is_not_treated_as_anchored() -> None:
     )
 
 
-def test_c2_from_exempt_base_is_not_treated_as_anchored() -> None:
-    """SHARED_CONFIG_EXEMPT is per-file, not an inherited "has the config"."""
-    text = (
-        "FROM pocketshell-test:real-agents\n"
-        "RUN apk add --no-cache openssh-server\n"
-    )
-    assert not _inherits_shared_config(text), (
-        "FROM pocketshell-test:real-agents must not satisfy the anchor — "
-        "that base is SHARED_CONFIG_EXEMPT precisely because it does NOT "
-        "copy the shared config (issue #2168)."
-    )
-
-
-def test_c2_from_chain_via_tmux_stays_green() -> None:
-    """Real-tree A -> B -> C: ssh copies the config, tmux FROMs ssh, leaf
-    FROMs tmux. Only the root carries the COPY."""
-    text = "FROM pocketshell-test:tmux\nRUN echo leaf\n"
-    assert _inherits_shared_config(text), (
-        "FROM pocketshell-test:tmux must resolve through Dockerfile.tmux "
-        "to Dockerfile.ssh, which copies sshd_config (issue #2168). If this "
-        "goes red, the chain walker is broken and will block a legitimate "
-        "three-level inherit."
-    )
-
-
 def test_c2_intree_tag_map_resolves_known_bases() -> None:
     """Guard the resolver: a broken compose parser must not read as a pass.
 
     Two failure modes are the same shape as #2168: an empty map fail-closes
-    every inherit (blocks Dockerfile.tmux), and a map that points every tag
+    every inherit, and a map that points every tag
     at Dockerfile.ssh would treat packet-loss-proxy as anchored.
     """
     mapping = _intree_image_dockerfiles()
@@ -832,15 +798,11 @@ def test_c2_intree_tag_map_resolves_known_bases() -> None:
 
     ssh = mapping.get("pocketshell-test:ssh")
     proxy = mapping.get("pocketshell-test:packet-loss-proxy")
-    tmux = mapping.get("pocketshell-test:tmux")
     assert ssh == (DOCKER_DIR / "Dockerfile.ssh").resolve(), (
         f"pocketshell-test:ssh resolved to {ssh}"
     )
     assert proxy == (DOCKER_DIR / "packet-loss-proxy" / "Dockerfile").resolve(), (
         f"pocketshell-test:packet-loss-proxy resolved to {proxy}"
-    )
-    assert tmux == (DOCKER_DIR / "Dockerfile.tmux").resolve(), (
-        f"pocketshell-test:tmux resolved to {tmux}"
     )
     assert ssh != proxy
     assert not _inherits_shared_config(_read(proxy)), (
@@ -849,11 +811,6 @@ def test_c2_intree_tag_map_resolves_known_bases() -> None:
         "treating a no-sshd base as if it carried the config."
     )
     assert _inherits_shared_config(_read(ssh))
-    assert _inherits_shared_config(_read(tmux)), (
-        "Dockerfile.tmux does not COPY sshd_config; it is anchored only "
-        "via FROM pocketshell-test:ssh. If this is False, the chain walker "
-        "lost the real two-level inherit."
-    )
 
 
 def _write_chain_tree(
@@ -981,7 +938,7 @@ def _ssh_healthchecks(compose_text: str) -> list[str]:
 
 def test_c3_ssh_healthchecks_exist_to_check() -> None:
     total = sum(len(_ssh_healthchecks(_read(p))) for p in _compose_files())
-    assert total >= 2, (
+    assert total >= 1, (
         f"found only {total} SSH healthchecks across {[p.name for p in _compose_files()]}; "
         "the parser is broken, not the tree."
     )

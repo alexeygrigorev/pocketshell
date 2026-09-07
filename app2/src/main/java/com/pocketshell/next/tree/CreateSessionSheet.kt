@@ -30,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.ProfileInfo
 import com.pocketshell.uikit.components.Banner
@@ -61,9 +60,6 @@ const val CREATE_SESSION_TYPE_SHELL_TAG: String = "create-session-type-shell"
 const val CREATE_SESSION_TYPE_AGENT_TAG: String = "create-session-type-agent"
 const val CREATE_SESSION_ENGINE_TAG_PREFIX: String = "create-session-engine-"
 const val CREATE_SESSION_PROFILE_TAG: String = "create-session-profile"
-const val CREATE_SESSION_BACKEND_DEFAULT_TAG: String = "create-session-backend-default"
-const val CREATE_SESSION_BACKEND_TMUX_TAG: String = "create-session-backend-tmux"
-const val CREATE_SESSION_BACKEND_APLEXER_TAG: String = "create-session-backend-aplexer"
 const val CREATE_SESSION_NO_ENGINES_TAG: String = "create-session-no-engines"
 
 fun createSessionEngineTag(engineId: String): String = "$CREATE_SESSION_ENGINE_TAG_PREFIX$engineId"
@@ -81,43 +77,19 @@ internal const val CREATE_SESSION_HINT =
 internal const val CREATE_SESSION_TYPE_LABEL = "Session type"
 internal const val CREATE_SESSION_ENGINE_LABEL = "Agent engine"
 internal const val CREATE_SESSION_PROFILE_LABEL = "Profile"
-internal const val CREATE_SESSION_BACKEND_LABEL = "Backend"
 internal const val CREATE_SESSION_NO_ENGINES =
     "No agent engines are available on this host."
 internal const val CREATE_SESSION_ENGINE_HINT =
     "The engine will auto-start in the new pane."
-internal const val CREATE_SESSION_BACKEND_HINT =
-    "Default uses the host's [backends] config."
 internal const val CREATE_SESSION_LOADING_ENGINES = "Loading engines…"
 
 private val CREATE_SESSION_TYPE_LABELS = listOf("Shell", "Agent")
-private val CREATE_SESSION_BACKEND_LABELS = listOf("Default", "tmux", "aplexer")
 private val PICKER_SEGMENT_HEIGHT = 48.dp
 private const val CREATE_SESSION_HEIGHT_FRACTION = 0.85f
 private val CREATE_SESSION_MAX_HEIGHT = 560.dp
 
 /** Shell (plain pane) vs Agent (host starts an engine in the new session). */
 enum class CreateSessionKind { Shell, Agent }
-
-/**
- * Backend override for `sessions create --backend`.
- *
- * [HostDefault] omits the flag so the host's `[backends]` config stays in
- * charge — an explicit `tmux`/`aplexer` is what beats that config.
- */
-enum class CreateSessionBackend {
-    HostDefault,
-    Tmux,
-    Aplexer,
-    ;
-
-    val flag: String?
-        get() = when (this) {
-            HostDefault -> null
-            Tmux -> Backend.WIRE_TMUX
-            Aplexer -> Backend.WIRE_APLEXER
-        }
-}
 
 /**
  * What the sheet asks `sessions create` to do. Optional flags are `null`
@@ -129,7 +101,6 @@ data class CreateSessionRequest(
     val cwd: String?,
     val engine: String? = null,
     val profile: String? = null,
-    val backend: String? = null,
 )
 
 /**
@@ -163,12 +134,6 @@ fun profilesForEngine(profiles: List<ProfileInfo>, engineId: String?): List<Prof
  * prefills this and lets them overwrite it — the create button stays disabled
  * while the field is blank, so the host can never be asked to do the deriving.
  *
- * `:` and `.` are rewritten to `-` because tmux rejects both in a session name
- * (`:` separates a session from its window, `.` a window from its pane), and a
- * folder called `agent.v2` would otherwise prefill a name the host must refuse.
- * Only the DERIVED default is rewritten; a name the user types is sent verbatim
- * and the host's own validation answers for it.
- *
  * Pure: no Android, no Compose, no clock.
  */
 fun defaultSessionName(folder: String): String {
@@ -178,9 +143,7 @@ fun defaultSessionName(folder: String): String {
     // `~`, `.` and `..` name a location, not a project; there is nothing
     // useful to derive from them.
     if (segment == "~" || segment == "." || segment == "..") return ""
-    return segment.map { char -> if (char == ':' || char == '.') '-' else char }
-        .joinToString("")
-        .trim('-')
+    return segment
 }
 
 /**
@@ -222,9 +185,6 @@ class CreateSessionFormState(initialFolder: String = "") {
     var profileName: String? by mutableStateOf(null)
         private set
 
-    var backend: CreateSessionBackend by mutableStateOf(CreateSessionBackend.HostDefault)
-        private set
-
     fun onFolderChange(value: String) {
         folder = value
         if (!nameEdited) name = defaultSessionName(value)
@@ -246,10 +206,6 @@ class CreateSessionFormState(initialFolder: String = "") {
 
     fun onProfileChange(value: String?) {
         profileName = value
-    }
-
-    fun onBackendChange(value: CreateSessionBackend) {
-        backend = value
     }
 
     /** The host requires a name, so a blank one can never be submitted. */
@@ -290,7 +246,6 @@ class CreateSessionFormState(initialFolder: String = "") {
             cwd = submittedCwd,
             engine = engine?.id,
             profile = profile,
-            backend = backend.flag,
         )
     }
 }
@@ -299,7 +254,7 @@ class CreateSessionFormState(initialFolder: String = "") {
  * The create-session bottom sheet (rewrite task U-6, journey J04, issue #2522).
  *
  * Folder + name, plus the v0.4.47 create interaction restored: Shell vs Agent,
- * an engine/profile picker fed by the host registry, and tmux vs aplexer.
+ * an engine/profile picker fed by the host registry.
  *
  * Dismissing the sheet (scrim tap / back / drag-down) routes to [onCancel],
  * so backing out can never be mistaken for a create.
@@ -490,32 +445,6 @@ fun CreateSessionSheetContent(
                 }
             }
 
-            Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-                SectionHeader(label = CREATE_SESSION_BACKEND_LABEL)
-                SegmentedToggle(
-                    labels = CREATE_SESSION_BACKEND_LABELS,
-                    selectedIndex = form.backend.ordinal,
-                    onSelected = { index ->
-                        form.onBackendChange(CreateSessionBackend.entries[index])
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = PICKER_SEGMENT_HEIGHT),
-                    fillSegments = true,
-                    segmentTag = { index ->
-                        when (index) {
-                            0 -> CREATE_SESSION_BACKEND_DEFAULT_TAG
-                            1 -> CREATE_SESSION_BACKEND_TMUX_TAG
-                            else -> CREATE_SESSION_BACKEND_APLEXER_TAG
-                        }
-                    },
-                )
-                Text(
-                    text = CREATE_SESSION_BACKEND_HINT,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-            }
         }
 
         Row(

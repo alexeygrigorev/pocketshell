@@ -5,8 +5,8 @@
 # - rely on an ed25519 key (matches the D3 reason-to-exist test)
 # - keep the surface minimal — only openssh, no extras
 #
-# Higher-tier images (`pocketshell-test:tmux`, `pocketshell-test:agents`) will
-# extend this one in later issues.
+# Higher-tier images (`pocketshell-test:agents`) extend this one in later
+# issues; the agent image supplies the bundled aplexer runtime.
 FROM alpine:latest
 
 # openssh-sftp-server is a SEPARATE alpine package: `openssh-server` alone

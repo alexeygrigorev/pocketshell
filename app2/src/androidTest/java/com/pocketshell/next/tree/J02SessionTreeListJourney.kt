@@ -57,23 +57,13 @@ import kotlinx.coroutines.runBlocking
  * ## Fixture
  *
  * The Docker `agents` fixture on `10.0.2.2:2222` (see [AgentsFixture]) — its
- * `pocketshell sessions list --json` speaks schema 2. The host state each test
+ * `pocketshell sessions list --json` speaks schema 3. The host state each test
  * needs is SEEDED over SSH in [seed] rather than baked into the image:
  *
- *  - `~/.pocketshell-fixture-session-detail.json` gives the canned tmux
- *    sessions their workspace / attach / activity / agent-state fields. One
- *    session is deliberately left OUT of it, so the host reports a `null`
- *    workspace and the "other" bucket is exercised on a real device.
- *  - `~/.pocketshell-fixture-aplexer.json` hands the fixture enumerator a
- *    canned aplexer session, so the tree lists BOTH managers — the shape the
- *    maintainer's own box has, and the one a tmux-only fixture could never
- *    reproduce. Issue #2563 deleted the shell `a` stub this used to be read
- *    through (the image now ships the real pinned aplexer binaries); the seed
- *    file and its payload are unchanged.
- *  - `~/.pocketshell-fixture-session-errors.json` makes a backend report an
- *    enumeration failure. Only the partial-listing test seeds it; the others
- *    delete it, because a leftover file would make the happy-path
- *    "no banner" assertion pass or fail for the wrong reason.
+ *  - The seed creates four real aplexer shell sessions in two workspaces.
+ *  - `~/.pocketshell-fixture-session-errors.json` adds an explicit enumeration
+ *    error to the real aplexer payload for the partial-listing test. The other
+ *    methods remove it, so a leftover fault cannot change a happy-path result.
  *
  * Bring the fixture up before running:
  * `docker compose -f tests/docker/docker-compose.yml up -d --build agents`
@@ -142,77 +132,28 @@ class J02SessionTreeListJourney {
      */
     private fun seedHostSessions(description: Description) {
         val partial = description.methodName.contains("partial", ignoreCase = true)
-        val now = System.currentTimeMillis() / 1000
-        // Issue #2586: the live-enumeration marker is per-user state in a
-        // container the WHOLE suite shares (#2474 runs it unfiltered, one
-        // process, one fixture), and nothing expires it — a journey that opted
-        // into live mode leaves it behind for everyone after it. Marker + the
-        // seed this journey writes is a deliberate rc-78 mode conflict, so the
-        // app would receive no listing at all and every assertion below would
-        // fail as a bare 60-second Compose timeout that names nothing. Cleared
-        // unconditionally, BEFORE the partial branch: the deterministic arm
-        // defends itself rather than trusting the previous journey's teardown.
-        AgentsFixture.exec("rm -f $LIVE_MARKER")
-        AgentsFixture.writeFile(
-            DETAIL_FILE,
-            """
-            {
-              "$SESSION_ATTACHED": {
-                "workspace": "$WORKSPACE_MAIN",
-                "attached": true,
-                "engine": "claude",
-                "agent_state": "working",
-                "agent_state_source": "reported",
-                "activity_epoch": ${now - 120}
-              },
-              "$SESSION_QUIET": {
-                "workspace": "$WORKSPACE_MAIN",
-                "attached": false,
-                "activity_epoch": ${now - 7200}
-              }
-            }
-            """.trimIndent(),
+        val sessions = listOf(
+            Triple(SESSION_ATTACHED, WORKSPACE_MAIN, "claude-main"),
+            Triple(SESSION_QUIET, WORKSPACE_MAIN, "codex"),
+            Triple(SESSION_OTHER, WORKSPACE_APLEXER, "opencode-lab"),
+            Triple(SESSION_APLEXER, WORKSPACE_APLEXER, "yolo"),
         )
-        // NOTE: no entry for `opencode-lab` — the host therefore reports it with
-        // a null workspace, which is the "other" bucket under test.
-
+        AgentsFixture.exec("rm -f $ERRORS_FILE")
+        sessions.forEach { (displayName, workspace, tag) ->
+            AgentsFixture.exec("pocketshell sessions kill -- '$displayName' >/dev/null 2>&1 || true")
+            AgentsFixture.exec(
+                "pocketshell sessions create --cwd '$workspace' --mem none --json -- '$tag' >/dev/null",
+            )
+        }
         if (partial) {
-            // The REAL shape of a backend that failed to enumerate: it
-            // contributes NO rows and reports why. Seeding the error while
-            // leaving its sessions in place would have been the easy version and
-            // a weaker test — the whole point is that "aplexer produced nothing"
-            // must not read as "aplexer has nothing".
-            AgentsFixture.exec("rm -f $APLEXER_FILE")
+            // The real aplexer listing remains visible, with an explicit
+            // enumeration error added by the fixture wrapper. This exercises
+            // the partial-listing contract without a second backend.
             AgentsFixture.writeFile(
                 ERRORS_FILE,
-                """[{"manager": "aplexer", "message": "$BACKEND_ERROR_MESSAGE"}]""",
+                "[{\"message\": \"$BACKEND_ERROR_MESSAGE\"}]",
             )
-            return
         }
-
-        AgentsFixture.exec("rm -f $ERRORS_FILE")
-        AgentsFixture.writeFile(
-            APLEXER_FILE,
-            """
-            {
-              "sessions": [
-                {
-                  "name": "$SESSION_APLEXER",
-                  "id": "52a2508e-c902-4bd6-9ea8-dd3668381749",
-                  "workspace": "$WORKSPACE_APLEXER",
-                  "tag": "yolo",
-                  "engine": "codex",
-                  "profile": null,
-                  "agent_state": "waiting",
-                  "agent_state_source": "heuristic",
-                  "attached": false,
-                  "created_epoch": ${now - 86400},
-                  "activity_epoch": ${now - 60}
-                }
-              ]
-            }
-            """.trimIndent(),
-        )
     }
 
     /**
@@ -228,7 +169,7 @@ class J02SessionTreeListJourney {
         // same command the app just ran, read over a separate connection.
         val hostSessions = hostSessionNames()
         assertTrue(
-            "the fixture must report at least the seeded tmux + aplexer sessions, got $hostSessions",
+            "the fixture must report the seeded aplexer sessions, got $hostSessions",
             hostSessions.containsAll(
                 listOf(SESSION_ATTACHED, SESSION_QUIET, SESSION_OTHER, SESSION_APLEXER),
             ),
@@ -239,12 +180,10 @@ class J02SessionTreeListJourney {
         }
         JourneyScreenshots.capture("01-session-tree", JOURNEY)
 
-        // Root → folder → session: both Docker workspaces sit under `~/git`,
-        // and the session the host reported with no cwd lands in `other`.
+        // Root → folder → session: both fixture workspaces sit under `~/git`.
         compose.onNodeWithTag(rootHeaderTag("~/git")).assertIsDisplayed()
         compose.onNodeWithTag(folderHeaderTag("~/git/pocketshell")).assertIsDisplayed()
         compose.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
-        compose.onNodeWithTag(rootHeaderTag(OTHER_ROOT_KEY)).assertIsDisplayed()
 
         // No engine/agent chrome — the tree names the session, not the engine.
         compose.onNodeWithContentDescription("codex").assertDoesNotExist()
@@ -253,7 +192,7 @@ class J02SessionTreeListJourney {
         compose.onNodeWithContentDescription("Waiting for input").assertDoesNotExist()
 
         // The happy path raises NO banner. A partial-listing banner here would
-        // mean a backend silently failed and the list is short.
+        // mean the aplexer probe silently failed and the list is short.
         compose.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertDoesNotExist()
@@ -272,8 +211,7 @@ class J02SessionTreeListJourney {
         // `aplexer` display name carries a `:` and therefore goes through route
         // encoding, and the session screen titles itself with the decoded name.
         // Whether the attach then succeeds is J03's subject, not this test's:
-        // the `a` fixture hosts no attachable process, so this screen is
-        // expected to end up saying so.
+        // the fixture hosts a real attachable aplexer process.
         awaitTag(SESSION_SCREEN_TAG)
         awaitText(SESSION_APLEXER)
         compose.onNodeWithText(SESSION_APLEXER).assertIsDisplayed()
@@ -281,9 +219,9 @@ class J02SessionTreeListJourney {
     }
 
     /**
-     * The non-happy host state: one backend fails to enumerate. The tree must
-     * SAY the list is short and still show what did arrive — "aplexer is
-     * broken" and "aplexer has no sessions" must not render identically
+     * The non-happy host state: the aplexer probe reports an error alongside
+     * rows it did enumerate. The tree must SAY the list may be short — a
+     * probe failure and an empty healthy host must not render identically
      * (the #2426 contract, on a device).
      */
     @Test
@@ -293,19 +231,17 @@ class J02SessionTreeListJourney {
         awaitTag(SESSION_TREE_PARTIAL_BANNER_TAG)
         JourneyScreenshots.capture("03-partial-listing", JOURNEY)
         compose.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Some sessions may be missing: aplexer").assertIsDisplayed()
+        compose.onNodeWithText(
+            "Some sessions may be missing: $BACKEND_ERROR_MESSAGE",
+        ).assertIsDisplayed()
 
-        // The tmux sessions the host DID enumerate are still listed...
+        // The aplexer sessions the host DID enumerate are still listed...
         compose.onNodeWithTag(sessionRowTag(SESSION_ATTACHED)).assertIsDisplayed()
         compose.onNodeWithTag(sessionRowTag(SESSION_QUIET)).assertIsDisplayed()
-        // ...the failed backend really did contribute nothing (this is what the
-        // banner exists to explain — without it this absence is invisible)...
-        assertTrue(
-            "the failed backend must contribute no rows",
-            SESSION_APLEXER !in hostSessionNames(),
-        )
-        compose.onNodeWithTag(sessionRowTag(SESSION_APLEXER)).assertDoesNotExist()
-        // ...and the empty state never appears, because the host is not empty.
+        // ...and the healthy rows remain visible while the error is surfaced.
+        assertTrue(SESSION_APLEXER in hostSessionNames())
+        compose.onNodeWithTag(sessionRowTag(SESSION_APLEXER)).assertIsDisplayed()
+        // The empty state never appears, because the host is not empty.
         compose.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertDoesNotExist()
         // A partial listing is not a hard failure either.
         compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
@@ -349,7 +285,7 @@ class J02SessionTreeListJourney {
         val payload = JSONObject(AgentsFixture.exec("pocketshell sessions list --json"))
         assertEquals(
             "the fixture must speak the schema the client parses",
-            2,
+            3,
             payload.getInt("schema"),
         )
         val sessions = payload.getJSONArray("sessions")
@@ -374,11 +310,11 @@ class J02SessionTreeListJourney {
         const val TIMEOUT_MS = 60_000L
         const val JOURNEY = "j02-session-tree"
 
-        /** Canned tmux sessions the `agents` image always reports. */
-        const val SESSION_ATTACHED = "claude-main"
-        const val SESSION_QUIET = "codex"
-        const val SESSION_OTHER = "opencode-lab"
-        const val SESSION_APLEXER = "aplexer-follow:yolo"
+        /** Real aplexer sessions seeded by each test method. */
+        const val SESSION_ATTACHED = "pocketshell:claude-main"
+        const val SESSION_QUIET = "pocketshell:codex"
+        const val SESSION_OTHER = "aplexer:opencode-lab"
+        const val SESSION_APLEXER = "aplexer:yolo"
 
         const val WORKSPACE_MAIN = "/home/testuser/git/pocketshell"
         const val WORKSPACE_APLEXER = "/home/testuser/git/aplexer"
@@ -386,16 +322,7 @@ class J02SessionTreeListJourney {
         const val BACKEND_ERROR_MESSAGE =
             "a --json snapshot failed: exit 127 (command not found)"
 
-        const val DETAIL_FILE = "\$HOME/.pocketshell-fixture-session-detail.json"
-        const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
-
-        /**
-         * The opt-in marker for the fixture's LIVE aplexer arm (issue #2586).
-         * This journey drives the deterministic seed arm and must therefore
-         * remove it — see [seedHostSessions].
-         */
-        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
 
         val HOST_IDS: Map<String, Long> = mapOf(
             "connectingToAHostListsItsRealSessionsGroupedByWorkspace" to 9_201L,

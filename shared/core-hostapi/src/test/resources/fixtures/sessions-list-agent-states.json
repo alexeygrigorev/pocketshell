@@ -1,12 +1,8 @@
 {
-  "schema": 2,
-  "managers": [
-    "aplexer"
-  ],
+  "schema": 3,
   "sessions": [
     {
       "name": "aplexer-follow:idle",
-      "manager": "aplexer",
       "id": "00000000-0000-4000-8000-000000000001",
       "workspace": "/tmp/aplexer-follow",
       "tag": "idle",
@@ -20,7 +16,6 @@
     },
     {
       "name": "aplexer-follow:waiting",
-      "manager": "aplexer",
       "id": "00000000-0000-4000-8000-000000000002",
       "workspace": "/tmp/aplexer-follow",
       "tag": "waiting",
@@ -34,7 +29,6 @@
     },
     {
       "name": "aplexer-follow:working",
-      "manager": "aplexer",
       "id": "00000000-0000-4000-8000-000000000003",
       "workspace": "/tmp/aplexer-follow",
       "tag": "working",

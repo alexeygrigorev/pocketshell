@@ -12,4 +12,4 @@ ssh -i tests/docker/test_key -p 2222 \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
   testuser@127.0.0.1 \
-  'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+  'for tool in pocketshell agent-log-explorer a aplexer quse; do command -v "$tool"; done'

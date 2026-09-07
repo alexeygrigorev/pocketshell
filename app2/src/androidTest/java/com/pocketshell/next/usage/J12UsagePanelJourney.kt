@@ -33,7 +33,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -93,7 +92,7 @@ class J12UsagePanelJourney {
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j12_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -114,12 +113,15 @@ class J12UsagePanelJourney {
         )
     }
 
-    /** Same per-session `tmuxctl-<name>` socket convention `sessions attach` resolves. */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    /** Create the real aplexer session whose usage pill this journey opens. */
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
+        )
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'clear; echo $BANNER'",
         )
     }
 
@@ -227,7 +229,7 @@ class J12UsagePanelJourney {
      *
      * [startRealAplexerSessionRunningClaude] does, over the same SSH the app
      * uses, exactly what the maintainer's box does: it starts an aplexer
-     * session (through the host CLI, `--backend aplexer`, which is a plain
+     * session through the host CLI, which is a plain
      * shell workload — `engine` is NOT the answer to "which agent"), then
      * launches an agent INSIDE it. The agent is a `claude`-named executable
      * that stays alive, so the workload has a live descendant whose `comm` and
@@ -238,35 +240,10 @@ class J12UsagePanelJourney {
      * The image's own `/usr/local/bin/claude` is deliberately NOT used: it
      * prints one line and exits, so it leaves no descendant to detect.
      *
-     * ## This journey is expected RED until #2581 + #2586 land
-     *
-     * Two things must ship before it can pass, and it fails on the FIRST of
-     * them by name rather than degrading into a silent fallback:
-     *
-     *  1. `a` must report the detected agent (aplexer 0.1.4, issue #2580) and
-     *     the host CLI must pass it through as `agent` on the schema-2 row
-     *     (issue #2581, which also bumps `tools/pocketshell/pyproject.toml`'s
-     *     `aplexer==` pin — the same line `Dockerfile.agents` derives the
-     *     fixture's binary download from, so the pin bump is what re-points
-     *     this fixture at a detecting `a`). Today the row carries no `agent`
-     *     key at all.
-     *  2. The fixture's `sessions list --json` arm must ENUMERATE live aplexer
-     *     sessions instead of reading `~/.pocketshell-fixture-aplexer.json`
-     *     (issue #2586; the shim says so itself). Until then the app
-     *     cannot see this session, so the UI half below cannot run either —
-     *     which is why the host-contract assertion comes first and is the one
-     *     that fails.
-     *
-     * Nothing here is stubbed to route around either gap: a journey that
-     * seeded the `agent` value itself would prove only that the client can
-     * read a value the journey wrote, which is what the JVM suite already
-     * proves without an emulator.
+     * The host-contract assertions below keep this journey tied to the real
+     * aplexer process-tree signal and to the exact app-facing schema-3 listing.
      */
     @Test
-    // Red by design today; the KDoc above names both blockers and what turns
-    // each green. Quarantined per D36(4) so it cannot freeze `main`'s journey
-    // lane while it waits — one line, because the reconciler parses it.
-    @Ignore("quarantined: #2586, expires 2026-09-20 — fixture lists no live aplexer row")
     fun theSessionPillFocusesTheSessionsDetectedAgentAndDropsTheWindowToken() {
         val sessionName = startRealAplexerSessionRunningClaude()
         try {
@@ -325,14 +302,14 @@ class J12UsagePanelJourney {
         killAgentSession(aplexerSessionName())
 
         val created = AgentsFixture.exec(
-            "pocketshell sessions create $AGENT_TAG --backend aplexer " +
+            "pocketshell sessions create $AGENT_TAG " +
                 "--cwd $AGENT_WORKSPACE --json",
         )
         val envelope = JSONObject(created)
         assertEquals(
-            "the fixture must create this session on aplexer, not tmux: $created",
-            "aplexer",
-            envelope.optString("manager"),
+            "the fixture must create an aplexer session: $created",
+            3,
+            envelope.optInt("schema"),
         )
         val name = envelope.optString("name")
         assertTrue("the create envelope carried no name: $created", name.isNotEmpty())
@@ -391,18 +368,14 @@ class J12UsagePanelJourney {
             realRow.optString("agent", ""),
         )
 
-        // 2. The APP-FACING listing: the exact command the client runs. On the
-        //    fixture this is the deterministic shim, whose list arm still reads
-        //    aplexer rows from a seed file rather than enumerating live ones.
+        // 2. The APP-FACING listing: the exact command the client runs. The
+        //    fixture delegates this to the real schema-3 aplexer enumerator.
         val appListing = AgentsFixture.exec("pocketshell sessions list --json")
         val appRow = aplexerRow(appListing, sessionName)
         assertNotNull(
             "`pocketshell sessions list --json` — the command the app runs — " +
-                "did not list the live aplexer session $sessionName. The " +
-                "fixture's list arm still reads aplexer rows from " +
-                "~/.pocketshell-fixture-aplexer.json instead of enumerating " +
-                "them (issue #2586), so the app cannot see a real " +
-                "aplexer session yet.\nHost listing:\n$appListing",
+            "did not list the live aplexer session $sessionName.\n" +
+                "Host listing:\n$appListing",
             appRow,
         )
         assertEquals(
@@ -502,7 +475,10 @@ class J12UsagePanelJourney {
         const val REAL_CLI_SRC = "/opt/pocketshell-real/src"
         const val JOURNEY = "j12-usage-panel"
 
-        const val SESSION = "j12-shell"
+        const val TAG = "j12-shell"
+        const val SESSION = "testuser:j12-shell"
+        const val WORKSPACE = "/home/testuser"
+        const val BANNER = "J12-FIXTURE-SESSION"
         const val HOST_ID = 9_801L
 
         /**
@@ -528,7 +504,5 @@ class J12UsagePanelJourney {
          */
         const val CLAUDE_LONGEST_WINDOW_PERCENT = 60
 
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
     }
 }

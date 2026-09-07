@@ -76,7 +76,7 @@ public final class TerminalBuffer {
     /**
      * Issue #966/#967: the number of VISIBLE screen rows (the viewport height in
      * cells), so the stale-render oracle can compare the rendered visible grid
-     * against the matching visible-tail of tmux's `capture-pane` text — an
+     * against the matching visible tail of the host terminal capture text — an
      * apples-to-apples diff that is robust to the capture carrying scrollback.
      */
     public int getVisibleScreenRows() {

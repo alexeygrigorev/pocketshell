@@ -50,7 +50,7 @@ A display name is not identity. Resolve a host-specific canonical absolute path;
 
 The persistent list of workspace folders must not depend entirely on currently enumerated sessions: new/empty workspaces remain visible. Use the existing host helper/registry where available; agree on durable workspace registration before implementing a phone-only competing source of truth. If a local preference must be used temporarily, document its device-only scope and do not promise desktop synchronization.
 
-Keep session identity host-defined. Use Terminal, Terminal 2 or meaningful suffixes for display, separate from the underlying tmux/aplexer identifier. Auto-name without replacing an existing session; collisions still permit starting another. Do not auto-resume an existing session when the user explicitly chose New session.
+Keep session identity host-defined. Use Terminal, Terminal 2 or meaningful suffixes for display, separate from the underlying aplexer identifier. Auto-name without replacing an existing session; collisions still permit starting another. Do not auto-resume an existing session when the user explicitly chose New session.
 
 Known nested folders may be searched across configured roots. For large filesystems, use a bounded host-side folder index/query, cancellation and exclusions for generated/dependency folders. Do not recursively crawl an unbounded filesystem over individual SFTP round trips on each keystroke. Never claim a partial or failed search is exhaustive. The HTML demo only filters its supplied workspace/folder fixtures.
 

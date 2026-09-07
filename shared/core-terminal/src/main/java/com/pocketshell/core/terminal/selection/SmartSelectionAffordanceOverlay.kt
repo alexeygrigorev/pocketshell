@@ -224,7 +224,7 @@ public fun AgentPaneAffordanceOverlay(
  * `layout(maxWidth.coerceAtLeast(0), maxHeight.coerceAtLeast(0))`, which is fine
  * under a normal bounded measure — but the overlay sits inside the terminal pane,
  * which is itself inside a [androidx.compose.foundation.pager.Pager]
- * (`TmuxTerminalPager`). The pager / lookahead runs intermittent measure passes
+ * (the terminal pager). The pager / lookahead runs intermittent measure passes
  * with an **unbounded** (`Constraints.Infinity`, i.e. `Int.MAX_VALUE`) maximum
  * dimension. `coerceAtLeast(0)` left that `Int.MAX_VALUE` intact, so
  * `layout(width, Int.MAX_VALUE)` threw

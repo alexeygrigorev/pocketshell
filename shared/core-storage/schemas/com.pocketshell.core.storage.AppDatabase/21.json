@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 21,
-    "identityHash": "0bc22516a37126eff991d50c64e39a78",
+    "identityHash": "08d40b0e3508acf5ffa4f2378d79325e",
     "entities": [
       {
         "tableName": "hosts",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `hostname` TEXT NOT NULL, `port` INTEGER NOT NULL, `username` TEXT NOT NULL, `keyId` INTEGER NOT NULL, `maxAutoPort` INTEGER NOT NULL, `skipPortsBelow` INTEGER NOT NULL, `scanIntervalSec` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `lastConnectedAt` INTEGER, `tmuxInstalled` INTEGER, `lastBootstrapAt` INTEGER, `pocketshellInstalled` INTEGER, `pocketshellLastDetectedAt` INTEGER, `pocketshellCliVersion` TEXT, `pocketshellExpectedCliVersion` TEXT, `pocketshellVersionCompatible` INTEGER, `pocketshellDaemonRunning` INTEGER, `pocketshellDaemonEnabled` INTEGER, `usageCommandOverride` TEXT, `treeIdentity` TEXT NOT NULL, `trustedHostKeyAlgorithm` TEXT, `trustedHostKeySha256` TEXT, FOREIGN KEY(`keyId`) REFERENCES `ssh_keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `hostname` TEXT NOT NULL, `port` INTEGER NOT NULL, `username` TEXT NOT NULL, `keyId` INTEGER NOT NULL, `maxAutoPort` INTEGER NOT NULL, `skipPortsBelow` INTEGER NOT NULL, `scanIntervalSec` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `lastConnectedAt` INTEGER, `lastBootstrapAt` INTEGER, `pocketshellInstalled` INTEGER, `pocketshellLastDetectedAt` INTEGER, `pocketshellCliVersion` TEXT, `pocketshellExpectedCliVersion` TEXT, `pocketshellVersionCompatible` INTEGER, `pocketshellDaemonRunning` INTEGER, `pocketshellDaemonEnabled` INTEGER, `usageCommandOverride` TEXT, `treeIdentity` TEXT NOT NULL, `trustedHostKeyAlgorithm` TEXT, `trustedHostKeySha256` TEXT, FOREIGN KEY(`keyId`) REFERENCES `ssh_keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "id",
@@ -77,11 +77,6 @@
           {
             "fieldPath": "lastConnectedAt",
             "columnName": "lastConnectedAt",
-            "affinity": "INTEGER"
-          },
-          {
-            "fieldPath": "tmuxInstalled",
-            "columnName": "tmuxInstalled",
             "affinity": "INTEGER"
           },
           {
@@ -782,7 +777,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0bc22516a37126eff991d50c64e39a78')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '08d40b0e3508acf5ffa4f2378d79325e')"
     ]
   }
 }

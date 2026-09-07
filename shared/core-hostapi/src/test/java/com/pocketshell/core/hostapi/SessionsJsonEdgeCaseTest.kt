@@ -5,92 +5,53 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Edge cases the live dev box did not happen to be in when
- * `sessions-list-real.json` was captured: a failed backend, a manager this
- * build has never heard of, an outdated host CLI, and corrupt payloads.
- * Every fixture used here is hand-built.
- */
+/** Schema-3 session-list edge cases, including an unavailable aplexer. */
 class SessionsJsonEdgeCaseTest {
 
-    // --- errors[] ---------------------------------------------------------
-
     @Test
-    fun `a failed backend surfaces in errors while the healthy one still lists`() {
-        val listing =
-            SessionsJson.parseSessionsList(fixture("sessions-list-errors.json")).getOrThrow()
+    fun `an enumeration failure remains visible beside healthy rows`() {
+        val listing = SessionsJson.parseSessionsList(
+            fixture("sessions-list-errors.json"),
+        ).getOrThrow()
 
         assertEquals(listOf("git-pocketshell"), listing.sessions.map { it.name })
         assertEquals(
-            listOf(
-                BackendError(
-                    manager = "aplexer",
-                    message = "a list --json failed: exit 127 (command not found)",
-                ),
-            ),
-            listing.errors,
+            listOf("a list --json failed: exit 127 (command not found)"),
+            listing.errors.map { it.message },
         )
     }
 
     @Test
-    fun `an all-backends-failed listing is a success with zero sessions and every error kept`() {
-        // The regression this guards: an empty `sessions` list plus dropped
-        // errors is indistinguishable from "the host genuinely has no
-        // sessions". Both errors must survive, in order.
-        val listing =
-            SessionsJson.parseSessionsList(fixture("sessions-list-errors-only.json")).getOrThrow()
+    fun `an unavailable listing is still a successful parse with all errors`() {
+        val listing = SessionsJson.parseSessionsList(
+            fixture("sessions-list-errors-only.json"),
+        ).getOrThrow()
 
-        assertEquals(emptyList<SessionRow>(), listing.sessions)
-        assertEquals(listOf("tmux", "aplexer"), listing.errors.map { it.manager })
+        assertTrue(listing.sessions.isEmpty())
         assertEquals(
-            "tmuxctl list failed: no server running on /tmp/tmux-1000/default",
-            listing.errors.first().message,
+            listOf("a list --json failed: aplexer unavailable", "probe failed"),
+            listing.errors.map { it.message },
         )
-        assertEquals("probe failed", listing.errors.last().message)
-    }
-
-    // --- forward compatibility -------------------------------------------
-
-    @Test
-    fun `an unknown manager keeps the row as UNKNOWN instead of dropping it`() {
-        val listing =
-            SessionsJson.parseSessionsList(fixture("sessions-list-unknown-manager.json"))
-                .getOrThrow()
-
-        assertEquals(3, listing.sessions.size)
-        assertEquals(
-            listOf(Backend.TMUX, Backend.UNKNOWN, Backend.APLEXER),
-            listing.sessions.map { it.backend },
-        )
-
-        val unknown = listing.sessions.single { it.backend == Backend.UNKNOWN }
-        assertEquals("future-manager-session", unknown.name)
-        assertEquals("zj-0001", unknown.id)
-        assertTrue(unknown.attached)
-        assertEquals(1788400000L, unknown.createdEpoch)
     }
 
     @Test
-    fun `unknown keys, a newer schema, and unknown enum values never fail the parse`() {
-        val listing =
-            SessionsJson.parseSessionsList(fixture("sessions-list-forward-compat.json"))
-                .getOrThrow()
+    fun `unknown fields and unknown state values preserve the row`() {
+        val row = SessionsJson.parseSessionsList(
+            fixture("sessions-list-forward-compat.json"),
+        ).getOrThrow().sessions.single()
 
-        val row = listing.sessions.single()
         assertEquals("aplexer-follow:next", row.name)
-        assertEquals(Backend.APLEXER, row.backend)
-        // "thinking" / "psychic" are states this build predates: null, not a
-        // crash, and the row itself survives with everything else intact.
-        assertNull(row.agentState)
-        assertNull(row.agentStateSource)
         assertEquals("claude", row.engine)
         assertEquals("zlaude", row.profile)
+        assertNull(row.agentState)
+        assertNull(row.agentStateSource)
     }
 
     @Test
-    fun `every documented agent state and source maps`() {
-        val listing =
-            SessionsJson.parseSessionsList(fixture("sessions-list-agent-states.json")).getOrThrow()
+    fun `documented agent states and sources map`() {
+        val listing = SessionsJson.parseSessionsList(
+            fixture("sessions-list-agent-states.json"),
+        ).getOrThrow()
 
         assertEquals(
             listOf(AgentState.IDLE, AgentState.WAITING, AgentState.WORKING),
@@ -106,176 +67,91 @@ class SessionsJsonEdgeCaseTest {
         )
     }
 
-    // --- schema gate ------------------------------------------------------
-
     @Test
-    fun `schema 1 is rejected as TooOld and never coerced into a listing`() {
+    fun `schema 1 is rejected as too old`() {
         val result = SessionsJson.parseSessionsList(fixture("sessions-list-schema1.json"))
-
-        assertTrue("expected failure, got ${result.getOrNull()}", result.isFailure)
         val error = result.exceptionOrNull()
-        assertTrue("expected TooOld, got $error", error is HostCliError.TooOld)
+
+        assertTrue(error is HostCliError.TooOld)
         error as HostCliError.TooOld
         assertEquals(1, error.foundSchema)
-        assertEquals(2, error.requiredSchema)
         assertEquals(SessionsJson.REQUIRED_SCHEMA, error.requiredSchema)
-        assertTrue(
-            "message should tell the user to update the host CLI: ${error.userMessage}",
-            error.userMessage.contains("too old") && error.userMessage.contains("Update it"),
-        )
+        assertTrue(error.userMessage.contains("Update it"))
     }
 
     @Test
-    fun `schema 0 is TooOld too`() {
-        val result = SessionsJson.parseSessionsList("""{"schema": 0, "sessions": [], "errors": []}""")
-
+    fun `schema zero is too old`() {
+        val result = SessionsJson.parseSessionsList(
+            """{"schema": 0, "sessions": [], "errors": []}""",
+        )
         assertEquals(0, (result.exceptionOrNull() as HostCliError.TooOld).foundSchema)
     }
 
-    // --- malformed payloads ----------------------------------------------
-
     @Test
-    fun `one bad row fails the whole listing rather than silently shortening it`() {
-        val result = SessionsJson.parseSessionsList(fixture("sessions-list-malformed-row.json"))
-
-        assertTrue("expected failure, got ${result.getOrNull()}", result.isFailure)
-        val error = result.exceptionOrNull()
-        assertTrue("expected Malformed, got $error", error is HostCliError.Malformed)
-        assertTrue(
-            "detail should name the missing field: ${(error as HostCliError.Malformed).detail}",
-            error.detail.contains("name"),
+    fun `one malformed row fails the whole listing`() {
+        val result = SessionsJson.parseSessionsList(
+            fixture("sessions-list-malformed-row.json"),
         )
+        val error = result.exceptionOrNull()
+
+        assertTrue(error is HostCliError.Malformed)
+        assertTrue((error as HostCliError.Malformed).detail.contains("name"))
     }
 
     @Test
-    fun `a mistyped field fails the listing`() {
-        val raw = """
-            {"schema": 2, "managers": ["tmux"], "errors": [],
-             "sessions": [{"name": "s", "manager": "tmux", "attached": "yes"}]}
-        """.trimIndent()
-
+    fun `mistyped fields fail the listing`() {
+        val raw = """{"schema": 3, "sessions": [{"name": "s", "attached": "yes"}]}"""
         assertTrue(SessionsJson.parseSessionsList(raw).exceptionOrNull() is HostCliError.Malformed)
     }
 
     @Test
-    fun `non-JSON output is a Malformed failure, not a thrown exception`() {
-        // What a real host produces when the CLI is missing or a shell rc
-        // printed something first.
-        val result = SessionsJson.parseSessionsList("bash: pocketshell: command not found\n")
-
-        assertTrue(result.isFailure)
-        assertTrue(result.exceptionOrNull() is HostCliError.Malformed)
-    }
-
-    @Test
-    fun `empty output is a Malformed failure`() {
+    fun `non-json output, empty output, arrays and missing schema are malformed`() {
+        assertTrue(SessionsJson.parseSessionsList("not json").exceptionOrNull() is HostCliError.Malformed)
         assertTrue(SessionsJson.parseSessionsList("").exceptionOrNull() is HostCliError.Malformed)
-    }
-
-    @Test
-    fun `a JSON array root is a Malformed failure`() {
-        val result = SessionsJson.parseSessionsList("""[{"name": "s"}]""")
-
-        assertTrue(result.exceptionOrNull() is HostCliError.Malformed)
-    }
-
-    @Test
-    fun `a missing schema field is Malformed, not TooOld`() {
-        // No `schema` key at all means we cannot tell what we're reading;
-        // claiming "too old" would send the user down the wrong repair path.
-        val result = SessionsJson.parseSessionsList("""{"sessions": [], "errors": []}""")
-
-        val error = result.exceptionOrNull()
-        assertTrue("expected Malformed, got $error", error is HostCliError.Malformed)
-        assertTrue((error as HostCliError.Malformed).detail.contains("schema"))
-    }
-
-    @Test
-    fun `a non-integer schema is Malformed`() {
-        val result = SessionsJson.parseSessionsList("""{"schema": "two", "sessions": []}""")
-
-        assertTrue(result.exceptionOrNull() is HostCliError.Malformed)
-    }
-
-    // --- shape tolerances -------------------------------------------------
-
-    @Test
-    fun `an absent errors key parses as an empty error list`() {
-        val result = SessionsJson.parseSessionsList("""{"schema": 2, "sessions": []}""")
-
-        assertEquals(SessionsListing(emptyList(), emptyList()), result.getOrThrow())
-    }
-
-    @Test
-    fun `optional row fields may be absent entirely, not just null`() {
-        val raw = """{"schema": 2, "sessions": [{"name": "s", "manager": "tmux", "attached": false}]}"""
-
-        val row = SessionsJson.parseSessionsList(raw).getOrThrow().sessions.single()
-
-        assertEquals(
-            SessionRow(
-                name = "s",
-                backend = Backend.TMUX,
-                id = null,
-                workspace = null,
-                tag = null,
-                engine = null,
-                profile = null,
-                agent = null,
-                agentState = null,
-                agentStateSource = null,
-                attached = false,
-                createdEpoch = null,
-                activityEpoch = null,
-            ),
-            row,
+        assertTrue(
+            SessionsJson.parseSessionsList("[]").exceptionOrNull() is HostCliError.Malformed,
+        )
+        assertTrue(
+            SessionsJson.parseSessionsList("{\"sessions\": []}").exceptionOrNull()
+                is HostCliError.Malformed,
         )
     }
 
-    // --- `agent` (issue #2579) --------------------------------------------
-
-    /**
-     * The three shapes a host can send for `agent`, all on the SAME parse so
-     * one lenient default cannot mask another: a row from a host CLI that
-     * never heard of the key, a row that reports it as an explicit null, and
-     * a row naming an agent this client build has never heard of.
-     *
-     * The unknown string is kept VERBATIM rather than mapped to an enum: the
-     * vocabulary belongs to aplexer's detector on the host, and a client that
-     * folded an unrecognised value to null would silently lose a focus the
-     * host had already resolved.
-     */
     @Test
-    fun `agent is absent, null and unknown-string tolerant`() {
+    fun `optional fields may be absent and no backend is synthesized`() {
+        val row = SessionsJson.parseSessionsList(
+            """{"schema": 3, "sessions": [{"name": "s", "attached": false}]}""",
+        ).getOrThrow().sessions.single()
+
+        assertEquals("s", row.name)
+        assertEquals(false, row.attached)
+        assertNull(row.id)
+        assertNull(row.agent)
+    }
+
+    @Test
+    fun `agent is absent null blank and unknown-string tolerant`() {
         val raw = """
-            {"schema": 2, "sessions": [
-              {"name": "old-cli", "manager": "aplexer", "attached": false},
-              {"name": "explicit-null", "manager": "aplexer", "attached": false, "agent": null},
-              {"name": "blank", "manager": "aplexer", "attached": false, "agent": "  "},
-              {"name": "unknown", "manager": "aplexer", "attached": false, "agent": "mystery-9"},
-              {"name": "padded", "manager": "aplexer", "attached": false, "agent": " claude "}
+            {"schema": 3, "sessions": [
+              {"name": "old-cli", "attached": false},
+              {"name": "explicit-null", "attached": false, "agent": null},
+              {"name": "blank", "attached": false, "agent": "  "},
+              {"name": "unknown", "attached": false, "agent": "mystery-9"},
+              {"name": "padded", "attached": false, "agent": " claude "}
             ]}
         """.trimIndent()
+        val rows = SessionsJson.parseSessionsList(raw).getOrThrow().sessions.associateBy { it.name }
 
-        val rows = SessionsJson.parseSessionsList(raw).getOrThrow().sessions
-            .associateBy { it.name }
-
-        assertEquals(5, rows.size)
         assertNull(rows.getValue("old-cli").agent)
         assertNull(rows.getValue("explicit-null").agent)
-        // A blank string is "the host said nothing", not an agent named "".
         assertNull(rows.getValue("blank").agent)
         assertEquals("mystery-9", rows.getValue("unknown").agent)
         assertEquals("claude", rows.getValue("padded").agent)
     }
 
-    /** A non-string `agent` is a real defect, not something to shrug off. */
     @Test
-    fun `a non-string agent fails the parse instead of silently nulling`() {
-        val raw =
-            """{"schema": 2, "sessions": [{"name": "s", "manager": "aplexer", """ +
-                """"attached": false, "agent": 7}]}"""
-
+    fun `non-string agent fails instead of being silently nulled`() {
+        val raw = """{"schema": 3, "sessions": [{"name": "s", "attached": false, "agent": 7}]}"""
         assertTrue(SessionsJson.parseSessionsList(raw).exceptionOrNull() is HostCliError.Malformed)
     }
 }

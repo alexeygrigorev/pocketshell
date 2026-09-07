@@ -38,7 +38,7 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * Presentational only — selection state and the click callback are owned by
  * the caller. [segmentTag] lets a call site attach a stable per-segment test
- * tag (e.g. the tmux session screen tags index 0 as the "Terminal" segment).
+ * tag (e.g. the session screen tags index 0 as the "Terminal" segment).
  *
  * Sizing matches the mockup's compact header control: a 32dp-tall track with
  * 8/4dp segment padding so two short labels fit inside a 56dp toolbar row.

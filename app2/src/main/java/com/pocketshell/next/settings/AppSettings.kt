@@ -13,7 +13,7 @@ package com.pocketshell.next.settings
  *
  * | Dropped | Why |
  * | --- | --- |
- * | `tmuxOnAttachByDefault` | Plan P-6 drop list. app2 always attaches through the host CLI; there is no plain-SSH branch to prefer. |
+ * | `aplexerOnAttachByDefault` | Plan P-6 drop list. app2 always attaches through the host CLI; there is no plain-SSH branch to prefer. |
  * | `outboundDeliveryAuthority` (+ enum) | Plan P-6 drop list. It selected between two outbound-queue implementations, both deleted. |
  * | `diagnosticsRecordingEnabled` | The connection-journal recorder subsystem is not ported (plan P-10, audit finding #5). |
  * | `terminalKeyboardMode` | app2's terminal pins char-based input (see `TerminalHostView`'s client) — a smart-text mode no longer exists to select. |

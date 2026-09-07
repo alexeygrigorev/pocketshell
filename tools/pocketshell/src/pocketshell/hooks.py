@@ -264,37 +264,10 @@ stop and never injects a follow-up (integration only; see D26).
 """
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 
 EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__
-
-
-def record_tmux_agent_state(state):
-    if "TMUX" not in os.environ:
-        return
-    option_value = {
-        "FINISHED": "idle",
-        "WAITING_FOR_INPUT": "waiting_for_input",
-    }.get(state)
-    if option_value is None:
-        return
-    try:
-        subprocess.run(
-            ["tmux", "set-option", "@ps_agent_state", option_value],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        subprocess.run(
-            ["tmux", "set-option", "@ps_agent_state_updated_at", datetime.now(timezone.utc).isoformat()],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def main():
@@ -327,7 +300,6 @@ def main():
     os.makedirs(os.path.dirname(EVENTS_FILE), exist_ok=True)
     with open(EVENTS_FILE, "a") as handle:
         handle.write(json.dumps(record) + "\\n")
-    record_tmux_agent_state(state)
     # Exit clean with no stdout so Claude proceeds with the stop.
     sys.exit(0)
 
@@ -348,37 +320,10 @@ event bus configured at install time.
 """
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 
 EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__
-
-
-def record_tmux_agent_state(state):
-    if "TMUX" not in os.environ:
-        return
-    option_value = {
-        "FINISHED": "idle",
-        "WAITING_FOR_INPUT": "waiting_for_input",
-    }.get(state)
-    if option_value is None:
-        return
-    try:
-        subprocess.run(
-            ["tmux", "set-option", "@ps_agent_state", option_value],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        subprocess.run(
-            ["tmux", "set-option", "@ps_agent_state_updated_at", datetime.now(timezone.utc).isoformat()],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def main():
@@ -405,7 +350,6 @@ def main():
     os.makedirs(os.path.dirname(EVENTS_FILE), exist_ok=True)
     with open(EVENTS_FILE, "a") as handle:
         handle.write(json.dumps(record) + "\\n")
-    record_tmux_agent_state(state)
     sys.exit(0)
 
 
@@ -423,31 +367,9 @@ _OPENCODE_PLUGIN_SOURCE = '''\
 // (WAITING_FOR_INPUT), or errors (ERROR). Integration only — no
 // continue/stop decision (see D26).
 import fs from "node:fs";
-import child_process from "node:child_process";
 import path from "node:path";
 
 const EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__;
-
-function recordTmuxAgentState(state) {
-  if (!process.env.TMUX) return;
-  const value = {
-    FINISHED: "idle",
-    WAITING_FOR_INPUT: "waiting_for_input",
-  }[state];
-  if (!value) return;
-  try {
-    child_process.spawnSync("tmux", ["set-option", "@ps_agent_state", value], {
-      stdio: "ignore",
-    });
-    child_process.spawnSync(
-      "tmux",
-      ["set-option", "@ps_agent_state_updated_at", new Date().toISOString()],
-      { stdio: "ignore" },
-    );
-  } catch (e) {
-    // best-effort; never throw out of a plugin hook
-  }
-}
 
 export const PocketShellIdleSignal = async () => {
   function emit(state, event) {
@@ -462,7 +384,6 @@ export const PocketShellIdleSignal = async () => {
     try {
       fs.mkdirSync(path.dirname(EVENTS_FILE), { recursive: true });
       fs.appendFileSync(EVENTS_FILE, JSON.stringify(rec) + "\\n");
-      recordTmuxAgentState(state);
     } catch (e) {
       // best-effort; never throw out of a plugin hook
     }

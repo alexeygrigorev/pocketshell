@@ -4,12 +4,12 @@ package com.pocketshell.uikit.model
  * Per-host bootstrap / setup readiness as displayed on `HostCard`.
  *
  * Issue #120: the host list previously had no visible signal for whether
- * a saved host already had the server-side tooling (`tmux`, the
- * `pocketshell` CLI, the jobs daemon) installed. The card now renders a
+ * a saved host already had the server-side tooling (`aplexer` and the
+ * `pocketshell` CLI) installed. The card now renders a
  * small badge to the right of the host name with three states:
  *
  * - [Ready] — the most recent bootstrap probe reported every required
- *   tool installed and the pocketshell jobs daemon active. Tapping the
+ *   tool installed. Tapping the
  *   badge is a no-op (informational).
  * - [NeedsSetup] — the most recent probe reported one or more required
  *   tools missing (or the daemon disabled). Tapping the badge opens the
@@ -19,10 +19,8 @@ package com.pocketshell.uikit.model
  * - [CliUpdateNeeded] — the remote `pocketshell` CLI exists, but its
  *   version does not match the app-compatible helper version. Tapping
  *   the badge opens the bootstrap sheet with an upgrade action.
- * - [OptionalUnavailable] — required SSH/tmux/CLI setup is ready, but
+ * - [OptionalUnavailable] — required SSH/aplexer/CLI setup is ready, but
  *   optional helper capability state is unavailable or unverified.
- * - [DaemonDisabled] — required SSH/tmux/CLI setup is ready, but the
- *   optional jobs daemon is stopped or disabled.
  * - [Unknown] — there is no cached probe result yet (cold launch with
  *   saved hosts) OR the cache is stale and a probe has not landed. The
  *   ViewModel triggers a background re-probe on first composition; the
@@ -37,6 +35,5 @@ enum class HostSetupState {
     NeedsSetup,
     CliUpdateNeeded,
     OptionalUnavailable,
-    DaemonDisabled,
     Unknown,
 }

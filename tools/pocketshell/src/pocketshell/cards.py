@@ -1,9 +1,9 @@
 """Generic per-session typed-card store — the agent→app "push feed" (epic #859).
 
 A running agent (Claude/Codex on the host) pushes a **typed card** to the
-PocketShell app, scoped to the **current tmux session**; the app renders each
+PocketShell app, scoped to the **current aplexer session**; the app renders each
 card by its type and writes interaction state back. This module is the host
-side of that channel: a **generic** typed-card store keyed by tmux session,
+side of that channel: a **generic** typed-card store keyed by session,
 with a **type registry**. v1 registers ONE card type — ``checklist`` — but the
 store + registry are deliberately type-agnostic so adding ``note`` (mark-as-read)
 or ``choice``/``approval`` later is just a new schema + handler, no new
@@ -30,7 +30,7 @@ For the ``checklist`` type:
 Storage
 -------
 
-One YAML document per tmux session under ``~/.pocketshell/cards/<session>.yaml``
+One YAML document per session under ``~/.pocketshell/cards/<session>.yaml``
 (mirrors the ``reviews/`` inbox convention #714 — but two-way), holding the
 session's list of cards. The app reads it over the warm session (D21, no new
 connection) via ``pocketshell push get --json`` and writes interaction state
@@ -147,7 +147,7 @@ def resolve_paths(
 
 
 def _encode_session(session: str) -> str:
-    """Reversibly encode a tmux session as one safe path segment."""
+    """Reversibly encode a session as one safe path segment."""
     encoded = base64.urlsafe_b64encode(session.encode("utf-8")).decode("ascii")
     return "s-" + encoded.rstrip("=")
 
@@ -247,7 +247,7 @@ def _session_lock(path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Session auto-detection ($TMUX / `tmux display-message -p '#S'`)
+# Session auto-detection
 # ---------------------------------------------------------------------------
 
 
@@ -256,13 +256,12 @@ def detect_session(
     explicit: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
-    """Resolve the target tmux session.
+    """Resolve the target session.
 
     Precedence:
 
     1. ``explicit`` (the ``--session`` CLI override) when given.
-    2. ``tmux display-message -p '#S'`` when ``$TMUX`` is set (we are inside a
-       tmux client) — the authoritative current-session name.
+    2. ``$POCKETSHELL_SESSION`` when set by the session workload.
 
     Returns ``None`` when neither yields a session (the CLI then errors with a
     clear message rather than guessing).
@@ -270,36 +269,8 @@ def detect_session(
     if explicit and explicit.strip():
         return explicit.strip()
     env_map = env if env is not None else os.environ
-    if not env_map.get("TMUX"):
-        return None
-    return _tmux_current_session()
-
-
-def _tmux_current_session() -> Optional[str]:
-    """Return the current tmux session name via ``tmux display-message``.
-
-    Pulled out so tests can monkeypatch it. Returns ``None`` if ``tmux`` is
-    missing or the command fails.
-    """
-    import shutil
-    import subprocess
-
-    tmux = shutil.which("tmux")
-    if tmux is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [tmux, "display-message", "-p", "#S"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if completed.returncode != 0:
-        return None
-    name = completed.stdout.strip()
-    return name or None
+    session = env_map.get("POCKETSHELL_SESSION", "").strip()
+    return session or None
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +621,7 @@ def apply_interaction(
 #
 # These verbs are registered onto the EXISTING `push` group (FCM lives there
 # too) by `cli.py`. The app only ever execs `pocketshell push <verb>` over its
-# warm SSH session (D21); the agent calls the same verbs from inside its tmux
+    # warm SSH session (D21); the agent calls the same verbs from inside its
 # session.
 # ---------------------------------------------------------------------------
 
@@ -659,8 +630,8 @@ def _require_session(explicit: Optional[str]) -> str:
     session = detect_session(explicit=explicit)
     if session is None:
         raise click.ClickException(
-            "could not determine the tmux session: pass --session or run "
-            "inside tmux ($TMUX unset / `tmux display-message -p '#S'` failed)."
+            "could not determine the session: pass --session or set "
+            "POCKETSHELL_SESSION in the workload environment."
         )
     return session
 
@@ -711,7 +682,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
         multiple=True,
         help="A checklist item (repeatable). Alternative to piping markdown on stdin.",
     )
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_checklist(
         title: Optional[str],
         card_id: str,
@@ -721,7 +692,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
         """Create/replace the session's checklist card from stdin markdown or --item.
 
         Reads ``- [ ] item`` markdown on stdin, OR takes repeated ``--item``
-        flags. The session is auto-detected from ``$TMUX`` (override with
+        flags. The session is auto-detected from ``$POCKETSHELL_SESSION`` (override with
         ``--session``). A re-push fully replaces the card of that id.
         """
         target = _require_session(session)
@@ -759,7 +730,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
 
     @push_group.command("get")
     @click.option("--json", "as_json", is_flag=True, help="Emit the cards as a JSON array (for the app).")
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_get(as_json: bool, session: Optional[str]) -> None:
         """Return the session's cards (human/YAML by default, --json for the app)."""
         # No notify (#1446 audit): read-only query, upserts no card. The app is
@@ -786,7 +757,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @push_group.command("status")
     @click.option("--id", "card_id", default=None, help="Limit to one card id.")
     @click.option("--json", "as_json", is_flag=True, help="Emit interaction state as JSON.")
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_status(card_id: Optional[str], as_json: bool, session: Optional[str]) -> None:
         """Report interaction state — which checklist items the human has ticked."""
         # No notify (#1446 audit): read-only query, upserts no card.
@@ -822,7 +793,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @click.option("--id", "card_id", required=True, help="The checklist card id.")
     @click.option("--item", "item_id", required=True, help="The item id to (un)check.")
     @click.option("--done/--undone", "done", default=True, help="Tick (default) or untick the item.")
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_check(card_id: str, item_id: str, done: bool, session: Optional[str]) -> None:
         """Set a checklist item's checked state (this is what the app's tick calls)."""
         # No notify (#1446 audit): this is the APP writing back the human's tick,
@@ -858,7 +829,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
         default=None,
         help="The note body. Alternative to piping the message on stdin.",
     )
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_note(
         title: Optional[str],
         card_id: str,
@@ -868,7 +839,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
         """Create/replace the session's note card from --text or piped stdin.
 
         A note is a non-interactive message the human marks read (``push read``).
-        The session is auto-detected from ``$TMUX`` (override with ``--session``).
+        The session is auto-detected from ``$POCKETSHELL_SESSION`` (override with ``--session``).
         A re-push fully replaces the card of that id (hard-cut, D22).
         """
         target = _require_session(session)
@@ -899,7 +870,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @push_group.command("read")
     @click.option("--id", "card_id", required=True, help="The note card id.")
     @click.option("--read/--unread", "read", default=True, help="Mark read (default) or unread.")
-    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected session.")
     def push_read(card_id: str, read: bool, session: Optional[str]) -> None:
         """Set a note's read state (this is what the app's "mark read" calls)."""
         # No notify (#1446 audit): this is the APP writing back "human read it",

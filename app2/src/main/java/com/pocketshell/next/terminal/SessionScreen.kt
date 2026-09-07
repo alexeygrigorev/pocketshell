@@ -175,7 +175,7 @@ fun SessionRoute(
  * The session column is a plain [Modifier.fillMaxSize] — no `imePadding`, no
  * pan. The window is `SOFT_INPUT_ADJUST_NOTHING` (see [com.pocketshell.next.MainActivity]),
  * so the OS neither resizes nor pans when the keyboard shows. The grid stays
- * put; [onResized] does not fire; tmux does not reflow. The composer and
+ * put; [onResized] does not fire; aplexer does not reflow. The composer and
  * hotkeys sheets are [androidx.compose.material3.ModalBottomSheet]s with their
  * own IME policy, so Send/mic stay above the keyboard independently of this
  * column.

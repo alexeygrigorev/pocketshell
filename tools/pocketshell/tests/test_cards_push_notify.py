@@ -38,7 +38,6 @@ def _env(tmp_path: Path) -> dict[str, str]:
     """CLI env pointing the card store at tmp_path with a deterministic session."""
     return {
         "POCKETSHELL_CARDS_DIR": str(tmp_path / "pocketshell" / "cards"),
-        "TMUX": "/tmp/fake-tmux,1,0",
     }
 
 

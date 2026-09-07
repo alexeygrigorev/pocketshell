@@ -13,6 +13,17 @@ checkout on `main` whose `HEAD` already equals `origin/main` — it does not
 accept a release-branch worktree, so tagging always happens after that
 branch's SHA has reached `main`, never before.
 
+## Product note for the next release
+
+The #2561 session-runtime cut ships an aplexer-only product contract. The host
+CLI, Android schema, Room storage, Docker agents fixture, and app2 journeys all
+use real aplexer sessions. Existing Room databases migrate from schema 20 to
+21; that migration rebuilds `hosts` and drops the obsolete `tmuxInstalled`
+capability column. Earlier migration SQL and exported schemas keep that column
+name only because Room must first open databases at versions 1–20. It is not a
+runtime compatibility path and does not appear in the current entity, DAO, or
+schema 21.
+
 ## The nightly fault gate blocks the tag, full stop (D37)
 
 `scripts/release-emulator-validation.sh` runs
@@ -229,7 +240,7 @@ Green means, for this candidate SHA:
 
 The chain itself got shorter with the rewrite. `release-emulator-validation.sh`
 is now nightly-fault guard -> pre-release confidence gate -> publish; the four
-downstream walkthrough stages (terminal-lab, tmux-existing-session, the
+downstream walkthrough stages (terminal-lab, legacy session-attach, the
 setup-detection matrix, visual-audit) and the optional `TERMINAL_RELEASE_GATE=1`
 / `LONG_RUNNING_TEST=1` lanes were deleted with the `app` module androidTest
 classes they drove. The journeys did not go away: the confidence gate installs

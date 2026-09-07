@@ -2,16 +2,14 @@ package com.pocketshell.core.hostapi
 
 /**
  * One session as the host CLI listed it (`pocketshell sessions list --json`,
- * schema 2).
+ * schema 3).
  *
- * Everything except [name], [backend] and [attached] is nullable because the
- * two managers populate different subsets: a plain tmux session has no [id],
- * [tag], [engine] or [profile]; an aplexer session has all of them. A `null`
- * here always means "the host did not report this", never "unset by default".
+ * Everything except [name] and [attached] is nullable because the host may
+ * omit optional session metadata. A `null` here always means "the host did
+ * not report this", never "unset by default".
  */
 data class SessionRow(
     val name: String,
-    val backend: Backend,
     val id: String?,
     val workspace: String?,
     val tag: String?,
@@ -29,11 +27,8 @@ data class SessionRow(
      * aplexer owns the workload process tree, so it is the one place that can
      * answer; the client never probes for this itself.
      *
-     * `null` means the host reported no agent — a tmux row (always null), an
-     * aplexer session with no known agent among its workload's descendants,
-     * or, importantly, a host CLI old enough not to emit the key at all. All
-     * three collapse to "no focus" at the call site, so an older host keeps
-     * working unchanged.
+     * `null` means the host reported no agent, or a host CLI did not emit the
+     * key at all. Both collapse to "no focus" at the call site.
      */
     val agent: String?,
     val agentState: AgentState?,
@@ -46,19 +41,16 @@ data class SessionRow(
 /**
  * The whole `sessions list --json` document.
  *
- * [errors] is never dropped and never folded into an exception: a backend that
- * failed to enumerate produces an entry here while the other backend's sessions
- * still arrive. The UI must render a partial-list banner when it is non-empty,
- * otherwise "aplexer is broken" is indistinguishable from "aplexer has no
- * sessions" (the regression the host-side schema 2 was built to end).
+ * [errors] is never dropped and never folded into an exception. The UI must
+ * render the error when the host could not enumerate sessions, so an
+ * unavailable aplexer is distinguishable from an empty host.
  */
 data class SessionsListing(
     val sessions: List<SessionRow>,
-    val errors: List<BackendError>,
+    val errors: List<SessionListError>,
 )
 
-/** One backend's enumeration failure. [manager] is the raw wire string. */
-data class BackendError(
-    val manager: String,
+/** One session-list enumeration failure. */
+data class SessionListError(
     val message: String,
 )

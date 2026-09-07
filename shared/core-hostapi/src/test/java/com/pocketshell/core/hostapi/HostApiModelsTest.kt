@@ -11,17 +11,6 @@ import org.junit.Test
 class HostApiModelsTest {
 
     @Test
-    fun `backend wire mapping covers both managers and falls back to UNKNOWN`() {
-        assertEquals(Backend.TMUX, Backend.fromWire("tmux"))
-        assertEquals(Backend.APLEXER, Backend.fromWire("aplexer"))
-        assertEquals(Backend.UNKNOWN, Backend.fromWire("zellij"))
-        assertEquals(Backend.UNKNOWN, Backend.fromWire(""))
-        // Case is not normalised on purpose: the host emits lowercase, and
-        // quietly accepting "TMUX" would hide a host-side contract change.
-        assertEquals(Backend.UNKNOWN, Backend.fromWire("TMUX"))
-    }
-
-    @Test
     fun `agent state wire mapping`() {
         assertEquals(AgentState.IDLE, AgentState.fromWire("idle"))
         assertEquals(AgentState.WAITING, AgentState.fromWire("waiting"))

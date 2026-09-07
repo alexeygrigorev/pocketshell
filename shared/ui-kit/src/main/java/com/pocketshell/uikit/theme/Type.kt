@@ -111,7 +111,7 @@ object PocketShellType {
 
     /**
      * 13sp mono body (Δ7) — terminal-adjacent UI: host subtitles, paths, command
-     * chips, tmux names, tool-call previews. System monospace via
+     * chips, aplexer names, tool-call previews. System monospace via
      * [JetBrainsMonoFamily] (bundling deferred).
      */
     val bodyMono: TextStyle = TextStyle(

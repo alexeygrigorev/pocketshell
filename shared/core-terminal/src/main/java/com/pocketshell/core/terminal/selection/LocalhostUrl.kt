@@ -13,7 +13,7 @@ package com.pocketshell.core.terminal.selection
  * `Intent.ACTION_VIEW` at an address the phone cannot reach.
  *
  * This file is the pure, Android-free classification core so it is unit-tested
- * on the JVM. The terminal surface / tmux screen consume [classifyLocalhostUrl]
+ * on the JVM. The terminal surface consumes [classifyLocalhostUrl]
  * on the URL-tap path to decide whether to take the forward route.
  */
 

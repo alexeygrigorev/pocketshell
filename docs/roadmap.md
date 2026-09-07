@@ -1,69 +1,44 @@
 # Roadmap
 
-Rough sizing — wall-clock estimates assume one developer working steadily.
+The original phased plan is complete where it concerned the old terminal
+architecture. The current roadmap describes work that can be built on the
+app2 rewrite and the aplexer-only session contract.
 
-## Phase 0 — Foundation (1–2 weeks)
+## Current foundation
 
-Goal: a scaffold both apps can build on.
+- `app2` is the only Android application module.
+- `core-transport` owns sshj connections and PTYs.
+- `core-hostapi` speaks schema-3 `pocketshell sessions` JSON.
+- The host CLI creates, lists, attaches, and kills aplexer sessions only.
+- Room schema 21 removes the obsolete host session-runtime capability column.
+- Docker and emulator journeys use real pinned aplexer binaries.
 
-- Set up the `shared/` repo (or folder) with Gradle module structure
-- Extract `core-ssh` from `ssh-auto-forward-android`, swap JSch → sshj during the move
-- Extract `core-portfwd`, `core-storage`
-- Scaffold empty `core-tmux`, `core-terminal`, `ui-kit`
-- Vendor Termux `terminal-emulator` + `terminal-view` into `core-terminal`
-- New `pocketshell` Gradle project (`com.pocketshell.app`) consuming the shared modules
-- Render a single PTY in a Compose screen — proof of life
+## Near term
 
-## Phase 1 — Terminal that's pleasant on a phone (3–4 weeks)
+- Ship the lean-core release target after the current emulator journeys have
+  been reviewed on the maintainer's device.
+- Finish the remaining app2 session-menu chrome: reconnect, files, forwarding,
+  and quick session switching.
+- Improve aplexer-backed agent identity and state presentation once the host
+  contract is stable enough to expose it in the tree.
+- Keep the host CLI and APK versions in lockstep and maintain the real fixture
+  self-check as a release gate.
 
-Goal: even *without* tmux awareness, the terminal experience must clear the Termius bar — *and* the voice-first input story must work end-to-end.
+## Later
 
-- Build `ui-kit` core components (`HostCard`, `Breadcrumb`, `CommandChip`, `StatusDot`, `KeyBar`, `MicButton`)
-- Termius design tokens applied throughout
-- Key bar above keyboard (Esc/Tab/Ctrl/Alt/arrows — 8 slots, no chord palette per [D18](decisions.md))
-- Voice input: Whisper integration, prompt composer bottom sheet, inline dictation via mic in key bar
-- Command chips above keyboard, snippet library (per-host)
-- Smart selection (paths, URLs, errors → tap to copy)
-- Breadcrumb path bar (parses `pwd` from PTY)
-- Host management screens (reuse / adapt from `ssh-auto-forward-android`)
+- Port-forwarding polish and host setup recovery.
+- QR host sharing and biometric key handling improvements.
+- Home-screen session/tunnel status surfaces.
+- Mosh, only after a real UDP transport and a defined server installation path
+  exist.
 
-Checkpoint: use it daily for a few days. Does it beat Termius for your workflow? If not, fix before continuing.
+## Out of scope
 
-## Phase 2 — Tmux control mode (3–4 weeks)
+- Windows or desktop targets.
+- Cloud-stored terminal history.
+- Multi-user host configuration sync.
+- A second session runtime or compatibility path for retired host tooling.
 
-Goal: the moment it stops being "another SSH client."
-
-- `core-tmux`: `tmux -CC` client (parser for `%output`, `%session-changed`, `%window-add`, `%layout-change`, etc.)
-- Per-pane rendering, swipes between panes/windows
-- Cross-host session dashboard (sorted by recency via the `pocketshell` helper)
-- Session create / attach / detach / rename / kill
-- Host bootstrap flow: detect tmux, prompt to install if missing
-
-## Phase 3 — Workflow features (3–4 weeks)
-
-- Port forwarding panel (slide-over, reuses `core-portfwd` — the UI already exists in `ssh-auto-forward-android`)
-- Recurring jobs (delegates to remote `pocketshell jobs add/list/edit`)
-- Host bootstrap: detect `pocketshell`, offer one-tap install/upgrade, offer systemd user unit
-- Quick-send presets per session
-- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; runtime detection for all three agents from tmux pane cwd plus pane-scoped process confirmation; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
-- Usage panel: `core-usage` module wrapping `pocketshell usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
-- Agent monitoring chips (build/deploy/training status surfaced on dashboard)
-
-## Phase 4 — Polish (ongoing)
-
-- Biometric unlock for key passphrases
-- QR host sharing
-- Home-screen widget (active tunnels / sessions count)
-- Quick Settings tile (toggle forwarding)
-- Mosh support (deferred — requires shipping `mosh-server` binary or assuming remote install + UDP path)
-- Auto-start on boot
-- Crash reporting
-
-Phase 4 closure note: Mosh remains intentionally unsupported, not partially implemented. Current capability/status surfaces should keep reporting Mosh as unavailable until PocketShell has a real UDP transport path and a defined `mosh-server` installation/discovery strategy.
-
-## Out of scope (for now)
-
-- Windows / desktop targets
-- File transfer UI (SFTP) — can be added later if there's demand
-- Multi-user / team sync of host configs
-- Cloud-stored history
+See [architecture.md](architecture.md) for the shipped module map and
+[decisions.md](decisions.md) for locked choices. Historical rewrite plans are
+kept in git history; they are not implementation instructions for current work.

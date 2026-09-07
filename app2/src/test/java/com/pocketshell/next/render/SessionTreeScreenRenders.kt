@@ -5,7 +5,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import com.github.takahirom.roborazzi.captureRoboImage
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.SessionTreeScreen
 import com.pocketshell.next.tree.SessionTreeUiState
@@ -69,7 +68,6 @@ class SessionTreeScreenRenders {
             listOf(
                 SessionRow(
                     name = "claude-main",
-                    backend = Backend.TMUX,
                     id = null,
                     workspace = "/home/a/git/pocketshell",
                     tag = null,

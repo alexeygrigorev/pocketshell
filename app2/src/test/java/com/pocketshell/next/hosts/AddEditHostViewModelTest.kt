@@ -208,7 +208,6 @@ class AddEditHostViewModelTest {
                 port = 22,
                 username = "alexey",
                 keyId = keyId,
-                tmuxInstalled = true,
                 pocketshellInstalled = true,
                 pocketshellCliVersion = "1.2.3",
                 lastConnectedAt = 1234L,
@@ -223,7 +222,6 @@ class AddEditHostViewModelTest {
 
         val row = db.hostDao().getById(id)!!
         assertEquals("renamed", row.name)
-        assertEquals(true, row.tmuxInstalled)
         assertEquals(true, row.pocketshellInstalled)
         assertEquals("1.2.3", row.pocketshellCliVersion)
         assertEquals(1234L, row.lastConnectedAt)

@@ -1,6 +1,9 @@
 # PocketShell simplification plan — deletion-and-rewrite, 2026-09-02
 
-Scratch working doc, not committed process. Written after a read-only survey of
+Historical diagnosis, superseded by the shipped app2 architecture and the
+aplexer-only session contract in #2561. It is retained for rationale and
+review history; its old manager and socket designs are not supported product
+paths. Written after a read-only survey of
 `pocketshell` (HEAD b7fa7713), `~/git/pocketshell-electron` (origin/main b171078),
 `~/git/aplexer` (v0.1.1, HEAD ~3a816ba), and `~/git/tmuxctl` (HEAD 2026-08-27).
 

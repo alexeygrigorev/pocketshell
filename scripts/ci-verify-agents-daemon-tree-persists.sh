@@ -8,7 +8,7 @@ set -eo pipefail
 #
 # Confirm the 2239 fixture really IS the REAL daemon: `pocketshell tree`
 # round-trips a persist (upsert then get over a fresh exec returns the
-# collapsed node) AND reconcile diffs against the LIVE tmux server. A broken
+# collapsed node) AND reconcile diffs against the LIVE aplexer sessions. A broken
 # fixture fails the job loudly here instead of letting the journey pass
 # vacuously / self-skip. Mirrors the agents-old-cli mismatch sanity check.
 

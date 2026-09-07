@@ -17,7 +17,7 @@ import androidx.room.PrimaryKey
  *   their explicit label preserved, while new snippets default to `null`
  *   and let the UI render the derived label so the user is not asked to
  *   type the same content twice.
- * - [body] is the literal text sent over tmux when the snippet fires.
+ * - [body] is the literal text sent over aplexer when the snippet fires.
  * - [kind] discriminates command (`"command"`) from agent prompt
  *   (`"prompt"`). Stored as String to keep schema migrations open-ended;
  *   the parser layer above maps to a Kotlin enum.

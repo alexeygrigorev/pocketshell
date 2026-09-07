@@ -4,6 +4,12 @@ Codified from the journey-level UX audit in [#163](https://github.com/alexeygrig
 
 Material 3 is the base. Deviations are explicit and justified — never implicit.
 
+The placement and transition rules were first written against the pre-app2
+screen inventory. Current session surfaces are `SessionTreeScreen` and
+`SessionScreen`, backed by host-managed aplexer sessions. The old class names
+in the audit section are retained as historical evidence only; they are not
+supported product routes.
+
 The goal of this doc is not to constrain creativity. It is to keep the headline user journeys (`docs/`-tracked in [#163](https://github.com/alexeygrigorev/pocketshell/issues/163) under "Headline user journeys") visually consistent so that one screen's "back" gesture, "primary action", or "sheet open" feels identical to every other.
 
 ---
@@ -13,23 +19,23 @@ The goal of this doc is not to constrain creativity. It is to keep the headline 
 These describe **where** persistent UI elements live within a screen, so that moving across screens never makes the user re-learn the layout.
 
 1. **Back affordance — always top-left of the breadcrumb row.**
-   Rationale: matches the platform expectation for navigation depth. Applies to: every screen that can be popped (e.g. `TmuxSessionScreen` breadcrumb chevron, `AddEditHostScreen` close icon, `UsageScreen` back arrow).
+   Rationale: matches the platform expectation for navigation depth. Applies to: every screen that can be popped (e.g. `SessionScreen` breadcrumb chevron, `AddEditHostScreen` close icon, `UsageScreen` back arrow).
 2. **More / kebab menu — always top-right of the breadcrumb row.**
-   Rationale: secondary actions live opposite the primary back affordance; the row reads left-to-right as "go back ↔ peek at extras". Applies to: `TmuxSessionScreen` overflow menu, host-list overflow menu, `SessionScreen` actions menu.
+   Rationale: secondary actions live opposite the primary back affordance; the row reads left-to-right as "go back ↔ peek at extras". Applies to: `SessionScreen` overflow menu, host-list overflow menu, and session-tree actions.
 3. **Primary action FAB — always bottom-right, 56dp minimum.**
-   Rationale: thumb reachability on a Pixel 7 in one-handed grip; aligns with Material 3 FAB conventions. Applies to: `HostListScreen` `+` host FAB, `TmuxSessionScreen` mic FAB.
+   Rationale: thumb reachability on a Pixel 7 in one-handed grip; aligns with Material 3 FAB conventions. Applies to: `HostListScreen` `+` host FAB and `SessionScreen` mic FAB.
 4. **Status / connection line — directly below the breadcrumb, above any tab row.**
-   Rationale: status is a property of the current destination, so it must sit attached to the destination header, not floating above main content. Applies to: `TmuxSessionScreen` "connecting…" line at line 356, host-list usage strip, `SessionScreen` agent-detection chip.
+   Rationale: status is a property of the current destination, so it must sit attached to the destination header, not floating above main content. Applies to: `SessionScreen` connection line, host-list usage strip, and agent-detection chip.
 5. **Tab row — immediately below status, spans full width.**
-   Rationale: tabs are co-located controls for one destination; they must not float or change horizontal anchor between screens. Applies to: `TmuxSessionScreen` Terminal/Conversation tabs.
+   Rationale: tabs are co-located controls for one destination; they must not float or change horizontal anchor between screens. Applies to: `SessionScreen` Terminal/Conversation tabs.
 6. **Window strip — render only when `windows.size > 1`.**
-   Rationale: a strip with one item adds vertical chrome without choice; users learn to ignore strips that never act. Applies to: `TmuxSessionScreen` WindowStrip at line 400 (see Breakage 3).
+   Rationale: a strip with one item adds vertical chrome without choice; users learn to ignore strips that never act. Applies to: any multi-session or multi-pane strip that offers a choice.
 7. **Main content (terminal / conversation / form) — fills remaining vertical space, no fixed minimum.**
-   Rationale: the terminal viewport is the user's reason for being here; chrome shrinks before content does. Applies to: `TmuxSessionScreen` terminal pane, `SessionScreen` conversation list.
+   Rationale: the terminal viewport is the user's reason for being here; chrome shrinks before content does. Applies to: `SessionScreen` terminal pane and conversation list.
 8. **Bottom input controls — always above the keyboard when IME is visible, above the system navigation bar otherwise.**
    Rationale: input affordances must move with the IME so the user never has to hunt for them; `imePadding` is mandatory. Applies to: `PromptComposerSheet` action row, `SessionScreen` key bar, future conversation-reply input ([#160](https://github.com/alexeygrigorev/pocketshell/issues/160)).
 9. **Modal sheets — always slide from bottom (Material 3 `ModalBottomSheet`).**
-   Rationale: bottom is the input edge; sheets that come from any other edge break the "input lives at the bottom" mental model. Applies to: `PromptComposerSheet`, `HostTmuxSessionPickerSheet`, `BootstrapSheet`, `TmuxSessionDrawer`.
+   Rationale: bottom is the input edge; sheets that come from any other edge break the "input lives at the bottom" mental model. Applies to: `PromptComposerSheet`, `CreateSessionSheet`, and `BootstrapSheet`.
 10. **Conversation pane — inherits all placement rules of the terminal pane.**
     Rationale: Terminal and Conversation are sibling tabs on one screen; the user must not have to re-orient when switching tabs. Applies to: `SessionScreen` conversation view (which when [#160](https://github.com/alexeygrigorev/pocketshell/issues/160) lands gets bottom input controls per rule 8).
 
@@ -59,19 +65,23 @@ Material 3 reference tokens used below:
 5. **Status / banner appear or change — 100ms fade-in + 100ms slide-up, `motion-easing-standard`.**
    M3: snackbar adjacent. Subtle, informational, non-blocking. Applies to: connection-status line, usage chip, error strip.
 6. **Pane swipe (HorizontalPager) — 1:1 finger drag, spring snap on release, haptic tick at page boundary.**
-   M3: page indicator pattern. Already implemented in `TmuxSessionScreen` pane pager; documented here so it is not changed without consideration. Applies to: tmux pane swipe.
+   M3: page indicator pattern. Apply it to any current session pager only when the user is choosing among live panes or session views.
 7. **Breadcrumb — 150ms fade-in on first appearance, instant on recompose; live-dot status is a continuous pulse, not a transition.**
    M3: top-app-bar pattern. Pulsing dot is `motion-loop` continuous; the breadcrumb container itself transitions only on first mount. Applies to: `Breadcrumb` composable in `ui-kit`.
 8. **Hint / discoverable chip (agent detection, etc.) — 150ms fade-in with subtle elevation entrance; dismissible, dismissal remembered per session.**
-   M3: assist-chip pattern. Hints help, they do not startle. Applies to: agent-detected hint chip on `TmuxSessionScreen`.
+   M3: assist-chip pattern. Hints help, they do not startle. Applies to: agent-detected hint chip on `SessionScreen`.
 9. **Keyboard show / hide — OS-owned animation; app supplies `imePadding` and clips content correctly.**
    M3: IME-aware layout. No app-level transition required; trying to add one will fight the OS animator. Applies to: every screen with text input.
 10. **Error / crash recovery — 200ms fade-in for the error surface; "Reconnect" tap fades out the error and fades in the new connection status. No glitch / shake artifacts.**
-    M3: error-state pattern. Recovery should feel like normal navigation, not like a system fault. Applies to: SSH/tmux disconnect surfaces, full-screen error fallbacks.
+    M3: error-state pattern. Recovery should feel like normal navigation, not like a system fault. Applies to: SSH/session disconnect surfaces and full-screen error fallbacks.
 
 ---
 
-## Known Breakages
+## Known Breakages in the pre-app2 audit
+
+The following entries document the old implementation that informed the audit.
+They are retained for traceability and do not describe current routes or
+session-runtime behavior.
 
 Five concrete journey breakages identified in the [#163](https://github.com/alexeygrigorev/pocketshell/issues/163) audit. Treat this as a checklist for future UX work — when you change the cited file, cite the corresponding rule and either fix the breakage or note why it is still out of scope.
 

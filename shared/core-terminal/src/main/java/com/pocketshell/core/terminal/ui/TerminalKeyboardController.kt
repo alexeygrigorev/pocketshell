@@ -17,7 +17,7 @@ import com.termux.view.TerminalView
  * `requestFocus + InputMethodManager.showSoftInput` choreography through a
  * helper here keeps the `TerminalView` import inside the module that already
  * owns it and avoids accidental skew between `SessionScreen` and
- * `TmuxSessionScreen` (which both need exactly the same behaviour).
+ * the session screen (which needs exactly the same behaviour).
  *
  * The helper is deliberately a no-op when:
  *

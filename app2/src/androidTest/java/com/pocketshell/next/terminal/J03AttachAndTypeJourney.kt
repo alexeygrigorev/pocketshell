@@ -70,18 +70,18 @@ import org.junit.runner.RunWith
  * `TerminalView` in the running Activity — the exact text the renderer paints —
  * never ViewModel state (the D29 lesson: internal state green while the screen
  * is broken is the failure this project has already paid for). Each assertion
- * is then cross-checked against `tmux capture-pane -p` run over an INDEPENDENT
+ * is then cross-checked against `a capture --screen --plain` run over an INDEPENDENT
  * SSH connection, so "the phone shows it" and "the host has it" have to agree:
  * a device-only assertion could pass on locally echoed bytes that never left,
  * and a host-only assertion could pass with a black screen.
  *
  * ## Fixture
  *
- * The Docker `agents` fixture (see [AgentsFixture]). [seed] creates a REAL tmux
- * session on a real `tmuxctl-<name>` socket — the shape `pocketshell sessions
- * list` enumerates and `pocketshell sessions attach` resolves — with a pinned
- * `PS1` so "the shell prompt is on screen" is an assertable string rather than
- * a guess about Alpine's ash defaults.
+ * The Docker `agents` fixture (see [AgentsFixture]). [seed] creates a REAL
+ * aplexer session — the shape `pocketshell sessions list` enumerates and
+ * `pocketshell sessions attach` resolves — with a pinned `PS1` so "the shell
+ * prompt is on screen" is an assertable string rather than a shell-default
+ * guess.
  *
  * Bring the fixture up before running:
  * `docker compose -f tests/docker/docker-compose.yml up -d --build agents`
@@ -143,7 +143,7 @@ class J03AttachAndTypeJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J03_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j03_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -164,31 +164,20 @@ class J03AttachAndTypeJourney {
         )
     }
 
-    /**
-     * Creates the session on its own `tmuxctl-<name>` socket — the per-session
-     * socket convention `sessions attach` resolves against — and paints a known
-     * prompt plus a marker line into it.
-     *
-     * Recreated per test rather than reused, so a test that types into the pane
-     * cannot leave text behind that would make the NEXT test's assertion pass
-     * for the wrong reason.
-     */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        // `tmux -S <path>` binds the path as given and does NOT create its
-        // parent, unlike `-L`. The enumerator scans this exact directory.
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    /** Creates a real aplexer shell and paints a known prompt plus marker. */
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        // A pinned prompt: Alpine's ash default PS1 is not something a test
-        // should be guessing at, and this is still the shell's real prompt.
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+        )
         SystemClock.sleep(500)
-        val pane = capturePane()
-        check(squashed(pane).contains(BANNER)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
+        val screen = capturePane()
+        check(squashed(screen).contains(BANNER)) {
+            "the fixture aplexer session did not come up: a capture says\n$screen"
         }
     }
 
@@ -254,7 +243,7 @@ class J03AttachAndTypeJourney {
         // removes the row and tests nothing.
         openTree()
         awaitTag(sessionRowTag(SESSION))
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
 
@@ -534,7 +523,7 @@ class J03AttachAndTypeJourney {
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
                 "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n$last\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}" + compose.idleWedgeNote(),
         )
     }
@@ -692,8 +681,8 @@ class J03AttachAndTypeJourney {
      * INDEPENDENT SSH connection, and polled until it stops moving — a resize
      * crosses the wire asynchronously and asserting mid-flight would be a
      * flake generator. Then `stty size` is typed INTO the session and required
-     * to report that exact size: the pane geometry proves the resize reached
-     * tmux, and `stty` proves it reached the process that actually wraps text.
+     * to report that exact size: the aplexer screen geometry proves the resize reached
+     * the aplexer PTY, and `stty` proves it reached the process that actually wraps text.
      *
      * ## Why the whole thing is a RETRY loop, and why it pins the keyboard
      *
@@ -759,7 +748,7 @@ class J03AttachAndTypeJourney {
                 "${TIMEOUT_MS}ms (last host pane=$host).\n" +
                 "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n" + renderedTranscript() + "\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -806,7 +795,7 @@ class J03AttachAndTypeJourney {
     /**
      * The host's pane size once two consecutive reads agree.
      *
-     * A `SIGWINCH` and tmux's own redraw are not instantaneous, and the phone's
+     * A `SIGWINCH` and aplexer's redraw are not instantaneous, and the phone's
      * inset animation produces several intermediate sizes on the way, so a
      * single read right after a viewport change can catch any of them.
      */
@@ -826,16 +815,18 @@ class J03AttachAndTypeJourney {
         )
     }
 
-    /** `tmux display-message`, over the fixture's own connection, never the app's. */
+    /** Reads the live aplexer PTY size over an independent SSH connection. */
     private fun hostPaneSize(): RemoteSize? {
-        val raw = AgentsFixture.exec(
-            "tmux -S $SOCKET display-message -p -t '=$SESSION:' " +
-                "'#{pane_width} #{pane_height}' 2>/dev/null || true",
-        ).trim()
-        val match = Regex("""^(\d+) (\d+)$""").find(raw) ?: return null
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "\"printf 'J03HOSTSIZE '; stty size\" >/dev/null 2>&1 || true",
+        )
+        val raw = capturePane()
+        val match = Regex("""J03HOSTSIZE (\d+) (\d+)""").findAll(raw).lastOrNull()
+            ?: return null
         return RemoteSize(
-            cols = match.groupValues[1].toInt(),
-            rows = match.groupValues[2].toInt(),
+            cols = match.groupValues[2].toInt(),
+            rows = match.groupValues[1].toInt(),
         )
     }
 
@@ -1012,14 +1003,17 @@ class J03AttachAndTypeJourney {
      * turn a broken app connection into a broken-looking fixture.
      */
     private fun capturePane(): String =
-        AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:' 2>/dev/null || true")
+        AgentsFixture.exec(
+            "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain " +
+                "2>/dev/null || true",
+        )
 
     /**
      * Whitespace-free view of terminal text, for wrap-proof matching.
      *
      * A terminal hard-wraps at its column count, and the phone's column count
-     * is whatever the device's font metrics produced — so `capture-pane` and
-     * the rendered transcript can each split a marker across two rows at
+     * is whatever the device's font metrics produced — so the independent
+     * aplexer capture and the rendered transcript can each split a marker across two rows at
      * different points. Every string matched here is whitespace-free by
      * construction, so dropping whitespace makes the assertion independent of
      * the viewport width without weakening it.
@@ -1067,7 +1061,9 @@ class J03AttachAndTypeJourney {
 
         const val JOURNEY = "j03-attach-type"
 
-        const val SESSION = "j03-shell"
+        const val TAG = "j03-shell"
+        const val WORKSPACE = "/home/testuser"
+        const val SESSION = "testuser:j03-shell"
 
         /** `stty size`'s output: `rows cols`, on a line of its own. */
         val STTY_SIZE_LINE = Regex("""\d{1,4} \d{1,4}""")
@@ -1079,14 +1075,6 @@ class J03AttachAndTypeJourney {
          * under a loose match and `sleep 3600` from them under any match.
          */
         const val SLEEP_SECONDS = 987
-
-        /**
-         * The per-session socket convention `sessions attach` resolves against
-         * (and `pocketshell sessions list` enumerates). Written as a shell
-         * expression because only the host can expand `$(id -u)`.
-         */
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
 
         const val PROMPT = "J03READY\$"
         const val BANNER = "J03-FIXTURE-PANE"

@@ -21,7 +21,7 @@ package com.pocketshell.testsupport
  * project's contention headroom is decided and no per-file constant can drift
  * back down.
  *
- * 30 s matches the budget the already-migrated tmux pumps converged on
+ * 30 s matches the budget the already-migrated session pumps converged on
  * (`SLOW_FEED_DRAIN_TIMEOUT_MS`) and stays safely under `runTest`'s 60 s default
  * global timeout, so the pump's own HARD-FAIL message fires first instead of
  * `runTest` aborting the whole test with no diagnosis. It does NOT slow a
@@ -81,7 +81,7 @@ const val GENEROUS_SETTLE_DEADLINE_MS: Long = 30_000L
  * `Dispatchers.IO` continuation) passes it as [onTick] — that is precisely what
  * the injected drain exists for, and the helper still advances nothing itself.
  * #1048 originally read the invariant as a carve-out and left
- * `TmuxSessionWarmOpenTest.pumpUntil` (and its copy in
+ * the session warm-open pump (and its copy in
  * `Issue1574DeadReconnectTest`) hand-rolled; both then carried a 5 s real-time
  * budget that reds only under contention (#2017). They are migrated.
  *

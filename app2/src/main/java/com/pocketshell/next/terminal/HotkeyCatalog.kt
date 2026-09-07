@@ -10,7 +10,7 @@ const val HOTKEY_CTRL_FLOW_LABEL: String = "Ctrl+…"
 /**
  * Issue #1662 main page: a one-screenful catalog of common controls.
  *
- * Ported from v0.4.47 `TmuxHotkeyMainSections`. The old CTRL COMBOS, visible
+ * Ported from v0.4.47 `HotkeyMainSections`. The old CTRL COMBOS, visible
  * doubled tiles, sticky modifier, literal-letter grid, and expander are
  * deliberately gone. Arbitrary control chords live on [HOTKEY_CTRL_SECTIONS].
  */

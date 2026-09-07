@@ -46,7 +46,7 @@ import org.junit.runner.RunWith
  * Long-press → drag → Copy in the vendored selection action mode calls
  * `session.onCopyTextToClipboard`, and Paste calls
  * `session.onPasteTextFromClipboard`; both reach the session's client. With a
- * no-op client the menu items did nothing, silently. `OSC 52` (tmux
+ * no-op client the menu items did nothing, silently. `OSC 52` (terminal
  * `set-clipboard`, an agent copying a snippet) lands on the same copy path.
  *
  * These tests drive the vendored entry points the menu itself calls, on the

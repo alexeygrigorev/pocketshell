@@ -78,7 +78,7 @@ import org.junit.runner.RunWith
  * must never exist in the semantics tree across the whole cycle, not merely at
  * the end — and the recovered session must still be the SAME one: it renders
  * the SAME transcript it had before backgrounding (no re-attach, no `clear`)
- * and, after typing, the command shows up in the host's OWN `capture-pane`,
+ * and, after typing, the command shows up in the host's OWN `a capture`,
  * over an independent connection.
  *
  * Bring the fixture up before running:
@@ -138,7 +138,7 @@ class J06BackgroundGraceReturnJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J06_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j06_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -180,18 +180,19 @@ class J06BackgroundGraceReturnJourney {
         )
     }
 
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+        )
         SystemClock.sleep(500)
         val pane = capturePane()
         check(squashed(pane).contains(BANNER)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
+            "the fixture aplexer session did not come up: a capture says\n$pane"
         }
     }
 
@@ -464,7 +465,7 @@ class J06BackgroundGraceReturnJourney {
      * as "somebody ended this session on purpose" (issue #2477's discriminator,
      * whose own comment claimed "nothing in production calls that today" —
      * every 90-second background does) and put a `Failed` banner reading "the
-     * connection was closed" on screen, with no reconnect, over a tmux session
+     * connection was closed" on screen, with no reconnect, over an aplexer session
      * that was still running on the host. Tapping Retry from that banner then
      * reattached onto an emulator whose byte queues `settleEnd` had already
      * closed one-way: `Live` on screen, frozen, swallowing every keystroke.
@@ -481,7 +482,7 @@ class J06BackgroundGraceReturnJourney {
      * stop/start boundary, and the real terminal the user types into.
      *
      * The oracle is deliberately not "the state says Live": it is that no error
-     * banner is on screen, that the pane is the SAME session (`capture-pane` on
+     * banner is on screen, that the pane is the SAME session (`a capture` on
      * the host agrees), and that typing after the return reaches the HOST.
      */
     @Test
@@ -533,8 +534,8 @@ class J06BackgroundGraceReturnJourney {
         // 3. Take the phone back out.
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
 
-        // 4. The session comes BACK. No "session ended" error, ever — the tmux
-        //    session was alive on the host the whole time.
+        // 4. The session comes BACK. No "session ended" error, ever — the
+        //    aplexer session was alive on the host the whole time.
         val afterReturn = awaitTranscript("the fixture's banner line again") {
             it.contains(BANNER)
         }
@@ -778,7 +779,7 @@ class J06BackgroundGraceReturnJourney {
         throw AssertionError(
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
                 "Rendered viewport was:\n$last\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -818,7 +819,9 @@ class J06BackgroundGraceReturnJourney {
     }
 
     private fun capturePane(): String =
-        AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:' 2>/dev/null || true")
+        AgentsFixture.exec(
+            "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain 2>/dev/null || true",
+        )
 
     private fun squashed(text: String): String = text.filterNot { it.isWhitespace() }
 
@@ -835,10 +838,9 @@ class J06BackgroundGraceReturnJourney {
 
         const val JOURNEY = "j06-background-grace-return"
 
-        const val SESSION = "j06-shell"
-
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
+        const val TAG = "j06-shell"
+        const val SESSION = "testuser:j06-shell"
+        const val WORKSPACE = "/home/testuser"
 
         const val PROMPT = "J06READY\$"
         const val BANNER = "J06-FIXTURE-PANE"

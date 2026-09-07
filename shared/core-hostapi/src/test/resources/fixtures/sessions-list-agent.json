@@ -1,28 +1,8 @@
 {
-  "schema": 2,
-  "managers": [
-    "tmux",
-    "aplexer"
-  ],
+  "schema": 3,
   "sessions": [
     {
-      "name": "git-pocketshell",
-      "manager": "tmux",
-      "id": null,
-      "workspace": "/home/alexey/git/pocketshell",
-      "tag": null,
-      "engine": null,
-      "profile": null,
-      "agent": null,
-      "agent_state": null,
-      "agent_state_source": null,
-      "attached": false,
-      "created_epoch": 1788159369,
-      "activity_epoch": 1788381055
-    },
-    {
       "name": "pocketshell:git-pocketshell",
-      "manager": "aplexer",
       "id": "b31c7f21-4b40-4a1e-8d0f-4b2f5c9e77aa",
       "workspace": "/home/alexey/git/pocketshell",
       "tag": "git-pocketshell",
@@ -37,7 +17,6 @@
     },
     {
       "name": "aplexer-follow:idle",
-      "manager": "aplexer",
       "id": "52a2508e-c902-4bd6-9ea8-dd3668381749",
       "workspace": "/tmp/aplexer-follow",
       "tag": "idle",

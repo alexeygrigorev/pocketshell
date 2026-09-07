@@ -15,9 +15,9 @@ class CrashReportDisplayTest {
             timestamp = Instant.parse("2026-06-06T12:00:00Z"),
             file = File("unused.txt"),
             summary = "IllegalStateException: session failed",
-            contextSummary = "Tmux session · host=devbox · session=agent-main",
+            contextSummary = "Session · host=devbox · session=agent-main",
             appVersion = "0.2.8",
-            topFrame = "com.pocketshell.app.tmux.TmuxSessionScreenKt.render(TmuxSessionScreen.kt:540)",
+            topFrame = "com.pocketshell.next.terminal.SessionScreenKt.render(SessionScreen.kt:540)",
         )
 
         assertEquals(
@@ -25,8 +25,8 @@ class CrashReportDisplayTest {
             crashReportRowTitle(report, ZoneOffset.UTC),
         )
         assertEquals(
-            "Tmux session · host=devbox · session=agent-main · app=0.2.8 · " +
-                "top=TmuxSessionScreen.kt:540",
+            "Session · host=devbox · session=agent-main · app=0.2.8 · " +
+                "top=SessionScreen.kt:540",
             crashReportRowSubtitle(report),
         )
     }
@@ -38,14 +38,14 @@ class CrashReportDisplayTest {
             timestamp = Instant.parse("2026-06-06T12:00:00Z"),
             file = File("unused.txt"),
             summary = "IllegalStateException: session failed",
-            contextSummary = "Tmux session · host=devbox · session=agent-main",
+            contextSummary = "Session · host=devbox · session=agent-main",
             appVersion = "0.2.8",
             topFrame = null,
         )
 
         assertEquals(
             "PocketShell crash report - 2026-06-06 12:00:00 Z - " +
-                "Tmux session · host=devbox · session=agent-main - " +
+                "Session · host=devbox · session=agent-main - " +
                 "IllegalStateException: session failed",
             crashReportShareSubject(report, ZoneOffset.UTC),
         )

@@ -183,18 +183,16 @@ private fun usageGlancePill(viewModel: UsageGlanceViewModel?): UsageGlancePillSt
  *
  * ## The partial-list banner is the point of the screen, not decoration
  *
- * When `sessions list --json` reports a backend that failed to enumerate, the
- * list is SHORT and the screen says so, naming the manager. Without it,
- * "aplexer is broken" and "aplexer has no sessions" render identically — the
- * exact failure the host's schema-2 `errors[]` list exists to make visible
- * (#2426). It is a warning rather than an error because the sessions that DID
- * arrive are real and usable.
+ * When `sessions list --json` reports an enumeration failure, the screen says
+ * so instead of rendering the result as an empty healthy list. The error is a
+ * warning while stale rows remain visible, and a hard listing failure is shown
+ * separately.
  *
  * Built from ui-kit primitives ([ScreenHeader], [SectionHeader], [ListRow],
  * [Banner], [EmptyState], [StatusDot]) so the row density, tap-target floor and
  * status vocabulary are the shared ones. Agent/engine chrome is deliberately
  * absent (rewrite U-9 stays cut): no [com.pocketshell.uikit.components.AgentKindBadge],
- * no [com.pocketshell.uikit.components.AgentStateChip], no engine/profile/backend
+ * no [com.pocketshell.uikit.components.AgentStateChip], no engine/profile
  * in the subtitle. Attached is the green [StatusDot] only.
  *
  * Stateless: everything it paints comes from [state], so it renders identically
@@ -351,7 +349,7 @@ private fun SessionTreeBody(
 
         if (state.errors.isNotEmpty()) {
             Banner(
-                text = "Some sessions may be missing: ${partialManagers(state)}",
+                text = "Some sessions may be missing: ${partialErrors(state)}",
                 role = BannerRole.Warning,
                 maxLines = 4,
                 modifier = Modifier
@@ -417,7 +415,7 @@ private fun SessionTreeBody(
 
                 state.isEmptyAndHealthy -> EmptyState(
                     title = "No sessions",
-                    description = "This host has no tmux or aplexer sessions running.",
+                    description = "This host has no sessions running.",
                     modifier = Modifier.testTag(SESSION_TREE_EMPTY_TAG),
                 )
 
@@ -530,8 +528,8 @@ private fun headerSubtitle(state: SessionTreeUiState): String = when {
 
 private fun plural(count: Int, noun: String): String = if (count == 1) noun else "${noun}s"
 
-/** `aplexer`, or `aplexer, tmux` — the managers that failed, deduplicated. */
-private fun partialManagers(state: SessionTreeUiState): String =
-    state.errors.map { it.manager }.distinct().joinToString(", ")
+/** The host-side error text, deduplicated for a compact banner. */
+private fun partialErrors(state: SessionTreeUiState): String =
+    state.errors.map { it.message }.distinct().joinToString("; ")
 
 internal const val ATTACHED_DESCRIPTION: String = "Attached"

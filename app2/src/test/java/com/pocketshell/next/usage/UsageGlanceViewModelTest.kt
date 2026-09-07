@@ -105,15 +105,14 @@ class UsageGlanceViewModelTest {
         }
 
     /**
-     * Same host, same usage numbers, same session name — but the row is tmux.
-     * tmux cannot see inside a session, so there is nothing to focus on and the
-     * pill keeps its cross-provider meaning.
+     * Same host, same usage numbers, same session name — but the aplexer row
+     * has no detected agent, so the pill keeps its cross-provider meaning.
      */
     @Test
-    fun `a tmux row yields the old worst-provider pill`() = vmTest { stack ->
+    fun `an aplexer row without an agent yields the old worst-provider pill`() = vmTest { stack ->
         val hostId = stack.seedHost("claude-box")
         stack.scriptUsage(CLAUDE_AND_GROK_NDJSON)
-        stack.scriptSessions(sessionsListing(TMUX_ROW))
+        stack.scriptSessions(sessionsListing(APLEXER_NO_AGENT_ROW))
         stack.connect(hostId)
         val viewModel = viewModel(stack)
 
@@ -248,9 +247,9 @@ class UsageGlanceViewModelTest {
         body(stack)
     }
 
-    /** A schema-2 `sessions list --json` document holding exactly [row]. */
+    /** A schema-3 `sessions list --json` document holding exactly [row]. */
     private fun sessionsListing(row: String): String =
-        """{"schema": 2, "managers": ["tmux", "aplexer"], "sessions": [$row], "errors": []}"""
+        """{"schema": 3, "sessions": [$row], "errors": []}"""
 
     private companion object {
         // percent_remaining 9 -> 91% used, above WARN_PERCENT(85) and below
@@ -283,21 +282,17 @@ class UsageGlanceViewModelTest {
          * client cannot answer this question from `engine`.
          */
         const val APLEXER_CLAUDE_ROW =
-            "{\"name\": \"$SESSION\", \"manager\": \"aplexer\", \"attached\": true, " +
+            "{\"name\": \"$SESSION\", \"attached\": true, " +
                 "\"engine\": \"shell\", \"agent\": \"claude\"}"
 
         const val APLEXER_NO_AGENT_ROW =
-            "{\"name\": \"$SESSION\", \"manager\": \"aplexer\", \"attached\": true, " +
+            "{\"name\": \"$SESSION\", \"attached\": true, " +
                 "\"engine\": \"shell\", \"agent\": null}"
 
         /** No `agent` key at all: a host CLI predating #2581. */
         const val APLEXER_OLD_CLI_ROW =
-            "{\"name\": \"$SESSION\", \"manager\": \"aplexer\", \"attached\": true, " +
+            "{\"name\": \"$SESSION\", \"attached\": true, " +
                 "\"engine\": \"shell\"}"
 
-        /** tmux never reports an agent, so this row carries the key as null. */
-        const val TMUX_ROW =
-            "{\"name\": \"$SESSION\", \"manager\": \"tmux\", \"attached\": true, " +
-                "\"agent\": null}"
     }
 }

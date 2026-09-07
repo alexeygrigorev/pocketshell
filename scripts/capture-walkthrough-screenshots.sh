@@ -223,7 +223,7 @@ wait_for_host_ssh_fixture() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "$SSH_USER@$SSH_HOST" \
-      "printf 'ssh fixture ready '; tmux -V"
+      "command -v a && command -v aplexer && pocketshell sessions list --json >/dev/null && printf 'ssh fixture ready aplexer'"
   } >> "$log_file" 2>&1 || {
     printf '\n[04-docker-ssh-readiness]\nLog: %s\n' "$log_file"
     tail -n 80 "$log_file" || true

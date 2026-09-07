@@ -1,12 +1,8 @@
 {
-  "schema": 2,
-  "managers": [
-    "tmux"
-  ],
+  "schema": 3,
   "sessions": [
     {
       "name": "git-pocketshell",
-      "manager": "tmux",
       "id": null,
       "workspace": "/home/alexey/git/pocketshell",
       "tag": null,
@@ -21,7 +17,6 @@
   ],
   "errors": [
     {
-      "manager": "aplexer",
       "message": "a list --json failed: exit 127 (command not found)"
     }
   ]

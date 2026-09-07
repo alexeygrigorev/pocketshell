@@ -10,7 +10,7 @@
 #
 # Behaviour (intentionally tiny + deterministic):
 #   * Presents a single visible input line: `> <typed-text>`. As the user types
-#     (tmux `send-keys -l` literal chars from the composer Send), the characters
+#     (literal characters from the terminal composer Send), the characters
 #     are ECHOED into that line so `capture-pane -p` shows the typed-but-not-yet-
 #     submitted payload — exactly what the #869 ack-gate polls for.
 #   * The line WRAPS/REFLOWS naturally: when the buffer exceeds the pane width
@@ -52,7 +52,7 @@
 # `POCKETSHELL_FAKE_AGENT_RENDER_MODE=issue1153-incremental`. Its INITIAL render
 # paints the dense ISSUE1153 frame into the upper rows. Later paste/submit
 # renders touch ONLY three lower rows, preserving that authoritative upper frame
-# in tmux without streaming a full-screen redraw that could itself repair the
+# in the terminal without streaming a full-screen redraw that could itself repair the
 # journey's synthetic local-only black band. The default mode remains byte-for-
 # byte behaviour-compatible with the #869/#1526/#1687 journeys above.
 set -u
@@ -249,7 +249,7 @@ read_paste_body() {
   while true; do
     read_byte || cleanup
     b="$REPLY"
-    # Real ESC, or tmux 3.7c paste-buffer caret-ESC (`^[`, issue #2205).
+    # Real ESC, or a terminal paste-buffer caret-ESC (`^[`, issue #2205).
     if [ "$(printf '%d' "'$b")" = "27" ] || [ "$b" = "^" ]; then
       if [ "$b" = "^" ]; then
         read_byte || cleanup
@@ -327,7 +327,7 @@ process_byte() {
   if [ "$ch" != "$EOT" ]; then
     empty_prompt_eot_pending=0
   fi
-  # Real ESC (0x1b). Also accept tmux 3.7c paste-buffer's vis-encoding of ESC
+  # Real ESC (0x1b). Also accept a terminal paste-buffer's vis-encoding of ESC
   # as the two-byte caret sequence `^[` (0x5e 0x5b) — issue #2205. Without
   # that, a framed `\e[200~`…`\e[201~` is typed, the embedded newline submits
   # the first line, and the paste-ack needle fires without a collapsed chip.

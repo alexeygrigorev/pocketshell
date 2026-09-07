@@ -1,13 +1,9 @@
 {
   "schema": 3,
-  "managers": [
-    "aplexer"
-  ],
   "generated_at": "2026-09-03T10:00:00Z",
   "sessions": [
     {
       "name": "aplexer-follow:next",
-      "manager": "aplexer",
       "id": "9f0f2c1a-0000-4000-8000-000000000001",
       "workspace": "/tmp/aplexer-follow",
       "tag": "next",

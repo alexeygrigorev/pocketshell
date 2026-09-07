@@ -38,6 +38,12 @@ const val APP_DATABASE_SCHEMA_VERSION = 21
  * `sessions` / `agent_sessions` stub tables (superseded by the host-side
  * daemon session registry, epic #821); see [MIGRATION_16_17].
  *
+ * Schema 21 is the current product model. It has no session-runtime or
+ * backend-installation field: session identity and lifecycle come from the
+ * host-side aplexer contract. The older migration bodies below are retained
+ * because an existing database must be opened at each version it has recorded
+ * before Room can apply the final migration to version 21.
+ *
  * `exportSchema = true` (Room writes the versioned schema JSON to the
  * `room.schemaLocation` dir configured in this module's `build.gradle.kts`).
  * The exported artifact is the durable record of each shipped schema, so a
@@ -73,6 +79,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun commandTemplateDao(): CommandTemplateDao
     abstract fun sentMessageDao(): SentMessageDao
 }
+
+/*
+ * Historical migration SQL may mention `tmuxInstalled` while it reconstructs
+ * the hosts table shape shipped by an older APK. This is migration input, not
+ * a current entity, DAO field, query, or runtime capability. The 20->21
+ * rebuild below deliberately omits the obsolete column while copying every
+ * supported current host field, so an upgraded database is tmux-free without
+ * losing supported user data.
+ */
 
 val MIGRATION_2_8: Migration = legacyMigrationToVersionEight(2)
 val MIGRATION_3_8: Migration = legacyMigrationToVersionEight(3)
@@ -315,13 +330,72 @@ val MIGRATION_19_20: Migration = object : Migration(19, 20) {
 }
 
 /**
- * Quiet Services labels manual tunnels so a saved mapping remains identifiable
- * after the app process is recreated. Existing remappings were created before
- * the label existed; an empty value intentionally falls back to the discovered
- * remote process name in the UI.
+ * Issue #2561 storage boundary: the current host model no longer stores a
+ * backend-installation flag. This migration is the point where the historical
+ * `tmuxInstalled` column is intentionally dropped. Earlier migrations still
+ * describe old on-disk schemas so Room can reach this boundary; only current
+ * entity fields are copied into the version-21 table.
  */
 val MIGRATION_20_21: Migration = object : Migration(20, 21) {
     override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE hosts_migration_20_21 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                treeIdentity TEXT NOT NULL,
+                trustedHostKeyAlgorithm TEXT,
+                trustedHostKeySha256 TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_migration_20_21 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_migration_20_21 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+
+        // Quiet Services labels manual tunnel mappings. This column was added
+        // in the same release as the host-model cleanup, so one v20 -> v21
+        // migration must preserve both changes for existing installs.
         db.execSQL("ALTER TABLE port_remappings ADD COLUMN name TEXT NOT NULL DEFAULT ''")
     }
 }

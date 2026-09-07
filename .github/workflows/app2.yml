@@ -278,10 +278,9 @@ jobs:
   # handing off to Testcontainers, then a fresh-run marker, --rerun-tasks
   # --no-build-cache, an execution guard, and an always-on report upload.
   #
-  # tests.yml's two extra fixture steps ("Smoke shared tmux-wrapper fixtures",
-  # "Shared SSH/tmux fixture health on a REAL fixture") are DELIBERATELY not
-  # copied: they build the `agents`/tmux-shim compose fixtures that the old
-  # core-tmux/core-agents suites needed. RealHostConnectionIntegrationTest uses
+  # tests.yml's separate agents-fixture lifecycle smoke is deliberately not
+  # copied: this lane's Testcontainers suite builds its own SSH image.
+  # RealHostConnectionIntegrationTest uses
   # none of them — Testcontainers builds its own sshd image from
   # tests/docker/Dockerfile.ssh — so those steps would add several minutes of
   # unrelated image builds and a failure mode this lane cannot cause.

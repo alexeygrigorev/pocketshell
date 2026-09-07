@@ -64,7 +64,7 @@ def _state_env(tmp_path: Path, *, session: str = "demo", with_token: bool = True
     env = {
         "XDG_STATE_HOME": str(state_home),
         "POCKETSHELL_CARDS_DIR": str(tmp_path / "cards"),
-        "TMUX": f"/tmp/x,1,0 {session}",
+        "POCKETSHELL_SESSION": session,
     }
     if with_token:
         usage_paths = push_mod.resolve_paths(env=env)
@@ -221,7 +221,6 @@ def test_content_key_changes_on_state_change(tmp_path: Path) -> None:
 def test_cli_push_checklist_fires_trigger_when_configured(tmp_path: Path, monkeypatch: Any) -> None:
     env = _state_env(tmp_path)
     sender = _RecordingSender()
-    monkeypatch.setattr(cards_mod, "_tmux_current_session", lambda: "demo")
     # Force the lazy trigger to use our recording sender (no real Firebase).
     real_notify = agent_card_push.notify_card_pushed
 
@@ -251,7 +250,6 @@ def test_cli_push_checklist_succeeds_when_push_unconfigured(tmp_path: Path, monk
     # No token registered -> the trigger no-ops, but the CLI call STILL succeeds
     # (the agent's `push checklist` must never break on an unconfigured host).
     env = _state_env(tmp_path, with_token=False)
-    monkeypatch.setattr(cards_mod, "_tmux_current_session", lambda: "demo")
     runner = CliRunner()
     result = runner.invoke(
         cli,
@@ -266,7 +264,6 @@ def test_cli_push_checklist_succeeds_when_push_unconfigured(tmp_path: Path, monk
 def test_cli_push_checklist_succeeds_even_if_trigger_raises(tmp_path: Path, monkeypatch: Any) -> None:
     # The trigger is best-effort: even a bug that raises must not fail the CLI.
     env = _state_env(tmp_path, with_token=False)
-    monkeypatch.setattr(cards_mod, "_tmux_current_session", lambda: "demo")
 
     def _boom(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("boom")

@@ -34,7 +34,10 @@ object HostQrCode {
             sizePx,
             sizePx,
             mapOf(
-                EncodeHintType.MARGIN to 1,
+                // QR readers require a quiet zone around the symbol.  A
+                // one-module border is enough for some payload sizes but
+                // leaves the rendered host QR intermittently undecodable.
+                EncodeHintType.MARGIN to 4,
                 EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
             ),
         )

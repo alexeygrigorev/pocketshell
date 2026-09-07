@@ -16,7 +16,7 @@ package com.pocketshell.uikit.model
  *   `docs/agent-awareness.md`.
  * - [TagKind.Deploy] -> amber — deploys / pipelines / prod
  * - [TagKind.Ml] -> purple — ML training / GPU / inference
- * - [TagKind.Attached] -> green — at least one tmux client is attached
+ * - [TagKind.Attached] -> green — at least one aplexer client is attached
  *   to this session right now. Activity-state, distinct from agent-kind
  *   per issue #202 acceptance criterion "no two indicators on the same
  *   row have similar shapes/colors". Aligns with the host-status
@@ -25,7 +25,7 @@ package com.pocketshell.uikit.model
  * - [TagKind.Detached] -> muted — no clients attached. Activity-state,
  *   complement of [Attached]. We surface "Detached" rather than the
  *   ambiguous "Idle" word that issue #201 explicitly removes from the
- *   host-card vocabulary; tmux's `man` page calls a session with no
+ *   host-card vocabulary; aplexer's `man` page calls a session with no
  *   clients "detached", which reads unambiguously to first-time users.
  */
 data class Tag(
@@ -40,7 +40,7 @@ data class Tag(
  *    *what* the session is — agent-kind, domain, etc. Cyan / amber /
  *    purple / neutral.
  *  - Activity-state slots ([Attached], [Detached]) describe *what is
- *    happening now* — whether a tmux client is attached. Green / muted.
+ *    happening now* — whether a aplexer client is attached. Green / muted.
  *
  * Per issue #202 the two slot categories are rendered as visually
  * distinct chips (activity-state chips lead with a small status dot)

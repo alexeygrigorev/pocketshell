@@ -5,7 +5,7 @@ Coverage (one test per acceptance criterion):
 
 - `push checklist` from stdin markdown creates the card; `push get --json`
   returns it; `push check` toggles an item; `push status` reflects it.
-- Session is auto-detected from `$TMUX` (via `tmux display-message -p '#S'`).
+- Session is auto-detected from `$POCKETSHELL_SESSION`.
 - State persists across separate CLI invocations (a real process restart is
   simulated by independent CliRunner.invoke calls reading the same store).
 - State is per-session (one session's ticks don't leak into another).
@@ -38,12 +38,12 @@ def _paths(tmp_path: Path) -> cards_mod.CardPaths:
 def _env(tmp_path: Path, session: str = "demo") -> dict[str, str]:
     """CLI env that points the store at tmp_path and forces session detection.
 
-    `POCKETSHELL_CARDS_DIR` relocates the store; `TMUX` + the monkeypatched
-    `tmux display-message` give a deterministic session without a real tmux.
+    `POCKETSHELL_CARDS_DIR` relocates the store and
+    `POCKETSHELL_SESSION` gives deterministic session detection.
     """
     return {
         "POCKETSHELL_CARDS_DIR": str(tmp_path / "pocketshell" / "cards"),
-        "TMUX": "/tmp/fake-tmux,1,0",
+        "POCKETSHELL_SESSION": session,
     }
 
 
@@ -257,20 +257,19 @@ def test_read_rejects_document_with_wrong_session_identity(tmp_path: Path) -> No
     assert cards_mod.read_cards("expected", paths=paths) == []
 
 
-# ----- session auto-detection ($TMUX) --------------------------------
+# ----- session auto-detection ----------------------------------------
 
 
 def test_detect_session_explicit_wins() -> None:
     assert cards_mod.detect_session(explicit="given", env={}) == "given"
 
 
-def test_detect_session_none_outside_tmux() -> None:
+def test_detect_session_none_without_session_context() -> None:
     assert cards_mod.detect_session(env={}) is None
 
 
-def test_detect_session_uses_tmux_display_message(monkeypatch: Any) -> None:
-    monkeypatch.setattr(cards_mod, "_tmux_current_session", lambda: "live-sess")
-    assert cards_mod.detect_session(env={"TMUX": "x"}) == "live-sess"
+def test_detect_session_uses_session_context() -> None:
+    assert cards_mod.detect_session(env={"POCKETSHELL_SESSION": "live-sess"}) == "live-sess"
 
 
 # ----- checklist markdown parsing ------------------------------------
@@ -553,11 +552,13 @@ def test_cli_get_empty_feed(tmp_path: Path) -> None:
     assert "no cards" in res.output
 
 
-def test_cli_session_autodetected_from_tmux(tmp_path: Path, monkeypatch: Any) -> None:
-    """AC: session auto-detected from $TMUX (no --session passed)."""
-    monkeypatch.setattr(cards_mod, "_tmux_current_session", lambda: "auto-sess")
+def test_cli_session_autodetected_from_workload_context(tmp_path: Path) -> None:
+    """AC: session auto-detected from the workload environment."""
     runner = CliRunner()
-    env = {"POCKETSHELL_CARDS_DIR": str(tmp_path / "pocketshell" / "cards"), "TMUX": "x"}
+    env = {
+        "POCKETSHELL_CARDS_DIR": str(tmp_path / "pocketshell" / "cards"),
+        "POCKETSHELL_SESSION": "auto-sess",
+    }
     res = runner.invoke(cli, ["push", "checklist", "--item", "z"], input="", env=env)
     assert res.exit_code == 0, res.output
     assert "auto-sess" in res.output
@@ -568,12 +569,11 @@ def test_cli_session_autodetected_from_tmux(tmp_path: Path, monkeypatch: Any) ->
 
 def test_cli_no_session_errors(tmp_path: Path) -> None:
     runner = CliRunner()
-    # Empty TMUX explicitly clears any leaked $TMUX from the test runner's own
-    # tmux session; no --session means detection must fail.
-    env = {"POCKETSHELL_CARDS_DIR": str(tmp_path / "c"), "TMUX": ""}
+    # No workload session means detection must fail.
+    env = {"POCKETSHELL_CARDS_DIR": str(tmp_path / "c")}
     res = runner.invoke(cli, ["push", "checklist", "--item", "z"], env=env)
     assert res.exit_code != 0
-    assert "tmux session" in res.output
+    assert "could not determine the session" in res.output
 
 
 def test_cli_check_unknown_item_errors(tmp_path: Path) -> None:

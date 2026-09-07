@@ -33,7 +33,7 @@ class AgentCommandScannerTest {
 
     @Test
     fun detectsCommandWrappedInBoxDrawingPunctuation() {
-        // tmux/agent chrome around the token must not block detection.
+        // Terminal/agent chrome around the token must not block detection.
         assertEquals(listOf("/compact"), detect("│ /compact │"))
     }
 

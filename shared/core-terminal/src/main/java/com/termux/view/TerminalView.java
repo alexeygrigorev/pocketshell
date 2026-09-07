@@ -911,9 +911,9 @@ public final class TerminalView extends View {
      * tracking is not, it synthesised {@code KEYCODE_DPAD_UP}/{@code KEYCODE_DPAD_DOWN}
      * and wrote the resulting {@code ESC [ A} / {@code ESC O A} to the session, because
      * that is how {@code less} scrolls. On a phone that is a destructive default: the
-     * app's emulator is on the alternate screen for the whole of any tmux attach (tmux
-     * puts its client there) and for any aplexer attach onto an alt-screen workload,
-     * and {@code mouse} is OFF by default in tmux — so on a stock host every finger
+     * app's emulator is on the alternate screen for the whole of a host-session attach
+     * and for any aplexer attach onto an alt-screen workload, and the terminal mouse
+     * mode is OFF by default — so on a stock host every finger
      * drag became arrow keys, which in a shell or an agent TUI is command/prompt
      * history. Scrolling back through an agent's output rewrote what the user was
      * typing. That branch is deleted, not made conditional (D22 hard cut): the

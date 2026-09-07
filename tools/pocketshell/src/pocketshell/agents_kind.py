@@ -11,7 +11,7 @@ no way to be reached from the client today.
 This module adds the missing seam: ``pocketshell agents kind`` accepts a pane
 list (each pane ``{pane_id, pane_pid}``, matching the RPC's input shape),
 dispatches to the daemon when it is up (mirroring the
-:func:`pocketshell.jobs._try_daemon_jobs_call` CLI→daemon pattern), falls back
+:func:`pocketshell.sessions._try_daemon_sessions_list` CLI→daemon pattern), falls back
 to calling :func:`pocketshell.cgroup_agents.kind_for_panes` in-process when the
 daemon is absent (the detection is pure cgroupfs/``/proc`` reads — no shell-out,
 so the in-process call is the same computation the daemon performs), and emits
@@ -104,7 +104,7 @@ def _try_daemon_call(
 ) -> Optional[dict[str, Any]]:
     """Dispatch ``agents.kind_for_panes`` through the typed daemon boundary.
 
-    Mirrors :func:`pocketshell.jobs._try_daemon_jobs_call`. Only used when the
+    Mirrors :func:`pocketshell.sessions._try_daemon_sessions_list`. Only used when the
     detection runs against the real host roots — when the caller overrode
     ``--proc-root`` / ``--cgroup-mount`` (tests, debugging), the in-process path
     is used directly so the override is honoured (the daemon reads the live
@@ -148,7 +148,7 @@ def _classify_in_process(
     help=(
         "Host-side agent-awareness helpers for the PocketShell client.\n\n"
         "`kind` classifies the coding-agent (claude / codex / opencode) "
-        "running in each tmux pane's cgroup scope — the CLI seam over the "
+        "running in each aplexer workload's cgroup scope — the CLI seam over the "
         "`agents.kind_for_panes` daemon RPC. See epic #821."
     ),
 )

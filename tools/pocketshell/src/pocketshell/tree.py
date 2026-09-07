@@ -12,27 +12,25 @@ via three JSON-RPC methods:
 
 - ``tree.get {host}`` -> ``{nodes: [...], version}`` — the persisted node list
   (order, folder_path, collapsed, optional cached foreign-guess kind, and the
-  exact tmux generation when known). An empty result is valid (no registry yet
+  exact session generation when known). An empty result is valid (no registry yet
   → the client seeds fresh). Cached with a short TTL (~5 s) like
   ``sessions.list``.
 - ``tree.upsert {host, nodes}`` -> ``{status, version}`` — atomically persists
   the node list. A mutation: it carries NO TTL and invalidates the ``tree.get``
   cache for that host (see :data:`pocketshell.daemon.METHOD_CACHE_INVALIDATIONS`).
 - ``tree.reconcile {host}`` -> ``{alive, gone, added}`` — diffs the persisted
-  registry against live ``tmuxctl list`` and returns DELTAS ONLY (never a full
+  registry against live aplexer sessions and returns DELTAS ONLY (never a full
   reload), pruning the gone sessions from the registry with an optimistic-grace
   guard (mirrors ``HostTreeModel.reconcile`` + ``OPTIMISTIC_GRACE_MS``).
 
 What this store deliberately does NOT hold
 -------------------------------------------
 
-The per-session agent **kind** (recorded AND confirmed-foreign) lives ONLY in
-the tmux ``@ps_agent_kind`` user-option (``ManualKindWriter`` writes it; the
-client reads it back as the sole kind authority). This registry stores no kind
-copy — a second kind writer would be the exact "third cache / two writers"
-smell the design forbids. The optional ``foreign_kind`` field on a node is the
-cheap one-shot foreign-GUESS cache (a hint the client re-derives if absent), not
-the confirmed kind.
+The per-session agent **kind** (recorded AND confirmed-foreign) is owned by the
+session backend. This registry stores no kind copy — a second kind writer would
+be the exact "third cache / two writers" smell the design forbids. The optional
+``foreign_kind`` field on a node is the cheap one-shot foreign-GUESS cache (a
+hint the client re-derives if absent), not the confirmed kind.
 
 Storage
 -------
@@ -52,8 +50,6 @@ from __future__ import annotations
 import json
 import fcntl
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -72,7 +68,7 @@ REGISTRY_FILENAME = "registry.json"
 
 # Optimistic-grace guard, mirrored from ``HostTreeModel.OPTIMISTIC_GRACE_MS``
 # (30 s, expressed in seconds here). A node the registry holds but live
-# ``tmuxctl list`` does not yet report is NOT pruned while it is still within
+# The live listing does not yet report is NOT pruned while it is still within
 # this window of its ``optimistic_since`` stamp, so a session the client just
 # created (and upserted optimistically) survives the immediately-following
 # reconcile that has not yet observed it.
@@ -218,8 +214,8 @@ def _normalise_node(raw: Any, fallback_order: int) -> Optional[dict[str, Any]]:
 
     A node MUST have a non-empty ``session`` string; everything else is
     optional and defaulted. ``foreign_kind`` is the cheap one-shot foreign-guess
-    cache (NOT the confirmed kind — that lives in ``@ps_agent_kind``); it is
-    persisted verbatim when present and omitted otherwise. ``tmux_session_id``
+    cache (NOT the confirmed kind — that lives in the session backend); it is
+    persisted verbatim when present and omitted otherwise. ``session_id``
     and positive ``session_created`` are persisted together as the exact
     generation; an incomplete pair is treated as provisional. One malformed
     node never sinks the batch — the caller filters ``None`` out.
@@ -247,15 +243,15 @@ def _normalise_node(raw: Any, fallback_order: int) -> Optional[dict[str, Any]]:
     foreign_kind = raw.get("foreign_kind")
     if isinstance(foreign_kind, str) and foreign_kind:
         node["foreign_kind"] = foreign_kind
-    tmux_session_id = raw.get("tmux_session_id")
+    session_id = raw.get("session_id")
     session_created = raw.get("session_created")
-    if isinstance(tmux_session_id, str) and tmux_session_id.strip():
+    if isinstance(session_id, str) and session_id.strip():
         try:
             created = int(session_created)
         except (TypeError, ValueError):
             created = 0
         if created > 0:
-            node["tmux_session_id"] = tmux_session_id.strip()
+            node["session_id"] = session_id.strip()
             node["session_created"] = created
     # Preserve / stamp the optimistic-grace marker so the next reconcile spares
     # a just-upserted node the live probe has not yet observed.
@@ -327,46 +323,14 @@ def _cli_version() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_tmuxctl_binary() -> Optional[str]:
-    """Locate ``tmuxctl`` on PATH (pulled out so tests can monkeypatch it)."""
-    return shutil.which("tmuxctl")
-
-
 def _live_session_names(env: Optional[Mapping[str, str]] = None) -> Optional[set[str]]:
-    """Enumerate the live tmux session names from ``tmuxctl list``.
+    """Return live aplexer session names, or ``None`` when it is unavailable."""
+    from pocketshell.session_enum import enumerate_live_sessions
 
-    Returns the set of session names, or ``None`` when the enumeration could
-    not be performed (``tmuxctl`` missing or a non-zero exit) — in which case
-    reconcile must NOT prune anything (treating an enumeration failure as "all
-    sessions gone" would wipe the held tree on a transient hiccup).
-
-    Uses the SAME ``tmuxctl list`` enumeration ``sessions.list`` proxies and
-    the timestamp-anchored parser in :mod:`pocketshell.session_enum` (the
-    same rule as Android ``HostTmuxSessionListParser``), so overflowed long
-    names are not dropped.
-    """
-    tmuxctl_path = _resolve_tmuxctl_binary()
-    if tmuxctl_path is None:
+    rows, errors = enumerate_live_sessions(env=env)
+    if errors:
         return None
-    try:
-        completed = subprocess.run(
-            [tmuxctl_path, "list"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if completed.returncode != 0:
-        return None
-    return _parse_session_names(completed.stdout)
-
-
-def _parse_session_names(stdout: str) -> set[str]:
-    """Parse session names from the ``tmuxctl list`` fixed-width table."""
-    from pocketshell.session_enum import parse_tmuxctl_list_names
-
-    return set(parse_tmuxctl_list_names(stdout))
+    return {row.name for row in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +419,7 @@ def reconcile_tree(
 ) -> dict[str, Any]:
     """Handle ``tree.reconcile`` — return ``{alive, gone, added}`` DELTAS.
 
-    Diffs the persisted registry against live ``tmuxctl list`` by session name:
+    Diffs the persisted registry against the live aplexer listing by session name:
 
     - ``alive``  — registry sessions still present in the live enumeration.
     - ``gone``   — registry sessions absent from the live enumeration AND past
@@ -465,7 +429,7 @@ def reconcile_tree(
       client upserts the freshened tree afterwards).
 
     Deltas only — never a full node reload. When the live enumeration cannot be
-    performed (``tmuxctl`` missing / error), NOTHING is pruned: ``gone`` and
+    performed (aplexer missing / error), NOTHING is pruned: ``gone`` and
     ``added`` are empty and every registry session is reported ``alive`` so a
     transient enumeration hiccup never wipes the held tree.
 
@@ -535,7 +499,7 @@ def reconcile_tree(
 # ---------------------------------------------------------------------------
 #
 # A single workspace per remote Unix account (the physical XDG state dir is
-# already per machine/user). Stored as a sibling of ``hosts`` so tmux
+# already per machine/user). Stored as a sibling of ``hosts`` so session
 # reconcile/upsert cannot prune file tabs, and a workspace write cannot wipe
 # the session tree. Identity is the resolved absolute path. Cap is 12.
 
@@ -797,7 +761,7 @@ def _is_daemon_result(method: str, result: Any) -> bool:
         "across an app restart. Params are read as a JSON object on stdin "
         "(the RPC request shape); the result envelope is emitted as JSON on "
         "stdout. NB: the per-session agent KIND is NOT stored here — it lives "
-        "in the tmux `@ps_agent_kind` option (one source of truth)."
+        "in the session backend (one source of truth)."
     ),
 )
 def tree_group() -> None:
@@ -842,7 +806,7 @@ def tree_upsert_command() -> None:
     name="reconcile",
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
-        "Diff the registry against live `tmuxctl list` and return deltas. "
+        "Diff the registry against live aplexer sessions and return deltas. "
         "Reads `{\"host\": ...}` on stdin; emits "
         "`{\"alive\": [...], \"gone\": [...], \"added\": [...]}`. Gone "
         "sessions (past optimistic grace) are pruned from the registry."

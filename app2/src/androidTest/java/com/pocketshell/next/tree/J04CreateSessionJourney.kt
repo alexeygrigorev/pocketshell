@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -55,7 +56,7 @@ import kotlinx.coroutines.flow.first
  *
  * After the create, the assertions are made against an INDEPENDENT
  * `pocketshell sessions list --json` over the journey's own SSH connection
- * ([AgentsFixture.exec]) plus the tmux session's own `#{session_path}` — so
+ * ([AgentsFixture.exec]) plus the aplexer row's own `workspace` — so
  * "the session exists" and "it was created in the folder that was typed" are
  * answered by the host, not by the screen that claimed it. A screen-only
  * assertion would pass just as happily against a client that navigated to a
@@ -74,9 +75,8 @@ import kotlinx.coroutines.flow.first
  *
  * The Docker `agents` fixture (see [AgentsFixture]) — its `pocketshell sessions
  * create` arm delegates to the repository's REAL host implementation and
- * creates a real detached tmux session on that session's own `tmuxctl-<name>`
- * socket, so the same `sessions list --json` the tree reads then enumerates it
- * for real.
+ * creates a real detached aplexer session, so the same `sessions list --json`
+ * the tree reads then enumerates it for real.
  *
  * Bring the fixture up before running:
  * `docker compose -f tests/docker/docker-compose.yml up -d --build agents`
@@ -132,16 +132,15 @@ class J04CreateSessionJourney {
      * instead, silently testing the wrong half).
      */
     private fun seedHostState() {
-        // $LIVE_MARKER: issue #2586. A journey that opted into the fixture's
-        // LIVE aplexer arm leaves that marker in the shared container, and
-        // marker + a seed file is a deliberate rc-78 mode conflict — the app
-        // gets no listing at all and this journey would fail as a bare
-        // 60-second Compose timeout. Cleared here with the seeds it already
-        // clears, so the deterministic arm defends itself.
-        AgentsFixture.exec("rm -f $ERRORS_FILE $APLEXER_FILE $DETAIL_FILE $LIVE_MARKER")
+        AgentsFixture.exec("rm -f $ERRORS_FILE")
         AgentsFixture.exec("mkdir -p $FOLDER_NEW $FOLDER_TWICE")
         killSession(SESSION_NEW)
         killSession(SESSION_TWICE)
+        AgentsFixture.exec("pocketshell sessions kill -- '$CANNED_SESSION' >/dev/null 2>&1 || true")
+        AgentsFixture.exec(
+            "pocketshell sessions create --cwd /home/testuser/git/pocketshell " +
+                "--mem none --json -- claude-main >/dev/null",
+        )
     }
 
     /**
@@ -164,7 +163,7 @@ class J04CreateSessionJourney {
         // The name follows the folder, so the common case is one tap. This is
         // the on-device half of `defaultSessionName` — an IME that delivered the
         // text differently would break it here and nowhere else.
-        compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertTextContains(SESSION_NEW)
+        compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertTextContains(SESSION_NEW_TAG)
         // Settle the IME animation before the evidence shot: the sheet's
         // `imePadding` lifts the action row over the keyboard, and a frame
         // grabbed mid-animation would show the Create button half-covered and
@@ -284,6 +283,19 @@ class J04CreateSessionJourney {
         compose.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).performClick()
         awaitTag(CREATE_SESSION_SHEET_TAG)
         compose.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).performTextReplacement(folder)
+        // Keep the idempotent path under the same device-level guarantees as
+        // the first-create path. Replacing the folder opens the IME and the
+        // sheet's action row moves with it; an immediate semantic click can
+        // target a still-disabled/under-IME button without invoking the host
+        // command. That leaves the sheet open and makes the failure look like
+        // a broken aplexer navigation even though no create was sent.
+        val expectedTag = defaultSessionName(folder)
+        compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertTextContains(expectedTag)
+        SystemClock.sleep(IME_SETTLE_MS)
+        compose.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+        assertCreateButtonClearsTheKeyboard()
         compose.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
     }
 
@@ -309,10 +321,46 @@ class J04CreateSessionJourney {
      * up": that is the assertion that fails if the create navigates to the
      * wrong session (a stale `openRequest`, the typed name instead of the
      * host's answer, a dedup that opens a neighbour). Waiting on
-     * [SESSION_SCREEN_TAG] alone would pass for any of those.
+    * [SESSION_SCREEN_TAG] alone would pass for any of those.
      */
     private fun awaitSessionScreen(name: String) {
-        awaitTag(SESSION_SCREEN_TAG)
+        try {
+            awaitTag(SESSION_SCREEN_TAG)
+        } catch (failure: Throwable) {
+            // A timeout here used to leave only a generic Compose exception.
+            // Preserve the actual route state and host answer while the app is
+            // still on screen, so a real aplexer/create regression is distinct
+            // from a navigation or test-identity mistake.
+            listOf(
+                CREATE_SESSION_SHEET_TAG,
+                CREATE_SESSION_SUBMIT_TAG,
+                CREATE_SESSION_ERROR_TAG,
+                SESSION_TREE_TAG,
+                SESSION_TREE_ERROR_BANNER_TAG,
+                SESSION_TREE_CREATE_NOTICE_TAG,
+                SESSION_SCREEN_TAG,
+                SESSION_TITLE_TAG,
+            ).forEach { tag ->
+                val nodes = compose.onAllNodesWithTag(
+                    tag,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes()
+                println("J04_SESSION_TIMEOUT_TAG $tag count=${nodes.size}")
+                nodes.forEach { node ->
+                    println(
+                        "J04_SESSION_TIMEOUT_NODE $tag text=" +
+                            node.config.getOrNull(SemanticsProperties.Text) +
+                            " disabled=" +
+                            node.config.contains(SemanticsProperties.Disabled) +
+                            " contentDescription=" +
+                            node.config.getOrNull(SemanticsProperties.ContentDescription),
+                    )
+                }
+            }
+            println("J04_SESSION_TIMEOUT_HOST ${AgentsFixture.exec("pocketshell sessions list --json")}")
+            JourneyScreenshots.capture("failure-session-screen", JOURNEY)
+            throw failure
+        }
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(SESSION_TITLE_TAG)
                 .fetchSemanticsNodes()
@@ -333,7 +381,7 @@ class J04CreateSessionJourney {
         val payload = JSONObject(AgentsFixture.exec("pocketshell sessions list --json"))
         assertEquals(
             "the fixture must speak the schema the client parses",
-            2,
+            3,
             payload.getInt("schema"),
         )
         val sessions = payload.getJSONArray("sessions")
@@ -342,19 +390,19 @@ class J04CreateSessionJourney {
         }
     }
 
-    /** tmux's own working directory for the session [name], read on the host. */
-    private fun hostSessionPath(name: String): String = AgentsFixture.exec(
-        "tmux -S \"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$name\" " +
-            "list-sessions -F '#{session_path}'",
-    ).trim()
+    /** The aplexer row's workspace for [name], read on the host. */
+    private fun hostSessionPath(name: String): String {
+        val payload = JSONObject(AgentsFixture.exec("pocketshell sessions list --json"))
+        val sessions = payload.getJSONArray("sessions")
+        return (0 until sessions.length())
+            .map { sessions.getJSONObject(it) }
+            .first { it.getString("name") == name }
+            .getString("workspace")
+    }
 
-    /** Removes a session left behind by an earlier run, socket and all. */
+    /** Removes a session left behind by an earlier run. */
     private fun killSession(name: String) {
-        AgentsFixture.exec(
-            "socket=\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$name\"; " +
-                "tmux -S \"\$socket\" kill-session -t \"=$name\" >/dev/null 2>&1; " +
-                "rm -f \"\$socket\"; true",
-        )
+        AgentsFixture.exec("pocketshell sessions kill -- '$name' >/dev/null 2>&1 || true")
     }
 
     private fun awaitTag(tag: String) {
@@ -370,20 +418,21 @@ class J04CreateSessionJourney {
         const val IME_SETTLE_MS = 1_500L
         const val JOURNEY = "j04-create-session"
 
-        /** A session the `agents` image always reports, so the tree has landed. */
-        const val CANNED_SESSION = "claude-main"
+        /** A real aplexer session the image/journey reports, so the tree has landed. */
+        const val CANNED_SESSION = "pocketshell:claude-main"
 
         const val FOLDER_NEW = "/home/testuser/git/j04-new"
-        const val SESSION_NEW = "j04-new"
+        // The app submits the explicit tag after `--`; the host returns the
+        // stable aplexer display identity `<workspace-basename>:<tag>`. Keep
+        // both values explicit because the form shows the tag while the tree
+        // and attach route use the host identity.
+        const val SESSION_NEW_TAG = "j04-new"
+        const val SESSION_NEW = "j04-new:j04-new"
         const val FOLDER_TWICE = "/home/testuser/git/j04-twice"
-        const val SESSION_TWICE = "j04-twice"
+        const val SESSION_TWICE_TAG = "j04-twice"
+        const val SESSION_TWICE = "j04-twice:j04-twice"
 
-        const val DETAIL_FILE = "\$HOME/.pocketshell-fixture-session-detail.json"
-        const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
-
-        /** The fixture's LIVE-aplexer opt-in marker (issue #2586); cleared, never set. */
-        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
 
         /** Per-test host ids, for the same reason J01/J02 use them. */
         val HOST_IDS: Map<String, Long> = mapOf(

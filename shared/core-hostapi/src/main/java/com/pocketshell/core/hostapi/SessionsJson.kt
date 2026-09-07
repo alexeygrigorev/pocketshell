@@ -9,15 +9,14 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
 
 /**
- * Parser for `pocketshell sessions list --json` (schema 2).
+ * Parser for `pocketshell sessions list --json` (schema 3).
  *
  * Contract, in one place:
  * - Unknown keys are ignored, so a newer host CLI adding a field never breaks
  *   an older phone.
- * - `schema < 2` is rejected with [HostCliError.TooOld]; there is no schema-1
- *   compatibility path (D22 hard cut).
- * - An unrecognised `manager` keeps the row with [Backend.UNKNOWN]; an
- *   unrecognised `agent_state` / `agent_state_source` keeps the row with a
+ * - `schema < 3` is rejected with [HostCliError.TooOld]. The host exposes one
+ *   session implementation, so there is no backend compatibility path.
+ * - An unrecognised `agent_state` / `agent_state_source` keeps the row with a
  *   `null` state. Forward compatibility never costs a row.
  * - `agent` is carried through verbatim (issue #2579) — no enum, no
  *   normalisation beyond trimming — because the vocabulary belongs to
@@ -26,18 +25,18 @@ import kotlinx.serialization.json.intOrNull
  * - `errors[]` is mapped verbatim onto [SessionsListing.errors] and never
  *   dropped, even when it is the only thing in the document.
  * - Anything genuinely unreadable — non-JSON, a non-object root, a missing
- *   `schema`, a row missing `name`/`manager`/`attached` or with a mistyped
+ *   `schema`, a row missing `name`/`attached` or with a mistyped
  *   field — fails the whole parse with [HostCliError.Malformed]. Failure is
  *   returned in a [Result], not thrown.
  */
 object SessionsJson {
 
     /** The lowest `schema` this parser understands. */
-    const val REQUIRED_SCHEMA: Int = 2
+    const val REQUIRED_SCHEMA: Int = 3
 
     private val json = Json {
         ignoreUnknownKeys = true
-        // The host emits a fixed record per row in schema 2; a missing
+        // The host emits a fixed record per row in schema 3; a missing
         // required key is a real defect, so no `coerceInputValues` /
         // `explicitNulls` leniency that would paper over it.
     }
@@ -62,9 +61,8 @@ object SessionsJson {
                 HostCliError.Malformed("expected a JSON object at the top level"),
             )
 
-        // The schema gate runs BEFORE the typed decode: a schema-1 document has
-        // a different row shape, so decoding first would report a confusing
-        // "missing field" instead of the actionable "update the host CLI".
+        // The schema gate runs BEFORE the typed decode so an old document gets
+        // the actionable "update the host CLI" error.
         val schemaField = obj[FIELD_SCHEMA]
         val schema = (schemaField as? JsonPrimitive)?.intOrNull
             ?: return Result.failure(
@@ -95,31 +93,23 @@ object SessionsJson {
         return Result.success(
             SessionsListing(
                 sessions = wire.sessions.map { it.toModel() },
-                errors = wire.errors.map { BackendError(manager = it.manager, message = it.message) },
+                errors = wire.errors.map { SessionListError(message = it.message) },
             ),
         )
     }
 
     private const val FIELD_SCHEMA = "schema"
 
-    /**
-     * `managers` is read but not surfaced: it is derivable from the rows, and
-     * [SessionsListing] is deliberately the two-field shape the UI needs
-     * (sessions + errors). It stays in the wire type so `ignoreUnknownKeys`
-     * isn't the only thing keeping it out.
-     */
     @Serializable
     private data class SessionsListingWire(
         val schema: Int,
-        val managers: List<String> = emptyList(),
         val sessions: List<SessionWire> = emptyList(),
-        val errors: List<BackendErrorWire> = emptyList(),
+        val errors: List<SessionListErrorWire> = emptyList(),
     )
 
     @Serializable
     private data class SessionWire(
         val name: String,
-        val manager: String,
         val attached: Boolean,
         val id: String? = null,
         val workspace: String? = null,
@@ -139,7 +129,6 @@ object SessionsJson {
     ) {
         fun toModel(): SessionRow = SessionRow(
             name = name,
-            backend = Backend.fromWire(manager),
             id = id,
             workspace = workspace,
             tag = tag,
@@ -158,8 +147,7 @@ object SessionsJson {
     }
 
     @Serializable
-    private data class BackendErrorWire(
-        val manager: String,
+    private data class SessionListErrorWire(
         val message: String,
     )
 }

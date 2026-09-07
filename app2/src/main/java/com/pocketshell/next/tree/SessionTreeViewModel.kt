@@ -3,7 +3,6 @@ package com.pocketshell.next.tree
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.hostapi.BackendError
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.ProfileInfo
@@ -27,15 +26,15 @@ import kotlinx.coroutines.launch
  * Everything the session tree renders.
  *
  * The three "nothing is on screen" situations are deliberately distinguishable,
- * because conflating them is the exact bug the schema-2 `errors[]` contract
+ * because conflating them is the exact bug the session-list `errors[]` contract
  * (#2426) was introduced to end:
  *
  * - **still loading** — [loading] is true and [loaded] is false.
  * - **empty and healthy** — [loaded] with no sessions, no [errors], no
  *   [failure]. The host really has no sessions.
  * - **empty and broken** — [failure] set (the whole listing failed), or
- *   [errors] non-empty (one backend failed to enumerate while the other
- *   answered). Either way the screen says so instead of printing "No sessions".
+ *   [errors] non-empty (session enumeration failed). Either way the screen says
+ *   so instead of printing "No sessions".
  *
  * [failure] and [roots] coexist on purpose: a refresh that fails after a good
  * listing keeps the last known sessions on screen under an error banner. A
@@ -52,8 +51,8 @@ data class SessionTreeUiState(
     /** At least one listing has succeeded, so [roots] is a real answer. */
     val loaded: Boolean = false,
     val roots: List<SessionRoot> = emptyList(),
-    /** Backends that failed to enumerate. Non-empty ⇒ this list may be short. */
-    val errors: List<BackendError> = emptyList(),
+    /** Session enumeration errors. Non-empty means the list is unavailable. */
+    val errors: List<com.pocketshell.core.hostapi.SessionListError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
     val failure: String? = null,
     /**
@@ -313,10 +312,8 @@ class SessionTreeViewModel @Inject constructor(
      * session, with a notice saying it was already there. A FAILURE leaves the
      * sheet open with its text intact so the user can fix the folder and retry.
      *
-     * [CreateSessionRequest.engine] / [CreateSessionRequest.profile] /
-     * [CreateSessionRequest.backend] are forwarded when set and omitted when
-     * null, so a Shell create with the host-default backend is still
-     * `sessions create --json -- NAME`.
+     * [CreateSessionRequest.engine] and [CreateSessionRequest.profile] are
+     * forwarded when set and omitted when null.
      */
     fun createSession(request: CreateSessionRequest) {
         if (createInFlight?.isActive == true) return
@@ -335,7 +332,6 @@ class SessionTreeViewModel @Inject constructor(
                 cwd = request.cwd?.trim()?.takeIf { it.isNotEmpty() },
                 engine = request.engine?.trim()?.takeIf { it.isNotEmpty() },
                 profile = request.profile?.trim()?.takeIf { it.isNotEmpty() },
-                backend = request.backend?.trim()?.takeIf { it.isNotEmpty() },
             )
         }
     }
@@ -412,7 +408,6 @@ class SessionTreeViewModel @Inject constructor(
         cwd: String?,
         engine: String?,
         profile: String?,
-        backend: String?,
     ) {
         val connection = when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> outcome.connection
@@ -424,7 +419,6 @@ class SessionTreeViewModel @Inject constructor(
                 cwd = cwd,
                 engine = engine,
                 profile = profile,
-                backend = backend,
             )
             .fold(
                 onSuccess = { created ->
@@ -530,8 +524,8 @@ class SessionTreeViewModel @Inject constructor(
                         ),
                         errors = listing.errors,
                         // A successful listing clears a previous failure; the
-                        // partial-backend banner is driven by `errors`, which
-                        // this same read just replaced wholesale.
+                        // The enumeration error banner is driven by `errors`,
+                        // which this same read just replaced wholesale.
                         failure = null,
                     )
                 }

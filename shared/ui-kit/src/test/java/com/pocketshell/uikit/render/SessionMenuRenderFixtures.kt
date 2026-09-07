@@ -270,8 +270,8 @@ internal fun CreateSessionSheetShellRender() {
 }
 
 /**
- * Issue #2522: the same sheet with Agent selected — host engines, a profile
- * picker, and the tmux vs aplexer backend override.
+ * Issue #2522: the same sheet with Agent selected — host engines and a profile
+ * picker. Session creation always uses the host's aplexer runtime.
  */
 @Composable
 internal fun CreateSessionSheetAgentRender() {
@@ -351,23 +351,6 @@ private fun CreateSessionSheetRender(
                     fillSegments = true,
                 )
             }
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            SectionHeader(label = "Backend")
-            SegmentedToggle(
-                labels = listOf("Default", "tmux", "aplexer"),
-                selectedIndex = 0,
-                onSelected = {},
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                fillSegments = true,
-            )
-            Text(
-                text = "Default uses the host's [backends] config.",
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-            )
         }
 
         Spacer(modifier = Modifier.height(4.dp))
@@ -472,7 +455,7 @@ internal fun SessionKebabMenuRender() {
 }
 
 /**
- * Static mirror of the grouped `TmuxMoreMenu` opened menu: a [SurfaceElev]
+ * Static mirror of the grouped session overflow menu: a [SurfaceElev]
  * rounded panel where each section is a muted [DropdownMenuSectionHeader]-style
  * label, its items as [PocketShellType.bodyDense] rows, and a
  * [HorizontalDivider] between sections — matching the real menu chrome.

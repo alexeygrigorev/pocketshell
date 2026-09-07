@@ -2,7 +2,6 @@ package com.pocketshell.next.usage
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.hostcli.HostCliClientFactory
@@ -126,8 +125,7 @@ class UsageGlanceViewModel @Inject constructor(
      * "no focus, show the ordinary pill".
      *
      * Null on every unremarkable path, deliberately: no session named
-     * (the tree), no live connection (D21 — the pill never dials), a tmux row
-     * (aplexer is the only manager that can see inside a session), no agent
+     * (the tree), no live connection (D21 — the pill never dials), no agent
      * detected, or a host CLI too old to emit the field at all. The client
      * never inspects the session itself; the ONLY source is
      * `pocketshell sessions list --json`.
@@ -145,7 +143,6 @@ class UsageGlanceViewModel @Inject constructor(
             ?.getOrNull()
             ?: return null
         val row = listing.sessions.firstOrNull { it.name == sessionName } ?: return null
-        if (row.backend != Backend.APLEXER) return null
         val agent = row.agent?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         return GlanceFocus(hostId = hostId, provider = agent)
     }

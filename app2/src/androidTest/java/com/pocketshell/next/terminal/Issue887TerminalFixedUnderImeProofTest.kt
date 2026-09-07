@@ -46,7 +46,7 @@ import org.junit.runner.RunWith
  *
  * The rewrite put [Modifier.imePadding] back on [SessionScreen]'s session
  * column, so raising the keyboard shrinks the column, [onResized] fires, and
- * tmux reflows. After the keyboard hides, the view can be left with a large
+ * the host session reflows. After the keyboard hides, the view can be left with a large
  * empty void (the 2026-09-05 screenshot). #887 already forbade that: the
  * window is `SOFT_INPUT_ADJUST_NOTHING` and the session column is a plain
  * `Modifier.fillMaxSize()`.

@@ -4,7 +4,7 @@ package com.pocketshell.core.hostapi
  * What the agent running in a session is doing, as the host reports it.
  *
  * `null` (rather than a fourth enum constant) means "the host has no opinion" —
- * a plain shell session, or a manager that does not track agent state. The UI
+ * a plain shell session, or a host that does not track agent state. The UI
  * must render that as "no badge", not as [IDLE].
  *
  * An unrecognised wire value also parses to `null`: a newer host CLI inventing

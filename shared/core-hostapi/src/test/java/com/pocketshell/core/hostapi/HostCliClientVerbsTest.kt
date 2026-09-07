@@ -31,19 +31,22 @@ class HostCliClientVerbsTest {
         }
 
         val listing = result.getOrThrow()
-        assertEquals(15, listing.sessions.size)
-        assertEquals(emptyList<BackendError>(), listing.errors)
+        assertEquals(4, listing.sessions.size)
+        assertEquals(emptyList<SessionListError>(), listing.errors)
     }
 
     @Test
-    fun `listSessions keeps a partial listing's backend errors`() {
+    fun `listSessions keeps a partial listing's aplexer errors`() {
         val result = runSuspending {
             HostCliClient(RecordingExec.ok(fixture("sessions-list-errors.json"))).listSessions()
         }
 
         val listing = result.getOrThrow()
         assertEquals(listOf("git-pocketshell"), listing.sessions.map { it.name })
-        assertEquals(listOf("aplexer"), listing.errors.map { it.manager })
+        assertEquals(
+            listOf("a list --json failed: exit 127 (command not found)"),
+            listing.errors.map { it.message },
+        )
     }
 
     @Test
@@ -142,14 +145,14 @@ class HostCliClientVerbsTest {
 
         val tooOld = error as HostCliError.TooOld
         assertEquals(1, tooOld.foundSchema)
-        assertEquals(2, tooOld.requiredSchema)
+        assertEquals(3, tooOld.requiredSchema)
     }
 
     // --- createSession ----------------------------------------------------
 
     @Test
-    fun `createSession parses a real tmux create`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+    fun `createSession parses an aplexer create`() {
+        val exec = RecordingExec.ok(fixture("create-aplexer.json"))
 
         val created = runSuspending {
             HostCliClient(exec).createSession(name = "k2-fixture-tmp", cwd = "/tmp")
@@ -157,9 +160,8 @@ class HostCliClientVerbsTest {
 
         assertEquals(
             CreatedSession(
-                name = "k2-fixture-tmp",
-                manager = Backend.TMUX,
-                id = null,
+                name = "pocketshell:work",
+                id = "0d5a4d1e-6a5c-4a1e-9d2f-5b7a0c3e8f11",
                 created = true,
             ),
             created,
@@ -178,7 +180,6 @@ class HostCliClientVerbsTest {
 
         assertFalse(created.created)
         assertEquals("k2-fixture-tmp", created.name)
-        assertEquals(Backend.TMUX, created.manager)
     }
 
     @Test
@@ -190,26 +191,13 @@ class HostCliClientVerbsTest {
         }.getOrThrow()
 
         assertEquals("pocketshell:work", created.name)
-        assertEquals(Backend.APLEXER, created.manager)
         assertEquals("0d5a4d1e-6a5c-4a1e-9d2f-5b7a0c3e8f11", created.id)
     }
 
     @Test
-    fun `createSession keeps a session created by an unknown manager`() {
-        val exec = RecordingExec.ok(fixture("create-unknown-manager.json"))
-
-        val created = runSuspending { HostCliClient(exec).createSession(name = "x") }.getOrThrow()
-
-        // A newer host growing a third manager must not make the phone think
-        // the create failed — the session really does exist now.
-        assertEquals(Backend.UNKNOWN, created.manager)
-        assertEquals("future-session", created.name)
-    }
-
-    @Test
     fun `createSession prefers the host's own error text over the exit code`() {
-        // Real capture: `sessions create --json` with tmuxctl off PATH exits
-        // 127 and prints its explanation as JSON on STDOUT.
+        // A missing bundled aplexer exits 127 and prints its explanation as
+        // JSON on STDOUT.
         val exec = RecordingExec.exit(code = 127, stdout = fixture("create-error-real.json"))
 
         val error = runSuspending {
@@ -218,8 +206,8 @@ class HostCliClientVerbsTest {
 
         val failed = error as HostCliError.Failed
         assertEquals(
-            "pocketshell: `tmuxctl` is not installed on this host. " +
-                "Install it via `uv tool install tmuxctl` or `pipx install tmuxctl` and re-run.",
+            "pocketshell: could not resolve the bundled `a` (aplexer) binary; " +
+                "sessions create requires aplexer. Reinstall the pocketshell CLI.",
             failed.userMessage,
         )
         assertEquals(127, failed.exitCode)
@@ -268,7 +256,7 @@ class HostCliClientVerbsTest {
 
     @Test
     fun `createSession rejects a response with no schema`() {
-        val exec = RecordingExec.ok("""{"name":"work","manager":"tmux","created":true}""")
+        val exec = RecordingExec.ok("""{"name":"work","created":true}""")
 
         val error = runSuspending { HostCliClient(exec).createSession(name = "work") }
             .hostCliError()

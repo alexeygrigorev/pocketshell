@@ -11,7 +11,9 @@ The full alternative-to-typing strategy. PocketShell reduces keyboard reliance t
 | Terminal hotkeys panel | Special keys, control combos, the sticky `Ctrl` modifier + a–z letters, arrows | Tap the `⌨` launcher on the Terminal tab |
 | Command chips / snippets | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
 
-For tmux operations (detach, switch sessions, etc.) PocketShell uses native UI controls rather than a chord palette — see [Quick navigation](#quick-navigation-replaces-chord-palette) below.
+For session operations (detach, switch sessions, and stop) PocketShell uses
+native UI controls rather than terminal control sequences — see
+[Quick navigation](#quick-navigation) below.
 
 ---
 
@@ -33,7 +35,7 @@ Whisper / `AudioRecorder` is not started from the composer mic. Future: support 
 ┌─────────────────────────────────────────┐
 │ <  agent-main · main pane         ...   │
 ├─────────────────────────────────────────┤
-│  $ tmux ls                              │
+│  $ pocketshell sessions list --json    │
 │  agent-main: 1 windows (attached)       │  terminal
 │  $ _                                    │  (dimmed)
 ├─────────────────────────────────────────┤
@@ -106,8 +108,8 @@ bottom-sheet surface opened from the Terminal tab's `⌨` launcher (NOT crammed
 above the soft keyboard; #784/#789 hard-cut the old in-keyboard bar). The panel
 opens on one screenful of common controls and stays open after a tap so you can
 fire several keys in a row. It routes every key through
-`TmuxSessionViewModel.onKeyBarKey`, which maps the visible label to its control
-byte (`send-keys -H` overlay) or tmux named key — no terminal resize / redraw.
+`SessionViewModel.onKeyBarKey`, which maps the visible label to its control byte
+and writes it to the live terminal PTY — no terminal resize or redraw.
 
 Main page:
 
@@ -144,18 +146,17 @@ Terminal panes; controls are disabled when the pane is not live.
 
 ---
 
-## Quick navigation (replaces chord palette)
+## Quick navigation
 
-The original plan had a chord palette for tmux sequences (`Ctrl+B D` detach, `Ctrl+B S` sessions, etc.). Dropped from v1 because PocketShell's native UI already covers the common cases more smoothly than chords:
+Session navigation is handled by the native UI. The terminal hotkeys panel is
+for bytes that belong to the shell or the foreground workload:
 
 | Action | Native UI |
 |---|---|
 | Detach session | Tap the back arrow `‹` on the breadcrumb. Session keeps running server-side. |
 | Switch session | Tap the session name in the breadcrumb → dropdown of sessions on this host |
 | List sessions across hosts | Swipe down to dashboard |
-| New window | `+` button in window strip (tmux control mode) |
-| Next/prev window | Swipe within session |
-| Kill / rename | `⋮` menu on the breadcrumb |
+| Stop session | `⋮` menu on the session tree row |
 
 For things genuinely without native UI (vim `Esc :wq`, less `q`, copy mode entry) → the terminal hotkeys panel handles them (direct keys, or the sticky `Ctrl` + a letter).
 
@@ -217,6 +218,6 @@ Single "Input methods" settings screen with sub-pages:
 
 - Voice commands inside dictation ("new line", "period") — raw transcript only
 - Wake-word activation ("Hey shell") — too unreliable, too battery-hungry
-- Chord palette for tmux/shell sequences — see [Quick navigation](#quick-navigation-replaces-chord-palette). May return post-v1 as opt-in if demand appears.
+- Chord palette for session-management sequences — native session controls cover this surface.
 - Multilingual auto-detection — fixed locale per session, user-configurable
 - Self-hosted Whisper on user's own SSH host — on brand but adds setup complexity; deferred

@@ -1,14 +1,20 @@
-# PocketShell rewrite — implementation playbook (for small-model implementers)
+# Historical PocketShell rewrite playbook
+
+This plan is superseded by the shipped app2 architecture and the aplexer-only
+session contract in #2561. It remains as implementation history; it is not a
+current work queue or an instruction to restore the deleted runtime paths. Use
+[architecture.md](architecture.md), [testing.md](testing.md), and
+[roadmap.md](roadmap.md) for current work.
 
 Companion to [rewrite-diagnosis-and-design.md](rewrite-diagnosis-and-design.md)
 (the diagnosis and target design — read its §1–§3 only if you need the "why"; this
 document deliberately repeats every decision you need, so you should not have to).
 Written 2026-09-02 against `pocketshell` HEAD b7fa7713, `aplexer` v0.1.1,
 `tools/pocketshell` as of the same commit. Moved out of `docs/_scratch/` on
-2026-09-03 — this is now the live, actively-maintained plan for the rewrite,
-not a point-in-time scratch note; see its "Scope amendment" section for the
-current, authoritative target (superseding parts of the original plan below
-it where they conflict).
+2026-09-03. It is retained as a point-in-time implementation record; the
+current target is the shipped app2 architecture and aplexer-only session
+contract in #2561. Its task entries are historical and must not restore the
+deleted manager, socket, or backend paths.
 
 **How to use this document.** Each task in Part D is sized for one implementer
 session under this repo's normal process (process.md): one issue, one worktree,
@@ -1685,4 +1691,3 @@ Parallel-safe lanes from day one: {H-1→H-2/H-3/H-4}, {T-1→T-2→T-3/T-4/T-5}
 path (U-4 is the go/no-go gate — diagnosis doc §6.1), with P-tasks fanning
 out after their stated deps. 42 tasks total: 6 H (2 blocked), 5 T, 2 K, 3 M,
 10 U, 12 P (counting P-3a/b/c), 4 X (1 blocked, 1 maintainer-gated).
-

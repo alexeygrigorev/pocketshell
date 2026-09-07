@@ -96,7 +96,7 @@ data class ShareUiState(
  * ## Scope
  *
  * Upload only. The shipping client's share ViewModel was ~1,500 lines because it
- * also owned a "paste into the attached tmux session" branch, a per-host project
+ * also owned a "paste into the attached aplexer session" branch, a per-host project
  * target chooser, a passphrase prompt, and a lease it had to keep alive across
  * all of them. None of that is here: the session-injection half is a separate
  * (unbuilt) feature, the destination is one directory, and authentication

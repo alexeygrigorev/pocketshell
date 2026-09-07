@@ -20,7 +20,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Alexey Grigorev" }]
 license = { text = "MIT" }
-keywords = ["pocketshell", "ssh", "tmux", "agents", "usage"]
+keywords = ["pocketshell", "ssh", "agents", "usage"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -65,25 +65,8 @@ dependencies = [
     # human/agent-readable default output format (#714). The Android client
     # consumes the `--json` flag instead; the host-facing default is YAML.
     "pyyaml>=6.0",
-    # Session create/resume delegates to the `tmuxctl` binary (see
-    # `pocketshell/resume.py`: `tmuxctl create-detached` / `create-or-attach`),
-    # so installing pocketshell pulls a tmuxctl that has the server-cgroup fix.
-    # >=0.3.3 is required: earlier tmuxctl started the shared tmux server inside
-    # the SSH login's `session-*.scope`, so a logout (or a per-session OOM) tore
-    # down every session at once; 0.3.3 starts the server in its own
-    # login-independent unit under robust.slice (tmuxctl#4). 0.3.0 first shipped
-    # the `create-detached` verb this CLI calls.
-    # >=0.3.5 is required as of 2026-08-26: 0.3.4 still resolves/creates
-    # sessions on the legacy shared socket only. A pinned-old pocketshell host
-    # CLI running alongside a newer interactive `tmuxctl`/`t` checkout (which
-    # does per-session servers) raced session creation for the same name onto
-    # two different sockets, so the app/desktop and an interactive `t` session
-    # silently disagreed about which sessions existed. 0.3.5 ships tmuxctl's
-    # per-session-server migration so every caller resolves sessions the same
-    # way.
-    "tmuxctl>=0.3.5",
     # aplexer ships WITH the pocketshell CLI (issue #2543). `pocketshell
-    # sessions create --backend aplexer` needs BOTH the `a` CLI and its
+    # sessions create` needs BOTH the `a` CLI and its
     # `aplexer` worker binary (aplexer/src/lib.rs::worker_executable resolves
     # the worker as a sibling of current_exe); the published wheel bundles
     # both native binaries and exposes them as the `a` / `aplexer`
@@ -112,7 +95,7 @@ dependencies = [
     # running) and never persisted, so it cannot go stale.
     #
     # `session_enum._aplexer_rows` reads that key straight onto
-    # `LiveSession.agent` and schema 2 emits it on every row. Against 0.1.3
+    # `LiveSession.agent` and schema 3 emits it on every row. Against 0.1.3
     # the key is simply absent and every row reports `agent: null` — the
     # listing still works, it just cannot name an agent, which is the whole
     # point of the bump. tests/test_aplexer_contract.py pins the behaviour
@@ -143,7 +126,7 @@ dependencies = [
     # session tree silently lost EVERY aplexer row. Worse, a record-less
     # directory that outlives the window (a killed/crashed `a start`) bricks
     # 0.1.2's registry permanently — including `a start` itself, which runs
-    # the same scan under the lock, so `sessions create --backend aplexer`
+    # the same scan under the lock, so `sessions create`
     # stops working until someone manually `rmdir`s it.
     # tests/test_aplexer_contract.py drives the bundled binary through both
     # production probes with exactly that on-disk shape; verified red on
@@ -159,7 +142,7 @@ dependencies = [
     #   * aplexer ee4b957 — profile `executable` override (argv[0]) for Codex
     #     variants. Without it, `[profiles.zcodex] engine="codex",
     #     executable="zcodex"` resolves argv[0] to `codex`, and `pocketshell
-    #     sessions create --backend aplexer --engine codex --profile zcodex`
+    #     sessions create --engine codex --profile zcodex`
     #     dies with "a: command is not executable or was not found in PATH:
     #     codex".
     #   * aplexer d13ecb2 — preserve the provider environment for plain
@@ -172,7 +155,7 @@ dependencies = [
     #
     # There is no separate release-time guard for the aplexer version itself
     # (scripts/check-pypi-version.sh only couples pocketshell's OWN version to
-    # the release tag and says nothing about quse or tmuxctl either), so the
+    # the release tag and says nothing about quse either), so the
     # exact pin + the committed uv.lock + that contract test are the
     # enforcement.
     #
@@ -180,9 +163,8 @@ dependencies = [
     # manylinux wheels only (x86_64 + aarch64) and NO sdist, so an unmarked
     # hard dependency would make `pip install pocketshell` unresolvable on
     # macOS/Windows. PocketShell hosts are Linux; a non-Linux host simply gets
-    # no bundled aplexer at all, so `sessions create --backend aplexer` there
-    # fails loud (there is no PATH fallback — D22) while tmux, the default
-    # backend, keeps working.
+    # no bundled aplexer at all, so `sessions create` there fails loud (there
+    # is no PATH fallback — D22).
     #
     # Install-surface note (unchanged in 0.1.4): as of 0.1.2 the wheels moved
     # from manylinux_2_17 to manylinux_2_28, raising the minimum glibc from
@@ -243,7 +225,7 @@ exclude = [
 required-version = "==0.10.11"
 # Keep the lockfile's reproducibility cutoff project-local. The host may have
 # a rolling global `exclude-newer` policy that predates deliberately pinned
-# releases (quse 0.0.15 and tmuxctl 0.3.5); this exact value is also the
+# release (quse 0.0.15); this exact value is also the
 # `uv.lock` options cutoff and must be used when checking this lock. Moved
 # past quse 0.0.15's 2026-08-28T12:09:07Z PyPI upload for issue #2293, then
 # past aplexer 0.1.2's 2026-09-05T22:38:08Z PyPI upload (its `aplexer-client`

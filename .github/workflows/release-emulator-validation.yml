@@ -346,7 +346,6 @@ jobs:
         if: always()
         run: |
           docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
-          docker compose -f tests/docker/real-agent/compose.yml down --volumes --remove-orphans || true
 
   # Issue #2356 (Phase 4 of epic #2350), Part A step 2: on a GREEN nightly
   # run only, record the "validated RC" marker -- see

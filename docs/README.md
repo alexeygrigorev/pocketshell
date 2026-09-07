@@ -5,11 +5,11 @@ context; the README and current feature docs track released behavior.
 
 | File | What it covers |
 |---|---|
-| [vision.md](vision.md) | Original product brief — the why and the desired UX |
+| [vision.md](vision.md) | Historical product brief — the original goals and UX vocabulary |
 | [architecture.md](architecture.md) | Post-rewrite module map, tech stack, three load-bearing decisions, connect/session/terminal/grace design |
 | [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
-| [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, OpenCode, and Grok Build in a tmux pane and showing a clean conversation view |
+| [agent-awareness.md](agent-awareness.md) | Live agent identity from an aplexer workload and host logs |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
 | [diagnostics.md](diagnostics.md) | Shareable JSONL flight recorder for app, connection, network, and action events |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
@@ -18,14 +18,14 @@ context; the README and current feature docs track released behavior.
 | [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [rewrite-diagnosis-and-design.md](rewrite-diagnosis-and-design.md) | app2 rewrite: diagnosis of the old app's complexity and the target architecture |
-| [rewrite-implementation-plan.md](rewrite-implementation-plan.md) | app2 rewrite: the live task-by-task playbook, current scope decisions, and lean-core release target — check its "Scope amendment" section first |
-| [aplexer-integration.md](aplexer-integration.md) | Becoming an aplexer client: phases A–C; Phase A done, both managers listed |
+| [rewrite-implementation-plan.md](rewrite-implementation-plan.md) | Historical app2 rewrite playbook, superseded by the shipped app2/aplexer contract |
+| [aplexer-integration.md](aplexer-integration.md) | Aplexer integration record: current runtime status and historical transition notes |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [release.md](release.md) | How we cut candidate, stabilize, fast-forward the exact SHA to main, push main, and tag from main (release-owner agent) |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
-| [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
+| [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker fixture targets, ports, emulator commands, connected-test runbook |
 | [screenshots/](screenshots/) | Curated README screenshot assets captured from the visual-audit workflow |
-| [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
+| [tmux-socket-recovery.md](tmux-socket-recovery.md) | Operational runner-only tmux socket recovery and namespace guardrails |
 | [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session-tree/connection audit and issue plan — delete once #2222, #2241–#2243, #2247, #2264, #2295 all close; no unique content will remain |
 | [audit-2026-08-30-code-quality.md](audit-2026-08-30-code-quality.md) | Five-reviewer whole-codebase audit of correctness, inefficiency, duplication, dead code, and simplification — delete when its retained findings are tracked and resolved or superseded |
 | [worktrees.md](worktrees.md) | Agent worktree layout, creation, and merge-back mechanics |
@@ -41,8 +41,8 @@ context; the README and current feature docs track released behavior.
 | Project | Role |
 |---|---|
 | [ssh-auto-forward-android](https://github.com/alexeygrigorev/ssh-auto-forward-android) | Existing Kotlin/Compose app. Source of extractable SSH + port-forward modules. |
-| [tmuxctl](https://github.com/alexeygrigorev/tmuxctl) | Python CLI (checked out locally as `tmuxcli`). PocketShell mirrors its job/session semantics through the server-side `pocketshell` helper. |
+| [tmuxctl](https://github.com/alexeygrigorev/tmuxctl) | Historical session tool; it is not a PocketShell product runtime. |
 | [ssh-auto-forward](https://github.com/alexeygrigorev/ssh-auto-forward) | Python TUI. Reference for `ss -tlnp` parsing and reconnect/backoff logic. |
 | `agent-log-explorer` | Separate local tool with no published GitHub remote. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
 | [heru](https://github.com/alexeygrigorev/heru) | Historical provider quota reference; current app usage polling goes through `pocketshell usage --json`. |
-| [aplexer](https://github.com/alexeygrigorev/aplexer) | Intended session runtime and engine/profile/launch registry. PocketShell becomes a client; see [aplexer-integration.md](aplexer-integration.md). |
+| [aplexer](https://github.com/alexeygrigorev/aplexer) | The shipped session runtime and engine/profile/launch registry; see [aplexer-integration.md](aplexer-integration.md). |

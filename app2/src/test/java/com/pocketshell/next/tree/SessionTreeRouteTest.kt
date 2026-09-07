@@ -62,7 +62,7 @@ class SessionTreeRouteTest {
                 // The host answers with ITS OWN name for what it made.
                 ExecResult(
                     0,
-                    """{"schema":2,"name":"reviews","manager":"tmux","id":null,"created":true}""",
+                    """{"schema":3,"name":"reviews","id":null,"created":true}""",
                     "",
                     false,
                 ),
@@ -104,6 +104,6 @@ class SessionTreeRouteTest {
 
     private companion object {
         const val EMPTY_LISTING =
-            """{"schema":2,"managers":["tmux"],"sessions":[],"errors":[]}"""
+            """{"schema":3,"sessions":[],"errors":[]}"""
     }
 }

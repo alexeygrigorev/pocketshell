@@ -18,9 +18,9 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
@@ -256,9 +256,10 @@ class J10FilesBrowseEditJourney {
      * home directory the HOST reported.
      */
     private fun openExplorerAt(path: String) {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG)
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
+        awaitTag(SESSION_TREE_FILES_TAG)
 
         compose.onNodeWithTag(SESSION_TREE_FILES_TAG).performClick()
         awaitTag(FILE_EXPLORER_TAG)

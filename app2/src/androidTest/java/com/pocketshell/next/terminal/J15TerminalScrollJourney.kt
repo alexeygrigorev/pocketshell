@@ -21,9 +21,7 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.idleWedgeNote
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.connect.openQuietSession
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -392,12 +390,7 @@ class J15TerminalScrollJourney {
     // --- navigation ----------------------------------------------------------
 
     private fun openSession() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(sessionName))
-        compose.onNodeWithTag(sessionRowTag(sessionName)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, sessionName, APLEXER_WORKSPACE, TIMEOUT_MS)
     }
 
     /** Waits until the fixture TUI has painted its banner into the live grid. */

@@ -23,9 +23,8 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.ToxiproxyControl
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.connect.openQuietSession
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -291,17 +290,12 @@ class J05ReconnectAfterDropJourney {
 
     /** Host tap → the session tree for that host. */
     private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
     }
 
     /** ...and on into the fixture session's terminal. */
     private fun openSession() {
-        openTree()
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
     }
 
     /**

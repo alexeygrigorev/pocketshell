@@ -83,6 +83,48 @@ class HostCliClient(
     }
 
     /**
+     * `pocketshell workspaces list --host HOST --json` (schema 1).
+     *
+     * [host] is the durable opaque identity stored in the local host row, not
+     * the editable display name or hostname. It is quoted as one shell word so
+     * the host registry remains safe if an older installation contains unusual
+     * identity text.
+     */
+    suspend fun listWorkspaces(host: String): Result<WorkspacesListing> {
+        val command = buildString {
+            append(binary).append(" workspaces list --host ")
+                .append(shellSingleQuote(host))
+                .append(" --json")
+        }
+        val stdout = captureJson(command, LIST_TIMEOUT_MS).getOrElse { return Result.failure(it) }
+        return WorkspacesJson.parseWorkspacesList(stdout)
+    }
+
+    /** `pocketshell workspaces add PATH --host HOST --json`. */
+    suspend fun addWorkspace(host: String, path: String): Result<WorkspacesListing> =
+        mutateWorkspace("add", host, path)
+
+    /** `pocketshell workspaces remove PATH --host HOST --json`. */
+    suspend fun removeWorkspace(host: String, path: String): Result<WorkspacesListing> =
+        mutateWorkspace("remove", host, path)
+
+    private suspend fun mutateWorkspace(
+        operation: String,
+        host: String,
+        path: String,
+    ): Result<WorkspacesListing> {
+        val command = buildString {
+            append(binary).append(" workspaces ").append(operation).append(' ')
+                .append(shellSingleQuote(path))
+                .append(" --host ").append(shellSingleQuote(host))
+                .append(" --json")
+        }
+        val stdout = captureJson(command, MUTATION_TIMEOUT_MS)
+            .getOrElse { return Result.failure(it) }
+        return WorkspacesJson.parseWorkspacesList(stdout)
+    }
+
+    /**
      * `pocketshell sessions create --json` — creates a DETACHED session.
      *
      * [name] is required, matching the host CLI (`sessions create NAME`): the
@@ -324,6 +366,9 @@ class HostCliClient(
          * send an agent launch line, both slower than a read.
          */
         const val CREATE_TIMEOUT_MS: Long = 60_000
+
+        /** Workspace membership writes take one locked host-registry update. */
+        const val MUTATION_TIMEOUT_MS: Long = 20_000
 
         /**
          * Budget for `sessions kill`. The host enumerates then kills one

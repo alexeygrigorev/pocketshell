@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -16,9 +17,20 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.hosts.HOST_LIST_TAG
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ADD_PATH_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_BACK_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_EMPTY_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_PARTIAL_BANNER_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_SEARCH_TAG
+import com.pocketshell.next.workspaces.workspaceRootAddTag
+import com.pocketshell.next.workspaces.workspaceRootTag
+import com.pocketshell.next.workspaces.workspaceRowTag
+import com.pocketshell.next.workspaces.workspaceSessionRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -33,7 +45,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
 /**
- * Journey J02 — connect to a host, land on its session tree, and see the
+ * Journey J02 — connect to a host, land on its workspaces, and see the
  * sessions the host really has (rewrite task U-3).
  *
  * ## Why this has to be a device journey
@@ -60,7 +72,8 @@ import kotlinx.coroutines.runBlocking
  * `pocketshell sessions list --json` speaks schema 3. The host state each test
  * needs is SEEDED over SSH in [seed] rather than baked into the image:
  *
- *  - The seed creates four real aplexer shell sessions in two workspaces.
+ *  - The seed creates five real aplexer shell sessions in two workspaces and
+ *    one root-level session.
  *  - `~/.pocketshell-fixture-session-errors.json` adds an explicit enumeration
  *    error to the real aplexer payload for the partial-listing test. The other
  *    methods remove it, so a leftover fault cannot change a happy-path result.
@@ -133,6 +146,7 @@ class J02SessionTreeListJourney {
     private fun seedHostSessions(description: Description) {
         val partial = description.methodName.contains("partial", ignoreCase = true)
         val sessions = listOf(
+            Triple(SESSION_ROOT, WORKSPACE_ROOT, "root"),
             Triple(SESSION_ATTACHED, WORKSPACE_MAIN, "claude-main"),
             Triple(SESSION_QUIET, WORKSPACE_MAIN, "codex"),
             Triple(SESSION_OTHER, WORKSPACE_APLEXER, "opencode-lab"),
@@ -157,12 +171,12 @@ class J02SessionTreeListJourney {
     }
 
     /**
-     * The headline journey: tap the host, land on the tree, and see the host's
+     * The headline journey: tap the host, land on workspaces, and see the host's
      * REAL sessions grouped by the workspaces the host reported.
      */
     @Test
     fun connectingToAHostListsItsRealSessionsGroupedByWorkspace() {
-        openTree()
+        openWorkspaces()
 
         // Every session the host reports right now has a row on screen. This is
         // the load-bearing assertion: the oracle is the host's own answer to the
@@ -171,19 +185,20 @@ class J02SessionTreeListJourney {
         assertTrue(
             "the fixture must report the seeded aplexer sessions, got $hostSessions",
             hostSessions.containsAll(
-                listOf(SESSION_ATTACHED, SESSION_QUIET, SESSION_OTHER, SESSION_APLEXER),
+                listOf(
+                    SESSION_ROOT,
+                    SESSION_ATTACHED,
+                    SESSION_QUIET,
+                    SESSION_OTHER,
+                    SESSION_APLEXER,
+                ),
             ),
         )
-        hostSessions.forEach { name ->
-            compose.onNodeWithTag(sessionRowTag(name))
-                .assertIsDisplayed()
-        }
-        JourneyScreenshots.capture("01-session-tree", JOURNEY)
-
-        // Root → folder → session: both fixture workspaces sit under `~/git`.
-        compose.onNodeWithTag(rootHeaderTag("~/git")).assertIsDisplayed()
-        compose.onNodeWithTag(folderHeaderTag("~/git/pocketshell")).assertIsDisplayed()
-        compose.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRootTag(WORKSPACE_ROOT)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceSessionRowTag(SESSION_ROOT)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_APLEXER)).assertIsDisplayed()
+        JourneyScreenshots.capture("01-workspaces", JOURNEY)
 
         // No engine/agent chrome — the tree names the session, not the engine.
         compose.onNodeWithContentDescription("codex").assertDoesNotExist()
@@ -193,19 +208,14 @@ class J02SessionTreeListJourney {
 
         // The happy path raises NO banner. A partial-listing banner here would
         // mean the aplexer probe silently failed and the list is short.
-        compose.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(SESSION_TREE_LOADING_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_PARTIAL_BANNER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_EMPTY_TAG).assertDoesNotExist()
     }
 
     /** Tapping a session row opens THAT session, name intact through the route. */
     @Test
     fun tappingASessionRowOpensThatSession() {
-        openTree()
-        awaitTag(sessionRowTag(SESSION_APLEXER))
-
-        compose.onNodeWithTag(sessionRowTag(SESSION_APLEXER)).performClick()
+        compose.openQuietSession(hostId, SESSION_APLEXER, WORKSPACE_APLEXER, TIMEOUT_MS)
 
         // What this pins is that the tap navigated with THIS row's name — an
         // `aplexer` display name carries a `:` and therefore goes through route
@@ -226,25 +236,23 @@ class J02SessionTreeListJourney {
      */
     @Test
     fun aPartialListingRaisesTheMissingSessionsBannerAndStillShowsTheRest() {
-        openTree()
+        openWorkspaces()
 
-        awaitTag(SESSION_TREE_PARTIAL_BANNER_TAG)
+        awaitTag(HOST_WORKSPACES_PARTIAL_BANNER_TAG)
         JourneyScreenshots.capture("03-partial-listing", JOURNEY)
-        compose.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HOST_WORKSPACES_PARTIAL_BANNER_TAG).assertIsDisplayed()
         compose.onNodeWithText(
             "Some sessions may be missing: $BACKEND_ERROR_MESSAGE",
         ).assertIsDisplayed()
 
         // The aplexer sessions the host DID enumerate are still listed...
-        compose.onNodeWithTag(sessionRowTag(SESSION_ATTACHED)).assertIsDisplayed()
-        compose.onNodeWithTag(sessionRowTag(SESSION_QUIET)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).assertIsDisplayed()
         // ...and the healthy rows remain visible while the error is surfaced.
         assertTrue(SESSION_APLEXER in hostSessionNames())
-        compose.onNodeWithTag(sessionRowTag(SESSION_APLEXER)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_APLEXER)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceSessionRowTag(SESSION_ROOT)).assertIsDisplayed()
         // The empty state never appears, because the host is not empty.
-        compose.onNodeWithTag(SESSION_TREE_EMPTY_TAG).assertDoesNotExist()
-        // A partial listing is not a hard failure either.
-        compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_EMPTY_TAG).assertDoesNotExist()
     }
 
     /**
@@ -253,28 +261,41 @@ class J02SessionTreeListJourney {
      */
     @Test
     fun tappingBackOnTheTreeReturnsToHosts() {
-        openTree()
-        compose.onNodeWithTag(SESSION_TREE_BACK_TAG).assertIsDisplayed()
+        openWorkspaces()
+        compose.onNodeWithTag(HOST_WORKSPACES_BACK_TAG).assertIsDisplayed()
         compose.onNodeWithText("Back").assertIsDisplayed()
         JourneyScreenshots.capture("04-tree-back", JOURNEY)
 
-        compose.onNodeWithTag(SESSION_TREE_BACK_TAG).performClick()
+        compose.onNodeWithTag(HOST_WORKSPACES_BACK_TAG).performClick()
         awaitTag(HOST_LIST_TAG)
         compose.onNodeWithTag(hostRowTag(hostId)).assertIsDisplayed()
         JourneyScreenshots.capture("05-hosts-after-back", JOURNEY)
     }
 
+    @Test
+    fun searchingAndAddingAWorkspaceUsesTheProductionQuietControls() {
+        openWorkspaces()
+
+        compose.onNodeWithTag(HOST_WORKSPACES_SEARCH_TAG)
+            .performTextReplacement("aplexer")
+        awaitTag(workspaceRowTag(WORKSPACE_APLEXER))
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_APLEXER)).assertIsDisplayed()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).assertDoesNotExist()
+
+        // Keep the add flow reversible: opening the production dialog proves
+        // the root-level action is reachable without mutating fixture state.
+        compose.onNodeWithTag(workspaceRootAddTag(WORKSPACE_ROOT)).performClick()
+        awaitTag(HOST_WORKSPACES_ADD_PATH_TAG)
+        compose.onNodeWithTag(HOST_WORKSPACES_ADD_PATH_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+    }
+
     // --- helpers ----------------------------------------------------------
 
-    /** Taps the seeded host and waits for the tree's first real listing. */
-    private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-
-        awaitTag(SESSION_TREE_TAG)
-        // The screen exists immediately; wait for the listing to land before
-        // asserting on rows, so a slow exec is a wait rather than a false red.
-        awaitTag(sessionRowTag(SESSION_ATTACHED))
+    /** Taps the seeded host and waits for the workspaces listing. */
+    private fun openWorkspaces() {
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(workspaceRowTag(WORKSPACE_MAIN))
     }
 
     /**
@@ -315,7 +336,9 @@ class J02SessionTreeListJourney {
         const val SESSION_QUIET = "pocketshell:codex"
         const val SESSION_OTHER = "aplexer:opencode-lab"
         const val SESSION_APLEXER = "aplexer:yolo"
+        const val SESSION_ROOT = "git:root"
 
+        const val WORKSPACE_ROOT = "/home/testuser/git"
         const val WORKSPACE_MAIN = "/home/testuser/git/pocketshell"
         const val WORKSPACE_APLEXER = "/home/testuser/git/aplexer"
 
@@ -329,6 +352,7 @@ class J02SessionTreeListJourney {
             "tappingASessionRowOpensThatSession" to 9_202L,
             "aPartialListingRaisesTheMissingSessionsBannerAndStillShowsTheRest" to 9_203L,
             "tappingBackOnTheTreeReturnsToHosts" to 9_204L,
+            "searchingAndAddingAWorkspaceUsesTheProductionQuietControls" to 9_205L,
         )
     }
 }

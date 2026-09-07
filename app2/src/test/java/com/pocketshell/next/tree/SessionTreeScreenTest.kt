@@ -384,14 +384,14 @@ class SessionTreeScreenTest {
             state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW)))
                 .copy(
                     create = CreateSessionState(
-                        notice = "Session \"claude-main\" already existed — opened it.",
+                        notice = "Session \"claude-main\" already exists — choose it from the list to open it.",
                     ),
                 ),
         )
 
         composeRule.onNodeWithTag(SESSION_TREE_CREATE_NOTICE_TAG).assertIsDisplayed()
         composeRule
-            .onNodeWithText("Session \"claude-main\" already existed — opened it.")
+            .onNodeWithText("Session \"claude-main\" already exists — choose it from the list to open it.")
             .assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_TREE_PARTIAL_BANNER_TAG).assertDoesNotExist()

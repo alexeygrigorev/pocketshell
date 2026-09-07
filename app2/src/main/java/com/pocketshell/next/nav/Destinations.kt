@@ -22,7 +22,7 @@ import java.nio.charset.StandardCharsets
  *   connections registry (task M-3). That is the deliberate break from the old
  *   graph, where a credential-carrying destination was the norm.
  *
- * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
+ * Route set is fixed by plan §A.1: Hosts, Workspaces, Workspace, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
  * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus the categorized
@@ -102,9 +102,29 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "usage/$hostId"
     }
 
-    /** Workspace + session tree for one host. */
-    data object Tree : Destination("tree/{$ARG_HOST_ID}") {
-        fun route(hostId: Long): String = "tree/$hostId"
+    /** Host-scoped Quiet root: durable workspace navigation plus root sessions. */
+    data object Workspaces : Destination("workspaces/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "workspaces/$hostId"
+    }
+
+    /**
+     * One persistent workspace on a host. The canonical absolute path is a
+     * query argument because it contains `/`; route restoration therefore
+     * carries the workspace identity without relying on in-memory selection.
+     */
+    data object Workspace : Destination("workspace/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
+        fun route(hostId: Long, path: String): String =
+            "workspace/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
+    }
+
+    /**
+     * Compatibility name for existing callers while the destination migrates
+     * from the legacy session-tree vocabulary. It resolves to the Quiet route;
+     * production navigation uses [Workspaces] directly.
+     */
+    @Deprecated("Use Destination.Workspaces")
+    data object Tree : Destination(Workspaces.pattern) {
+        fun route(hostId: Long): String = Workspaces.route(hostId)
     }
 
     /**
@@ -241,6 +261,7 @@ sealed class Destination(val pattern: String) {
         @Deprecated("Use Destination.Diagnostics")
         val CrashReports: Diagnostics
             get() = Diagnostics
+        const val ARG_WORKSPACE_PATH: String = "workspacePath"
 
         /**
          * Every destination, in graph order.
@@ -257,7 +278,7 @@ sealed class Destination(val pattern: String) {
          */
         val all: List<Destination>
             get() = listOf(
-                Hosts, Tree, Session, Files, FileViewer, Ports, Settings,
+                Hosts, Workspaces, Workspace, Session, Files, FileViewer, Ports, Settings,
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
                 About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,

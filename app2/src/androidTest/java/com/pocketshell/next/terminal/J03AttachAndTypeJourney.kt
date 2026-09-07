@@ -25,12 +25,13 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
+import com.pocketshell.next.connect.openQuietSession
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.idleWedgeNote
 import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
@@ -242,9 +243,9 @@ class J03AttachAndTypeJourney {
         // `seed()` is what produces that ordering; killing it earlier just
         // removes the row and tests nothing.
         openTree()
-        awaitTag(sessionRowTag(SESSION))
+        awaitTag(workspaceSessionRowTag(SESSION))
         AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
+        compose.onNodeWithTag(workspaceSessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
 
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
@@ -263,9 +264,9 @@ class J03AttachAndTypeJourney {
         // Back is the way out, and it works.
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(SESSION_TREE_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertIsDisplayed()
     }
 
     /**
@@ -461,16 +462,12 @@ class J03AttachAndTypeJourney {
 
     /** Host tap → the session tree for that host. */
     private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
     }
 
     /** ...and on into the fixture session's terminal. */
     private fun openSession() {
-        openTree()
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
         awaitTag(SESSION_SCREEN_TAG)
     }
 

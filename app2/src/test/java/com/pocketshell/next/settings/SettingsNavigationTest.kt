@@ -216,7 +216,7 @@ class SettingsNavigationTest {
                 navController = controller,
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
-                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 settingsScreen = { navigation -> SettingsRoute(navigation = navigation) },
                 connectionSettingsScreen = { onBack, onOpenGrace, onOpenWorkspaceRoots ->
                     ConnectionSettingsRoute(

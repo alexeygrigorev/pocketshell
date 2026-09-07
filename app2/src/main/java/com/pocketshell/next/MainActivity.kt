@@ -1,6 +1,5 @@
 package com.pocketshell.next
 
-import android.util.Log
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
@@ -59,6 +58,8 @@ import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.next.usage.UsageRoute
+import com.pocketshell.next.workspaces.HostWorkspacesRoute
+import com.pocketshell.next.workspaces.WorkspaceRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -160,7 +161,8 @@ data class HostListActions(
  * strings live here.
  *
  * The `*Screen` / `connectViewModel` parameters are seams, not feature flags:
- * the real screens (host list, connect gate, session tree, terminal,
+ * the real screens (host list, connect gate, host workspaces, workspace,
+ * terminal,
  * port-forward panel, file explorer, file viewer, host add/edit form, SSH
  * keys, QR scan, crash reports) resolve their ViewModels through
  * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
@@ -186,21 +188,39 @@ fun AppNavHost(
         )
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
-    treeScreen: @Composable (
+    workspacesScreen: @Composable (
         hostId: Long,
+        onOpenWorkspace: (String) -> Unit,
         onOpenSession: (String) -> Unit,
         onOpenFiles: () -> Unit,
         onOpenPorts: () -> Unit,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
-        SessionTreeRoute(
+    ) -> Unit = { _, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
+        HostWorkspacesRoute(
+            onOpenWorkspace = onOpenWorkspace,
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
-            usageGlanceViewModel = hiltViewModel(),
+        )
+    },
+    workspaceScreen: @Composable (
+        hostId: Long,
+        workspacePath: String,
+        onOpenSession: (String) -> Unit,
+        onOpenFiles: () -> Unit,
+        onOpenPorts: () -> Unit,
+        onBack: () -> Unit,
+        onOpenUsage: () -> Unit,
+    ) -> Unit = { _, _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
+        WorkspaceRoute(
+            onOpenSession = onOpenSession,
+            onOpenFiles = onOpenFiles,
+            onOpenPorts = onOpenPorts,
+            onBack = onBack,
+            onOpenUsage = onOpenUsage,
         )
     },
     sessionScreen: @Composable (
@@ -342,10 +362,7 @@ fun AppNavHost(
             // tree; an unknown/changed host key raises the trust sheet first
             // and a failed dial keeps the user on the list with a retry.
             ConnectGate(
-                onConnected = { hostId ->
-                    Log.i("PocketShell.Connect", "navigating Hosts -> Tree host=$hostId")
-                    navController.navigate(Destination.Tree.route(hostId))
-                },
+                onConnected = { hostId -> navController.navigate(Destination.Workspaces.route(hostId)) },
                 viewModel = connectViewModel(),
             ) { onOpenHost ->
                 hostsScreen(
@@ -385,7 +402,7 @@ fun AppNavHost(
             val raw = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: Destination.NO_HOST_ID
             ConnectGate(
                 onConnected = { connectedHostId ->
-                    navController.navigate(Destination.Tree.route(connectedHostId)) {
+                    navController.navigate(Destination.Workspaces.route(connectedHostId)) {
                         // A successful form test is the access boundary. Keep
                         // Hosts below the new tree, but do not leave a stale
                         // form on the Back stack.
@@ -420,7 +437,7 @@ fun AppNavHost(
         composable(Destination.QrScan.pattern) {
             ConnectGate(
                 onConnected = { connectedHostId ->
-                    navController.navigate(Destination.Tree.route(connectedHostId)) {
+                    navController.navigate(Destination.Workspaces.route(connectedHostId)) {
                         popUpTo(Destination.Hosts.pattern)
                     }
                 },
@@ -430,27 +447,47 @@ fun AppNavHost(
             }
         }
         composable(
-            route = Destination.Tree.pattern,
+            route = Destination.Workspaces.pattern,
             arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
         ) { entry ->
-            // Task U-3: the real session tree. The hostId is read from the
+            // Quiet redesign: the host workspaces screen. The hostId is read from the
             // route here only to hand it to the seam; the ViewModel resolves it
             // from its own SavedStateHandle, so the screen keeps working under
             // process death without the navigation layer re-supplying it.
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
-            Log.i("PocketShell.Connect", "Tree destination composed host=$hostId")
-            treeScreen(
+            val onOpenSession: (String) -> Unit = { sessionName ->
+                navController.navigate(Destination.Session.route(hostId, sessionName))
+            }
+            val onOpenFiles: () -> Unit = { navController.navigate(Destination.Files.route(hostId)) }
+            val onOpenPorts: () -> Unit = { navController.navigate(Destination.Ports.route(hostId)) }
+            val onBack: () -> Unit = { navController.popBackStack() }
+            val onOpenUsage: () -> Unit = { navController.navigate(Destination.HostUsage.route(hostId)) }
+            workspacesScreen(
                 hostId,
+                { path -> navController.navigate(Destination.Workspace.route(hostId, path)) },
+                onOpenSession,
+                onOpenFiles,
+                onOpenPorts,
+                onBack,
+                onOpenUsage,
+            )
+        }
+        composable(
+            route = Destination.Workspace.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_WORKSPACE_PATH) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val path = entry.arguments?.getString(Destination.ARG_WORKSPACE_PATH).orEmpty()
+            workspaceScreen(
+                hostId,
+                path,
                 { sessionName ->
                     navController.navigate(Destination.Session.route(hostId, sessionName))
                 },
-                // Task P-3a: the host's file browser. Opened with no path, so
-                // the explorer resolves the account's home directory itself.
-                // The plan's terminal kebab will later navigate to this same
-                // route WITH the session's workspace path.
-                { navController.navigate(Destination.Files.route(hostId)) },
-                // Task P-4: the host's port-forward panel. Same host-scoped
-                // rationale as Files — forwarding is not a per-session action.
+                { navController.navigate(Destination.Files.route(hostId, path)) },
                 { navController.navigate(Destination.Ports.route(hostId)) },
                 { navController.popBackStack() },
                 // Issue #2532: Usage is a host-scoped panel, same as Files/Ports,

@@ -80,6 +80,19 @@ class HostCliCommandStringTest {
     }
 
     @Test
+    fun `listWorkspaces uses the durable host identity and quotes it`() {
+        val exec = RecordingExec.ok("{\"schema\":1,\"workspaces\":[]}")
+
+        runSuspending { HostCliClient(exec).listWorkspaces("host's opaque id") }
+
+        assertEquals(
+            "pocketshell workspaces list --host 'host'\\''s opaque id' --json",
+            exec.command,
+        )
+        assertEquals(listOf(HostCliClient.LIST_TIMEOUT_MS), exec.timeouts)
+    }
+
+    @Test
     fun `listEngines runs the json engines verb`() {
         val exec = RecordingExec.ok(fixture("engines-list-real.json"))
 

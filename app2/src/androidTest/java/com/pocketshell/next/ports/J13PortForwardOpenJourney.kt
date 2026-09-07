@@ -24,14 +24,14 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
 import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
 import com.pocketshell.next.usage.USAGE_PROVIDER_LIST_TAG
 import com.pocketshell.next.usage.USAGE_SCREEN_TAG
 import com.pocketshell.next.usage.usageProviderRowTag
 import kotlinx.coroutines.runBlocking
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
@@ -143,7 +143,7 @@ class J13PortForwardOpenJourney {
 
     /** The first phase leaves the durable manual mapping for the host script. */
     private fun runSetupPhase() {
-        openServices("the seeded host row")
+        openServices()
         awaitText("No active tunnels")
         compose.onNodeWithText("No active tunnels").assertIsDisplayed()
         JourneyScreenshots.capture("02-services-off", JOURNEY)
@@ -154,7 +154,7 @@ class J13PortForwardOpenJourney {
 
     /** The second phase starts only after the host script force-stops/relaunches the app. */
     private fun runResumePhase() {
-        openServices("the seeded host row after process death")
+        openServices()
         awaitMappingPresent(DISCOVERED_PORT, LOCAL_PORT)
         awaitForwardingAndHttp("06-process-death-remounted")
         removeManualTunnel()
@@ -164,7 +164,7 @@ class J13PortForwardOpenJourney {
 
     /** The third phase starts after a second external force-stop/relaunch. */
     private fun runRemovedPhase() {
-        openServices("the seeded host row after removal restart")
+        openServices()
         awaitMappingAbsent(DISCOVERED_PORT)
         awaitForwardService()
         awaitTag("$SERVICES_DISCOVERY_TAG-off", "the enabled discovery control after restart")
@@ -183,7 +183,7 @@ class J13PortForwardOpenJourney {
 
     /** The ordinary connected-suite path remains self-contained. */
     private fun runFullPhase() {
-        openServices("the seeded host row")
+        openServices()
         awaitText("No active tunnels")
         compose.onNodeWithText("No active tunnels").assertIsDisplayed()
         JourneyScreenshots.capture("02-services-off", JOURNEY)
@@ -211,12 +211,12 @@ class J13PortForwardOpenJourney {
         openUsageFromServices()
     }
 
-    private fun openServices(hostDescription: String) {
-        awaitTag(hostRowTag(hostId), hostDescription)
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG, "the session tree")
-        JourneyScreenshots.capture("01-tree", JOURNEY)
+    private fun openServices() {
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        JourneyScreenshots.capture("01-workspaces", JOURNEY)
 
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG, "the host actions menu")
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
         awaitTag(SESSION_TREE_PORTS_TAG, "the Ports header action")
         compose.onNodeWithTag(SESSION_TREE_PORTS_TAG).performClick()
 
@@ -285,7 +285,9 @@ class J13PortForwardOpenJourney {
 
     private fun openUsageFromServices() {
         compose.onNodeWithTag(SERVICES_BACK_TAG).performClick()
-        awaitTag(SESSION_TREE_TAG, "the session tree after Services")
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG, "the host actions menu after Services")
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
+        awaitTag(SESSION_TREE_USAGE_TAG, "the Usage header action after Services")
         compose.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "host-scoped Usage")
         awaitTag(USAGE_PROVIDER_LIST_TAG, "host-scoped Usage providers")

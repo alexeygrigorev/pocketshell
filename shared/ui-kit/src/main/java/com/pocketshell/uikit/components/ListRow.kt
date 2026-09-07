@@ -45,7 +45,9 @@ import com.pocketshell.uikit.theme.PocketShellType
  * - **title** — the primary scan target, [PocketShellType.bodyDense]`(13)`
  *   Medium on the bright text token.
  * - **[subtitle]** (optional) — paths / IDs / `user@host`, rendered
- *   [PocketShellType.bodyMono]`(13)` on the muted token. Single line, ellipsised.
+ *   [PocketShellType.bodyMono]`(13)` on the muted token. The default is a
+ *   single ellipsised line; callers such as [WorkspaceRow] may opt into a
+ *   second line when the label itself is part of navigation.
  * - **[trailing]** (optional) — badge ([Badge]) / count / kebab ([Kebab]). One
  *   overflow affordance per row (design language: avoid multiple inline action
  *   buttons).
@@ -73,6 +75,8 @@ fun ListRow(
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null,
+    titleMaxLines: Int = 1,
+    subtitleMaxLines: Int = 1,
 ) {
     // Visual paint floor is the compact 44dp row height; when the row is
     // tappable the floor is raised to the 48dp a11y touch floor. Baking the
@@ -114,7 +118,7 @@ fun ListRow(
                 color = PocketShellColors.Text,
                 style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.Medium,
-                maxLines = 1,
+                maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
             )
             if (subtitle != null) {
@@ -123,7 +127,7 @@ fun ListRow(
                     text = subtitle,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.bodyMono,
-                    maxLines = 1,
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

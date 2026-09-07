@@ -97,7 +97,7 @@ class SessionTreeNavigationTest {
                     navController = controller,
                     hostsScreen = { Text("Hosts") },
                     connectViewModel = { stack.viewModel },
-                    treeScreen = { _, _, _, onOpenPorts, onBack, onOpenUsage ->
+                    workspacesScreen = { _, _, _, _, onOpenPorts, onBack, onOpenUsage ->
                         SessionTreeScreen(
                             state = SessionTreeUiState(hostId = 7, loaded = true),
                             onRefresh = {},

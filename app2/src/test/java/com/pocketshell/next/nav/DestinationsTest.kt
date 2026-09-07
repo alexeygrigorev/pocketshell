@@ -41,14 +41,21 @@ class DestinationsTest {
         val patterns = Destination.all.map { it.pattern }
         // The fixed routes include the categorized Settings/support routes,
         // host-scoped Usage, and the Quiet Services & tunnels screens.
-        assertEquals(25, patterns.size)
+        // The aggregate includes both Quiet workspace routes and the
+        // categorized Settings/support plus Services routes. Deprecated aliases
+        // (Tree and CrashReports) intentionally do not add duplicate patterns.
+        assertEquals(26, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
 
     @Test
     fun `built routes match their patterns`() {
-        assertMatchesPattern(Destination.Tree.pattern, Destination.Tree.route(hostId = 7))
+        assertMatchesPattern(Destination.Workspaces.pattern, Destination.Workspaces.route(hostId = 7))
+        assertMatchesPattern(
+            Destination.Workspace.pattern,
+            Destination.Workspace.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
+        )
         assertMatchesPattern(
             Destination.Session.pattern,
             Destination.Session.route(hostId = 7, sessionName = "git-pocketshell"),
@@ -119,8 +126,23 @@ class DestinationsTest {
     }
 
     @Test
-    fun `tree route carries the host id`() {
-        assertEquals("tree/42", Destination.Tree.route(hostId = 42))
+    fun `workspaces route carries the host id`() {
+        assertEquals("workspaces/42", Destination.Workspaces.route(hostId = 42))
+        assertEquals("workspaces/42", Destination.Tree.route(hostId = 42))
+    }
+
+    @Test
+    fun `workspace route keeps the canonical path in one encoded query argument`() {
+        val route = Destination.Workspace.route(
+            hostId = 42,
+            path = "/home/alexey/git/pocket shell",
+        )
+
+        assertEquals(
+            "workspace/42?workspacePath=%2Fhome%2Falexey%2Fgit%2Fpocket%20shell",
+            route,
+        )
+        assertEquals(2, route.substringBefore('?').split("/").size)
     }
 
     @Test

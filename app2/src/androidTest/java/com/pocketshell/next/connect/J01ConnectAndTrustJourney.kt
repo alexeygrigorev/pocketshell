@@ -11,9 +11,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
-import com.pocketshell.next.hosts.HOST_LIST_TAG
 import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_EMPTY_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ERROR_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LOADING_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
@@ -30,7 +33,7 @@ import kotlinx.coroutines.runBlocking
 import java.io.File
 
 /**
- * Journey J01 — tap a host, answer the host-key prompt, land on its tree
+ * Journey J01 — tap a host, answer the host-key prompt, land on its workspaces
  * (rewrite task U-2).
  *
  * This is the first instrumented test of the rewrite's app module, and its job
@@ -153,19 +156,15 @@ class J01ConnectAndTrustJourney {
         // Raising the prompt is not consent.
         assertNull("prompt must not store a key", storedFingerprint())
         // And it must not have navigated.
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(TRUST_SHEET_TRUST_TAG).performClick()
 
-        // Trust -> record -> full re-dial -> authenticated -> settled tree.
-        // Waiting only for the tree tag is too early: NavHost can expose the
-        // destination's semantics while the old Hosts destination is still
-        // drawing its connecting banner. Capture only after the old tree is
-        // gone, so the evidence proves the settled post-trust screen.
-        awaitSettledTree()
+        // Trust -> record -> full re-dial -> authenticated -> loaded workspaces.
+        awaitWorkspacesSettled()
         capture("03-tree-after-trust")
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Hosts").assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HOST_WORKSPACES_ERROR_TAG).assertDoesNotExist()
         assertEquals(
             "the trusted key must be the one the server presented",
             presentedFingerprint,
@@ -190,7 +189,7 @@ class J01ConnectAndTrustJourney {
         assertNull("reject must not store a host key", storedFingerprint())
         // Screen-level: still on the host list, never on the tree.
         compose.onNodeWithTag(hostRowTag(hostId)).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
     }
 
     /**
@@ -227,7 +226,7 @@ class J01ConnectAndTrustJourney {
             STALE_FINGERPRINT,
             storedFingerprint(),
         )
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
     }
 
     private fun storedFingerprint(): String? =
@@ -245,17 +244,18 @@ class J01ConnectAndTrustJourney {
         }
     }
 
-    private fun awaitSettledTree() {
+    private fun awaitWorkspacesSettled() {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            val tree = compose.onAllNodesWithTag(SESSION_TREE_TAG)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            val hosts = compose.onAllNodesWithTag(HOST_LIST_TAG)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            tree && !hosts
+            val hasWorkspaceScreen = compose.onAllNodesWithTag(HOST_WORKSPACES_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+            val stillLoading = compose.onAllNodesWithTag(HOST_WORKSPACES_LOADING_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+            val hasContent = compose.onAllNodesWithTag(HOST_WORKSPACES_LIST_TAG)
+                .fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithTag(HOST_WORKSPACES_EMPTY_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+            hasWorkspaceScreen && !stillLoading && hasContent
         }
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
     }
 
     /** Keep the real-device captures after AGP removes the test app. */

@@ -409,12 +409,12 @@ class SessionTreeViewModelTest {
 
     /**
      * The idempotency contract (`CreatedSession.created == false`): the session
-     * already existed, which is a SUCCESS. It must still open, with a notice
-     * rather than an error — treating "already there" as a failure is exactly
-     * the bug the host CLI's idempotent create exists to prevent.
+     * already existed, which is a SUCCESS. The tree keeps it visible with a
+     * notice rather than silently resuming it — treating "already there" as a
+     * failure is exactly the bug the host CLI's idempotent create exists to prevent.
      */
     @Test
-    fun `creating a name that already exists opens it instead of failing`() = runTest(dispatcher) {
+    fun `creating a name that already exists stays on the tree`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         answerListAndCreate(HEALTHY_LISTING, createdJson("claude-main", created = false))
         val viewModel = viewModel(hostId)
@@ -425,10 +425,10 @@ class SessionTreeViewModelTest {
 
         val create = viewModel.state.value.create
         assertNull("an existing session must NOT read as a failure", create.failure)
-        assertEquals("claude-main", create.openRequest)
+        assertNull(create.openRequest)
         assertFalse(create.visible)
         val notice = requireNotNull(create.notice) { "the user should be told it already existed" }
-        assertTrue(notice, notice.contains("already existed"))
+        assertTrue(notice, notice.contains("already exists"))
         assertTrue(notice, notice.contains("claude-main"))
         // And the tree itself is not in an error state over it.
         assertNull(viewModel.state.value.failure)

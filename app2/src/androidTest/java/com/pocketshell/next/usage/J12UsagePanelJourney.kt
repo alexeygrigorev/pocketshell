@@ -20,11 +20,10 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
@@ -132,15 +131,10 @@ class J12UsagePanelJourney {
      * collapses it. Severity is still DERIVED from the fixture's
      * numbers (task P-5 accept: "J12 green; glance pill renders in session
      * screen").
-     */
+    */
     @Test
-    fun theGlancePillOpensThePanelAndExpandsAProviderRowOnCompactRowTap() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+    fun theGlancePillOpensThePanelAndExpandsACardOnCompactRowTap() {
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
 
         // The pill runs its OWN foreground fetch on session open (task P-5: no
         // scheduler, no cache) — waiting for it here is the assertion that the
@@ -198,9 +192,9 @@ class J12UsagePanelJourney {
      */
     @Test
     fun tappingUsageOnTheTreeOpensThePanel() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG, "the host actions menu")
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
         awaitTag(SESSION_TREE_USAGE_TAG, "the tree Usage header action")
         JourneyScreenshots.capture("03-tree-usage", JOURNEY)
 
@@ -249,12 +243,7 @@ class J12UsagePanelJourney {
         try {
             assertHostReportsTheDetectedAgent(sessionName)
 
-            awaitTag(hostRowTag(hostId))
-            compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-            awaitTag(SESSION_TREE_TAG)
-            awaitTag(sessionRowTag(sessionName), "the live aplexer session's row")
-            compose.onNodeWithTag(sessionRowTag(sessionName)).performClick()
-            awaitTag(SESSION_SCREEN_TAG)
+            compose.openQuietSession(hostId, sessionName, AGENT_WORKSPACE, TIMEOUT_MS)
 
             awaitTag(USAGE_GLANCE_PILL_TAG, "the usage glance pill")
             JourneyScreenshots.capture("05-focused-pill", JOURNEY)

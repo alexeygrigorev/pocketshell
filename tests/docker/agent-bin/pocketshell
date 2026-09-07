@@ -391,6 +391,189 @@ case "${1:-}" in
     printf 'pocketshell usage fixture supports: --json\n' >&2
     exit 64
     ;;
+  workspaces)
+    shift
+    workspace_operation="${1:-}"
+    [ "$#" -gt 0 ] && shift
+    workspace_host=""
+    workspace_path=""
+    workspace_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host)
+          [ "$#" -ge 2 ] || {
+            printf 'pocketshell workspaces: --host needs a value\n' >&2
+            exit 64
+          }
+          workspace_host="$2"
+          shift 2
+          ;;
+        --host=*)
+          workspace_host="${1#--host=}"
+          shift
+          ;;
+        --json)
+          workspace_json=1
+          shift
+          ;;
+        --)
+          shift
+          [ "$#" -gt 0 ] || {
+            printf 'pocketshell workspaces: path is required\n' >&2
+            exit 64
+          }
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+        -*)
+          printf 'pocketshell workspaces: unknown argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+        *)
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+      esac
+    done
+    [ -n "$workspace_host" ] || {
+      printf 'pocketshell workspaces: --host is required\n' >&2
+      exit 64
+    }
+    case "$workspace_operation" in
+      list)
+        [ -z "$workspace_path" ] || {
+          printf 'pocketshell workspaces list: unexpected path\n' >&2
+          exit 64
+        }
+        ;;
+      add|remove)
+        [ -n "$workspace_path" ] || {
+          printf 'pocketshell workspaces %s: path is required\n' "$workspace_operation" >&2
+          exit 64
+        }
+        ;;
+      *)
+        printf 'pocketshell workspaces fixture supports: list/add/remove\n' >&2
+        exit 64
+        ;;
+    esac
+    workspace_state_file="${POCKETSHELL_WORKSPACES_STATE_FILE:-${HOME}/.pocketshell-workspaces.json}"
+    # Keep this fixture's state contract equivalent to the real host CLI. The
+    # app only needs an empty listing for J01, but add/remove are implemented
+    # here as well so the connected workspace flow can exercise durable
+    # membership instead of a canned response.
+    python3 - "$workspace_operation" "$workspace_host" "$workspace_path" "$workspace_state_file" <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+
+operation, host, raw_path, state_name = sys.argv[1:]
+state_path = Path(state_name).expanduser()
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(64)
+
+
+def canonical_path(raw: str) -> str:
+    if not raw or not raw.strip():
+        fail("pocketshell workspaces: `path` must be a non-empty path")
+    expanded = os.path.expanduser(raw.strip())
+    if not os.path.isabs(expanded):
+        fail("pocketshell workspaces: `path` must be absolute or use the `~/` form")
+    return str(Path(expanded).resolve(strict=False))
+
+
+def read_state() -> dict:
+    try:
+        with state_path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"workspaces": {}}
+    return value if isinstance(value, dict) else {"workspaces": {}}
+
+
+def entries(state: dict) -> list[dict[str, str]]:
+    all_workspaces = state.get("workspaces")
+    raw_entries = all_workspaces.get(host) if isinstance(all_workspaces, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+    by_path: dict[str, dict[str, str]] = {}
+    for value in raw_entries:
+        if not isinstance(value, dict):
+            continue
+        try:
+            path = canonical_path(str(value.get("path", "")))
+        except SystemExit:
+            continue
+        display = value.get("display_path")
+        by_path.setdefault(
+            path,
+            {
+                "path": path,
+                "display_path": display.strip() if isinstance(display, str) and display.strip() else path,
+            },
+        )
+    return [by_path[path] for path in sorted(by_path)]
+
+
+def write_state(state: dict) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = state_path.with_name(state_path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(state_path)
+
+
+state = read_state()
+items = entries(state)
+created = None
+removed = None
+canonical = None
+if operation == "add":
+    canonical = canonical_path(raw_path)
+    existing = next((item for item in items if item["path"] == canonical), None)
+    if existing is None:
+        existing = {"path": canonical, "display_path": raw_path.strip()}
+        items.append(existing)
+        items.sort(key=lambda item: item["path"])
+        created = True
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+    else:
+        created = False
+elif operation == "remove":
+    canonical = canonical_path(raw_path)
+    kept = [item for item in items if item["path"] != canonical]
+    removed = len(kept) != len(items)
+    if removed:
+        items = kept
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+
+result = {"schema": 1, "host": host, "workspaces": items}
+if created is not None:
+    result["created"] = created
+    result["workspace"] = next(item for item in items if item["path"] == canonical)
+if removed is not None:
+    result["path"] = canonical
+    result["removed"] = removed
+print(json.dumps(result, sort_keys=True))
+PYEOF
+    exit 0
+    ;;
   sessions)
     shift
     # The Docker fixture has no delegated systemd --user scope, so the real

@@ -17,10 +17,12 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.terminal.SESSION_TITLE_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
+import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -34,7 +36,7 @@ import org.junit.runner.RunWith
 import kotlinx.coroutines.flow.first
 
 /**
- * Journey J14 — stop a throwaway session from the tree (and from the session
+ * Journey J14 — stop a throwaway session from a workspace (and from the session
  * screen) and prove the HOST no longer lists it (issue #2535).
  *
  * ## Why this has to be a device journey
@@ -47,7 +49,7 @@ import kotlinx.coroutines.flow.first
  *
  * ## Do not kill fixture sessions you did not create
  *
- * `claude-main` is the canned session every tree journey lands on. This
+ * `claude-main` is the canned session every workspace journey lands on. This
  * class creates a throwaway name, stops THAT, and asserts `claude-main` is
  * still on the host.
  *
@@ -104,7 +106,8 @@ class J14StopSessionJourney {
         val name = displayName(tag)
         cleanupThrowaway(name)
         AgentsFixture.exec(
-            "pocketshell sessions create --cwd /home/testuser --mem none --json -- '$tag'",
+            "pocketshell sessions create --cwd /home/testuser/git/pocketshell " +
+                "--mem none --json -- '$tag'",
         )
         AgentsFixture.exec("pocketshell sessions kill -- '$CANNED_SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
@@ -114,8 +117,8 @@ class J14StopSessionJourney {
     }
 
     @Test
-    fun stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost() {
-        openTree()
+    fun stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost() {
+        openWorkspace()
         assertTrue(
             "the throwaway must exist before Stop",
             SESSION_TREE in hostSessionNames(),
@@ -146,7 +149,7 @@ class J14StopSessionJourney {
 
     @Test
     fun cancellingStopLeavesTheSessionAlive() {
-        openTree()
+        openWorkspace()
         awaitTag(sessionRowTag(SESSION_CANCEL))
 
         compose.onNodeWithTag(sessionRowMenuTag(SESSION_CANCEL)).performClick()
@@ -165,8 +168,8 @@ class J14StopSessionJourney {
     }
 
     @Test
-    fun stoppingTheAttachedSessionReturnsToTheTree() {
-        openTree()
+    fun stoppingTheAttachedSessionReturnsToTheWorkspace() {
+        openWorkspace()
         awaitTag(sessionRowTag(SESSION_ATTACHED))
         compose.onNodeWithTag(sessionRowTag(SESSION_ATTACHED)).performClick()
         awaitSessionScreen(SESSION_ATTACHED)
@@ -176,7 +179,7 @@ class J14StopSessionJourney {
         compose.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        awaitTag(SESSION_TREE_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitGone(SESSION_SCREEN_TAG)
         awaitGone(sessionRowTag(SESSION_ATTACHED))
         compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
@@ -187,10 +190,11 @@ class J14StopSessionJourney {
         assertTrue(CANNED_SESSION in names)
     }
 
-    private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+    private fun openWorkspace() {
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(workspaceRowTag(WORKSPACE_MAIN))
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitTag(sessionRowTag(CANNED_SESSION))
     }
 
@@ -207,7 +211,7 @@ class J14StopSessionJourney {
         AgentsFixture.exec("pocketshell sessions kill -- '$name' >/dev/null 2>&1 || true")
     }
 
-    private fun displayName(tag: String): String = "testuser:$tag"
+    private fun displayName(tag: String): String = "pocketshell:$tag"
 
     private fun awaitSessionScreen(name: String) {
         awaitTag(SESSION_SCREEN_TAG)
@@ -240,22 +244,23 @@ class J14StopSessionJourney {
         const val JOURNEY = "j14-stop-session"
 
         const val CANNED_SESSION = "pocketshell:claude-main"
-        const val SESSION_TREE = "testuser:j14-stop-tree"
-        const val SESSION_CANCEL = "testuser:j14-stop-cancel"
-        const val SESSION_ATTACHED = "testuser:j14-stop-attached"
+        const val SESSION_TREE = "pocketshell:j14-stop-tree"
+        const val SESSION_CANCEL = "pocketshell:j14-stop-cancel"
+        const val SESSION_ATTACHED = "pocketshell:j14-stop-attached"
+        const val WORKSPACE_MAIN = "/home/testuser/git/pocketshell"
 
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
 
         val HOST_IDS: Map<String, Long> = mapOf(
-            "stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost" to 9_141L,
+            "stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost" to 9_141L,
             "cancellingStopLeavesTheSessionAlive" to 9_142L,
-            "stoppingTheAttachedSessionReturnsToTheTree" to 9_143L,
+            "stoppingTheAttachedSessionReturnsToTheWorkspace" to 9_143L,
         )
 
         val THROWAWAY_BY_TEST: Map<String, String> = mapOf(
-            "stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost" to "j14-stop-tree",
+            "stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost" to "j14-stop-tree",
             "cancellingStopLeavesTheSessionAlive" to "j14-stop-cancel",
-            "stoppingTheAttachedSessionReturnsToTheTree" to "j14-stop-attached",
+            "stoppingTheAttachedSessionReturnsToTheWorkspace" to "j14-stop-attached",
         )
     }
 }

@@ -6,12 +6,15 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.ProfileInfo
+import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.core.hostapi.SessionListError
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.workspaces.canonicalRemotePath
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -26,15 +29,15 @@ import kotlinx.coroutines.launch
  * Everything the session tree renders.
  *
  * The three "nothing is on screen" situations are deliberately distinguishable,
- * because conflating them is the exact bug the session-list `errors[]` contract
+ * because conflating them is the exact bug the schema-2 `errors[]` contract
  * (#2426) was introduced to end:
  *
  * - **still loading** — [loading] is true and [loaded] is false.
  * - **empty and healthy** — [loaded] with no sessions, no [errors], no
  *   [failure]. The host really has no sessions.
  * - **empty and broken** — [failure] set (the whole listing failed), or
- *   [errors] non-empty (session enumeration failed). Either way the screen says
- *   so instead of printing "No sessions".
+ *   [errors] non-empty (one backend failed to enumerate while the other
+ *   answered). Either way the screen says so instead of printing "No sessions".
  *
  * [failure] and [roots] coexist on purpose: a refresh that fails after a good
  * listing keeps the last known sessions on screen under an error banner. A
@@ -51,8 +54,12 @@ data class SessionTreeUiState(
     /** At least one listing has succeeded, so [roots] is a real answer. */
     val loaded: Boolean = false,
     val roots: List<SessionRoot> = emptyList(),
-    /** Session enumeration errors. Non-empty means the list is unavailable. */
-    val errors: List<com.pocketshell.core.hostapi.SessionListError> = emptyList(),
+    /** Non-null when this instance backs the persistent workspace route. */
+    val workspacePath: String? = null,
+    /** Live sessions whose host-reported cwd matches [workspacePath]. */
+    val workspaceSessions: List<SessionRow> = emptyList(),
+    /** Backends that failed to enumerate. Non-empty ⇒ this list may be short. */
+    val errors: List<SessionListError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
     val failure: String? = null,
     /**
@@ -64,7 +71,8 @@ data class SessionTreeUiState(
     /** Everything the create-session sheet needs (task U-6). */
     val create: CreateSessionState = CreateSessionState(),
 ) {
-    val sessionCount: Int get() = roots.sumOf { it.sessionCount }
+    val sessionCount: Int
+        get() = if (workspacePath != null) workspaceSessions.size else roots.sumOf { it.sessionCount }
 
     /** True when the screen should say "no sessions" rather than stay blank. */
     val isEmptyAndHealthy: Boolean
@@ -81,7 +89,7 @@ data class SessionTreeUiState(
      * host's own default apply.
      */
     val suggestedFolder: String
-        get() = roots.asSequence()
+        get() = workspacePath ?: roots.asSequence()
             .flatMap { it.folders }
             .flatMap { it.rows }
             .filter { it.workspace?.startsWith("/") == true }
@@ -101,9 +109,8 @@ data class SessionTreeUiState(
  *
  * [notice] carries the "that session already existed" message. The host CLI's
  * create is idempotent and reports `created: false` for a name that was already
- * there — a SUCCESS, per [com.pocketshell.core.hostapi.CreatedSession]. Treating
- * it as a failure would be the bug: the user asked for that session and now has
- * it, which is exactly what they wanted.
+ * there — a SUCCESS, per [com.pocketshell.core.hostapi.CreatedSession]. The
+ * tree stays on screen so the user can choose that existing row explicitly.
  */
 data class CreateSessionState(
     /** The sheet is on screen. */
@@ -182,7 +189,13 @@ class SessionTreeViewModel @Inject constructor(
         savedStateHandle.get<Long>(Destination.ARG_HOST_ID),
     ) { "SessionTreeViewModel needs a ${Destination.ARG_HOST_ID} argument" }
 
-    private val _state = MutableStateFlow(SessionTreeUiState(hostId = hostId))
+    private val workspacePath: String? = savedStateHandle
+        .get<String>(Destination.ARG_WORKSPACE_PATH)
+        ?.let(::canonicalRemotePath)
+
+    private val _state = MutableStateFlow(
+        SessionTreeUiState(hostId = hostId, workspacePath = workspacePath),
+    )
     val state: StateFlow<SessionTreeUiState> = _state.asStateFlow()
 
     private var inFlight: Job? = null
@@ -308,12 +321,15 @@ class SessionTreeViewModel @Inject constructor(
      * listing and ask the screen to open it.
      *
      * A session that already existed comes back `created == false`, which is a
-     * SUCCESS: the sheet closes, the tree refreshes and the screen opens that
-     * session, with a notice saying it was already there. A FAILURE leaves the
-     * sheet open with its text intact so the user can fix the folder and retry.
+     * SUCCESS: the sheet closes and the tree refreshes with a notice saying it
+     * was already there. The screen does not silently resume that existing
+     * session; the user chooses its row explicitly. A FAILURE leaves the sheet
+     * open with its text intact so the user can fix the folder and retry.
      *
-     * [CreateSessionRequest.engine] and [CreateSessionRequest.profile] are
-     * forwarded when set and omitted when null.
+     * [CreateSessionRequest.engine] / [CreateSessionRequest.profile] are
+     * forwarded when set and omitted when null, so a Shell create with the
+     * host-default backend is still
+     * `sessions create --json -- NAME`.
      */
     fun createSession(request: CreateSessionRequest) {
         if (createInFlight?.isActive == true) return
@@ -430,12 +446,12 @@ class SessionTreeViewModel @Inject constructor(
                             notice = if (created.created) {
                                 null
                             } else {
-                                "Session \"${created.name}\" already existed — opened it."
+                                "Session \"${created.name}\" already exists — choose it from the list to open it."
                             },
-                            // The HOST's name for what it made, not the typed
-                            // one: an aplexer-backed create answers with its own
-                            // `workspace:tag` display name.
-                            openRequest = created.name,
+                            // Only a newly created session is opened by the
+                            // explicit New session action. An idempotent
+                            // existing result must remain an explicit row tap.
+                            openRequest = created.name.takeIf { created.created },
                         )
                     }
                     // Same reason as the kill path: the new session must not
@@ -513,6 +529,11 @@ class SessionTreeViewModel @Inject constructor(
             .map { it.path }
         clients.create(connection).listSessions().fold(
             onSuccess = { listing ->
+                val workspaceSessions = workspacePath?.let { path ->
+                    listing.sessions.filter { session ->
+                        canonicalRemotePath(session.workspace) == path
+                    }
+                }.orEmpty()
                 _state.update { current ->
                     current.copy(
                         loading = false,
@@ -522,10 +543,11 @@ class SessionTreeViewModel @Inject constructor(
                             sessions = listing.sessions,
                             registeredRoots = registered,
                         ),
+                        workspaceSessions = workspaceSessions,
                         errors = listing.errors,
                         // A successful listing clears a previous failure; the
-                        // The enumeration error banner is driven by `errors`,
-                        // which this same read just replaced wholesale.
+                        // partial-backend banner is driven by `errors`, which
+                        // this same read just replaced wholesale.
                         failure = null,
                     )
                 }

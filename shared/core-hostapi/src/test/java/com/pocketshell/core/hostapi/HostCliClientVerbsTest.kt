@@ -137,6 +137,39 @@ class HostCliClientVerbsTest {
         assertTrue(error.userMessage.contains("was not valid JSON"))
     }
 
+    // --- listWorkspaces --------------------------------------------------
+
+    @Test
+    fun `listWorkspaces preserves a durable empty response`() {
+        val result = runSuspending {
+            HostCliClient(
+                RecordingExec.ok(
+                    """
+                    {"schema":1,"host":"opaque","workspaces":[]}
+                    """.trimIndent(),
+                ),
+            ).listWorkspaces("opaque")
+        }
+
+        assertEquals(emptyList<WorkspaceMembership>(), result.getOrThrow().workspaces)
+    }
+
+    @Test
+    fun `listWorkspaces reports a host command failure with its quoted command`() {
+        val exec = RecordingExec.exit(code = 127, stderr = "pocketshell: not found\n")
+
+        val error = runSuspending {
+            HostCliClient(exec).listWorkspaces("host-id")
+        }.hostCliError()
+
+        val failed = error as HostCliError.Failed
+        assertEquals(
+            "pocketshell workspaces list --host 'host-id' --json",
+            failed.command,
+        )
+        assertTrue(failed.userMessage.contains("exit 127"))
+    }
+
     @Test
     fun `listSessions surfaces an outdated host CLI as TooOld`() {
         val exec = RecordingExec.ok(fixture("sessions-list-schema1.json"))

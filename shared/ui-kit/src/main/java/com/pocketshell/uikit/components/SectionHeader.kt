@@ -1,6 +1,7 @@
 package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
@@ -40,6 +41,7 @@ fun SectionHeader(
     label: String,
     modifier: Modifier = Modifier,
     count: Int? = null,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -62,6 +64,10 @@ fun SectionHeader(
                 color = PocketShellColors.TextMuted,
                 style = PocketShellType.labelMono,
             )
+        }
+        if (trailing != null) {
+            Spacer(modifier = Modifier.weight(1f))
+            trailing()
         }
     }
 }

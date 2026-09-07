@@ -359,9 +359,9 @@ private fun SessionTreeBody(
             )
         }
 
-        // "That session already existed, so it was opened" — an INFO note, not
-        // an error: the host CLI's create is idempotent and `created:false` is
-        // a success (see CreateSessionState).
+        // "That session already existed" — an INFO note, not an error: the
+        // host CLI's create is idempotent and `created:false` is a success
+        // (see CreateSessionState). The existing row remains an explicit tap.
         state.create.notice?.let { notice ->
             Banner(
                 text = notice,

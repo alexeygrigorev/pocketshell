@@ -66,6 +66,8 @@ fun ScreenHeader(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    subtitleMaxLines: Int = 1,
+    titleMaxLines: Int = 1,
     titleTestTag: String? = null,
     subtitleTestTag: String? = null,
     leading: (@Composable () -> Unit)? = null,
@@ -90,7 +92,7 @@ fun ScreenHeader(
                 color = PocketShellColors.Text,
                 style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (titleTestTag != null) Modifier.testTag(titleTestTag) else Modifier,
             )
@@ -100,7 +102,7 @@ fun ScreenHeader(
                     text = subtitle,
                     color = PocketShellColors.TextMuted,
                     style = PocketShellType.bodyDense,
-                    maxLines = 1,
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                     modifier = if (subtitleTestTag != null) Modifier.testTag(subtitleTestTag) else Modifier,
                 )

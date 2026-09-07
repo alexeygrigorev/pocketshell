@@ -23,9 +23,14 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.terminal.SESSION_TITLE_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_ERROR_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_CREATE_NOTICE_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_NEW_SESSION_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
+import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -39,7 +44,7 @@ import org.junit.runner.RunWith
 import kotlinx.coroutines.flow.first
 
 /**
- * Journey J04 — create a session from the tree's FAB and land in it
+ * Journey J04 — create a session from a workspace and land in it
  * (rewrite task U-6).
  *
  * ## Why this has to be a device journey
@@ -144,22 +149,23 @@ class J04CreateSessionJourney {
     }
 
     /**
-     * The headline journey: FAB → folder → Create → land in the new session,
-     * which the HOST agrees exists, in the folder that was typed.
+     * The headline journey: workspace → New session → folder → Create → land
+     * in the new session, which the HOST agrees exists in the typed folder.
      */
     @Test
     fun creatingASessionFromTheTreeLandsOnItAndItAppearsOnTheTree() {
-        openTree()
+        openWorkspace()
         assertTrue(
             "the session under test must not exist before the journey creates it",
             SESSION_NEW !in hostSessionNames(),
         )
 
-        compose.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
         awaitTag(CREATE_SESSION_SHEET_TAG)
         JourneyScreenshots.capture("01-create-sheet", JOURNEY)
 
         compose.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).performTextReplacement(FOLDER_NEW)
+        compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).performTextReplacement(SESSION_NEW_TAG)
         // The name follows the folder, so the common case is one tap. This is
         // the on-device half of `defaultSessionName` — an IME that delivered the
         // text differently would break it here and nowhere else.
@@ -196,7 +202,7 @@ class J04CreateSessionJourney {
         pressBack()
         awaitTag(sessionRowTag(SESSION_NEW))
         compose.onNodeWithTag(sessionRowTag(SESSION_NEW)).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(WORKSPACE_ERROR_TAG).assertDoesNotExist()
         JourneyScreenshots.capture("04-tree-after-create", JOURNEY)
     }
 
@@ -206,12 +212,12 @@ class J04CreateSessionJourney {
      */
     @Test
     fun creatingTheSameNameTwiceOpensTheExistingSessionWithoutAnError() {
-        openTree()
+        openWorkspace()
 
         createFromSheet(FOLDER_TWICE)
         awaitSessionScreen(SESSION_TWICE)
         pressBack()
-        awaitTag(SESSION_TREE_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
         assertEquals(
             "the first create must have made exactly one session",
             1,
@@ -221,10 +227,11 @@ class J04CreateSessionJourney {
         // Exactly the same folder, so exactly the same derived name.
         createFromSheet(FOLDER_TWICE)
 
-        // The second create still OPENS the session — a client that treated
-        // `created:false` as a failure would never get here.
-        awaitSessionScreen(SESSION_TWICE)
-        JourneyScreenshots.capture("05-existing-session-opened", JOURNEY)
+        // The second create remains on the workspace. `created:false` must not
+        // silently resume an existing session; the user chooses its row.
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        awaitTag(WORKSPACE_CREATE_NOTICE_TAG)
+        compose.onNodeWithTag(SESSION_SCREEN_TAG).assertDoesNotExist()
         assertEquals(
             "an idempotent create must not duplicate the session",
             1,
@@ -232,13 +239,16 @@ class J04CreateSessionJourney {
         )
 
         // ...and it is reported as a notice, never as a failure.
-        pressBack()
-        awaitTag(SESSION_TREE_CREATE_NOTICE_TAG)
-        compose.onNodeWithTag(SESSION_TREE_CREATE_NOTICE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(WORKSPACE_CREATE_NOTICE_TAG).assertIsDisplayed()
         compose.onNodeWithText(
-            "Session \"$SESSION_TWICE\" already existed — opened it.",
+            "Session \"$SESSION_TWICE\" already exists — choose it from the list to open it.",
         ).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TREE_ERROR_BANNER_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(sessionRowTag(SESSION_TWICE)).performClick()
+        awaitSessionScreen(SESSION_TWICE)
+        JourneyScreenshots.capture("05-existing-session-opened", JOURNEY)
+        pressBack()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        compose.onNodeWithTag(WORKSPACE_ERROR_TAG).assertDoesNotExist()
         compose.onNodeWithTag(CREATE_SESSION_ERROR_TAG).assertDoesNotExist()
         JourneyScreenshots.capture("06-already-existed-notice", JOURNEY)
     }
@@ -280,7 +290,7 @@ class J04CreateSessionJourney {
 
     /** FAB → type the folder → Create. Leaves the screen mid-navigation. */
     private fun createFromSheet(folder: String) {
-        compose.onNodeWithTag(SESSION_TREE_CREATE_FAB_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
         awaitTag(CREATE_SESSION_SHEET_TAG)
         compose.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).performTextReplacement(folder)
         // Keep the idempotent path under the same device-level guarantees as
@@ -289,7 +299,15 @@ class J04CreateSessionJourney {
         // target a still-disabled/under-IME button without invoking the host
         // command. That leaves the sheet open and makes the failure look like
         // a broken aplexer navigation even though no create was sent.
-        val expectedTag = defaultSessionName(folder)
+        val expectedTag = if (folder == FOLDER_TWICE) {
+            SESSION_TWICE_TAG
+        } else {
+            defaultSessionName(folder)
+        }
+        if (folder == FOLDER_TWICE) {
+            compose.onNodeWithTag(CREATE_SESSION_NAME_TAG)
+                .performTextReplacement(SESSION_TWICE_TAG)
+        }
         compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertTextContains(expectedTag)
         SystemClock.sleep(IME_SETTLE_MS)
         compose.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG)
@@ -299,14 +317,12 @@ class J04CreateSessionJourney {
         compose.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
     }
 
-    /** Taps the seeded host and waits for the tree's first real listing. */
-    private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-
-        awaitTag(SESSION_TREE_TAG)
-        // The screen exists immediately; wait for the listing to land before
-        // touching the FAB, so a slow exec is a wait rather than a false red.
+    /** Opens the seeded workspace and waits for its first real listing. */
+    private fun openWorkspace() {
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(workspaceRowTag(WORKSPACE_MAIN))
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitTag(sessionRowTag(CANNED_SESSION))
     }
 
@@ -335,9 +351,9 @@ class J04CreateSessionJourney {
                 CREATE_SESSION_SHEET_TAG,
                 CREATE_SESSION_SUBMIT_TAG,
                 CREATE_SESSION_ERROR_TAG,
-                SESSION_TREE_TAG,
-                SESSION_TREE_ERROR_BANNER_TAG,
-                SESSION_TREE_CREATE_NOTICE_TAG,
+                WORKSPACE_SCREEN_TAG,
+                WORKSPACE_ERROR_TAG,
+                WORKSPACE_CREATE_NOTICE_TAG,
                 SESSION_SCREEN_TAG,
                 SESSION_TITLE_TAG,
             ).forEach { tag ->
@@ -420,17 +436,18 @@ class J04CreateSessionJourney {
 
         /** A real aplexer session the image/journey reports, so the tree has landed. */
         const val CANNED_SESSION = "pocketshell:claude-main"
+        const val WORKSPACE_MAIN = "/home/testuser/git/pocketshell"
 
-        const val FOLDER_NEW = "/home/testuser/git/j04-new"
+        const val FOLDER_NEW = "/home/testuser/git/pocketshell"
         // The app submits the explicit tag after `--`; the host returns the
         // stable aplexer display identity `<workspace-basename>:<tag>`. Keep
         // both values explicit because the form shows the tag while the tree
         // and attach route use the host identity.
         const val SESSION_NEW_TAG = "j04-new"
-        const val SESSION_NEW = "j04-new:j04-new"
-        const val FOLDER_TWICE = "/home/testuser/git/j04-twice"
+        const val SESSION_NEW = "pocketshell:j04-new"
+        const val FOLDER_TWICE = "/home/testuser/git/pocketshell"
         const val SESSION_TWICE_TAG = "j04-twice"
-        const val SESSION_TWICE = "j04-twice:j04-twice"
+        const val SESSION_TWICE = "pocketshell:j04-twice"
 
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
 

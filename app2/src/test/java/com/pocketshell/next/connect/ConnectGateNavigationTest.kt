@@ -69,6 +69,7 @@ class ConnectGateNavigationTest {
         composeRule.onNodeWithTag(TRUST_SHEET_TRUST_TAG).performClick()
 
         awaitText("Tree(hostId=$hostId)")
+        composeRule.onNodeWithText("Hosts").assertDoesNotExist()
         assertEquals(Destination.Tree.pattern, nav.currentBackStackEntry?.destination?.route)
         assertEquals(
             hostId,

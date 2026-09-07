@@ -2,9 +2,11 @@ package com.pocketshell.next.connect
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -130,6 +132,31 @@ class ConnectViewModelTest {
             assertNull(state.prompt)
             // The retry is a FULL re-dial, not a resumed handshake.
             assertTrue(stack.factory.dialCount > dialsBeforeTrust)
+        }
+
+    @Test
+    fun `trust stays busy until the post-trust retry really connects`() =
+        runTest(dispatcher) {
+            stack = TestConnectStack(presentedFingerprint = "SHA256:presented")
+            val hostId = stack.seedHost()
+
+            stack.viewModel.connect(hostId)
+            advanceUntilIdle()
+            val retryGate = CompletableDeferred<Unit>()
+            stack.factory.retryGate = retryGate
+
+            stack.viewModel.trust()
+            runCurrent()
+
+            assertEquals(hostId, stack.viewModel.state.value.busyHostId)
+            assertNull(stack.viewModel.state.value.navigateToHostId)
+
+            retryGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(hostId, stack.viewModel.state.value.navigateToHostId)
+            assertNull(stack.viewModel.state.value.busyHostId)
+            assertEquals(2, stack.factory.dialCount)
         }
 
     /**

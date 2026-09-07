@@ -1,5 +1,6 @@
 package com.pocketshell.next.connect
 
+import android.util.Log
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.transport.AuthMaterial
@@ -82,9 +83,11 @@ class ConnectionsRegistry(
      */
     suspend fun getOrConnect(hostId: Long): ConnectResult = mutex.withLock {
         withContext(dispatcher) {
+            Log.i(TAG, "registry dial start host=$hostId")
             val existing = connections[hostId]
             if (existing != null) {
                 if (existing.state.value.isLive()) {
+                    Log.i(TAG, "registry reused live connection host=$hostId")
                     return@withContext ConnectResult.Connected(existing)
                 }
                 // Spent instance: drop it before dialing so a failed dial can
@@ -97,7 +100,10 @@ class ConnectionsRegistry(
             val host = hostDao.getById(hostId)
                 ?: return@withContext ConnectResult.Failed("No host row for id $hostId", null)
 
-            when (val result = factory.connect(host.toTarget(), trustStore)) {
+            val target = host.toTarget()
+            val result = factory.connect(target, trustStore)
+            Log.i(TAG, "registry factory result host=$hostId ${result.summary()}")
+            when (result) {
                 is ConnectResult.Connected -> {
                     connections[hostId] = result.connection
                     result
@@ -105,7 +111,12 @@ class ConnectionsRegistry(
 
                 is ConnectResult.NeedsTrust -> ConnectResult.NeedsTrust(
                     decision = result.decision,
-                    retry = { getOrConnect(hostId) },
+                    retry = {
+                        Log.i(TAG, "registry post-trust retry entered host=$hostId")
+                        getOrConnect(hostId).also {
+                            Log.i(TAG, "registry post-trust retry result host=$hostId ${it.summary()}")
+                        }
+                    },
                 )
 
                 is ConnectResult.Failed -> result
@@ -131,6 +142,7 @@ class ConnectionsRegistry(
         withContext(dispatcher) {
             val host = hostDao.getById(hostId) ?: return@withContext false
             trustStore.recordTrusted(host.toTarget(), sha256)
+            Log.i(TAG, "registry recorded trust host=$hostId fingerprint=$sha256")
             true
         }
 
@@ -164,6 +176,14 @@ class ConnectionsRegistry(
     }
 
     private companion object {
+        const val TAG = "PocketShell.Connect"
+
+        fun ConnectResult.summary(): String = when (this) {
+            is ConnectResult.Connected -> "connected"
+            is ConnectResult.NeedsTrust -> "needs-trust/${decision::class.simpleName}"
+            is ConnectResult.Failed -> "failed/${cause?.javaClass?.simpleName ?: "no-cause"}"
+        }
+
         fun TransportState.isLive(): Boolean = when (this) {
             TransportState.Connecting, TransportState.Connected -> true
             // Both terminal states are spent, whatever the close's reason: a

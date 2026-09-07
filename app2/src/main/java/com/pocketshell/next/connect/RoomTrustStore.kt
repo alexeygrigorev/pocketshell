@@ -1,5 +1,6 @@
 package com.pocketshell.next.connect
 
+import android.util.Log
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.transport.HostTarget
 import com.pocketshell.core.transport.TrustDecision
@@ -33,11 +34,13 @@ class RoomTrustStore(
         presentedSha256: String,
     ): TrustDecision = withContext(dispatcher) {
         val stored = hostDao.getById(target.hostId)?.trustedHostKeySha256
-        when {
+        val decision = when {
             stored.isNullOrBlank() -> TrustDecision.Unknown(presentedSha256)
             stored == presentedSha256 -> TrustDecision.Trusted
             else -> TrustDecision.Mismatch(storedSha256 = stored, presentedSha256 = presentedSha256)
         }
+        Log.i(TAG, "trust evaluate host=${target.hostId} decision=${decision::class.simpleName}")
+        decision
     }
 
     override suspend fun recordTrusted(target: HostTarget, sha256: String) {
@@ -49,10 +52,13 @@ class RoomTrustStore(
                     trustedHostKeySha256 = sha256,
                 ),
             )
+            Log.i(TAG, "trust store updated host=${target.hostId}")
         }
     }
 
     companion object {
+        private const val TAG = "PocketShell.Connect"
+
         /**
          * Value written to `hosts.trustedHostKeyAlgorithm`.
          *

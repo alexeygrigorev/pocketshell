@@ -15,8 +15,11 @@ import net.schmizz.keepalive.KeepAliveProvider
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.Buffer
+import net.schmizz.sshj.common.Factory
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
-import net.schmizz.sshj.userauth.password.PasswordFinder
+import net.schmizz.sshj.userauth.keyprovider.KeyProvider
+import net.schmizz.sshj.userauth.keyprovider.KeyProviderUtil
+import net.schmizz.sshj.userauth.password.PasswordUtils
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.security.MessageDigest
 import java.security.PublicKey
@@ -37,11 +40,19 @@ import java.util.concurrent.atomic.AtomicReference
  */
 interface AuthSecretResolver {
     /**
-     * Returns the private key for `ssh_keys` row [keyId] as OpenSSH/PEM text,
-     * already decrypted (passphrase handling belongs to the secret store, not
-     * the transport).
+     * Returns the private key for `ssh_keys` row [keyId] as OpenSSH/PEM text.
+     * Encrypted material remains encrypted; [resolvePrivateKeyPassphrase]
+     * supplies a one-use passphrase when the user has unlocked it.
      */
     suspend fun resolvePrivateKeyPem(keyId: Long): String
+
+    /**
+     * Returns a one-use copy of the passphrase for an encrypted private key.
+     * Implementations must keep passphrases out of durable storage and return
+     * null for passphrase-less keys. The factory scrubs the returned array
+     * after the dial finishes.
+     */
+    suspend fun resolvePrivateKeyPassphrase(keyId: Long): CharArray? = null
 
     /** Returns the password behind an [AuthMaterial.Password.secretRef] handle. */
     suspend fun resolvePassword(secretRef: String): CharArray
@@ -118,57 +129,61 @@ class RealHostConnectionFactory(
             )
         }
 
-        val client = newClient()
-        val verifier = TrustDecisionVerifier(target, trust)
-        client.addHostKeyVerifier(verifier)
+        try {
+            val client = newClient()
+            val verifier = TrustDecisionVerifier(target, trust)
+            client.addHostKeyVerifier(verifier)
 
-        val dial = dialScope.async { blockingDial(client, target, resolvedAuth) }
-        val outcome: DialOutcome = try {
-            withContext(ioDispatcher) {
-                withTimeoutOrNull(connectTimeoutMs) {
-                    dial.await()
-                    DialOutcome.Success
-                } ?: DialOutcome.TimedOut
-            }
-        } catch (cancelled: CancellationException) {
-            abandonDial(client, dial)
-            throw cancelled
-        } catch (failure: Throwable) {
-            DialOutcome.Failed(failure)
-        }
-
-        return when (outcome) {
-            DialOutcome.Success ->
-                ConnectResult.Connected(RealHostConnection(target, client, ioDispatcher))
-
-            DialOutcome.TimedOut -> {
+            val dial = dialScope.async { blockingDial(client, target, resolvedAuth) }
+            val outcome: DialOutcome = try {
+                withContext(ioDispatcher) {
+                    withTimeoutOrNull(connectTimeoutMs) {
+                        dial.await()
+                        DialOutcome.Success
+                    } ?: DialOutcome.TimedOut
+                }
+            } catch (cancelled: CancellationException) {
                 abandonDial(client, dial)
-                ConnectResult.Failed(
-                    "Connect to ${target.username}@${target.hostname}:${target.port} " +
-                        "timed out after ${connectTimeoutMs}ms",
-                    null,
-                )
+                throw cancelled
+            } catch (failure: Throwable) {
+                DialOutcome.Failed(failure)
             }
 
-            is DialOutcome.Failed -> {
-                // blockingDial already disconnected its client best-effort.
-                val decision = verifier.decision()
-                if (decision != null && decision !is TrustDecision.Trusted) {
-                    // Not a failure: the host key needs a user decision. The
-                    // retry dials from scratch (fresh SSHClient, fresh
-                    // verifier) so a recordTrusted() in between is re-evaluated.
-                    ConnectResult.NeedsTrust(
-                        decision = decision,
-                        retry = { connect(target, trust) },
-                    )
-                } else {
+            return when (outcome) {
+                DialOutcome.Success ->
+                    ConnectResult.Connected(RealHostConnection(target, client, ioDispatcher))
+
+                DialOutcome.TimedOut -> {
+                    abandonDial(client, dial)
                     ConnectResult.Failed(
-                        "Connect to ${target.username}@${target.hostname}:${target.port} failed: " +
-                            (outcome.cause.message ?: outcome.cause.javaClass.simpleName),
-                        outcome.cause,
+                        "Connect to ${target.username}@${target.hostname}:${target.port} " +
+                            "timed out after ${connectTimeoutMs}ms",
+                        null,
                     )
                 }
+
+                is DialOutcome.Failed -> {
+                    // blockingDial already disconnected its client best-effort.
+                    val decision = verifier.decision()
+                    if (decision != null && decision !is TrustDecision.Trusted) {
+                        // Not a failure: the host key needs a user decision. The
+                        // retry dials from scratch (fresh SSHClient, fresh
+                        // verifier) so a recordTrusted() in between is re-evaluated.
+                        ConnectResult.NeedsTrust(
+                            decision = decision,
+                            retry = { connect(target, trust) },
+                        )
+                    } else {
+                        ConnectResult.Failed(
+                            "Connect to ${target.username}@${target.hostname}:${target.port} failed: " +
+                                (outcome.cause.message ?: outcome.cause.javaClass.simpleName),
+                            outcome.cause,
+                        )
+                    }
+                }
             }
+        } finally {
+            resolvedAuth.scrub()
         }
     }
 
@@ -185,7 +200,7 @@ class RealHostConnectionFactory(
                 is ResolvedAuth.PrivateKey ->
                     client.authPublickey(
                         target.username,
-                        client.loadKeys(auth.pem, null as String?, null as PasswordFinder?),
+                        loadKeysFromPem(client, auth.pem, auth.passphrase),
                     )
 
                 is ResolvedAuth.Password ->
@@ -196,6 +211,30 @@ class RealHostConnectionFactory(
             runCatching { client.disconnect() }
             throw failure
         }
+    }
+
+    /**
+     * sshj's two-argument `loadKeys(String, char[])` treats the first argument
+     * as a filesystem path. The resolver deliberately returns PEM text so an
+     * encrypted key never has to be copied to a temporary file; use the
+     * content overload instead and attach the one-use password finder.
+     */
+    private fun loadKeysFromPem(
+        client: SSHClient,
+        pem: String,
+        passphrase: CharArray?,
+    ): KeyProvider {
+        val format = KeyProviderUtil.detectKeyFileFormat(pem, passphrase != null)
+        val provider = Factory.Named.Util.create(
+            client.transport.config.fileKeyProviderFactories,
+            format.toString(),
+        ) ?: error("No sshj key provider for ${format}")
+        provider.init(
+            pem,
+            null,
+            passphrase?.let(PasswordUtils::createOneOff),
+        )
+        return provider
     }
 
     /**
@@ -212,7 +251,10 @@ class RealHostConnectionFactory(
     }
 
     private suspend fun resolveAuth(auth: AuthMaterial): ResolvedAuth = when (auth) {
-        is AuthMaterial.KeyRef -> ResolvedAuth.PrivateKey(secrets.resolvePrivateKeyPem(auth.keyId))
+        is AuthMaterial.KeyRef -> ResolvedAuth.PrivateKey(
+            pem = secrets.resolvePrivateKeyPem(auth.keyId),
+            passphrase = secrets.resolvePrivateKeyPassphrase(auth.keyId),
+        )
         is AuthMaterial.Password -> ResolvedAuth.Password(secrets.resolvePassword(auth.secretRef))
     }
 
@@ -228,12 +270,19 @@ class RealHostConnectionFactory(
     }
 
     private sealed interface ResolvedAuth {
-        data class PrivateKey(val pem: String) : ResolvedAuth
+        data class PrivateKey(val pem: String, val passphrase: CharArray?) : ResolvedAuth
         data class Password(val password: CharArray) : ResolvedAuth {
             override fun equals(other: Any?): Boolean =
                 other is Password && password.contentEquals(other.password)
 
             override fun hashCode(): Int = password.contentHashCode()
+        }
+
+        fun scrub() {
+            when (this) {
+                is PrivateKey -> passphrase?.fill('\u0000')
+                is Password -> password.fill('\u0000')
+            }
         }
     }
 

@@ -41,8 +41,16 @@ class QrScannerViewModel @Inject constructor(
         /** Every part arrived and the payload is being written. */
         data object Importing : State
 
-        /** Terminal success. The screen navigates back and reports [message]. */
-        data class Imported(val message: String) : State
+        /** A decoded real payload is waiting for the user to approve import. */
+        data class Review(
+            val config: SshImportConfig,
+            internal val payload: String,
+            val existingHost: ExistingHost? = null,
+            val duplicateChecked: Boolean = true,
+        ) : State
+
+        /** Terminal success. The screen reports [message] and opens this host. */
+        data class Imported(val message: String, val hostId: Long) : State
 
         /** Terminal failure; the screen offers retry. */
         data class Failed(val message: String) : State
@@ -83,7 +91,7 @@ class QrScannerViewModel @Inject constructor(
             return
         }
         when (val outcome = assembler.accept(part)) {
-            is QrChunkAssembler.Outcome.Complete -> importPayload(outcome.payload)
+            is QrChunkAssembler.Outcome.Complete -> reviewPayload(outcome.payload)
             is QrChunkAssembler.Outcome.Progress ->
                 _state.value = State.Scanning(outcome.state.count, outcome.state.total)
 
@@ -98,7 +106,25 @@ class QrScannerViewModel @Inject constructor(
      * says so if it is not.
      */
     fun onPayloadPicked(payload: String) {
-        importPayload(payload)
+        reviewPayload(payload)
+    }
+
+    /** Confirm the exact decoded host shown by the review screen. */
+    fun confirmImport(action: DuplicateAction? = null) {
+        val review = _state.value as? State.Review ?: return
+        if (!review.duplicateChecked) return
+        if (review.existingHost != null && action == null) return
+        importPayload(
+            payload = review.payload,
+            duplicateAction = if (review.existingHost == null) DuplicateAction.AddNew else action!!,
+        )
+    }
+
+    /** Return to the camera without writing the reviewed host or key. */
+    fun cancelReview() {
+        if (_state.value !is State.Review) return
+        assembler.reset()
+        _state.value = State.Scanning()
     }
 
     /** Report a failure raised by the screen's own plumbing (image decode, file read). */
@@ -111,13 +137,57 @@ class QrScannerViewModel @Inject constructor(
         _state.value = State.RequestingPermission
     }
 
-    private fun importPayload(payload: String) {
+    private fun importPayload(payload: String, duplicateAction: DuplicateAction) {
         _state.value = State.Importing
         viewModelScope.launch {
-            _state.value = when (val outcome = importer.import(payload)) {
-                is ImportOutcome.Imported -> State.Imported("Imported ${outcome.name}")
-                is ImportOutcome.AlreadyPresent -> State.Imported("Already added: ${outcome.name}")
+            _state.value = when (val outcome = importer.import(payload, duplicateAction)) {
+                is ImportOutcome.Imported -> State.Imported("Imported ${outcome.name}", outcome.hostId)
+                is ImportOutcome.AlreadyPresent -> State.Imported(
+                    "Skipped; already added: ${outcome.name}",
+                    outcome.hostId,
+                )
+                is ImportOutcome.Replaced -> State.Imported("Replaced ${outcome.name}", outcome.hostId)
                 is ImportOutcome.Failed -> State.Failed(outcome.message)
+            }
+        }
+    }
+
+    /** Decode enough to render a review without ever displaying key material. */
+    private fun reviewPayload(rawPayload: String) {
+        val payload = if (QrChunkCodec.isEnvelope(rawPayload)) {
+            val part = QrChunkCodec.decodePart(rawPayload).getOrElse {
+                _state.value = State.Failed(it.message ?: "Could not read that QR")
+                return
+            }
+            if (part.total != 1) {
+                _state.value = State.Failed(
+                    "This QR is part ${part.part} of ${part.total}. " +
+                        "Use the camera so every part can be combined.",
+                )
+                return
+            }
+            String(part.chunk, Charsets.UTF_8)
+        } else {
+            rawPayload
+        }
+
+        val config = SshImportPayloadCodec.decode(payload).getOrElse {
+            _state.value = State.Failed(it.message ?: "Could not read the shared host")
+            return
+        }
+        val review = State.Review(
+            config = config,
+            payload = payload,
+            duplicateChecked = false,
+        )
+        _state.value = review
+        viewModelScope.launch {
+            val existing = runCatching { importer.findExisting(config) }.getOrElse {
+                _state.value = State.Failed(it.message ?: "Could not check existing hosts")
+                return@launch
+            }
+            if (_state.value == review) {
+                _state.value = review.copy(existingHost = existing, duplicateChecked = true)
             }
         }
     }

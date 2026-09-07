@@ -82,6 +82,11 @@ class SshKeyStoreTest {
         assertFalse(SshKeyMaterial.isEncrypted(pem))
         assertEquals(file.readText(), pem)
 
+        val publicKey = store.readPublicKey(key)
+        assertNotNull(publicKey)
+        assertTrue(publicKey!!.startsWith("ssh-rsa "))
+        assertTrue(publicKey.split(' ').size >= 2)
+
         // Registered, and the fingerprint indexes it.
         assertEquals(listOf("laptop"), db.sshKeyDao().getAll().first().map { it.name })
         assertEquals(key.id, db.sshKeyDao().getByFingerprint(key.fingerprint)?.id)
@@ -118,17 +123,16 @@ class SshKeyStoreTest {
     }
 
     @Test
-    fun `a passphrase-protected key is refused with an explanation`() = runTest {
-        val error = runCatching { store.importKey("locked", ENCRYPTED_OPENSSH_PEM) }.exceptionOrNull()
+    fun `a passphrase-protected key is retained for a later unlock`() = runTest {
+        val key = store.importKey("locked", ENCRYPTED_OPENSSH_PEM)
 
-        assertTrue(error is EncryptedKeyUnsupportedException)
-        assertTrue(error!!.message!!.contains("passphrase-protected"))
-        // Nothing partial was written: no row, and no file left behind.
-        assertTrue(db.sshKeyDao().getAll().first().isEmpty())
+        assertTrue(key.hasPassphrase)
+        assertTrue(File(key.privateKeyPath).isFile)
+        assertEquals(1, db.sshKeyDao().getAll().first().size)
     }
 
     @Test
-    fun `a classic encrypted PEM is refused too`() = runTest {
+    fun `a classic encrypted PEM is retained too`() = runTest {
         val classic = """
             -----BEGIN RSA PRIVATE KEY-----
             Proc-Type: 4,ENCRYPTED
@@ -139,10 +143,9 @@ class SshKeyStoreTest {
         """.trimIndent()
 
         assertTrue(SshKeyMaterial.isEncrypted(classic))
-        assertTrue(
-            runCatching { store.importKey("x", classic) }
-                .exceptionOrNull() is EncryptedKeyUnsupportedException,
-        )
+        val key = store.importKey("x", classic)
+        assertTrue(key.hasPassphrase)
+        assertEquals(classic, File(key.privateKeyPath).readText())
     }
 
     @Test

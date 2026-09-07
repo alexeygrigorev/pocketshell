@@ -143,8 +143,8 @@ class AppNavHostTest {
                 // reason as the ones above, so they get stand-ins that echo the
                 // argument the route delivered — this suite pins the patterns
                 // and their argument decoding, not the screens.
-                hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
-                sshKeysScreen = { Text("SshKeys") },
+                hostFormScreen = { hostId, _, _, _ -> Text("HostForm(hostId=$hostId)") },
+                sshKeysScreen = { _, _ -> Text("SshKeys") },
                 qrScanScreen = { _, _ -> Text("QrScan") },
                 // Task P-6: Settings and WorkspaceRoots resolve ViewModels
                 // through `hiltViewModel()` too, for the same reason as every

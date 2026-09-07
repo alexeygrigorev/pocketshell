@@ -26,10 +26,9 @@ import kotlinx.coroutines.withContext
  * - **Byte-identical keys are deduplicated** by [SshKeyMaterial.fingerprint].
  *   Importing the same QR twice reuses the row instead of writing a second copy
  *   of the same secret under a `-<suffix>` name.
- * - **Encrypted keys are rejected** ([EncryptedKeyUnsupportedException]).
- *   app2 has no unlock flow (biometric passphrase entry was cut from P-6), so
- *   accepting one would store a key that can only fail later, at connect time,
- *   with the user two screens away from the cause.
+ * - **Encrypted keys are retained exactly as supplied.** The passphrase is
+ *   never stored beside the PEM; the connect flow hands a user-entered,
+ *   scrubbed copy to sshj after the native unlock handoff.
  */
 class SshKeyStore(
     private val keysDir: File,
@@ -42,13 +41,11 @@ class SshKeyStore(
      * inserted one or the existing row for the same key material.
      *
      * @throws NotAPrivateKeyException when the text is not a private-key PEM.
-     * @throws EncryptedKeyUnsupportedException when the key is passphrase-protected.
      */
     suspend fun importKey(name: String, pem: String): SshKeyEntity {
         val trimmed = pem.trim()
         if (!SshKeyMaterial.looksLikePrivateKey(trimmed)) throw NotAPrivateKeyException()
-        if (SshKeyMaterial.isEncrypted(trimmed)) throw EncryptedKeyUnsupportedException()
-        return persist(name, trimmed)
+        return persist(name, trimmed, SshKeyMaterial.isEncrypted(trimmed))
     }
 
     /**
@@ -60,7 +57,7 @@ class SshKeyStore(
         name: String = "generated-${System.currentTimeMillis()}",
     ): SshKeyEntity {
         val pem = withContext(dispatcher) { SshKeyMaterial.generateRsaPrivateKeyPem() }
-        return persist(name, pem.trim())
+        return persist(name, pem.trim(), hasPassphrase = false)
     }
 
     /** The `ssh_keys` row for [keyId], or `null` if it is gone. */
@@ -70,6 +67,16 @@ class SshKeyStore(
     suspend fun readPem(key: SshKeyEntity): String? = withContext(dispatcher) {
         File(key.privateKeyPath).takeIf { it.isFile }?.readText()
     }
+
+    /**
+     * Returns the complete authorized-keys line for [key]. The private PEM is
+     * only read inside this method and is never placed in UI state.
+     */
+    suspend fun readPublicKey(key: SshKeyEntity, passphrase: CharArray? = null): String? =
+        withContext(dispatcher) {
+            val pem = File(key.privateKeyPath).takeIf { it.isFile }?.readText() ?: return@withContext null
+            SshKeyMaterial.publicKeyLine(pem, passphrase)
+        }
 
     /**
      * Remove the key: the file first, then the row.
@@ -89,7 +96,7 @@ class SshKeyStore(
         sshKeyDao.delete(key)
     }
 
-    private suspend fun persist(name: String, pem: String): SshKeyEntity =
+    private suspend fun persist(name: String, pem: String, hasPassphrase: Boolean): SshKeyEntity =
         withContext(dispatcher) {
             val fingerprint = SshKeyMaterial.fingerprint(pem)
             val existing = sshKeyDao.getByFingerprint(fingerprint)
@@ -112,9 +119,7 @@ class SshKeyStore(
                 name = target.name,
                 privateKeyPath = target.absolutePath,
                 fingerprint = fingerprint,
-                // Always false: importKey rejects encrypted material and
-                // generateKey never produces any.
-                hasPassphrase = false,
+                hasPassphrase = hasPassphrase,
             )
             row.copy(id = sshKeyDao.insert(row))
         }
@@ -158,10 +163,4 @@ class SshKeyStore(
 class NotAPrivateKeyException : IOException(
     "That does not look like an SSH private key " +
         "(no -----BEGIN ... PRIVATE KEY----- block)",
-)
-
-/** The key is passphrase-protected and app2 has no unlock flow. */
-class EncryptedKeyUnsupportedException : IOException(
-    "That key is passphrase-protected. PocketShell cannot unlock encrypted " +
-        "keys yet — import an unencrypted key, or generate one here.",
 )

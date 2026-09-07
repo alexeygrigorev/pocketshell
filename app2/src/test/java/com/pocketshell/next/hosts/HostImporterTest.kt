@@ -143,7 +143,7 @@ class HostImporterTest {
     }
 
     @Test
-    fun `a payload carrying an encrypted key is refused without writing anything`() = runTest {
+    fun `a payload carrying an encrypted key is retained for connection unlock`() = runTest {
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
                 name = "locked",
@@ -154,12 +154,44 @@ class HostImporterTest {
             ),
         )
 
-        val outcome = importer.import(payload)
+        val outcome = importer.import(payload, DuplicateAction.Skip)
 
-        assertTrue(outcome is ImportOutcome.Failed)
-        assertTrue((outcome as ImportOutcome.Failed).message.contains("passphrase-protected"))
-        assertTrue(db.hostDao().getAll().first().isEmpty())
-        assertTrue(db.sshKeyDao().getAll().first().isEmpty())
+        assertTrue(outcome is ImportOutcome.Imported)
+        val key = db.sshKeyDao().getAll().first().single()
+        assertTrue(key.hasPassphrase)
+        assertEquals(1, db.hostDao().getAll().first().size)
+    }
+
+    @Test
+    fun `explicit replace updates the matching host and preserves one row`() = runTest {
+        val key = keyStore.generateKey("k")
+        val existingId = db.hostDao().insert(
+            HostEntity(name = "old-name", hostname = "10.0.0.1", port = 22, username = "alexey", keyId = key.id),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig("new-name", "10.0.0.1", 22, "alexey", SshImportAuth.KeyReference("k")),
+        )
+
+        assertEquals(
+            ImportOutcome.Replaced("new-name", existingId),
+            importer.import(payload, DuplicateAction.Replace),
+        )
+        assertEquals("new-name", db.hostDao().getById(existingId)?.name)
+        assertEquals(1, db.hostDao().getAll().first().size)
+    }
+
+    @Test
+    fun `explicit add-new creates a second host for the matching endpoint`() = runTest {
+        val key = keyStore.generateKey("k")
+        db.hostDao().insert(
+            HostEntity(name = "old-name", hostname = "10.0.0.1", port = 22, username = "alexey", keyId = key.id),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig("new-name", "10.0.0.1", 22, "alexey", SshImportAuth.KeyReference("k")),
+        )
+
+        assertTrue(importer.import(payload, DuplicateAction.AddNew) is ImportOutcome.Imported)
+        assertEquals(2, db.hostDao().getAll().first().size)
     }
 
     @Test
@@ -168,7 +200,7 @@ class HostImporterTest {
             SshImportConfig("h", "10.0.0.1", 22, "u", SshImportAuth.KeyReference("missing-key")),
         )
 
-        val outcome = importer.import(payload)
+        val outcome = importer.import(payload, DuplicateAction.Skip)
 
         assertTrue(outcome is ImportOutcome.Failed)
         assertTrue((outcome as ImportOutcome.Failed).message.contains("missing-key"))
@@ -185,9 +217,10 @@ class HostImporterTest {
             SshImportConfig("hetzner-again", "10.0.0.1", 22, "alexey", SshImportAuth.KeyReference("k")),
         )
 
-        val outcome = importer.import(payload)
+        val outcome = importer.import(payload, DuplicateAction.Skip)
 
-        assertEquals(ImportOutcome.AlreadyPresent("hetzner"), outcome)
+        val existingId = db.hostDao().getAll().first().single().id
+        assertEquals(ImportOutcome.AlreadyPresent("hetzner", existingId), outcome)
         assertEquals(1, db.hostDao().getAll().first().size)
     }
 

@@ -3,6 +3,7 @@ package com.pocketshell.next.hosts
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.HostEntity
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -72,7 +73,10 @@ class QrScannerViewModelTest {
 
         viewModel.onScanned(QrChunkCodec.encode(payload("hetzner")).single())
 
-        assertEquals(QrScannerViewModel.State.Imported("Imported hetzner"), awaitTerminal())
+        val review = awaitReview()
+        assertEquals("hetzner", review.config.name)
+        viewModel.confirmImport()
+        assertEquals(QrScannerViewModel.State.Imported("Imported hetzner", 1L), awaitTerminal())
         assertEquals("hetzner", db.hostDao().getAll().first().single().name)
     }
 
@@ -92,6 +96,8 @@ class QrScannerViewModelTest {
 
         parts.drop(1).forEach(viewModel::onScanned)
 
+        assertTrue(awaitReview().config.name.startsWith("h"))
+        viewModel.confirmImport()
         assertTrue(awaitTerminal() is QrScannerViewModel.State.Imported)
         assertEquals(1, db.hostDao().getAll().first().size)
     }
@@ -126,6 +132,8 @@ class QrScannerViewModelTest {
         val envelope = QrChunkCodec.encode(payload("hetzner")).single()
 
         viewModel.onScanned(envelope)
+        awaitReview()
+        viewModel.confirmImport()
         val terminal = awaitTerminal()
         // The camera keeps firing for a few frames after the decode.
         viewModel.onScanned(envelope)
@@ -165,8 +173,34 @@ class QrScannerViewModelTest {
 
         viewModel.onPayloadPicked(QrChunkCodec.encode(payload("from-file")).single())
 
+        awaitReview()
+        viewModel.confirmImport()
         assertTrue(awaitTerminal() is QrScannerViewModel.State.Imported)
         assertEquals("from-file", db.hostDao().getAll().first().single().name)
+    }
+
+    @Test
+    fun `a duplicate review waits for an explicit decision`() = runTest {
+        val key = keyStore.generateKey("k")
+        db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "135.181.114.209",
+                port = 22,
+                username = "alexey",
+                keyId = key.id,
+            ),
+        )
+        viewModel.onPayloadPicked(QrChunkCodec.encode(payload("incoming")).single())
+
+        val review = awaitReview()
+        assertEquals("existing", review.existingHost?.name)
+        viewModel.confirmImport()
+        assertTrue(viewModel.state.value is QrScannerViewModel.State.Review)
+
+        viewModel.confirmImport(DuplicateAction.AddNew)
+        assertTrue(awaitTerminal() is QrScannerViewModel.State.Imported)
+        assertEquals(2, db.hostDao().getAll().first().size)
     }
 
     /**
@@ -175,7 +209,14 @@ class QrScannerViewModelTest {
      * completion signal — the screen navigates on exactly this transition.
      */
     private suspend fun awaitTerminal(): QrScannerViewModel.State =
-        viewModel.state.first { it !is QrScannerViewModel.State.Importing }
+        viewModel.state.first {
+            it is QrScannerViewModel.State.Imported || it is QrScannerViewModel.State.Failed
+        }
+
+    private suspend fun awaitReview(): QrScannerViewModel.State.Review =
+        viewModel.state.first {
+            it is QrScannerViewModel.State.Review && it.duplicateChecked
+        } as QrScannerViewModel.State.Review
 
     private fun payload(name: String): String = SshImportPayloadCodec.encode(
         SshImportConfig(

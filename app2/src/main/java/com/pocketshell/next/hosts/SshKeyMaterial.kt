@@ -3,7 +3,14 @@ package com.pocketshell.next.hosts
 import java.nio.ByteBuffer
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
+import java.security.Security
 import java.util.Base64
+import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.Buffer
+import net.schmizz.sshj.common.KeyType
+import net.schmizz.sshj.userauth.keyprovider.KeyProvider
+import net.schmizz.sshj.userauth.password.PasswordUtils
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 
 /**
  * Pure private-key helpers: recognise a PEM, detect an encrypted one, hash one,
@@ -16,13 +23,10 @@ import java.util.Base64
  *
  * ## Passphrases
  *
- * app2 has no unlock flow: the biometric-gated passphrase prompt was cut from
- * P-6 by the maintainer, and
- * [com.pocketshell.next.connect.RoomAuthSecretResolver] refuses to hand sshj a
- * key it cannot decrypt. So an encrypted key is rejected at the door
- * ([isEncrypted]) rather than stored with `hasPassphrase = true` and failing
- * later at connect time, where the user has no way to act on it. Everything
- * this module writes has `hasPassphrase = false`.
+ * Encryption is a property of the material, not a reason to discard it. The
+ * encrypted PEM stays on app-private storage and the connection flow supplies
+ * a one-use passphrase to sshj after the native unlock handoff. No passphrase
+ * is written here or included in a QR payload.
  */
 object SshKeyMaterial {
 
@@ -64,6 +68,24 @@ object SshKeyMaterial {
         val bytes = MessageDigest.getInstance("SHA-256")
             .digest(content.trim().toByteArray(Charsets.UTF_8))
         return "sha256:" + bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Reads the public half through sshj without exposing the private half.
+     * Unencrypted keys can be displayed immediately; encrypted keys are read
+     * after the caller has completed the real unlock flow.
+     */
+    fun publicKeyLine(content: String, passphrase: CharArray? = null): String {
+        ensureBouncyCastle()
+        SSHClient().use { client ->
+            val provider = loadKeyProvider(client, content, passphrase)
+            val publicKey = provider.public
+            val type = KeyType.fromKey(publicKey)
+            val body = Buffer.PlainBuffer().apply {
+                type.putPubKeyIntoBuffer(publicKey, this)
+            }.getCompactData()
+            return "${type} ${Base64.getEncoder().encodeToString(body)} pocketshell"
+        }
     }
 
     /**
@@ -109,6 +131,25 @@ object SshKeyMaterial {
     }
 
     private data class OpenSshString(val value: String, val nextOffset: Int)
+
+    private fun loadKeyProvider(
+        client: SSHClient,
+        content: String,
+        passphrase: CharArray?,
+    ): KeyProvider = client.loadKeys(
+        content,
+        null as String?,
+        passphrase?.let(PasswordUtils::createOneOff),
+    )
+
+    private fun ensureBouncyCastle() {
+        synchronized(Security::class.java) {
+            val provider = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME)
+            if (provider?.javaClass?.name == BouncyCastleProvider::class.java.name) return
+            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+            Security.insertProviderAt(BouncyCastleProvider(), 1)
+        }
+    }
 
     private fun ByteArray.readOpenSshString(offset: Int): OpenSshString? {
         if (offset < 0 || offset + 4 > size) return null

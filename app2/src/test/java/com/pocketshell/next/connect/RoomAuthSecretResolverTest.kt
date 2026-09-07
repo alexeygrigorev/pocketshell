@@ -9,8 +9,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -22,8 +24,8 @@ import org.robolectric.annotation.Config
 
 /**
  * [RoomAuthSecretResolver] against a real in-memory database and real files on
- * disk: the happy read, plus each not-supported-yet path proving it raises a
- * TYPED failure rather than returning something sshj would choke on.
+ * disk: the happy read plus the transient passphrase handoff proving it never
+ * needs to persist or log a secret.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -74,17 +76,38 @@ class RoomAuthSecretResolverTest {
     }
 
     @Test
-    fun `a passphrase-protected key raises PassphraseRequiredException`() = runTest {
+    fun `a passphrase-protected key reads encrypted PEM and requires transient unlock`() = runTest {
         val file = keyDir.newFile("id_locked").apply { writeText(pem) }
         val keyId = insertKey(file.absolutePath, hasPassphrase = true, name = "locked")
 
+        assertEquals(pem, resolver.resolvePrivateKeyPem(keyId))
+
         val failure = assertThrows(PassphraseRequiredException::class.java) {
-            runBlocking { resolver.resolvePrivateKeyPem(keyId) }
+            runBlocking { resolver.resolvePrivateKeyPassphrase(keyId) }
         }
 
         assertEquals(keyId, failure.keyId)
         assertEquals("locked", failure.keyName)
         assertTrue(failure.message!!.contains("passphrase"))
+
+        val entered = "correct horse battery staple".toCharArray()
+        resolver.rememberPassphrase(keyId, entered)
+        entered.fill('\u0000')
+        val handedOff = resolver.resolvePrivateKeyPassphrase(keyId)
+        assertArrayEquals("correct horse battery staple".toCharArray(), handedOff!!)
+        handedOff!!.fill('\u0000')
+        resolver.clearPassphrase(keyId)
+        assertThrows(PassphraseRequiredException::class.java) {
+            runBlocking { resolver.resolvePrivateKeyPassphrase(keyId) }
+        }
+    }
+
+    @Test
+    fun `a passphrase-less key has no passphrase handoff`() = runTest {
+        val file = keyDir.newFile("id_plain").apply { writeText(pem) }
+        val keyId = insertKey(file.absolutePath)
+
+        assertNull(resolver.resolvePrivateKeyPassphrase(keyId))
     }
 
     @Test

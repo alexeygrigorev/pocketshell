@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
@@ -24,6 +26,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -31,6 +36,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -43,6 +49,9 @@ const val HOST_FORM_HOSTNAME_TAG: String = "host-form-hostname"
 const val HOST_FORM_PORT_TAG: String = "host-form-port"
 const val HOST_FORM_USERNAME_TAG: String = "host-form-username"
 const val HOST_FORM_KEY_TAG: String = "host-form-key"
+const val HOST_FORM_OPTIONS_TAG: String = "host-form-options"
+const val HOST_FORM_USAGE_COMMAND_TAG: String = "host-form-usage-command"
+const val HOST_FORM_TEST_TAG: String = "host-form-test"
 const val HOST_FORM_SAVE_TAG: String = "host-form-save"
 
 /**
@@ -59,18 +68,31 @@ fun AddEditHostRoute(
     hostId: Long?,
     onDone: () -> Unit,
     onAddKey: () -> Unit,
+    onTestConnection: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     val keys by viewModel.sshKeys.collectAsState()
+    val selectedKeyResult by viewModel.selectedKeyResult.collectAsState()
 
     LaunchedEffect(hostId) { viewModel.bind(hostId) }
+    LaunchedEffect(selectedKeyResult) {
+        selectedKeyResult?.let { keyId ->
+            viewModel.selectKey(keyId)
+            viewModel.consumeSelectedKeyResult()
+        }
+    }
     LaunchedEffect(state.saved) {
         if (state.saved) {
             viewModel.consumeSaved()
             onDone()
         }
+    }
+    LaunchedEffect(state.testConnectionHostId) {
+        val connectionHostId = state.testConnectionHostId ?: return@LaunchedEffect
+        viewModel.consumeTestConnection()
+        onTestConnection(connectionHostId)
     }
 
     AddEditHostScreen(
@@ -78,6 +100,7 @@ fun AddEditHostRoute(
         keys = keys,
         onChange = viewModel::update,
         onSave = viewModel::save,
+        onTestConnection = viewModel::testConnection,
         onCancel = onDone,
         onAddKey = onAddKey,
         modifier = modifier,
@@ -104,17 +127,27 @@ fun AddEditHostScreen(
     keys: List<SshKeyEntity>,
     onChange: ((HostFormState) -> HostFormState) -> Unit,
     onSave: () -> Unit,
+    onTestConnection: () -> Unit = {},
     onCancel: () -> Unit,
     onAddKey: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var showConnectionOptions by remember {
+        mutableStateOf(state.port != "22" || state.usageCommand.isNotBlank() || state.errors.port != null)
+    }
+    LaunchedEffect(state.errors.port, state.usageCommand) {
+        if (state.errors.port != null || state.usageCommand.isNotBlank()) {
+            showConnectionOptions = true
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(PocketShellColors.Background),
     ) {
         ScreenHeader(
-            title = if (state.editing) "Edit host" else "Add host",
+            title = "Connection details",
             trailing = {
                 PocketShellButton(
                     text = "Cancel",
@@ -145,19 +178,11 @@ fun AddEditHostScreen(
                 onValueChange = { value -> onChange { it.copy(name = value) } },
             )
             FormField(
-                label = "Hostname or IP",
+                label = "Address",
                 value = state.hostname,
                 error = state.errors.hostname,
                 testTag = HOST_FORM_HOSTNAME_TAG,
                 onValueChange = { value -> onChange { it.copy(hostname = value) } },
-            )
-            FormField(
-                label = "Port",
-                value = state.port,
-                error = state.errors.port,
-                testTag = HOST_FORM_PORT_TAG,
-                keyboardType = KeyboardType.Number,
-                onValueChange = { value -> onChange { it.copy(port = value) } },
             )
             FormField(
                 label = "Username",
@@ -192,14 +217,53 @@ fun AddEditHostScreen(
                 )
             }
 
-            PocketShellButton(
-                text = if (state.editing) "Save changes" else "Add host",
-                onClick = onSave,
-                variant = ButtonVariant.Primary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(HOST_FORM_SAVE_TAG),
+            ConnectionOptions(
+                expanded = showConnectionOptions,
+                onToggle = { showConnectionOptions = !showConnectionOptions },
             )
+
+            if (showConnectionOptions) {
+                FormField(
+                    label = "Port",
+                    value = state.port,
+                    error = state.errors.port,
+                    testTag = HOST_FORM_PORT_TAG,
+                    keyboardType = KeyboardType.Number,
+                    onValueChange = { value -> onChange { it.copy(port = value) } },
+                )
+                FormField(
+                    label = "Usage command",
+                    value = state.usageCommand,
+                    error = null,
+                    testTag = HOST_FORM_USAGE_COMMAND_TAG,
+                    onValueChange = { value -> onChange { it.copy(usageCommand = value) } },
+                    placeholder = "Use host default",
+                )
+            }
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+            ) {
+                PocketShellButton(
+                    text = if (state.testingConnection) "Preparing connection…" else "Test connection",
+                    onClick = onTestConnection,
+                    variant = ButtonVariant.Primary,
+                    enabled = !state.testingConnection,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(HOST_FORM_TEST_TAG),
+                )
+                PocketShellButton(
+                    text = if (state.editing) "Save changes" else "Save without testing",
+                    onClick = onSave,
+                    variant = ButtonVariant.Text,
+                    enabled = !state.testingConnection,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(HOST_FORM_SAVE_TAG),
+                )
+            }
         }
     }
 }
@@ -219,12 +283,14 @@ private fun FormField(
     testTag: String,
     onValueChange: (String) -> Unit,
     keyboardType: KeyboardType = KeyboardType.Text,
+    placeholder: String? = null,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
             label = { Text(label) },
+            placeholder = placeholder?.let { { Text(it) } },
             singleLine = true,
             isError = error != null,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
@@ -237,9 +303,40 @@ private fun FormField(
                 text = error,
                 color = PocketShellColors.Red,
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = PocketShellSpacing.md, top = 2.dp),
+                modifier = Modifier.padding(start = PocketShellSpacing.md, top = PocketShellSpacing.xs),
             )
         }
+    }
+}
+
+@Composable
+private fun ConnectionOptions(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(
+                value = expanded,
+                role = Role.Switch,
+                onValueChange = { onToggle() },
+            )
+            .semantics {
+                stateDescription = if (expanded) "Expanded" else "Collapsed"
+            }
+            .testTag(HOST_FORM_OPTIONS_TAG)
+            .padding(vertical = PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        DisclosureIcon(expanded = expanded)
+        Text(
+            text = "Connection options",
+            color = PocketShellColors.Text,
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+        )
     }
 }
 
@@ -307,7 +404,7 @@ private fun KeyPicker(
                 text = error,
                 color = PocketShellColors.Red,
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = PocketShellSpacing.md, top = 2.dp),
+                modifier = Modifier.padding(start = PocketShellSpacing.md, top = PocketShellSpacing.xs),
             )
         }
     }

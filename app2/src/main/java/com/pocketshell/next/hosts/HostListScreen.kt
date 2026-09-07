@@ -6,9 +6,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -34,6 +37,9 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -52,6 +58,12 @@ const val HOST_LIST_UPDATE_NOTES_TAG: String = "host-list-update-notes"
 const val HOST_LIST_UPDATE_DISMISS_TAG: String = "host-list-update-dismiss"
 const val HOST_LIST_UPDATE_RETRY_TAG: String = "host-list-update-retry"
 const val HOST_LIST_UPDATE_FAILURE_TAG: String = "host-list-update-failure"
+const val HOST_LIST_KEYS_TAG: String = "host-list-ssh-keys"
+const val HOST_LIST_SETTINGS_ROW_TAG: String = "host-list-settings-row"
+const val HOST_LIST_ADD_FOOTER_TAG: String = HOST_LIST_ADD_TAG
+const val HOST_LIST_ADD_METHODS_TAG: String = "host-list-add-methods"
+const val HOST_LIST_ADD_SCAN_TAG: String = "host-list-add-scan"
+const val HOST_LIST_ADD_DETAILS_TAG: String = "host-list-add-details"
 
 fun hostRowTag(hostId: Long): String = "host-row-$hostId"
 
@@ -72,6 +84,7 @@ fun HostListRoute(
     onEditHost: (Long) -> Unit,
     onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSshKeys: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     updateCheckViewModel: UpdateCheckViewModel? = null,
@@ -101,6 +114,7 @@ fun HostListRoute(
         onEditHost = onEditHost,
         onScanQr = onScanQr,
         onOpenSettings = onOpenSettings,
+        onOpenSshKeys = onOpenSshKeys,
         onDeleteHost = viewModel::delete,
         modifier = modifier,
         updateNotice = notice,
@@ -137,15 +151,15 @@ sealed interface HostListUpdateNotice {
  * What P-6 adds is the *management* surface it was missing — a fresh install had
  * literally no way to get a host into the table:
  *
- * - **Add** and **Scan** in the header, and repeated in the empty state, which
- *   is the only screen a fresh install ever sees. A **Settings** affordance sits
- *   alongside them — the only place in the app that reaches [SettingsScreen]
- *   (deliberately not a mid-session terminal menu action, plan §P-6).
+ * - The empty state has one **Add host** action that opens the two real setup
+ *   methods. Populated Hosts keeps setup in a full-width footer and puts **SSH
+ *   keys** and **Settings** in a separate tools section.
  * - A per-row [Kebab] with Edit / Delete. It sits in the trailing slot the
  *   navigation chevron used to occupy: the row's own tap still dials the host,
  *   and a menu tap does not (an inner clickable consumes it). Share QR was
- *   removed (issue #2523); Scan in the header still imports.
+ *   removed (issue #2523); QR import remains available through Add host.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HostListScreen(
     state: HostListUiState,
@@ -155,6 +169,7 @@ fun HostListScreen(
     onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
+    onOpenSshKeys: () -> Unit = {},
     modifier: Modifier = Modifier,
     updateNotice: HostListUpdateNotice? = null,
     onDownloadUpdate: (apkUrl: String) -> Unit = {},
@@ -164,42 +179,10 @@ fun HostListScreen(
     onDismissUpdateFailure: () -> Unit = {},
 ) {
     var pendingDelete by remember { mutableStateOf<HostRow?>(null) }
+    var showAddHostMethods by remember { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxSize()) {
-        ScreenHeader(
-            title = "Hosts",
-            trailing = {
-                Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-                    PocketShellButton(
-                        text = "Scan",
-                        onClick = onScanQr,
-                        variant = ButtonVariant.Text,
-                        compact = true,
-                        modifier = Modifier.testTag(HOST_LIST_SCAN_TAG),
-                    )
-                    PocketShellButton(
-                        text = "Add",
-                        onClick = onAddHost,
-                        variant = ButtonVariant.Primary,
-                        compact = true,
-                        modifier = Modifier.testTag(HOST_LIST_ADD_TAG),
-                    )
-                    // The only entry point into Settings anywhere in the app
-                    // (plan §P-6's "reachable from the hosts screen, not a
-                    // mid-session action"). A third compact Text button matches
-                    // the header's existing Scan/Add grammar rather than
-                    // introducing a bespoke icon-only affordance ui-kit does
-                    // not otherwise use in a `ScreenHeader` trailing slot.
-                    PocketShellButton(
-                        text = "Settings",
-                        onClick = onOpenSettings,
-                        variant = ButtonVariant.Text,
-                        compact = true,
-                        modifier = Modifier.testTag(HOST_LIST_SETTINGS_TAG),
-                    )
-                }
-            },
-        )
+        ScreenHeader(title = "Hosts")
 
         when (val notice = updateNotice) {
             is HostListUpdateNotice.Available -> UpdateAvailableBanner(
@@ -223,28 +206,25 @@ fun HostListScreen(
             !state.loaded -> Unit
 
             state.hosts.isEmpty() -> EmptyState(
-                title = "No hosts yet",
-                description = "Add one by hand, or scan a QR code from your computer.",
+                title = "Your work, from here.",
+                description = "Connect to a development machine to open its workspaces and terminals.",
                 action = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
-                        PocketShellButton(text = "Add host", onClick = onAddHost)
-                        PocketShellButton(
-                            text = "Scan QR",
-                            onClick = onScanQr,
-                            variant = ButtonVariant.Secondary,
-                        )
-                    }
+                    PocketShellButton(
+                        text = "Add host",
+                        onClick = { showAddHostMethods = true },
+                        modifier = Modifier.testTag(HOST_LIST_ADD_FOOTER_TAG),
+                    )
                 },
             )
 
             else -> {
-                SectionHeader(label = "Saved", count = state.hosts.size)
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag(HOST_LIST_TAG),
                     contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
                 ) {
+                    item { SectionHeader(label = "Hosts", count = state.hosts.size) }
                     items(items = state.hosts, key = { it.id }) { host ->
                         ListRow(
                             title = host.name,
@@ -262,9 +242,50 @@ fun HostListScreen(
                             modifier = Modifier.testTag(hostRowTag(host.id)),
                         )
                     }
+                    item { SectionHeader(label = "Tools") }
+                    item {
+                        ListRow(
+                            title = "SSH keys",
+                            subtitle = "Manage device authentication",
+                            onClick = onOpenSshKeys,
+                            modifier = Modifier.testTag(HOST_LIST_KEYS_TAG),
+                        )
+                    }
+                    item {
+                        ListRow(
+                            title = "Settings",
+                            subtitle = "Connection and app preferences",
+                            onClick = onOpenSettings,
+                            modifier = Modifier.testTag(HOST_LIST_SETTINGS_ROW_TAG),
+                        )
+                    }
+                    item {
+                        PocketShellButton(
+                            text = "Add host",
+                            onClick = { showAddHostMethods = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
+                                .testTag(HOST_LIST_ADD_FOOTER_TAG),
+                        )
+                    }
                 }
             }
         }
+    }
+
+    if (showAddHostMethods) {
+        AddHostMethodSheet(
+            onScanQr = {
+                showAddHostMethods = false
+                onScanQr()
+            },
+            onEnterDetails = {
+                showAddHostMethods = false
+                onAddHost()
+            },
+            onDismiss = { showAddHostMethods = false },
+        )
     }
 
     pendingDelete?.let { host ->
@@ -280,6 +301,49 @@ fun HostListScreen(
             },
             onDismiss = { pendingDelete = null },
         )
+    }
+}
+
+/**
+ * The two real entry points into host setup. It deliberately has no standalone
+ * primary action: choosing a row is the action, which keeps the sheet from
+ * becoming a second form or a preview-only branch.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddHostMethodSheet(
+    onScanQr: () -> Unit,
+    onEnterDetails: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        shape = PocketShellShapes.large,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(HOST_LIST_ADD_METHODS_TAG)
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            SheetHeader(title = "Add host")
+            ListRow(
+                title = "Scan a QR code",
+                subtitle = "Import from your computer",
+                onClick = onScanQr,
+                modifier = Modifier.testTag(HOST_LIST_ADD_SCAN_TAG),
+            )
+            ListRow(
+                title = "Enter connection details",
+                subtitle = "Address, user and SSH key",
+                onClick = onEnterDetails,
+                modifier = Modifier.testTag(HOST_LIST_ADD_DETAILS_TAG),
+            )
+        }
     }
 }
 

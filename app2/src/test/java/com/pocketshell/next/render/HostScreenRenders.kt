@@ -15,6 +15,9 @@ import com.pocketshell.next.hosts.HostListUpdateNotice
 import com.pocketshell.next.hosts.HostRow
 import com.pocketshell.next.hosts.QrScannerViewModel
 import com.pocketshell.next.hosts.QrScannerScreen
+import com.pocketshell.next.hosts.SshImportAuth
+import com.pocketshell.next.hosts.SshImportConfig
+import com.pocketshell.next.hosts.SshImportPayloadCodec
 import com.pocketshell.next.hosts.SshKeyRow
 import com.pocketshell.next.hosts.SshKeysScreen
 import com.pocketshell.next.hosts.SshKeysUiState
@@ -51,7 +54,7 @@ class HostScreenRenders {
 
     /** A fresh install: the state that had no way forward before P-6. */
     @Test
-    fun hostListEmpty() = render("p6-host-list-empty") {
+    fun hostListEmpty() = render("quiet-412-hosts-empty") {
         HostListScreen(
             state = HostListUiState(loaded = true),
             onOpenHost = {},
@@ -65,7 +68,7 @@ class HostScreenRenders {
 
     /** Issue #2531: the GitHub-Releases update banner on the host list. */
     @Test
-    fun hostListUpdateBanner() = render("host-list-update-banner") {
+    fun hostListUpdateBanner() = render("quiet-412-hosts-update") {
         HostListScreen(
             state = HostListUiState(
                 loaded = true,
@@ -90,7 +93,7 @@ class HostScreenRenders {
 
     /** The populated list, with the per-row management kebab. */
     @Test
-    fun hostListPopulated() = render("p6-host-list") {
+    fun hostListPopulated() = render("quiet-412-hosts-populated") {
         HostListScreen(
             state = HostListUiState(
                 loaded = true,
@@ -110,7 +113,7 @@ class HostScreenRenders {
 
     /** The blank Add form with keys available. */
     @Test
-    fun hostFormAdd() = render("p6-host-form-add") {
+    fun hostFormAdd() = render("quiet-412-host-form-add") {
         AddEditHostScreen(
             state = HostFormState(),
             keys = listOf(key(1, "hetzner-key"), key(2, "builder-key")),
@@ -123,7 +126,7 @@ class HostScreenRenders {
 
     /** Edit mode, populated. */
     @Test
-    fun hostFormEdit() = render("p6-host-form-edit") {
+    fun hostFormEdit() = render("quiet-412-host-form-edit") {
         AddEditHostScreen(
             state = HostFormState(
                 name = "hetzner",
@@ -143,7 +146,7 @@ class HostScreenRenders {
 
     /** A rejected submit: how five per-field messages read at once. */
     @Test
-    fun hostFormErrors() = render("p6-host-form-errors") {
+    fun hostFormErrors() = render("quiet-412-host-form-validation") {
         AddEditHostScreen(
             state = HostFormState(
                 port = "22x",
@@ -164,7 +167,7 @@ class HostScreenRenders {
     }
 
     @Test
-    fun sshKeysEmpty() = render("p6-ssh-keys-empty") {
+    fun sshKeysEmpty() = render("quiet-412-ssh-keys-empty") {
         SshKeysScreen(
             state = SshKeysUiState(loaded = true),
             onBack = {},
@@ -177,15 +180,15 @@ class HostScreenRenders {
     }
 
     @Test
-    fun sshKeysPopulated() = render("p6-ssh-keys") {
+    fun sshKeysPopulated() = render("quiet-412-ssh-keys") {
         SshKeysScreen(
             state = SshKeysUiState(
                 loaded = true,
                 keys = listOf(
-                    SshKeyRow(1, "hetzner-key", "sha256:0f2a9c4d8e1b"),
-                    SshKeyRow(2, "generated-1756900000000", "sha256:77c1aa30bb42"),
+                    SshKeyRow(1, "hetzner-key", ""),
+                    SshKeyRow(2, "workstation-key", ""),
                 ),
-                message = "Generated generated-1756900000000",
+                message = "Key added on this device",
             ),
             onBack = {},
             onGenerate = {},
@@ -198,7 +201,7 @@ class HostScreenRenders {
 
     /** The scanner's non-camera states (the preview itself needs a device). */
     @Test
-    fun qrScannerPermissionDenied() = render("p6-qr-scanner-permission-denied") {
+    fun qrScannerPermissionDenied() = render("quiet-412-qr-permission-denied") {
         QrScannerScreen(
             state = QrScannerViewModel.State.PermissionDenied(canRetry = true),
             onScanned = {},
@@ -210,13 +213,37 @@ class HostScreenRenders {
     }
 
     @Test
-    fun qrScannerFailed() = render("p6-qr-scanner-failed") {
+    fun qrScannerFailed() = render("quiet-412-qr-failed") {
         QrScannerScreen(
             state = QrScannerViewModel.State.Failed("That QR is not a PocketShell host code"),
             onScanned = {},
             onRetryPermission = {},
             onPickImage = {},
             onRetry = {},
+            onClose = {},
+        )
+    }
+
+    @Test
+    fun qrScannerReview() = render("quiet-412-qr-review") {
+        val config = SshImportConfig(
+            name = "Development host",
+            host = "dev.example.test",
+            port = 22,
+            username = "alexey",
+            auth = SshImportAuth.KeyReference("hetzner-key"),
+        )
+        QrScannerScreen(
+            state = QrScannerViewModel.State.Review(
+                config = config,
+                payload = SshImportPayloadCodec.encode(config),
+            ),
+            onScanned = {},
+            onRetryPermission = {},
+            onPickImage = {},
+            onRetry = {},
+            onConfirmImport = {},
+            onCancelReview = {},
             onClose = {},
         )
     }

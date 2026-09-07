@@ -1,10 +1,12 @@
 package com.pocketshell.next
 
+import android.util.Log
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBars
@@ -22,6 +24,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectViewModel
@@ -30,6 +33,7 @@ import com.pocketshell.next.crash.DiagnosticsScreen
 import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
+import com.pocketshell.next.hosts.HOST_FORM_SELECTED_KEY_RESULT
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
@@ -72,7 +76,7 @@ import javax.inject.Inject
  * dead composable is exactly what lets an oracle like that look alive (#2478).
  */
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     /**
      * Task U-8. The background-grace policy has no other consumer, so something
@@ -148,6 +152,7 @@ data class HostListActions(
     val onEditHost: (Long) -> Unit,
     val onScanQr: () -> Unit,
     val onOpenSettings: () -> Unit,
+    val onOpenSshKeys: () -> Unit,
 )
 
 /**
@@ -176,6 +181,7 @@ fun AppNavHost(
             onEditHost = actions.onEditHost,
             onScanQr = actions.onScanQr,
             onOpenSettings = actions.onOpenSettings,
+            onOpenSshKeys = actions.onOpenSshKeys,
             updateCheckViewModel = hiltViewModel(),
         )
     },
@@ -238,14 +244,27 @@ fun AppNavHost(
     },
     viewerScreen: @Composable (hostId: Long, path: String?, onBack: () -> Unit) -> Unit =
         { _, _, onBack -> ViewerRoute(onBack = onBack) },
-    hostFormScreen: @Composable (hostId: Long?, onDone: () -> Unit, onAddKey: () -> Unit) -> Unit =
-        { hostId, onDone, onAddKey ->
-            AddEditHostRoute(hostId = hostId, onDone = onDone, onAddKey = onAddKey)
+    hostFormScreen: @Composable (
+        hostId: Long?,
+        onDone: () -> Unit,
+        onAddKey: () -> Unit,
+        onTestConnection: (Long) -> Unit,
+    ) -> Unit =
+        { hostId, onDone, onAddKey, onTestConnection ->
+            AddEditHostRoute(
+                hostId = hostId,
+                onDone = onDone,
+                onAddKey = onAddKey,
+                onTestConnection = onTestConnection,
+            )
         },
-    sshKeysScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
-        SshKeysRoute(onBack = onBack)
+    sshKeysScreen: @Composable (
+        onBack: () -> Unit,
+        onUseKey: ((Long) -> Unit)?,
+    ) -> Unit = { onBack, onUseKey ->
+        SshKeysRoute(onBack = onBack, onUseKey = onUseKey)
     },
-    qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
+    qrScanScreen: @Composable (onFinished: (Long) -> Unit, onClose: () -> Unit) -> Unit =
         { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
     settingsScreen: @Composable (SettingsNavigation) -> Unit = { navigation ->
         SettingsRoute(navigation = navigation)
@@ -307,13 +326,26 @@ fun AppNavHost(
         navController = navController,
         startDestination = Destination.start.pattern,
         modifier = modifier,
+        // Navigation Compose 2.9 fades destinations for 700 ms by default.
+        // That leaves the outgoing Hosts layer visibly on top after the tree
+        // destination has already composed, which makes a successful trust
+        // handoff look stuck on "Connecting…". Hosts and the tree are full
+        // screens, so an atomic handoff is both clearer and the settled state
+        // the connection gate promises to the user.
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None },
     ) {
         composable(Destination.Hosts.pattern) {
             // Task U-2: a host tap DIALS. Only a connected host reaches the
             // tree; an unknown/changed host key raises the trust sheet first
             // and a failed dial keeps the user on the list with a retry.
             ConnectGate(
-                onConnected = { hostId -> navController.navigate(Destination.Tree.route(hostId)) },
+                onConnected = { hostId ->
+                    Log.i("PocketShell.Connect", "navigating Hosts -> Tree host=$hostId")
+                    navController.navigate(Destination.Tree.route(hostId))
+                },
                 viewModel = connectViewModel(),
             ) { onOpenHost ->
                 hostsScreen(
@@ -329,6 +361,7 @@ fun AppNavHost(
                             navController.navigate(Destination.HostForm.route(hostId))
                         },
                         onScanQr = { navController.navigate(Destination.QrScan.route()) },
+                        onOpenSshKeys = { navController.navigate(Destination.SshKeys.route()) },
                         // Task P-6 fast-follow: the only UI entry point into
                         // Settings, deliberately on the landing screen rather
                         // than a mid-session terminal action.
@@ -350,17 +383,51 @@ fun AppNavHost(
             // form's "am I editing?" question has a single answer derived from
             // the route rather than a `-1` leaking into the ViewModel.
             val raw = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: Destination.NO_HOST_ID
-            hostFormScreen(
-                raw.takeIf { it > 0L },
-                { navController.popBackStack() },
-                { navController.navigate(Destination.SshKeys.route()) },
-            )
+            ConnectGate(
+                onConnected = { connectedHostId ->
+                    navController.navigate(Destination.Tree.route(connectedHostId)) {
+                        // A successful form test is the access boundary. Keep
+                        // Hosts below the new tree, but do not leave a stale
+                        // form on the Back stack.
+                        popUpTo(Destination.Hosts.pattern)
+                    }
+                },
+                viewModel = connectViewModel(),
+            ) { onOpenHost ->
+                hostFormScreen(
+                    raw.takeIf { it > 0L },
+                    { navController.popBackStack() },
+                    { navController.navigate(Destination.SshKeys.route()) },
+                    onOpenHost,
+                )
+            }
         }
         composable(Destination.SshKeys.pattern) {
-            sshKeysScreen { navController.popBackStack() }
+            val previous = navController.previousBackStackEntry
+            val canSelectForHostForm = previous?.destination?.route == Destination.HostForm.pattern
+            sshKeysScreen(
+                { navController.popBackStack() },
+                if (canSelectForHostForm) {
+                    { keyId ->
+                        previous?.savedStateHandle?.set(HOST_FORM_SELECTED_KEY_RESULT, keyId)
+                        navController.popBackStack()
+                    }
+                } else {
+                    null
+                },
+            )
         }
         composable(Destination.QrScan.pattern) {
-            qrScanScreen({ navController.popBackStack() }, { navController.popBackStack() })
+            ConnectGate(
+                onConnected = { connectedHostId ->
+                    navController.navigate(Destination.Tree.route(connectedHostId)) {
+                        popUpTo(Destination.Hosts.pattern)
+                    }
+                },
+                viewModel = connectViewModel(),
+            ) { onOpenHost ->
+                qrScanScreen(onOpenHost) { navController.popBackStack() }
+            }
         }
         composable(
             route = Destination.Tree.pattern,
@@ -371,6 +438,7 @@ fun AppNavHost(
             // from its own SavedStateHandle, so the screen keeps working under
             // process death without the navigation layer re-supplying it.
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            Log.i("PocketShell.Connect", "Tree destination composed host=$hostId")
             treeScreen(
                 hostId,
                 { sessionName ->

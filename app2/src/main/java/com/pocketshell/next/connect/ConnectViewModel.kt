@@ -1,5 +1,6 @@
 package com.pocketshell.next.connect
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.storage.dao.HostDao
@@ -9,6 +10,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -31,18 +33,26 @@ data class ConnectError(
     val message: String,
 )
 
+/** A private key needs a user-entered passphrase before this host can dial. */
+data class PassphrasePrompt(
+    val hostId: Long,
+    val keyId: Long,
+    val keyName: String,
+    val hostLabel: String,
+)
+
 /**
  * Everything the connect gate renders.
  *
- * At most ONE of [busyHostId] / [prompt] / [error] is ever set — a dial is
- * either in flight, waiting on the user, or finished. [navigateToHostId] is the
- * one-shot success signal, cleared by [ConnectViewModel.consumeNavigation] once
- * the navigation has actually been performed, so a recomposition (or a return
- * to this screen via Back) cannot re-fire it.
+ * At most ONE of [busyHostId] / [prompt] / [passphrasePrompt] / [error] is ever
+ * set — a dial is either in flight, waiting on a native/user decision, or
+ * finished. [navigateToHostId] is the one-shot success signal, cleared by
+ * [ConnectViewModel.consumeNavigation] once navigation has happened.
  */
 data class ConnectUiState(
     val busyHostId: Long? = null,
     val prompt: TrustPrompt? = null,
+    val passphrasePrompt: PassphrasePrompt? = null,
     val error: ConnectError? = null,
     val navigateToHostId: Long? = null,
 )
@@ -78,6 +88,7 @@ data class ConnectUiState(
 class ConnectViewModel @Inject constructor(
     private val registry: ConnectionsRegistry,
     private val hostDao: HostDao,
+    private val keyUnlocker: SshKeyUnlocker,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ConnectUiState())
@@ -88,14 +99,21 @@ class ConnectViewModel @Inject constructor(
      * carries a suspend lambda: UI state should stay comparable/loggable data.
      */
     private var pending: ConnectResult.NeedsTrust? = null
+    private var activeJob: Job? = null
+    /** Key whose transient passphrase must survive a trust retry, if any. */
+    private var pendingUnlockKeyId: Long? = null
 
     /** Dials [hostId], unless a dial or a prompt for some host is already open. */
     fun connect(hostId: Long) {
         val current = _state.value
-        if (current.busyHostId != null || current.prompt != null) return
+        if (current.busyHostId != null || current.prompt != null || current.passphrasePrompt != null) return
         pending = null
+        clearPendingUnlock()
         _state.value = ConnectUiState(busyHostId = hostId)
-        viewModelScope.launch { apply(hostId, registry.getOrConnect(hostId)) }
+        Log.i(TAG, "connect requested host=$hostId")
+        activeJob = viewModelScope.launch {
+            runDial(hostId, "initial") { registry.getOrConnect(hostId) }
+        }
     }
 
     /**
@@ -110,15 +128,66 @@ class ConnectViewModel @Inject constructor(
         val retry = pending ?: return
         pending = null
         _state.value = ConnectUiState(busyHostId = prompt.state.hostId)
-        viewModelScope.launch {
-            registry.recordTrusted(prompt.state.hostId, prompt.state.fingerprintSha256)
-            apply(prompt.state.hostId, retry.retry())
+        activeJob = viewModelScope.launch {
+            val hostId = prompt.state.hostId
+            Log.i(TAG, "trust accepted host=$hostId fingerprint=${prompt.state.fingerprintSha256}")
+            val recorded = registry.recordTrusted(hostId, prompt.state.fingerprintSha256)
+            Log.i(TAG, "trust persisted host=$hostId result=$recorded; retry starting")
+            runDial(hostId, "post-trust") { retry.retry() }
         }
+    }
+
+    /**
+     * Handoff the passphrase from the unlock sheet to the real resolver.
+     * [value] is scrubbed immediately after the resolver copies it; the
+     * ViewModel never retains the caller's array or puts secret material in
+     * [ConnectUiState].
+     */
+    fun submitPassphrase(value: CharArray) {
+        val prompt = _state.value.passphrasePrompt ?: run {
+            value.fill('\u0000')
+            return
+        }
+        if (value.isEmpty()) {
+            value.fill('\u0000')
+            return
+        }
+
+        try {
+            keyUnlocker.rememberPassphrase(prompt.keyId, value)
+        } finally {
+            value.fill('\u0000')
+        }
+        pendingUnlockKeyId = prompt.keyId
+        _state.value = ConnectUiState(busyHostId = prompt.hostId)
+        activeJob = viewModelScope.launch {
+            apply(prompt.hostId, registry.getOrConnect(prompt.hostId))
+        }
+    }
+
+    /** Dismiss the passphrase sheet without starting a dial or changing data. */
+    fun dismissPassphrase() {
+        clearPendingUnlock()
+        activeJob?.cancel()
+        activeJob = null
+        _state.value = ConnectUiState()
     }
 
     /** Dismisses the prompt without recording anything. */
     fun reject() {
         pending = null
+        clearPendingUnlock()
+        activeJob?.cancel()
+        activeJob = null
+        _state.value = ConnectUiState()
+    }
+
+    /** Cancel a real in-flight dial without changing the saved host row. */
+    fun cancel() {
+        pending = null
+        clearPendingUnlock()
+        activeJob?.cancel()
+        activeJob = null
         _state.value = ConnectUiState()
     }
 
@@ -141,16 +210,21 @@ class ConnectViewModel @Inject constructor(
 
     private suspend fun apply(hostId: Long, result: ConnectResult) {
         when (result) {
-            is ConnectResult.Connected ->
+            is ConnectResult.Connected -> {
+                Log.i(TAG, "connect result host=$hostId connected; navigation queued")
+                clearPendingUnlock()
                 _state.value = ConnectUiState(navigateToHostId = hostId)
+            }
 
             is ConnectResult.NeedsTrust -> {
+                Log.i(TAG, "connect result host=$hostId needs-trust")
                 val promptState = TrustPromptState.from(hostId, result.decision)
                 if (promptState == null) {
                     // NeedsTrust carrying a Trusted decision is a transport
                     // contract violation, not a user question. Surface it as a
                     // failure rather than raising a prompt with nothing to show
                     // (or, worse, silently dropping the tap).
+                    clearPendingUnlock()
                     _state.value = ConnectUiState(
                         error = ConnectError(
                             hostId = hostId,
@@ -168,9 +242,56 @@ class ConnectViewModel @Inject constructor(
                 }
             }
 
-            is ConnectResult.Failed ->
-                _state.value = ConnectUiState(error = ConnectError(hostId, result.message))
+            is ConnectResult.Failed -> {
+                Log.e(
+                    TAG,
+                    "connect result host=$hostId failed " +
+                        "cause=${result.cause?.javaClass?.simpleName ?: "unknown"}",
+                )
+                val required = result.cause.findCause<PassphraseRequiredException>()
+                if (required != null) {
+                    clearPendingUnlock()
+                    _state.value = ConnectUiState(
+                        passphrasePrompt = PassphrasePrompt(
+                            hostId = hostId,
+                            keyId = required.keyId,
+                            keyName = required.keyName,
+                            hostLabel = hostLabel(hostId),
+                        ),
+                    )
+                } else {
+                    clearPendingUnlock()
+                    _state.value = ConnectUiState(error = ConnectError(hostId, result.message))
+                }
+            }
         }
+    }
+
+    /** Converts an unexpected retry exception into a visible, retryable state. */
+    private suspend fun runDial(hostId: Long, phase: String, dial: suspend () -> ConnectResult) {
+        try {
+            apply(hostId, dial())
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            Log.i(TAG, "connect phase=$phase host=$hostId canceled")
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.e(
+                TAG,
+                "connect phase=$phase host=$hostId threw ${failure.javaClass.simpleName}",
+            )
+            clearPendingUnlock()
+            _state.value = ConnectUiState(
+                error = ConnectError(
+                    hostId = hostId,
+                    message = failure.message ?: "Could not connect to this host",
+                ),
+            )
+        }
+    }
+
+    private fun clearPendingUnlock() {
+        pendingUnlockKeyId?.let(keyUnlocker::clearPassphrase)
+        pendingUnlockKeyId = null
     }
 
     /**
@@ -181,5 +302,19 @@ class ConnectViewModel @Inject constructor(
     private suspend fun hostLabel(hostId: Long): String {
         val host = hostDao.getById(hostId) ?: return "Host $hostId"
         return "${host.username}@${host.hostname}:${host.port}"
+    }
+
+    private inline fun <reified T : Throwable> Throwable?.findCause(): T? {
+        var current = this
+        repeat(MAX_CAUSE_DEPTH) {
+            if (current is T) return current
+            current = current?.cause
+        }
+        return null
+    }
+
+    private companion object {
+        const val TAG = "PocketShell.Connect"
+        const val MAX_CAUSE_DEPTH = 8
     }
 }

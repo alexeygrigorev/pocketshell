@@ -3,6 +3,7 @@ package com.pocketshell.next.tree
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -218,7 +220,12 @@ fun SessionTreeScreen(
     onCancelStop: () -> Unit = {},
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PocketShellColors.Surface)
+            .zIndex(1f),
+    ) {
         SessionTreeBody(
             state = state,
             onRefresh = onRefresh,

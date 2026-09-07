@@ -6,6 +6,22 @@ host and uses its subcommands for usage, tmux session/job metadata,
 agent conversations, QR host setup, repository discovery, environment
 files, hooks, logs, and daemon lifecycle checks.
 
+## Durable workspaces
+
+The Quiet workspace-first client uses the host-side workspace membership
+contract before it has any live session to enumerate:
+
+```text
+pocketshell workspaces list --host <host> --json
+pocketshell workspaces add <path> --host <host> --json
+pocketshell workspaces remove <path> --host <host> --json
+```
+
+Membership is stored in the existing private tree registry. Each entry has a
+canonical absolute `path` for identity and a separate `display_path` for the
+path spelling shown in the UI. Adding or removing the same path repeatedly is
+safe, and `list` retains empty workspaces.
+
 ## Install
 
 The recommended path is `uv tool install`, which lands the binary on PATH

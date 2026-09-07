@@ -43,6 +43,7 @@ from pocketshell.sessions import sessions_group
 from pocketshell.serve import serve_command
 from pocketshell.tree import tree_group
 from pocketshell.usage import usage_command
+from pocketshell.workspaces import workspaces_group
 
 
 @click.group(
@@ -86,6 +87,7 @@ cli.add_command(push_group, name="push")
 register_push_card_commands(push_group)
 cli.add_command(qr_share_command, name="qr-share")
 cli.add_command(serve_command, name="serve")
+cli.add_command(workspaces_group, name="workspaces")
 
 
 # ---------------------------------------------------------------------------

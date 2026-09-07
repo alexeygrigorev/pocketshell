@@ -40,17 +40,23 @@ class UsageViewModel @Inject constructor(
     /** Guards against a pull-to-refresh tap re-entering a fetch already in flight. */
     private var inFlight: Job? = null
 
-    fun refresh() {
+    fun refresh(selectedHostId: Long? = null) {
         if (inFlight?.isActive == true) return
         _state.value = _state.value.copy(isRefreshing = true)
         inFlight = viewModelScope.launch {
-            val result = fetcher.fetchAll()
+            val result = if (selectedHostId == null) {
+                fetcher.fetchAll()
+            } else {
+                fetcher.fetchHost(selectedHostId)
+            }
             _state.value = usageScreenState(
                 snapshots = result.snapshots.values,
                 connectedHostCount = result.connectedHostCount,
                 isRefreshing = false,
                 loaded = true,
                 resetBanner = usageResetBannerState(result.resetEvents),
+                selectedHostId = selectedHostId,
+                selectedHostName = result.selectedHostName,
             )
         }
     }

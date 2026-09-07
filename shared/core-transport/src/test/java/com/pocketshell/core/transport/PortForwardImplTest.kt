@@ -15,6 +15,7 @@ import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -176,7 +177,10 @@ class PortForwardImplTest {
             )
             // The descriptor is really gone: rebinding the same port succeeds.
             val rebound = runCatching {
-                ServerSocket(localPort, 1, InetAddress.getByName("127.0.0.1")).close()
+                ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), localPort), 1)
+                }.close()
             }
             assertTrue(
                 "round $round: local port $localPort must be free once close() " +
@@ -305,8 +309,14 @@ class PortForwardImplTest {
         ioDispatcher = Dispatchers.IO,
     )
 
-    private fun freeLocalPort(): Int =
-        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+    private fun freeLocalPort(): Int {
+        val socket = ServerSocket()
+        socket.reuseAddress = true
+        socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
+        val port = socket.localPort
+        socket.close()
+        return port
+    }
 
     private fun liveForwardThreads(localPort: Int): List<Thread> =
         liveThreadsNamed(

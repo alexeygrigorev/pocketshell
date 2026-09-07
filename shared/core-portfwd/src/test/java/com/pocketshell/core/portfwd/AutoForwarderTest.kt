@@ -20,14 +20,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -86,6 +88,33 @@ class AutoForwarderTest {
             assertFalse(
                 "production availability probe must reject the held port ${holder.localPort}",
                 DefaultLocalPortAvailability.isAvailable(holder.localPort),
+            )
+        }
+    }
+
+    @Test
+    fun `default availability allows reuse after a just closed listener`() {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        ServerSocket(0, 1, loopback).use { listener ->
+            val port = listener.localPort
+            val accepted = AtomicReference<Socket?>()
+            val acceptThread = Thread {
+                accepted.set(listener.accept())
+            }.apply { start() }
+
+            Socket().use { client ->
+                client.connect(InetSocketAddress(loopback, port), 2_000)
+                assertTrue(waitUntilReal(2_000) { accepted.get() != null })
+                // The accepted side closes first, which leaves the listener's
+                // local port in TIME_WAIT on the host JVM.
+                accepted.get()!!.close()
+            }
+            acceptThread.join(2_000)
+            listener.close()
+
+            assertTrue(
+                "a recently closed forwarding port must be reusable",
+                DefaultLocalPortAvailability.isAvailable(port),
             )
         }
     }

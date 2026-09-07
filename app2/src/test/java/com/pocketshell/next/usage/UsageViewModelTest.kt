@@ -74,6 +74,24 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun `selected host refresh keeps the explicit host context`() = vmTest { stack ->
+        val selected = stack.seedHost("selected")
+        val other = stack.seedHost("other")
+        stack.scriptUsage(CLAUDE_NDJSON)
+        stack.connect(selected)
+        stack.connect(other)
+        val viewModel = UsageViewModel(stack.fetcher)
+
+        viewModel.refresh(selected)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertEquals(selected, state.selectedHostId)
+        assertEquals("selected", state.selectedHostName)
+        assertEquals(setOf(selected), state.hosts.map { it.hostId }.toSet())
+    }
+
+    @Test
     fun `a refresh already in flight is not re-entered`() = vmTest { stack ->
         val hostId = stack.seedHost()
         stack.scriptUsage(CLAUDE_NDJSON)

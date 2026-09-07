@@ -34,7 +34,10 @@ import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.ports.AddTunnelRoute
 import com.pocketshell.next.ports.PortForwardRoute
+import com.pocketshell.next.ports.ServicesRoute
+import com.pocketshell.next.ports.TunnelDetailRoute
 import com.pocketshell.next.settings.LocalAppSettings
 import com.pocketshell.next.settings.AboutRoute
 import com.pocketshell.next.settings.AdvancedSettingsRoute
@@ -210,6 +213,21 @@ fun AppNavHost(
     portsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         PortForwardRoute(onBack = onBack)
     },
+    servicesScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenTunnel: (Int) -> Unit,
+        onAddTunnel: (Int?) -> Unit,
+    ) -> Unit = { onBack, onOpenTunnel, onAddTunnel ->
+        ServicesRoute(
+            onBack = onBack,
+            onOpenTunnel = onOpenTunnel,
+            onAddTunnel = onAddTunnel,
+        )
+    },
+    tunnelDetailScreen: @Composable (remotePort: Int, onBack: () -> Unit) -> Unit =
+        { remotePort, onBack -> TunnelDetailRoute(remotePort = remotePort, onBack = onBack) },
+    addTunnelScreen: @Composable (remotePort: Int?, onDone: () -> Unit) -> Unit =
+        { remotePort, onDone -> AddTunnelRoute(initialRemotePort = remotePort, onDone = onDone) },
     filesScreen: @Composable (
         hostId: Long,
         path: String?,
@@ -280,6 +298,9 @@ fun AppNavHost(
         { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
     usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         UsageRoute(onBack = onBack)
+    },
+    hostUsageScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit = { hostId, onBack ->
+        UsageRoute(onBack = onBack, selectedHostId = hostId)
     },
 ) {
     NavHost(
@@ -367,7 +388,7 @@ fun AppNavHost(
                 // Issue #2532: Usage is a host-scoped panel, same as Files/Ports,
                 // so the tree header is an entry point — not only the session
                 // glance pill.
-                { navController.navigate(Destination.Usage.route()) },
+                { navController.navigate(Destination.HostUsage.route(hostId)) },
             )
         }
         composable(
@@ -389,7 +410,7 @@ fun AppNavHost(
                 name,
                 { navController.popBackStack() },
                 // Task P-5: the top bar's usage glance pill navigates here.
-                { navController.navigate(Destination.Usage.route()) },
+                { navController.navigate(Destination.HostUsage.route(hostId)) },
             )
         }
         composable(
@@ -431,11 +452,38 @@ fun AppNavHost(
         composable(
             route = Destination.Ports.pattern,
             arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
-        ) {
-            // Task P-4: the real port-forward panel. Like the tree, the ViewModel
-            // reads the hostId from its own SavedStateHandle, so the screen keeps
-            // working under process death without navigation re-supplying it.
-            portsScreen { navController.popBackStack() }
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            servicesScreen(
+                { navController.popBackStack() },
+                { remotePort -> navController.navigate(Destination.TunnelDetail.route(hostId, remotePort)) },
+                { remotePort -> navController.navigate(Destination.AddTunnel.route(hostId, remotePort)) },
+            )
+        }
+        composable(
+            route = Destination.TunnelDetail.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_REMOTE_PORT) { type = NavType.IntType },
+            ),
+        ) { entry ->
+            val remotePort = entry.arguments?.getInt(Destination.ARG_REMOTE_PORT)
+                ?: Destination.NO_REMOTE_PORT
+            tunnelDetailScreen(remotePort) { navController.popBackStack() }
+        }
+        composable(
+            route = Destination.AddTunnel.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_REMOTE_PORT) {
+                    type = NavType.IntType
+                    defaultValue = Destination.NO_REMOTE_PORT
+                },
+            ),
+        ) { entry ->
+            val rawRemotePort = entry.arguments?.getInt(Destination.ARG_REMOTE_PORT)
+                ?: Destination.NO_REMOTE_PORT
+            addTunnelScreen(rawRemotePort.takeIf { it > 0 }) { navController.popBackStack() }
         }
         composable(Destination.Settings.pattern) {
             settingsScreen(
@@ -507,6 +555,13 @@ fun AppNavHost(
         composable(Destination.Usage.pattern) {
             // Task P-5: the real usage/quota panel.
             usageScreen { navController.popBackStack() }
+        }
+        composable(
+            route = Destination.HostUsage.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            hostUsageScreen(hostId) { navController.popBackStack() }
         }
     }
 }

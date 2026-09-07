@@ -51,6 +51,8 @@ public sealed interface PortScanResult {
  *    busybox, which has no `ss`). Different process-field format than `ss`.
  * 3. `ss -tln` (no `-p`) — last resort; loses the process name but is the
  *    only thing guaranteed to work without root on stripped containers.
+ * 4. `/proc/net/tcp*` — minimal-container fallback when neither command is
+ *    installed; it also loses the process name.
  *
  * Ported from `ssh-auto-forward-android/.../ssh/PortScanner.kt`; rewired in task
  * P-4 from the deleted `core-ssh` session onto [HostConnection.exec]. The awk
@@ -71,6 +73,7 @@ public object PortScanner {
         val ports = tryPrimary(connection)
             ?: tryFallback(connection)
             ?: tryLastResort(connection)
+            ?: tryProcNet(connection)
             ?: return PortScanResult.Failed
         return PortScanResult.Ports(ports)
     }
@@ -96,6 +99,13 @@ public object PortScanner {
             ?: return null
         if (out.isBlank()) return null
         return parsePortsOnly(out).ifEmptyStrategyFailed()
+    }
+
+    private suspend fun tryProcNet(connection: HostConnection): List<RemotePort>? {
+        val out = runOrNull(connection, "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null")
+            ?: return null
+        if (out.isBlank()) return null
+        return parseProcNetOutput(out).ifEmptyStrategyFailed()
     }
 
     /**
@@ -155,6 +165,26 @@ public object PortScanner {
         return output.lineSequence()
             .filter { it.isNotBlank() }
             .mapNotNull { line -> extractPort(line.trim())?.let { RemotePort(it, "") } }
+            .toList()
+    }
+
+    /**
+     * Parse Linux's `/proc/net/tcp` and `/proc/net/tcp6` tables. The local
+     * address is column two (`0100007F:0016`) and state column four is `0A`
+     * for LISTEN. Reading these files needs no extra package and is available
+     * in the stripped SSH fixtures used by the connected tests.
+     */
+    internal fun parseProcNetOutput(output: String): List<RemotePort> {
+        return output.lineSequence()
+            .drop(1)
+            .mapNotNull { line ->
+                val fields = line.trim().split(WHITESPACE)
+                if (fields.size < 4 || fields[3] != "0A") return@mapNotNull null
+                val portHex = fields[1].substringAfter(':', missingDelimiterValue = "")
+                portHex.toIntOrNull(16)?.takeIf { it in 1..65_535 }
+                    ?.let { RemotePort(it, "") }
+            }
+            .distinctBy { it.port }
             .toList()
     }
 

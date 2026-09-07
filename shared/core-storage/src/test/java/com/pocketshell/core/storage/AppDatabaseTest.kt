@@ -169,12 +169,18 @@ class AppDatabaseTest {
             HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
         )
         db.portRemappingDao().insert(
-            PortRemappingEntity(hostId = hostId, remotePort = 5432, localPort = 15432),
+            PortRemappingEntity(
+                hostId = hostId,
+                remotePort = 5432,
+                localPort = 15432,
+                name = "Postgres",
+            ),
         )
         val remappings = db.portRemappingDao().getByHostId(hostId).first()
         assertEquals(1, remappings.size)
         assertEquals(5432, remappings[0].remotePort)
         assertEquals(15432, remappings[0].localPort)
+        assertEquals("Postgres", remappings[0].name)
     }
 
     @Test
@@ -604,6 +610,12 @@ class AppDatabaseTest {
         if (targetVersion <= 18) return
 
         applyMigration18To19Schema(db) // -> v19
+        if (targetVersion <= 19) return
+
+        applyMigration19To20Schema(db) // -> v20
+        if (targetVersion <= 20) return
+
+        applyMigration20To21Schema(db) // -> v21
     }
 
     private fun insertHostRowForVersion(db: SQLiteDatabase, version: Int) {
@@ -1156,6 +1168,28 @@ class AppDatabaseTest {
     private fun applyMigration18To19Schema(db: SQLiteDatabase) {
         db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeyAlgorithm TEXT")
         db.execSQL("ALTER TABLE hosts ADD COLUMN trustedHostKeySha256 TEXT")
+    }
+
+    private fun applyMigration19To20Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE sent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                sessionKey TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sentAtMs INTEGER NOT NULL,
+                delivered INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX index_sent_messages_sessionKey_sentAtMs " +
+                "ON sent_messages(sessionKey, sentAtMs)",
+        )
+    }
+
+    private fun applyMigration20To21Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE port_remappings ADD COLUMN name TEXT NOT NULL DEFAULT ''")
     }
 
     @Test

@@ -192,7 +192,12 @@ public class AutoForwarderSupervisor(
      * (contains → add/remove) that must be atomic against the loop's
      * snapshot read in [runConnectAndReconnectLoop].
      */
-    private val desiredManualPorts: MutableSet<Int> = mutableSetOf()
+    // A persisted remote→local remapping is the user's durable manual tunnel
+    // choice. Seed it here so an out-of-window mapping is restored when a new
+    // supervisor is mounted after process death or a reconnect. Removing the
+    // Room row removes this seed; ordinary discovered ports remain governed by
+    // the auto-forward window and the session-scoped toggle state.
+    private val desiredManualPorts: MutableSet<Int> = initialRemappings.keys.toMutableSet()
     private val desiredLock = Any()
 
     @Volatile

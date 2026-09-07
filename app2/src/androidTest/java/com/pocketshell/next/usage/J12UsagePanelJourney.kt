@@ -53,7 +53,7 @@ import org.junit.runner.RunWith
  * `usage` route, [com.pocketshell.next.MainActivity]'s Hilt-managed
  * `hiltViewModel()` graph failing to resolve [UsageFetcher]'s dependencies,
  * or the panel reading a DIFFERENT connection than the one the pill's own
- * fetch used. Everything from the pill tap to the rendered provider cards is
+ * fetch used. Everything from the pill tap to the rendered provider rows is
  * production code against a real sshd here.
  *
  * ## The canned response is the host's own answer, not a Kotlin fixture
@@ -125,15 +125,14 @@ class J12UsagePanelJourney {
 
     /**
      * Opening a session shows a live glance pill, and tapping it opens a panel
-     * whose first paint is the compact strip only (issue #2534). Tapping a
-     * compact row mounts that provider's existing card — windows, reset credits,
-     * severity pill — and tapping again collapses it. Other providers stay
-     * collapsed unless tapped. Severity is still DERIVED from the fixture's
+     * whose first paint is quiet provider rows. Tapping a row reveals that
+     * provider's windows, reset credits, and status details inline; tapping again
+     * collapses it. Severity is still DERIVED from the fixture's
      * numbers (task P-5 accept: "J12 green; glance pill renders in session
      * screen").
      */
     @Test
-    fun theGlancePillOpensThePanelAndExpandsACardOnCompactRowTap() {
+    fun theGlancePillOpensThePanelAndExpandsAProviderRowOnCompactRowTap() {
         awaitTag(hostRowTag(hostId))
         compose.onNodeWithTag(hostRowTag(hostId)).performClick()
         awaitTag(SESSION_TREE_TAG)
@@ -150,50 +149,50 @@ class J12UsagePanelJourney {
 
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel")
-        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
-        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
-        awaitTag(usageSummaryRowTag("Claude Code"), "the Claude compact row")
-        awaitTag(usageSummaryRowTag("GitHub Copilot"), "the Copilot compact row")
+        awaitTag(USAGE_PROVIDER_LIST_TAG, "the usage provider list")
+        awaitTag(usageProviderRowTag("Codex"), "the Codex provider row")
+        awaitTag(usageProviderRowTag("claude"), "the Claude provider row")
+        awaitTag(usageProviderRowTag("copilot"), "the Copilot provider row")
         JourneyScreenshots.capture("02-panel-collapsed", JOURNEY)
 
-        // First paint is the compact list. Full cards stay unmounted until the
-        // matching row is tapped — the screenshot that filed #2534.
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        // First paint is the compact list. Provider details stay unmounted until
+        // the matching row is tapped.
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("copilot")).assertDoesNotExist()
 
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
-        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performClick()
+        awaitTag(usageProviderDetailsTag("codex"), "the Codex provider details")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).performScrollTo().assertIsDisplayed()
-        assertCardHasDescendant(usageProviderCardTag("codex"), "OK")
-        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        assertDetailsHasText(usageProviderDetailsTag("codex"), "OK")
+        compose.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("copilot")).assertDoesNotExist()
         JourneyScreenshots.capture("03-codex-expanded", JOURNEY)
 
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performScrollTo().performClick()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performScrollTo().performClick()
         compose.awaitIdle("after collapsing Codex")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
         compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).assertDoesNotExist()
 
         // Expand the other two to keep the P-5 severity proof: claude is
         // hard-blocked, copilot is approaching. Each tap is independent — Codex
         // stays collapsed unless tapped again.
-        compose.onNodeWithTag(usageSummaryRowTag("Claude Code")).performScrollTo().performClick()
-        awaitTag(usageProviderCardTag("claude"), "the Claude provider card")
-        assertCardHasDescendant(usageProviderCardTag("claude"), "EXCEEDED")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderToggleTag("claude")).performScrollTo().performClick()
+        awaitTag(usageProviderDetailsTag("claude"), "the Claude provider details")
+        assertDetailsHasText(usageProviderDetailsTag("claude"), "EXCEEDED")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
 
-        compose.onNodeWithTag(usageSummaryRowTag("GitHub Copilot")).performScrollTo().performClick()
-        awaitTag(usageProviderCardTag("copilot"), "the Copilot provider card")
-        assertCardHasDescendant(usageProviderCardTag("copilot"), "WARN")
+        compose.onNodeWithTag(usageProviderToggleTag("copilot")).performScrollTo().performClick()
+        awaitTag(usageProviderDetailsTag("copilot"), "the Copilot provider details")
+        assertDetailsHasText(usageProviderDetailsTag("copilot"), "WARN")
     }
 
     /**
      * Issue #2532: Usage is a host-scoped action on the session tree, not only
      * a glance pill inside a session. Tapping Usage on the tree must open the
-     * same panel. First paint is the compact strip (#2534) — the expanded
-     * provider card is unmounted until the matching row is tapped.
+     * same panel. First paint is the quiet provider list — details are unmounted
+     * until the matching row is tapped.
      */
     @Test
     fun tappingUsageOnTheTreeOpensThePanel() {
@@ -205,11 +204,11 @@ class J12UsagePanelJourney {
 
         compose.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel from the tree")
-        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
-        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
-        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
+        awaitTag(USAGE_PROVIDER_LIST_TAG, "the usage provider list")
+        awaitTag(usageProviderRowTag("Codex"), "the Codex provider row")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performClick()
+        awaitTag(usageProviderDetailsTag("codex"), "the Codex provider details")
         JourneyScreenshots.capture("04-panel-from-tree", JOURNEY)
     }
 
@@ -460,8 +459,16 @@ class J12UsagePanelJourney {
         throw AssertionError("$what never happened within ${TIMEOUT_MS}ms")
     }
 
-    private fun assertCardHasDescendant(cardTag: String, text: String) {
-        compose.onNode(hasTestTag(cardTag) and hasAnyDescendant(hasText(text)))
+    private fun assertDetailsHasText(detailsTag: String, text: String) {
+        // Quiet details expose a single status line such as "Status · OK";
+        // the contract is the status token, not a legacy standalone card
+        // label. Match that token within the real line and keep the check
+        // usable with the merged semantics exposed on device.
+        compose.onNode(
+            hasTestTag(detailsTag) and
+                hasAnyDescendant(hasText(text, substring = true, ignoreCase = true)),
+            useUnmergedTree = true,
+        )
             .performScrollTo()
             .assertIsDisplayed()
     }

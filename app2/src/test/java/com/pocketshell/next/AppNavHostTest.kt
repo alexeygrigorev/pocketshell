@@ -183,6 +183,9 @@ class AppNavHostTest {
                 // and `PortForwardViewModelTest`; what this suite pins is that
                 // `NavHost` accepts the pattern and its Long argument.
                 portsScreen = { _ -> Text("Ports") },
+                servicesScreen = { _, _, _ -> Text("Ports") },
+                tunnelDetailScreen = { remotePort, _ -> Text("Tunnel($remotePort)") },
+                addTunnelScreen = { remotePort, _ -> Text("AddTunnel($remotePort)") },
                 // Task P-3: the file explorer and viewer resolve their
                 // ViewModels through `hiltViewModel()` too. Their behaviour is
                 // covered by `com.pocketshell.next.files.*`; the stand-ins here
@@ -193,6 +196,7 @@ class AppNavHostTest {
                 // Task P-5: the real usage panel resolves `UsageViewModel`
                 // through `hiltViewModel()`, same rationale as the others.
                 usageScreen = { Text("Usage") },
+                hostUsageScreen = { hostId, _ -> Text("Usage(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

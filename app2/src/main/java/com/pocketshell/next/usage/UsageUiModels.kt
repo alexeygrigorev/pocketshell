@@ -85,6 +85,9 @@ data class UsageFailedHost(
  * says which, rather than showing one blank screen for both.
  */
 data class UsageScreenState(
+    /** The selected host for the Quiet Usage destination, or null for the legacy aggregate route. */
+    val selectedHostId: Long? = null,
+    val selectedHostName: String? = null,
     val hosts: List<UsageHostSnapshot> = emptyList(),
     val missingToolHosts: List<UsageMissingToolHost> = emptyList(),
     val failedHosts: List<UsageFailedHost> = emptyList(),
@@ -132,8 +135,14 @@ fun usageScreenState(
     isRefreshing: Boolean = false,
     loaded: Boolean = true,
     resetBanner: UsageResetBannerState? = null,
+    selectedHostId: Long? = null,
+    selectedHostName: String? = null,
 ): UsageScreenState = UsageScreenState(
-    hosts = snapshots.filterIsInstance<UsageSnapshot.Records>().map { snapshot ->
+    selectedHostId = selectedHostId,
+    selectedHostName = selectedHostName ?: snapshots.firstOrNull { it.hostId == selectedHostId }?.hostName,
+    hosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.Records>().map { snapshot ->
         UsageHostSnapshot(
             hostId = snapshot.hostId,
             hostName = snapshot.hostName,
@@ -141,10 +150,14 @@ fun usageScreenState(
             lastSyncedAt = snapshot.fetchedAt,
         )
     },
-    missingToolHosts = snapshots.filterIsInstance<UsageSnapshot.ToolMissing>().map { snapshot ->
+    missingToolHosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.ToolMissing>().map { snapshot ->
         UsageMissingToolHost(hostId = snapshot.hostId, hostName = snapshot.hostName)
     },
-    failedHosts = snapshots.filterIsInstance<UsageSnapshot.Failed>().map { snapshot ->
+    failedHosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.Failed>().map { snapshot ->
         UsageFailedHost(
             hostId = snapshot.hostId,
             hostName = snapshot.hostName,

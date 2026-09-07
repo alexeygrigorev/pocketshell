@@ -97,6 +97,11 @@ sealed class Destination(val pattern: String) {
         fun route(): String = pattern
     }
 
+    /** Host-scoped quota panel opened from a workspace or terminal. */
+    data object HostUsage : Destination("usage/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "usage/$hostId"
+    }
+
     /** Workspace + session tree for one host. */
     data object Tree : Destination("tree/{$ARG_HOST_ID}") {
         fun route(hostId: Long): String = "tree/$hostId"
@@ -160,6 +165,21 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "ports/$hostId"
     }
 
+    /** Quiet Services & tunnels detail for one remote port. */
+    data object TunnelDetail : Destination("tunnel/{$ARG_HOST_ID}/{$ARG_REMOTE_PORT}") {
+        fun route(hostId: Long, remotePort: Int): String = "tunnel/$hostId/$remotePort"
+    }
+
+    /** Quiet manual tunnel form; a missing port opens a blank form. */
+    data object AddTunnel : Destination("add-tunnel/{$ARG_HOST_ID}?$ARG_REMOTE_PORT={$ARG_REMOTE_PORT}") {
+        fun route(hostId: Long, remotePort: Int? = null): String =
+            if (remotePort == null) {
+                "add-tunnel/$hostId?$ARG_REMOTE_PORT=$NO_REMOTE_PORT"
+            } else {
+                "add-tunnel/$hostId?$ARG_REMOTE_PORT=$remotePort"
+            }
+    }
+
     /**
      * The add/edit host form (task P-6).
      *
@@ -210,6 +230,8 @@ sealed class Destination(val pattern: String) {
         const val NO_HOST_ID: Long = -1L
         const val ARG_SESSION_NAME: String = "sessionName"
         const val ARG_PATH: String = "path"
+        const val ARG_REMOTE_PORT: String = "remotePort"
+        const val NO_REMOTE_PORT: Int = -1
 
         /**
          * Compatibility alias for the pre-#2610 name. The route itself is now
@@ -238,7 +260,8 @@ sealed class Destination(val pattern: String) {
                 Hosts, Tree, Session, Files, FileViewer, Ports, Settings,
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
-                About, Update, Usage, HostForm, SshKeys, QrScan, WorkspaceRoots,
+                About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,
+                HostForm, SshKeys, QrScan, WorkspaceRoots,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

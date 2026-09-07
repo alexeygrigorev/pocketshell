@@ -25,7 +25,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 20
+const val APP_DATABASE_SCHEMA_VERSION = 21
 
 /**
  * The PocketShell Room database.
@@ -314,6 +314,18 @@ val MIGRATION_19_20: Migration = object : Migration(19, 20) {
     }
 }
 
+/**
+ * Quiet Services labels manual tunnels so a saved mapping remains identifiable
+ * after the app process is recreated. Existing remappings were created before
+ * the label existed; an empty value intentionally falls back to the discovered
+ * remote process name in the UI.
+ */
+val MIGRATION_20_21: Migration = object : Migration(20, 21) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE port_remappings ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -334,6 +346,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_17_18,
     MIGRATION_18_19,
     MIGRATION_19_20,
+    MIGRATION_20_21,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

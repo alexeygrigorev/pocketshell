@@ -1,19 +1,11 @@
 package com.pocketshell.next.usage
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import java.time.Duration
 import java.time.Instant
@@ -67,41 +59,20 @@ fun usageResetBannerState(
     )
 }
 
-/**
- * Prominent in-app reset banner, rendered at the top of [UsageScreen] when the
- * host reported a recent reset.
- */
+/** Flat Quiet row rendered at the top of [UsageScreen] after a recent reset. */
 @Composable
 fun UsageResetBanner(
     state: UsageResetBannerState,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    ListRow(
+        title = state.title,
+        subtitle = state.detail,
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm)
-            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Green,
-                shape = PocketShellShapes.extraSmall,
-            )
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
             .testTag(USAGE_RESET_BANNER_TAG),
-    ) {
-        Text(
-            text = state.title,
-            color = PocketShellColors.Green,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = state.detail,
-            color = PocketShellColors.TextSecondary,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 2.dp),
-        )
-    }
+    )
 }
 
 const val USAGE_RESET_BANNER_TAG: String = "usage:reset-banner"

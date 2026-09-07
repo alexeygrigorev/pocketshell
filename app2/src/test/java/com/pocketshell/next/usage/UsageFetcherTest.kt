@@ -88,6 +88,21 @@ class UsageFetcherTest {
         assertEquals(setOf(hostA, hostB), result.snapshots.keys)
     }
 
+    @Test
+    fun `host scoped fetch does not include another connected host`() = runBlocking {
+        val selected = stack.seedHost("selected")
+        val other = stack.seedHost("other")
+        stack.scriptUsage(CLAUDE_NDJSON)
+        stack.connect(selected)
+        stack.connect(other)
+
+        val result = stack.fetcher.fetchHost(selected)
+
+        assertEquals(1, result.connectedHostCount)
+        assertEquals("selected", result.selectedHostName)
+        assertEquals(setOf(selected), result.snapshots.keys)
+    }
+
     private companion object {
         const val CLAUDE_NDJSON =
             "{\"provider\":\"claude\",\"status\":\"ok\"," +

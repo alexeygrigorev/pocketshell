@@ -58,6 +58,14 @@ class ForwardService : Service() {
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * The first snapshot is often empty while [ForwardingController.resumeEnabled]
+     * is still mounting Room's enabled hosts. Do not let that transient state
+     * stop the service before the resume request has had a chance to publish its
+     * supervisors.
+     */
+    private var resumeChecked = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -69,7 +77,7 @@ class ForwardService : Service() {
         scope.launch {
             controller.snapshot.collect { snapshot ->
                 updateNotification(snapshot)
-                if (snapshot.isEmpty()) stopSelf()
+                if (resumeChecked && snapshot.isEmpty()) stopSelf()
             }
         }
     }
@@ -84,7 +92,9 @@ class ForwardService : Service() {
             // ACTION_RESUME and a null intent (a restart delivery) are the same
             // request: make what Room says is enabled actually be running.
             else -> scope.launch {
-                if (controller.resumeEnabled() == 0) stopSelf()
+                val activeHosts = controller.resumeEnabled()
+                resumeChecked = true
+                if (activeHosts == 0) stopSelf()
             }
         }
         // Not sticky: a restarted process must not resurrect forwards without the

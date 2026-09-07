@@ -12,9 +12,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.AppNavHost
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
-import com.pocketshell.next.ports.PORT_FORWARD_BACK_TAG
-import com.pocketshell.next.ports.PortForwardScreen
 import com.pocketshell.next.ports.PortForwardUiState
+import com.pocketshell.next.ports.SERVICES_SCREEN_TAG
+import com.pocketshell.next.ports.ServicesScreen
 import com.pocketshell.next.usage.USAGE_BACK_TAG
 import com.pocketshell.next.usage.USAGE_SCREEN_TAG
 import com.pocketshell.next.usage.UsageScreen
@@ -27,9 +27,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #2532: the tree and ports seams actually pop / open Usage. Screen
+ * Issue #2532: the tree and Services seams actually pop / open Usage. Screen
  * tests prove the buttons fire callbacks; this suite proves [AppNavHost]
- * wired those callbacks to `popBackStack` / `Destination.Usage`.
+ * wired those callbacks to `popBackStack` / the host-scoped Usage destination.
  */
 @RunWith(AndroidJUnit4::class)
 class SessionTreeNavigationTest {
@@ -68,7 +68,7 @@ class SessionTreeNavigationTest {
         composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         composeRule.waitForIdle()
 
-        assertEquals(Destination.Usage.pattern, nav.currentBackStackEntry?.destination?.route)
+        assertEquals(Destination.HostUsage.pattern, nav.currentBackStackEntry?.destination?.route)
         composeRule.onNodeWithTag(USAGE_SCREEN_TAG).assertIsDisplayed()
     }
 
@@ -80,8 +80,8 @@ class SessionTreeNavigationTest {
         composeRule.runOnUiThread { nav.navigate(Destination.Ports.route(hostId = 7)) }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).performClick()
+        composeRule.onNodeWithTag(SERVICES_SCREEN_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Back").performClick()
         composeRule.waitForIdle()
 
         assertEquals(Destination.Tree.pattern, nav.currentBackStackEntry?.destination?.route)
@@ -108,16 +108,23 @@ class SessionTreeNavigationTest {
                             onOpenUsage = onOpenUsage,
                         )
                     },
-                    portsScreen = { onBack ->
-                        PortForwardScreen(
+                    servicesScreen = { onBack, _, _ ->
+                        ServicesScreen(
                             state = PortForwardUiState(hostId = 7, hostName = "rmthz"),
-                            onSetEnabled = {},
-                            onTogglePort = {},
-                            onSetShowAllPorts = {},
+                            onSetDiscovery = {},
+                            onOpenTunnel = {},
+                            onAddTunnel = {},
                             onBack = onBack,
                         )
                     },
                     usageScreen = { onBack ->
+                        UsageScreen(
+                            state = UsageScreenState(),
+                            onBack = onBack,
+                            onRefresh = {},
+                        )
+                    },
+                    hostUsageScreen = { _, onBack ->
                         UsageScreen(
                             state = UsageScreenState(),
                             onBack = onBack,

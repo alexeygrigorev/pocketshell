@@ -39,9 +39,9 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 22 = the core routes, host-management routes, and the categorized
-        // Settings/support routes from issue #2610.
-        assertEquals(22, patterns.size)
+        // The fixed routes include the categorized Settings/support routes,
+        // host-scoped Usage, and the Quiet Services & tunnels screens.
+        assertEquals(25, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -62,6 +62,15 @@ class DestinationsTest {
             Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
+        assertMatchesPattern(Destination.HostUsage.pattern, Destination.HostUsage.route(hostId = 7))
+        assertMatchesPattern(
+            Destination.TunnelDetail.pattern,
+            Destination.TunnelDetail.route(hostId = 7, remotePort = 5173),
+        )
+        assertMatchesPattern(
+            Destination.AddTunnel.pattern,
+            Destination.AddTunnel.route(hostId = 7, remotePort = 5173),
+        )
         assertMatchesPattern(Destination.TerminalSettings.pattern, Destination.TerminalSettings.route())
         assertMatchesPattern(Destination.VoiceSettings.pattern, Destination.VoiceSettings.route())
         assertMatchesPattern(Destination.VoiceLanguage.pattern, Destination.VoiceLanguage.route())
@@ -112,6 +121,14 @@ class DestinationsTest {
     @Test
     fun `tree route carries the host id`() {
         assertEquals("tree/42", Destination.Tree.route(hostId = 42))
+    }
+
+    @Test
+    fun `services and host usage routes retain their selected host`() {
+        assertEquals("usage/42", Destination.HostUsage.route(hostId = 42))
+        assertEquals("tunnel/42/5173", Destination.TunnelDetail.route(42, 5173))
+        assertEquals("add-tunnel/42?remotePort=-1", Destination.AddTunnel.route(42))
+        assertEquals("add-tunnel/42?remotePort=5173", Destination.AddTunnel.route(42, 5173))
     }
 
     @Test

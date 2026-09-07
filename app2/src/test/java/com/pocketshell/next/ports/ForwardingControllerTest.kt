@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -127,6 +128,130 @@ class ForwardingControllerTest {
             "the controller must feed port_remappings into the forwarder, got ${tunnel.localPort}",
             tunnel.localPort >= 7_500,
         )
+    }
+
+    @Test
+    fun `adding a manual tunnel persists the mapping and starts an out-of-window port`() =
+        forwardingTest { stack ->
+        stack.listenOn(22 to "sshd")
+        val hostId = stack.seedHost()
+
+        stack.controller.addManualTunnel(hostId, remotePort = 22, localPort = 7_432)
+        runCurrent()
+
+        assertTrue(stack.isEnabled(hostId))
+        val mapping = stack.db.portRemappingDao().getByRemotePort(hostId, 22)
+        assertEquals(7_432, mapping?.localPort)
+        assertEquals("Port 22", mapping?.name)
+        val tunnel = stack.controller.tunnels(hostId).single { it.remotePort == 22 }
+        assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
+        assertEquals(7_432, tunnel.localPort)
+    }
+
+    @Test
+    fun `adding a manual tunnel to a mounted host remounts the shared supervisor`() =
+        forwardingTest { stack ->
+        stack.listenOn(22 to "sshd", 7_431 to "vite")
+        val hostId = stack.seedHost()
+
+        stack.controller.start(hostId)
+        runCurrent()
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            stack.controller.tunnels(hostId).single { it.remotePort == 7_431 }.status,
+        )
+
+        stack.controller.addManualTunnel(hostId, remotePort = 22, localPort = 7_432)
+        runCurrent()
+
+        val tunnel = stack.controller.tunnels(hostId).single { it.remotePort == 22 }
+        assertEquals(TunnelInfo.Status.FORWARDING, tunnel.status)
+        assertEquals(7_432, tunnel.localPort)
+    }
+
+    @Test
+    fun `manual tunnel creation rejects a local port already reserved by another mapping`() =
+        forwardingTest { stack ->
+        stack.listenOn(22 to "sshd", 23 to "telnet")
+        val hostId = stack.seedHost()
+
+        stack.controller.addManualTunnel(
+            hostId,
+            remotePort = 22,
+            localPort = 7_432,
+            name = "Fixture SSH",
+        )
+        runCurrent()
+
+        val failure = try {
+            stack.controller.addManualTunnel(
+                hostId,
+                remotePort = 23,
+                localPort = 7_432,
+                name = "Second service",
+            )
+            throw AssertionError("expected local-port collision")
+        } catch (expected: LocalPortCollisionException) {
+            expected
+        }
+        assertEquals(7_432, failure.localPort)
+        assertTrue(failure.message!!.contains("Fixture SSH"))
+        assertNull(stack.db.portRemappingDao().getByRemotePort(hostId, 23))
+    }
+
+    @Test
+    fun `a durable manual mapping restores an out-of-window tunnel after supervisor restart`() =
+        forwardingTest { stack ->
+        stack.listenOn(22 to "sshd")
+        val hostId = stack.seedHost()
+
+        stack.controller.addManualTunnel(hostId, remotePort = 22, localPort = 7_432)
+        runCurrent()
+        assertEquals(TunnelInfo.Status.FORWARDING, stack.controller.tunnels(hostId).single().status)
+
+        // Model process death: the live supervisor is gone, but Room still owns
+        // both the enabled intent and the manual mapping the user saved.
+        stack.controller.stop(hostId)
+        runCurrent()
+        val stoppedHost = requireNotNull(stack.db.hostDao().getById(hostId))
+        stack.db.hostDao().update(stoppedHost.copy(enabled = true))
+
+        assertEquals(1, stack.controller.resumeEnabled())
+        runCurrent()
+
+        val restored = stack.controller.tunnels(hostId).single()
+        assertEquals(TunnelInfo.Status.FORWARDING, restored.status)
+        assertEquals(7_432, restored.localPort)
+    }
+
+    @Test
+    fun `removing a manual tunnel deletes the mapping and does not opt the port back in`() =
+        forwardingTest { stack ->
+        stack.listenOn(22 to "sshd")
+        val hostId = stack.seedHost()
+
+        stack.controller.addManualTunnel(hostId, remotePort = 22, localPort = 7_432)
+        runCurrent()
+        stack.controller.removeManualTunnel(hostId, remotePort = 22)
+        runCurrent()
+
+        assertNull(stack.db.portRemappingDao().getByRemotePort(hostId, 22))
+        val removed = stack.controller.tunnels(hostId).single { it.remotePort == 22 }
+        assertEquals(
+            "after removal the still-discovered sshd port is available, not manually forwarded",
+            TunnelInfo.Status.AVAILABLE,
+            removed.status,
+        )
+
+        // A fresh supervisor must not resurrect the deleted manual choice.
+        stack.controller.stop(hostId)
+        runCurrent()
+        val stoppedHost = requireNotNull(stack.db.hostDao().getById(hostId))
+        stack.db.hostDao().update(stoppedHost.copy(enabled = true))
+        stack.controller.resumeEnabled()
+        runCurrent()
+        val afterRestart = stack.controller.tunnels(hostId).single { it.remotePort == 22 }
+        assertEquals(TunnelInfo.Status.AVAILABLE, afterRestart.status)
     }
 
     @Test

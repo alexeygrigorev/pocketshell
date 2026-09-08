@@ -137,17 +137,17 @@ class ComposerViewModel @Inject constructor(
      */
     fun bind(hostId: Long, sessionName: String, sink: SessionSink) {
         this.sink = sink
-        failureJob?.cancel()
-        failureJob = viewModelScope.launch {
-            sink.sendFailures.collect { onDeliveryUncertain() }
-        }
         _state.update { it.copy(micAvailable = dictation.isAvailable()) }
         val key = ComposerText.sessionKey(hostId, sessionName)
-        if (sessionKey == key) return
+        if (sessionKey == key) {
+            observeFailures(sink)
+            return
+        }
         handOff()
         this.hostId = hostId
         this.sessionKey = key
         this.homeDir = null
+        observeFailures(sink)
         // Nothing is known about the new session's draft until its load lands
         // (or the user types), so nothing may be written under its key yet.
         draftKnown = false
@@ -171,6 +171,13 @@ class ComposerViewModel @Inject constructor(
             history.recent(key, HISTORY_LIMIT).collectLatest { rows ->
                 _state.update { it.copy(history = rows.map(::toSentMessage)) }
             }
+        }
+    }
+
+    private fun observeFailures(sink: SessionSink) {
+        failureJob?.cancel()
+        failureJob = viewModelScope.launch {
+            sink.sendFailures.collect { onDeliveryUncertain() }
         }
     }
 

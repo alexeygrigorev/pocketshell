@@ -12,7 +12,7 @@
 # on the current clean tree and FAILS when a file gains a NEW one (or a
 # brand-new file ships with any).
 #
-# What counts as a raw call-site (in app/src/main + shared/ui-kit/src/main,
+# What counts as a raw call-site (in app2/src/main + shared/ui-kit/src/main,
 # *.kt only): a call to one of these Material widgets, i.e. the widget name
 # immediately followed by `(`:
 #   - AlertDialog(               -> use ConfirmDialog / FormDialog (ui-kit)
@@ -22,10 +22,9 @@
 # Import lines are excluded (an `import androidx...AlertDialog` is not a use).
 # The shared ui-kit wrapper components (ConfirmDialog.kt, FormDialog.kt,
 # LoadingIndicator.kt, PocketShellButton.kt, HostCard.kt) are the canonical
-# implementations — they are SUPPOSED to call the raw widget exactly once, so
-# their call-sites live in the baseline like any other accepted site. Lowering
-# a count (by migrating a screen) is encouraged and the script tells you to
-# re-baseline when a count drops.
+# implementations — their raw call-sites are accepted and live in the baseline
+# like any other accepted site. Lowering a count (by migrating a screen) is
+# encouraged and the script tells you to re-baseline when a count drops.
 #
 # Usage:
 #   scripts/check-component-drift.sh            # check against the committed baseline
@@ -36,7 +35,7 @@
 #   0  no NEW drift (counts <= baseline)            [also: --update succeeded]
 #   1  NEW drift found (a file exceeds its baseline, or a new file has raw uses)
 #
-# Cheap: pure grep over two source roots, runs in well under a second. Wired
+# Cheap: pure grep over the two live source roots, runs in well under a second. Wired
 # into the Unit job of .github/workflows/tests.yml (a fast static grep — it does
 # NOT need the emulator job).
 set -euo pipefail
@@ -45,7 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-SCAN_DIRS=(app/src/main shared/ui-kit/src/main)
+SCAN_DIRS=(app2/src/main shared/ui-kit/src/main)
 BASELINE_FILE="scripts/component-drift-baseline.txt"
 
 # The raw Material call-sites we guard. `\b<name>[[:space:]]*\(` matches the
@@ -66,11 +65,11 @@ current_counts() {
     | sort
 }
 
-# Mutation-sensitive proof for the guard itself. The production FileViewer
-# source is copied into a temporary miniature tree, then each migrated form
-# dialog is changed back to a raw AlertDialog in isolation. The real guard must
-# reject both mutations; otherwise a green count check could be disconnected
-# from the source boundary it is meant to protect.
+# Mutation-sensitive proof for the guard itself. Real production sources from
+# both live roots are copied into a temporary miniature tree, then raw calls
+# are added in isolation. The real guard must reject each mutation; otherwise
+# a green count check could be disconnected from the source boundary it is
+# meant to protect.
 self_test() (
   set -euo pipefail
 
@@ -78,19 +77,24 @@ self_test() (
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/component-drift-selftest.XXXXXX")"
   trap 'rm -rf -- "$sandbox"' EXIT
 
-  # The fixture is a REAL baselined file, so the self-test cannot drift away
-  # from the thing it validates. It used to be the old app module's
-  # FileViewerScreen.kt (mutating its two FormDialog call-sites); the rewrite
-  # deleted that file and every other `app/` entry in the baseline, so the
-  # fixture moved to a surviving ui-kit wrapper. ConfirmDialog.kt is baselined at
-  # exactly 1 accepted raw AlertDialog( call — the wrapper's own — which is the
-  # shape the assertion below needs.
+  # These fixtures are REAL production files, so the self-test cannot drift
+  # away from the source it validates. The shared fixture keeps the existing
+  # three-widget mutation coverage. The app2 fixture proves the live app source
+  # root is scanned too; it has no raw calls and therefore relies on the guard's
+  # default zero baseline until a mutation adds one.
   local fixture_rel="shared/ui-kit/src/main/java/com/pocketshell/uikit/components/ConfirmDialog.kt"
+  local app2_fixture_rel="app2/src/main/java/com/pocketshell/next/settings/SettingsScreen.kt"
   scan_source="$sandbox/$fixture_rel"
   clean_source="$sandbox/clean/ConfirmDialog.kt"
-  mkdir -p "$(dirname "$scan_source")" "$(dirname "$clean_source")" "$sandbox/scripts"
+  local app2_scan_source="$sandbox/$app2_fixture_rel"
+  local app2_clean_source="$sandbox/clean/SettingsScreen.kt"
+  mkdir -p "$(dirname "$scan_source")" "$(dirname "$clean_source")" \
+    "$(dirname "$app2_scan_source")" "$(dirname "$app2_clean_source")" \
+    "$sandbox/scripts"
   cp "$REPO_ROOT/$fixture_rel" "$clean_source"
   cp "$clean_source" "$scan_source"
+  cp "$REPO_ROOT/$app2_fixture_rel" "$app2_clean_source"
+  cp "$app2_clean_source" "$app2_scan_source"
   cp "$BASELINE_FILE" "$sandbox/scripts/component-drift-baseline.txt"
   cp "$SCRIPT_DIR/check-component-drift.sh" "$sandbox/scripts/check-component-drift.sh"
   chmod +x "$sandbox/scripts/check-component-drift.sh"
@@ -123,7 +127,7 @@ self_test() (
       exit 1
     fi
     grep -Fq \
-      "DRIFT  $fixture_rel: 2 raw component call-sites (baseline 1, +1 new)" \
+      "DRIFT  $fixture_rel: 1 raw component call-sites (baseline 0, +1 new)" \
       <<<"$output" \
       || { printf '%s\n' "$output" >&2; echo "FAIL: $label mutation failed for an unexpected reason" >&2; exit 1; }
     echo "PASS: $label raw-component mutation is rejected"
@@ -133,6 +137,28 @@ self_test() (
   mutate_and_require_red AlertDialog 'AlertDialog('
   mutate_and_require_red Spinner 'CircularProgressIndicator('
   mutate_and_require_red TextButton 'TextButton('
+
+  # The live app2 source root must reject a raw component added to an existing
+  # production file, even though that file has no baseline row today.
+  local app2_mutant="$sandbox/app2-AlertDialog/SettingsScreen.kt"
+  mkdir -p "$(dirname "$app2_mutant")"
+  cp "$app2_clean_source" "$app2_mutant"
+  printf '\n@Composable\nprivate fun SelfTestApp2Drift() {\n    AlertDialog(\n    )\n}\n' \
+    >> "$app2_mutant"
+  grep -Fq 'AlertDialog(' "$app2_mutant" \
+    || { echo "FAIL: app2 AlertDialog mutation did not apply" >&2; exit 1; }
+  cp "$app2_mutant" "$app2_scan_source"
+  if output="$(cd "$sandbox" && scripts/check-component-drift.sh 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "FAIL: app2 raw-component mutation was accepted" >&2
+    exit 1
+  fi
+  grep -Fq \
+    "DRIFT  $app2_fixture_rel: 1 raw component call-sites (baseline 0, +1 new)" \
+    <<<"$output" \
+    || { printf '%s\n' "$output" >&2; echo "FAIL: app2 mutation failed for an unexpected reason" >&2; exit 1; }
+  echo "PASS: app2 raw-component mutation is rejected"
+  cp "$app2_clean_source" "$app2_scan_source"
 
   # And the other direction: a NEW file with a raw call is drift even though it
   # has no baseline row at all (this is how a freshly-added screen is caught).

@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import com.pocketshell.next.settings.AppSettings
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -317,6 +318,52 @@ class ComposerViewModelTest {
 
         assertEquals("half-written thought", second.state.value.draft)
     }
+
+    @Test
+    fun `the first bound session surfaces an async send failure and rebinding keeps the new failure subscription`() =
+        runTest(dispatcher) {
+            hostId = stack.seedHost()
+            val firstSink = FailureRecordingSessionSink()
+            val secondSink = FailureRecordingSessionSink()
+            val viewModel = stack.viewModel()
+
+            viewModel.bind(hostId, SESSION, firstSink)
+            advanceUntilIdle()
+
+            viewModel.onDraftChange("first session message")
+            advanceUntilIdle()
+            viewModel.send()
+            advanceUntilIdle()
+
+            firstSink.fail()
+            advanceUntilIdle()
+
+            assertEquals("first session message", viewModel.state.value.draft)
+            assertEquals(ComposerNotice.DeliveryUncertain, viewModel.state.value.notice)
+
+            viewModel.bind(hostId, OTHER_SESSION, secondSink)
+            advanceUntilIdle()
+            assertEquals("", viewModel.state.value.draft)
+            assertNull(viewModel.state.value.notice)
+
+            viewModel.onDraftChange("second session message")
+            advanceUntilIdle()
+            viewModel.send()
+            advanceUntilIdle()
+
+            // A failure from the session being left must not be able to consume
+            // the pending delivery belonging to the new session.
+            firstSink.fail()
+            advanceUntilIdle()
+            assertEquals("", viewModel.state.value.draft)
+            assertNull(viewModel.state.value.notice)
+
+            secondSink.fail()
+            advanceUntilIdle()
+
+            assertEquals("second session message", viewModel.state.value.draft)
+            assertEquals(ComposerNotice.DeliveryUncertain, viewModel.state.value.notice)
+        }
 
     // ------------------------------------------------- rebinding across sessions
 
@@ -1120,6 +1167,18 @@ class ComposerViewModelTest {
     private val SESSION_KEY: String get() = "$hostId/$SESSION"
 
     private val SCOPE: String get() = "$hostId-$SESSION"
+
+    private class FailureRecordingSessionSink : SessionSink {
+        private val failures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+        override val isLive: Boolean = true
+        override fun sendBytes(bytes: ByteArray) = Unit
+        override val sendFailures = failures
+
+        fun fail() {
+            check(failures.tryEmit(Unit)) { "the failure event was not accepted" }
+        }
+    }
 
     private companion object {
         const val SESSION = "devbox"

@@ -1,5 +1,8 @@
 package com.pocketshell.next.hosts
 
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
@@ -43,6 +46,7 @@ class SshKeysViewModelTest {
     private lateinit var db: AppDatabase
     private lateinit var keyStore: SshKeyStore
     private lateinit var viewModel: SshKeysViewModel
+    private val viewModelStore = ViewModelStore()
     private val unlocker = object : SshKeyUnlocker {
         override fun rememberPassphrase(keyId: Long, value: CharArray) = Unit
         override fun copyPassphrase(keyId: Long): CharArray? = null
@@ -61,11 +65,19 @@ class SshKeysViewModelTest {
             db.sshKeyDao(),
             UnconfinedTestDispatcher(),
         )
-        viewModel = SshKeysViewModel(db.sshKeyDao(), keyStore, unlocker)
+        val created = SshKeysViewModel(db.sshKeyDao(), keyStore, unlocker)
+        viewModel = ViewModelProvider(
+            viewModelStore,
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T = created as T
+            },
+        )[SshKeysViewModel::class.java]
     }
 
     @After
     fun tearDown() {
+        viewModelStore.clear()
         db.close()
         Dispatchers.resetMain()
     }

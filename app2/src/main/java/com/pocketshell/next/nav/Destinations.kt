@@ -145,9 +145,16 @@ sealed class Destination(val pattern: String) {
      * The name is the identity the host CLI speaks — the client never
      * carries sockets or UUIDs (plan §B.0).
      */
-    data object Session : Destination("session/{$ARG_HOST_ID}/{$ARG_SESSION_NAME}") {
-        fun route(hostId: Long, sessionName: String): String =
-            "session/$hostId/${encodeSegment(sessionName)}"
+    data object Session : Destination(
+        "session/{$ARG_HOST_ID}/{$ARG_SESSION_NAME}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}",
+    ) {
+        fun route(hostId: Long, sessionName: String, workspacePath: String? = null): String =
+            buildString {
+                append("session/$hostId/${encodeSegment(sessionName)}")
+                workspacePath?.takeIf { it.isNotBlank() }?.let {
+                    append("?$ARG_WORKSPACE_PATH=${encodeSegment(it)}")
+                }
+            }
     }
 
     /**

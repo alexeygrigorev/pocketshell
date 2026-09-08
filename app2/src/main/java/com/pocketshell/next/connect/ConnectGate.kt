@@ -111,23 +111,34 @@ fun ConnectGate(
             // turns every journey that waits on this screen into a hang. The
             // dial is bounded by the transport's connect timeout anyway.
             state.busyHostId?.let {
-                Banner(
-                    text = "Connecting…",
-                    role = BannerRole.Info,
-                    trailingContent = {
-                        PocketShellButton(
-                            text = "Cancel",
-                            onClick = viewModel::cancel,
-                            variant = ButtonVariant.Text,
-                            compact = true,
-                            modifier = Modifier.testTag(CONNECT_BUSY_CANCEL_TAG),
-                        )
-                    },
+                Column(
                     modifier = Modifier
                         .padding(horizontal = PocketShellSpacing.md)
                         .padding(bottom = PocketShellSpacing.sm)
                         .testTag(CONNECT_BUSY_BANNER_TAG),
-                )
+                ) {
+                    Banner(
+                        text = "Connecting to ${state.busyHostLabel ?: "this host"}",
+                        role = BannerRole.Info,
+                        trailingContent = {
+                            PocketShellButton(
+                                text = "Cancel",
+                                onClick = viewModel::cancel,
+                                variant = ButtonVariant.Text,
+                                compact = true,
+                                modifier = Modifier.testTag(CONNECT_BUSY_CANCEL_TAG),
+                            )
+                        },
+                    )
+                    Text(
+                        text = "Checking the server and SSH credentials.",
+                        color = PocketShellColors.TextSecondary,
+                        modifier = Modifier.padding(
+                            horizontal = PocketShellSpacing.sm,
+                            vertical = PocketShellSpacing.xs,
+                        ),
+                    )
+                }
             }
 
             state.error?.let { error ->

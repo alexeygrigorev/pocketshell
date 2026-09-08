@@ -36,12 +36,12 @@ import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.FormDialog
-import com.pocketshell.uikit.components.Kebab
-import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.WorkspaceRow
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -74,6 +74,11 @@ const val HOST_WORKSPACES_ROOT_REMOVE_TAG: String = "host-workspaces-root-remove
 const val HOST_WORKSPACES_ROOT_REMOVE_CONFIRM_TAG: String = "host-workspaces-root-remove-confirm"
 const val HOST_WORKSPACES_IN_ROOT_LABEL: String = "In this root"
 const val HOST_WORKSPACES_ROOT_EMPTY_TAG: String = "host-workspaces-root-empty"
+const val HOST_WORKSPACES_HOST_TOOLS_TAG: String = "host-workspaces-host-tools"
+const val HOST_WORKSPACES_PROJECT_ROOTS_TAG: String = "host-workspaces-project-roots"
+const val HOST_WORKSPACES_CONNECTION_DETAILS_TAG: String = "host-workspaces-connection-details"
+const val HOST_WORKSPACES_REFRESH_TAG: String = "host-workspaces-refresh"
+const val HOST_WORKSPACES_DISCONNECT_TAG: String = "host-workspaces-disconnect"
 
 fun workspaceRowTag(path: String): String = "workspace-row-$path"
 
@@ -93,12 +98,15 @@ fun HostWorkspacesRoute(
     onOpenWorkspace: (String) -> Unit,
     onStartSessionAtPath: (String) -> Unit = onOpenWorkspace,
     onOpenReorder: () -> Unit = {},
-    onOpenSession: (String) -> Unit,
+    onOpenSession: (SessionRow) -> Unit,
     onOpenFiles: () -> Unit,
     onOpenFilesAtPath: (String) -> Unit = { onOpenFiles() },
     onOpenPorts: () -> Unit,
     onBack: () -> Unit,
     onOpenUsage: () -> Unit,
+    onOpenProjectRoots: () -> Unit = {},
+    onOpenConnectionDetails: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HostWorkspacesViewModel = hiltViewModel(),
 ) {
@@ -116,6 +124,9 @@ fun HostWorkspacesRoute(
         onOpenPorts = onOpenPorts,
         onBack = onBack,
         onOpenUsage = onOpenUsage,
+        onOpenProjectRoots = onOpenProjectRoots,
+        onOpenConnectionDetails = onOpenConnectionDetails,
+        onDisconnect = onDisconnect,
         onOpenAddWorkspace = viewModel::openAddWorkspace,
         onSearchQueryChange = viewModel::setSearchQuery,
         onAddWorkspacePathChange = viewModel::setAddWorkspacePath,
@@ -143,12 +154,15 @@ fun HostWorkspacesScreen(
     onOpenWorkspace: (String) -> Unit,
     onStartSessionAtPath: (String) -> Unit = onOpenWorkspace,
     onOpenReorder: () -> Unit = {},
-    onOpenSession: (String) -> Unit,
+    onOpenSession: (SessionRow) -> Unit,
     onOpenFiles: () -> Unit = {},
     onOpenFilesAtPath: (String) -> Unit = { onOpenFiles() },
     onOpenPorts: () -> Unit = {},
     onBack: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    onOpenProjectRoots: () -> Unit = {},
+    onOpenConnectionDetails: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
     onOpenAddWorkspace: (String) -> Unit = {},
     onSearchQueryChange: (String) -> Unit = {},
     onAddWorkspacePathChange: (String) -> Unit = {},
@@ -168,6 +182,8 @@ fun HostWorkspacesScreen(
     val clipboard = LocalClipboardManager.current
     var activeRootActions by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
     var rootPendingRemoval by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
+    var hostToolsVisible by remember { mutableStateOf(false) }
+    var connectionDetailsVisible by remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -186,29 +202,8 @@ fun HostWorkspacesScreen(
                 )
             },
             trailing = {
-                Kebab(
-                    items = listOf(
-                        KebabItem(
-                            label = "Files",
-                            onClick = onOpenFiles,
-                            testTag = SESSION_TREE_FILES_TAG,
-                        ),
-                        KebabItem(
-                            label = "Ports",
-                            onClick = onOpenPorts,
-                            testTag = SESSION_TREE_PORTS_TAG,
-                        ),
-                        KebabItem(
-                            label = "Usage",
-                            onClick = onOpenUsage,
-                            testTag = SESSION_TREE_USAGE_TAG,
-                        ),
-                        KebabItem(
-                            label = "Reorder workspaces",
-                            onClick = onOpenReorder,
-                            testTag = HOST_WORKSPACES_REORDER_TAG,
-                        ),
-                    ),
+                KebabTrigger(
+                    onClick = { hostToolsVisible = true },
                     contentDescription = "Host actions",
                     triggerTestTag = HOST_WORKSPACES_ACTIONS_TAG,
                 )
@@ -357,6 +352,55 @@ fun HostWorkspacesScreen(
         }
     }
 
+    if (hostToolsVisible) {
+        HostToolsSheet(
+            onOpenFiles = {
+                hostToolsVisible = false
+                onOpenFiles()
+            },
+            onOpenPorts = {
+                hostToolsVisible = false
+                onOpenPorts()
+            },
+            onOpenUsage = {
+                hostToolsVisible = false
+                onOpenUsage()
+            },
+            onOpenProjectRoots = {
+                hostToolsVisible = false
+                onOpenProjectRoots()
+            },
+            onOpenConnectionDetails = {
+                hostToolsVisible = false
+                connectionDetailsVisible = true
+            },
+            onRefresh = {
+                hostToolsVisible = false
+                onRefresh()
+            },
+            onReorder = {
+                hostToolsVisible = false
+                onOpenReorder()
+            },
+            onDisconnect = {
+                hostToolsVisible = false
+                onDisconnect()
+            },
+            onDismiss = { hostToolsVisible = false },
+        )
+    }
+
+    if (connectionDetailsVisible) {
+        HostConnectionDetailsSheet(
+            state = state,
+            onEdit = {
+                connectionDetailsVisible = false
+                onOpenConnectionDetails()
+            },
+            onDismiss = { connectionDetailsVisible = false },
+        )
+    }
+
     if (state.addWorkspaceBrowserVisible) {
         WorkspaceFolderBrowserSheet(
             state = state,
@@ -450,7 +494,7 @@ fun HostWorkspacesScreen(
 private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     root: WorkspaceRootProjection,
     onOpenWorkspace: (String) -> Unit,
-    onOpenSession: (String) -> Unit,
+    onOpenSession: (SessionRow) -> Unit,
     onOpenAddWorkspace: (String) -> Unit,
     onOpenRootActions: () -> Unit,
 ) {
@@ -496,7 +540,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
             items = root.rootSessions,
             key = { session -> "root-session:${root.key}:${session.name}" },
         ) { session ->
-            WorkspaceSessionRow(session = session, onClick = { onOpenSession(session.name) })
+            WorkspaceSessionRow(
+                session = session,
+                onClick = { onOpenSession(session) },
+            )
         }
     }
 
@@ -676,6 +723,98 @@ private fun RootActionRow(
         onClick = onClick,
         modifier = Modifier.testTag(testTag),
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HostToolsSheet(
+    onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onOpenUsage: () -> Unit,
+    onOpenProjectRoots: () -> Unit,
+    onOpenConnectionDetails: () -> Unit,
+    onRefresh: () -> Unit,
+    onReorder: () -> Unit,
+    onDisconnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag(HOST_WORKSPACES_HOST_TOOLS_TAG),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = PocketShellSpacing.lg),
+        ) {
+            Text(
+                text = "Host tools",
+                color = PocketShellColors.Text,
+                style = PocketShellType.title,
+                modifier = Modifier.padding(
+                    horizontal = PocketShellSpacing.lg,
+                    vertical = PocketShellSpacing.sm,
+                ),
+            )
+            HostToolRow("Browse host files", onOpenFiles, SESSION_TREE_FILES_TAG)
+            HostToolRow("Services & tunnels", onOpenPorts, SESSION_TREE_PORTS_TAG)
+            HostToolRow("Usage", onOpenUsage, SESSION_TREE_USAGE_TAG)
+            HostToolRow("Project roots", onOpenProjectRoots, HOST_WORKSPACES_PROJECT_ROOTS_TAG)
+            HostToolRow("Connection details", onOpenConnectionDetails, HOST_WORKSPACES_CONNECTION_DETAILS_TAG)
+            HostToolRow("Refresh workspaces", onRefresh, HOST_WORKSPACES_REFRESH_TAG)
+            HostToolRow("Reorder workspaces", onReorder, HOST_WORKSPACES_REORDER_TAG)
+            HostToolRow("Disconnect", onDisconnect, HOST_WORKSPACES_DISCONNECT_TAG)
+        }
+    }
+}
+
+@Composable
+private fun HostToolRow(
+    title: String,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    ListRow(
+        title = title,
+        onClick = onClick,
+        modifier = Modifier.testTag(testTag),
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HostConnectionDetailsSheet(
+    state: HostWorkspacesUiState,
+    onEdit: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg),
+        ) {
+            SheetHeader(
+                title = "Connection details",
+                subtitle = "Saved connection for this host.",
+                onClose = onDismiss,
+            )
+            ListRow(title = "Host", subtitle = state.hostLabel)
+            ListRow(title = "Address", subtitle = state.hostAddress)
+            ListRow(title = "User", subtitle = state.hostUser)
+            PocketShellButton(
+                text = "Edit connection",
+                onClick = onEdit,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

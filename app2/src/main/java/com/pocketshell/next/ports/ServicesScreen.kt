@@ -115,7 +115,6 @@ fun ServicesScreen(
         ScreenHeader(
             title = "Services & tunnels",
             subtitle = state.hostName.ifBlank { state.hostSubtitle },
-            titleStyle = PocketShellType.title,
             leading = {
                 PocketShellButton(
                     text = "Back",

@@ -54,6 +54,8 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 /** Stable test tags. */
 const val QR_SCANNER_PREVIEW_TAG: String = "qr-scanner-preview"
 const val QR_SCANNER_PROGRESS_TAG: String = "qr-scanner-progress"
+const val QR_SCANNER_INSTRUCTION_TAG: String = "qr-scanner-instruction"
+const val QR_SCANNER_WAITING_TAG: String = "qr-scanner-waiting"
 const val QR_SCANNER_REVIEW_TAG: String = "qr-scanner-review"
 const val QR_SCANNER_REVIEW_IMPORT_TAG: String = "qr-scanner-review-import"
 const val QR_SCANNER_REVIEW_CANCEL_TAG: String = "qr-scanner-review-cancel"
@@ -197,16 +199,7 @@ fun QrScannerScreen(
             }
 
             is QrScannerViewModel.State.Scanning -> Column(modifier = Modifier.fillMaxSize()) {
-                if (state.total > 0) {
-                    Text(
-                        text = "Scanned ${state.scanned} of ${state.total}",
-                        color = PocketShellColors.Text,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .padding(PocketShellSpacing.md)
-                            .testTag(QR_SCANNER_PROGRESS_TAG),
-                    )
-                }
+                QrScannerInstructions(scanned = state.scanned, total = state.total)
                 CameraPreview(
                     onScanned = onScanned,
                     modifier = Modifier
@@ -247,6 +240,39 @@ fun QrScannerScreen(
                 }
             }
         }
+    }
+}
+
+/** The camera-independent status copy above the live preview. */
+@Composable
+internal fun QrScannerInstructions(scanned: Int, total: Int) {
+    Text(
+        text = "Point your camera at the PocketShell QR code on your computer.",
+        color = PocketShellColors.TextSecondary,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
+            .testTag(QR_SCANNER_INSTRUCTION_TAG),
+    )
+    if (total > 0) {
+        Text(
+            text = "Scanned $scanned of $total",
+            color = PocketShellColors.Text,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .padding(PocketShellSpacing.md)
+                .testTag(QR_SCANNER_PROGRESS_TAG),
+        )
+    } else {
+        Text(
+            text = "Waiting for a QR code…",
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .padding(horizontal = PocketShellSpacing.md)
+                .testTag(QR_SCANNER_WAITING_TAG),
+        )
     }
 }
 

@@ -1,7 +1,10 @@
 package com.pocketshell.next.terminal
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -40,6 +43,8 @@ import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
+import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -173,7 +178,7 @@ class J03AttachAndTypeJourney {
         )
         AgentsFixture.exec(
             "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
-                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+                "'PS1=\"$PROMPT \"; echo $BANNER'",
         )
         SystemClock.sleep(500)
         val screen = capturePane()
@@ -193,7 +198,7 @@ class J03AttachAndTypeJourney {
         // 1. The pane the host has is the pane the phone draws. Both sides are
         //    read fresh; neither is a constant this file made up.
         val rendered = awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
-        JourneyScreenshots.capture("01-attached", JOURNEY)
+        capture("01-attached")
         assertTrue(
             "the live shell prompt must be on screen, got:\n$rendered",
             squashed(rendered).contains(PROMPT),
@@ -214,7 +219,7 @@ class J03AttachAndTypeJourney {
             // merely rendered the keystrokes locally would show.
             squashed(it).split(MARKER).size >= 3
         }
-        JourneyScreenshots.capture("02-typed", JOURNEY)
+        capture("02-typed")
         assertTrue(
             "the rendered viewport must show the command's output, got:\n$afterTyping",
             squashed(afterTyping).contains(MARKER),
@@ -225,6 +230,18 @@ class J03AttachAndTypeJourney {
             "the host's pane must show the typed command, got:\n$pane",
             squashed(pane).contains("echo$MARKER"),
         )
+
+        // 4. Exercise the vendored native selection controller and the
+        // production SessionScreen copy action against the real Android
+        // clipboard. The unit seam can cover stored selection text, but only
+        // this device path proves rendered cell geometry and selection state.
+        // Put the marker on its own rendered row. The native controller expands
+        // a tap to the contiguous non-empty row, so selecting an `echo marker`
+        // command would also include the shell's `echo ` prefix.
+        typeLine("printf '\\n%s\\n' '$COPY_MARKER'")
+        awaitTranscript("the copy-selection marker") { it.contains(COPY_MARKER) }
+        copyNativeSelection(COPY_MARKER)
+        capture("03-copy-selection")
     }
 
     /**
@@ -251,7 +268,7 @@ class J03AttachAndTypeJourney {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(SESSION_ERROR_BANNER_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        JourneyScreenshots.capture("03-vanished-session", JOURNEY)
+        capture("03-vanished-session")
         compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
         // WHY it failed has to survive to the screen, not just THAT it failed:
         // exit 3 is `pocketshell sessions attach`'s "no session named ...", and
@@ -298,11 +315,11 @@ class J03AttachAndTypeJourney {
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
         val closed = remoteSize("keyboard down", keyboardUp = false)
-        JourneyScreenshots.capture("04-keyboard-down", JOURNEY)
+        capture("04-keyboard-down")
 
         showKeyboard()
         val opened = remoteSize("keyboard up", keyboardUp = true)
-        JourneyScreenshots.capture("05-keyboard-up", JOURNEY)
+        capture("05-keyboard-up")
         assertEquals(
             "the keyboard must not change the remote size (#887/#2533): " +
                 "closed=$closed opened=$opened",
@@ -321,7 +338,7 @@ class J03AttachAndTypeJourney {
 
         rotate(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
         val landscape = remoteSize("landscape", keyboardUp = false)
-        JourneyScreenshots.capture("06-landscape", JOURNEY)
+        capture("06-landscape")
         assertTrue(
             "landscape must widen the remote terminal: portrait=$closed landscape=$landscape",
             landscape.cols > closed.cols,
@@ -372,7 +389,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-        JourneyScreenshots.capture("06-compact-launcher", JOURNEY)
+        capture("06-compact-launcher")
     }
 
     /**
@@ -396,7 +413,7 @@ class J03AttachAndTypeJourney {
 
         typeLine("sleep $SLEEP_SECONDS")
         awaitHostSleep(running = true)
-        JourneyScreenshots.capture("07-sleeping", JOURNEY)
+        capture("07-sleeping")
 
         openHotkeys()
         // Two ordinary taps are the documented accessible fallback for a
@@ -408,7 +425,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitHostSleep(running = false)
-        JourneyScreenshots.capture("08-interrupted", JOURNEY)
+        capture("08-interrupted")
 
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG).performClick()
         compose.awaitIdle("after closing the hotkeys panel")
@@ -451,7 +468,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitTranscript("the marker echoed and run") { it.split(ENTER_MARKER).size >= 3 }
-        JourneyScreenshots.capture("09-hotkeys-enter", JOURNEY)
+        capture("09-hotkeys-enter")
         assertTrue(
             "the host must show the command the hotkeys panel's Enter submitted",
             squashed(capturePane()).contains(ENTER_MARKER),
@@ -515,7 +532,7 @@ class J03AttachAndTypeJourney {
             if (predicate(last)) return last
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
+        val shot = capture("failure-${what.replace(' ', '-')}")
         throw AssertionError(
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
                 "Screen state: ${safeScreenDiagnosis()}\n" +
@@ -664,6 +681,62 @@ class J03AttachAndTypeJourney {
         instrumentation.waitForIdleSync()
     }
 
+    /** Selects a known rendered word through TerminalView's native controller. */
+    private fun copyNativeSelection(expected: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val selected = AtomicReference<String?>()
+        val copied = AtomicReference(false)
+        instrumentation.runOnMainSync {
+            val view = checkNotNull(terminalView()) { "no TerminalView on screen" }
+            val emulator = checkNotNull(view.mEmulator) { "terminal emulator is not ready" }
+            val row = (0 until emulator.mRows).firstOrNull { candidate ->
+                emulator.screen.getSelectedText(0, candidate, emulator.mColumns, candidate)
+                    .trim() == expected
+            } ?: error(
+                "copy marker is absent from the rendered rows; " +
+                    "cursor=${emulator.getCursorRow()} transcript=${emulator.screen.transcriptText}",
+            )
+            val renderer = checkNotNull(view.mRenderer) { "terminal renderer is not ready" }
+            val event = MotionEvent.obtain(
+                SystemClock.uptimeMillis(),
+                SystemClock.uptimeMillis(),
+                MotionEvent.ACTION_DOWN,
+                (expected.length / 2) * renderer.getFontWidth(),
+                renderer.getFontLineSpacingAndAscent() +
+                    (row - view.getTopRow() + 0.5f) * renderer.getFontLineSpacing(),
+                0,
+            )
+            try {
+                view.startTextSelectionMode(event)
+                selected.set(view.getSelectedText())
+            } finally {
+                event.recycle()
+            }
+        }
+        assertEquals(
+            "native selection must isolate the rendered word; transcript=${renderedTranscript()}",
+            expected,
+            selected.get(),
+        )
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(400)
+        instrumentation.runOnMainSync {
+            copied.set(checkNotNull(terminalView()).copySelectionToClipboard())
+        }
+        assertTrue("the production copy action must accept native selection", copied.get())
+        assertEquals(expected, clipboardText())
+    }
+
+    private fun clipboardText(): String? {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        return clipboard.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+    }
+
     // --- U-5: size, keyboard, rotation ------------------------------------
 
     /** A terminal size as both ends of the wire report it. */
@@ -739,7 +812,7 @@ class J03AttachAndTypeJourney {
                 return current
             }
         }
-        val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
+        val shot = capture("failure-${what.replace(' ', '-')}")
         throw AssertionError(
             "$what: the phone and the host never agreed on a terminal size within " +
                 "${TIMEOUT_MS}ms (last host pane=$host).\n" +
@@ -891,7 +964,7 @@ class J03AttachAndTypeJourney {
             }
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-ime-${visible}", JOURNEY)
+        val shot = capture("failure-ime-${visible}")
         throw AssertionError(
             "the keyboard never became ${if (visible) "visible" else "hidden"} " +
                 "(ime inset bottom=$bottom). Screenshot: ${shot.absolutePath}" +
@@ -951,7 +1024,7 @@ class J03AttachAndTypeJourney {
             }
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-rotate-$want", JOURNEY)
+        val shot = capture("failure-rotate-$want")
         throw AssertionError(
             "the terminal never laid out $want within ${TIMEOUT_MS}ms " +
                 "(last seen $seen).\n" +
@@ -985,7 +1058,7 @@ class J03AttachAndTypeJourney {
             if ((count > 0) == running) return
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-sleep-$running", JOURNEY)
+        val shot = capture("failure-sleep-$running")
         throw AssertionError(
             "the host never reported `sleep $SLEEP_SECONDS` as " +
                 "${if (running) "running" else "gone"} (count=$count).\n" +
@@ -1004,6 +1077,26 @@ class J03AttachAndTypeJourney {
             "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain " +
                 "2>/dev/null || true",
         )
+
+    /** Keep current real-device captures after the connected-test app is removed. */
+    private fun capture(name: String): File {
+        val file = JourneyScreenshots.capture(name, JOURNEY)
+        val outputDir = InstrumentationRegistry.getArguments()
+            .getString("additionalTestOutputDir")
+            ?.takeIf { it.isNotBlank() }
+            ?: return file
+        runCatching {
+            val targetDir = File(outputDir, JOURNEY).apply { mkdirs() }
+            file.parentFile?.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("${file.nameWithoutExtension}") }
+                ?.forEach { artifact ->
+                    val target = File(targetDir, artifact.name)
+                    artifact.copyTo(target, overwrite = true)
+                    println("J03_SCREENSHOT ${target.absolutePath}")
+                }
+        }
+        return file
+    }
 
     /**
      * Whitespace-free view of terminal text, for wrap-proof matching.
@@ -1076,6 +1169,7 @@ class J03AttachAndTypeJourney {
         const val PROMPT = "J03READY\$"
         const val BANNER = "J03-FIXTURE-PANE"
         const val MARKER = "pocketshell-u4-ok"
+        const val COPY_MARKER = "pocketshell-copy-selection-ok"
         const val CTRL_MARKER = "pocketshell-u5-interrupted"
         const val ENTER_MARKER = "pocketshell-u5-submitted"
 

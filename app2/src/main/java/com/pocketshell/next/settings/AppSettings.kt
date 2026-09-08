@@ -187,11 +187,11 @@ data class AppSettings(
          * domain.
          */
         val BACKGROUND_GRACE_OPTIONS: List<BackgroundGraceOption> = listOf(
-            BackgroundGraceOption(BACKGROUND_GRACE_30_SECONDS_MS, "30 sec"),
-            BackgroundGraceOption(BACKGROUND_GRACE_1_MINUTE_MS, "1 min"),
-            BackgroundGraceOption(BACKGROUND_GRACE_90_SECONDS_MS, "90 sec"),
-            BackgroundGraceOption(BACKGROUND_GRACE_5_MINUTES_MS, "5 min"),
-            BackgroundGraceOption(BACKGROUND_GRACE_10_MINUTES_MS, "10 min"),
+            BackgroundGraceOption(BACKGROUND_GRACE_30_SECONDS_MS, "30 seconds"),
+            BackgroundGraceOption(BACKGROUND_GRACE_1_MINUTE_MS, "1 minute"),
+            BackgroundGraceOption(BACKGROUND_GRACE_90_SECONDS_MS, "90 seconds"),
+            BackgroundGraceOption(BACKGROUND_GRACE_5_MINUTES_MS, "5 minutes"),
+            BackgroundGraceOption(BACKGROUND_GRACE_10_MINUTES_MS, "10 minutes"),
         )
     }
 }

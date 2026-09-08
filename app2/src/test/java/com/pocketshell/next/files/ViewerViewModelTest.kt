@@ -125,6 +125,62 @@ class ViewerViewModelTest {
     }
 
     @Test
+    fun `a remote metadata change blocks save and keeps both versions available`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedFile(TEXT_PATH, "before\n") }
+            val viewModel = viewer(hostId, TEXT_PATH)
+            viewModel.load()
+            advanceUntilIdle()
+            viewModel.startEditing()
+            viewModel.onDraftChange("phone draft\n")
+
+            // A newer, differently sized host version is what the SFTP stat
+            // contract exposes to the optimistic save check.
+            stack.sftp.seedFile(TEXT_PATH, "remote version is newer\n")
+            viewModel.save()
+            advanceUntilIdle()
+
+            val conflict = viewModel.state.value.conflict
+            assertTrue("expected an explicit conflict state", conflict != null)
+            assertTrue(viewModel.state.value.editing)
+            assertEquals("phone draft\n", viewModel.state.value.draft)
+            assertEquals("remote version is newer\n", stack.sftp.textAt(TEXT_PATH))
+
+            viewModel.saveAsCopy()
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.editing)
+            assertEquals("phone draft\n", stack.sftp.textAt("$DIR/notes.txt.local-copy"))
+            assertEquals("remote version is newer\n", stack.sftp.textAt(TEXT_PATH))
+        }
+
+    @Test
+    fun `back with a dirty buffer opens a confirmation and discard is explicit`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedFile(TEXT_PATH, "before\n") }
+            val viewModel = viewer(hostId, TEXT_PATH)
+            viewModel.load()
+            advanceUntilIdle()
+            viewModel.startEditing()
+            viewModel.onDraftChange("keep or discard\n")
+
+            assertFalse(viewModel.requestBack())
+            assertTrue(viewModel.state.value.unsavedChangesVisible)
+
+            viewModel.keepEditing()
+            assertFalse(viewModel.state.value.unsavedChangesVisible)
+            assertTrue(viewModel.state.value.editing)
+
+            assertFalse(viewModel.requestBack())
+            viewModel.discardChanges()
+            assertFalse(viewModel.state.value.editing)
+            assertFalse(viewModel.state.value.unsavedChangesVisible)
+            assertEquals("before\n", stack.sftp.textAt(TEXT_PATH))
+        }
+
+    @Test
     fun `a re-read after a save shows the edit`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         stack.seedSftp = { it.seedFile(TEXT_PATH, "before\n") }

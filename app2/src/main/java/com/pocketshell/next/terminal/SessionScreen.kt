@@ -30,6 +30,7 @@ import com.pocketshell.next.composer.PromptComposerContent
 import com.pocketshell.next.composer.PromptComposerSheet
 import com.pocketshell.next.composer.SentMessage
 import com.pocketshell.next.composer.SessionSink
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_LABEL
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
@@ -69,6 +70,8 @@ const val SESSION_BACK_TAG: String = "session-back"
 const val SESSION_USAGE_TAG: String = "session-usage"
 const val SESSION_HEADER_KEBAB_TAG: String = "session-header-kebab"
 const val SESSION_STOP_FAILURE_TAG: String = "session-stop-failure"
+const val SESSION_ACTIONS_ITEM_TAG: String = "session-actions-item"
+const val SESSION_ENDED_TAG: String = "session-ended"
 
 /**
  * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
@@ -95,14 +98,19 @@ fun SessionRoute(
     sessionName: String,
     onBack: () -> Unit,
     onOpenUsage: () -> Unit,
+    onOpenFiles: () -> Unit = {},
+    onOpenSession: (SessionRow) -> Unit = {},
+    onOpenNewSession: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: SessionViewModel = hiltViewModel(),
     composerViewModel: ComposerViewModel = hiltViewModel(),
     usageGlanceViewModel: UsageGlanceViewModel = hiltViewModel(),
+    sessionSwitcherViewModel: SessionSwitcherViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
     val composerState by composerViewModel.state.collectAsState()
     val usagePillState by usageGlanceViewModel.state.collectAsState()
+    val sessionSwitcherState by sessionSwitcherViewModel.state.collectAsState()
     val leaveAfterStop by viewModel.leaveAfterStop.collectAsState()
     val stopFailure by viewModel.stopFailure.collectAsState()
 
@@ -112,6 +120,7 @@ fun SessionRoute(
     // the no-argument overload and keeps the cross-provider meaning.
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         usageGlanceViewModel.refresh(hostId = hostId, sessionName = sessionName)
+        sessionSwitcherViewModel.refresh()
     }
 
     LaunchedEffect(leaveAfterStop) {
@@ -143,6 +152,10 @@ fun SessionRoute(
         onBack = onBack,
         usagePillState = usagePillState,
         onOpenUsage = onOpenUsage,
+        onOpenFiles = onOpenFiles,
+        onOpenSession = onOpenSession,
+        onOpenNewSession = onOpenNewSession,
+        sessionSwitcherState = sessionSwitcherState,
         onResized = viewModel::onResized,
         onRetry = viewModel::retryNow,
         onStopSession = viewModel::stopSession,
@@ -192,6 +205,9 @@ fun SessionScreen(
     composerState: ComposerUiState,
     sessionName: String,
     onBack: () -> Unit,
+    onOpenSession: (SessionRow) -> Unit = {},
+    onOpenNewSession: () -> Unit = {},
+    onOpenFiles: () -> Unit = {},
     onResized: (cols: Int, rows: Int) -> Unit,
     usagePillState: UsageGlancePillState? = null,
     onOpenUsage: () -> Unit = {},
@@ -216,6 +232,7 @@ fun SessionScreen(
     onDiscardDraft: () -> Unit,
     onUseHistoryEntry: (SentMessage) -> Unit,
     onPermissionDenied: () -> Unit = {},
+    sessionSwitcherState: SessionSwitcherUiState = SessionSwitcherUiState(),
     modifier: Modifier = Modifier,
     cellMetrics: TerminalCellMetrics = rememberTerminalCellMetrics(),
     initiallyShowComposer: Boolean = false,
@@ -229,7 +246,11 @@ fun SessionScreen(
 ) {
     var composerOpen by remember { mutableStateOf(initiallyShowComposer) }
     var hotkeysOpen by remember { mutableStateOf(initiallyShowHotkeys) }
+    var terminalActionsOpen by remember { mutableStateOf(false) }
+    var sessionSwitcherOpen by remember { mutableStateOf(false) }
     var pendingStop by remember { mutableStateOf(false) }
+    var copyTerminalSelection by remember { mutableStateOf<(() -> Boolean)?>(null) }
+    val sessionEnded = (state as? SessionUiState.Failed)?.message?.looksLikeEndedSession() == true
 
     Column(
         modifier = modifier
@@ -263,6 +284,11 @@ fun SessionScreen(
                 }
                 Kebab(
                     items = listOf(
+                        KebabItem(
+                            label = "Terminal actions",
+                            onClick = { terminalActionsOpen = true },
+                            testTag = SESSION_ACTIONS_ITEM_TAG,
+                        ),
                         KebabItem(
                             label = STOP_SESSION_ITEM_LABEL,
                             onClick = { pendingStop = true },
@@ -312,6 +338,11 @@ fun SessionScreen(
                 is SessionUiState.Live -> TerminalHostView(
                     session = state.terminal,
                     onResized = onResized,
+                    onViewReady = { view ->
+                        copyTerminalSelection = view?.let { terminal ->
+                            { terminal.copySelectionToClipboard() }
+                        }
+                    },
                     modifier = Modifier.fillMaxSize(),
                 )
 
@@ -320,14 +351,18 @@ fun SessionScreen(
                         text = reconnectingMessage(state),
                         role = BannerRole.Warning,
                         maxLines = 2,
-                        trailingContent = {
-                            PocketShellButton(
-                                text = "Retry",
-                                onClick = onRetry,
-                                variant = ButtonVariant.Text,
-                                compact = true,
-                                modifier = Modifier.testTag(SESSION_RETRY_TAG),
-                            )
+                        trailingContent = if (sessionEnded) {
+                            null
+                        } else {
+                            {
+                                PocketShellButton(
+                                    text = "Retry",
+                                    onClick = onRetry,
+                                    variant = ButtonVariant.Text,
+                                    compact = true,
+                                    modifier = Modifier.testTag(SESSION_RETRY_TAG),
+                                )
+                            }
                         },
                         modifier = Modifier
                             .padding(horizontal = PocketShellSpacing.md)
@@ -337,6 +372,11 @@ fun SessionScreen(
                     Terminal(
                         session = state.terminal,
                         onResized = onResized,
+                        onViewReady = { view ->
+                            copyTerminalSelection = view?.let { terminal ->
+                                { terminal.copySelectionToClipboard() }
+                            }
+                        },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -361,32 +401,57 @@ fun SessionScreen(
                             .testTag(SESSION_ERROR_BANNER_TAG),
                     )
                     EmptyState(
-                        title = "Not attached",
-                        description = "Tap Retry, or go back to the session list to pick another " +
-                            "session.",
-                        modifier = Modifier.weight(1f),
+                        title = if (sessionEnded) "Session ended" else "Not attached",
+                        description = if (sessionEnded) {
+                            "The remote process has exited. Go back to the workspace to choose " +
+                                "another session."
+                        } else {
+                            "Tap Retry, or go back to the session list to pick another session."
+                        },
+                        action = if (sessionEnded) {
+                            {
+                                PocketShellButton(
+                                    text = "Back to workspace",
+                                    onClick = onBack,
+                                    variant = ButtonVariant.Secondary,
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(
+                                if (sessionEnded) {
+                                    Modifier.testTag(SESSION_ENDED_TAG)
+                                } else {
+                                    Modifier
+                                },
+                            ),
                     )
                 }
             }
         }
 
-        SessionLauncherBar(
-            onOpenComposer = {
-                hotkeysOpen = false
-                composerOpen = true
-            },
-            onOpenHotkeys = if (state is SessionUiState.Failed) {
-                null
-            } else {
-                {
-                    composerOpen = false
-                    hotkeysOpen = true
-                }
-            },
-        )
+        if (!sessionEnded) {
+            SessionLauncherBar(
+                onOpenComposer = {
+                    hotkeysOpen = false
+                    composerOpen = true
+                },
+                onOpenHotkeys = if (state is SessionUiState.Failed) {
+                    null
+                } else {
+                    {
+                        composerOpen = false
+                        hotkeysOpen = true
+                    }
+                },
+            )
+        }
     }
 
-    if (composerOpen) {
+    if (composerOpen && !sessionEnded) {
         val sendAndMaybeDismiss: () -> Unit = {
             if (onSend()) composerOpen = false
         }
@@ -440,6 +505,48 @@ fun SessionScreen(
         )
     }
 
+    if (terminalActionsOpen) {
+        TerminalActionsSheet(
+            onSessions = {
+                terminalActionsOpen = false
+                sessionSwitcherOpen = true
+            },
+            onBrowseFiles = {
+                terminalActionsOpen = false
+                onOpenFiles()
+            },
+            onCopySelection = {
+                copyTerminalSelection?.invoke()
+                terminalActionsOpen = false
+            },
+            onDetach = {
+                terminalActionsOpen = false
+                onBack()
+            },
+            onEndSession = {
+                terminalActionsOpen = false
+                pendingStop = true
+            },
+            onDismiss = { terminalActionsOpen = false },
+        )
+    }
+
+    if (sessionSwitcherOpen) {
+        SessionSwitcherSheet(
+            currentSessionName = sessionName,
+            state = sessionSwitcherState,
+            onNewSession = {
+                sessionSwitcherOpen = false
+                onOpenNewSession()
+            },
+            onOpenSession = { session ->
+                sessionSwitcherOpen = false
+                onOpenSession(session)
+            },
+            onDismiss = { sessionSwitcherOpen = false },
+        )
+    }
+
     if (composerState.historyOpen) {
         MessageHistorySheet(
             messages = composerState.history,
@@ -471,6 +578,7 @@ fun SessionScreen(
 private fun Terminal(
     session: TerminalSession,
     onResized: (cols: Int, rows: Int) -> Unit,
+    onViewReady: (com.termux.view.TerminalView?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -481,6 +589,7 @@ private fun Terminal(
         TerminalHostView(
             session = session,
             onResized = onResized,
+            onViewReady = onViewReady,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -497,5 +606,8 @@ private fun statusLine(state: SessionUiState): String = when (state) {
     SessionUiState.Connecting -> "attaching"
     is SessionUiState.Live -> "attached"
     is SessionUiState.Reconnecting -> "reconnecting"
-    is SessionUiState.Failed -> "not attached"
+    is SessionUiState.Failed -> if (state.message.looksLikeEndedSession()) "ended" else "not attached"
 }
+
+private fun String.looksLikeEndedSession(): Boolean =
+    contains(" ended.") || contains(" ended (exit ") || contains(" ended:")

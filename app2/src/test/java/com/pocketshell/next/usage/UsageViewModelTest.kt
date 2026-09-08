@@ -1,6 +1,7 @@
 package com.pocketshell.next.usage
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.settings.AppSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -36,7 +37,7 @@ class UsageViewModelTest {
 
     @Test
     fun `before any refresh nothing is loaded`() = vmTest { _ ->
-        val viewModel = UsageViewModel(stack!!.fetcher)
+        val viewModel = UsageViewModel(stack!!.fetcher, stack!!.settings)
 
         assertFalse(viewModel.state.value.loaded)
     }
@@ -44,7 +45,7 @@ class UsageViewModelTest {
     @Test
     fun `no connected hosts refreshes into the no-connected-hosts state`() = vmTest { stack ->
         stack.seedHost()
-        val viewModel = UsageViewModel(stack.fetcher)
+        val viewModel = UsageViewModel(stack.fetcher, stack.settings)
 
         viewModel.refresh()
         runCurrent()
@@ -61,7 +62,7 @@ class UsageViewModelTest {
         val hostId = stack.seedHost("claude-box")
         stack.scriptUsage(CLAUDE_NDJSON)
         stack.connect(hostId)
-        val viewModel = UsageViewModel(stack.fetcher)
+        val viewModel = UsageViewModel(stack.fetcher, stack.settings)
 
         viewModel.refresh()
         runCurrent()
@@ -74,13 +75,32 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun `the persisted warning threshold is carried into the refreshed panel state`() =
+        vmTest { stack ->
+            stack.settings.setUsageWarnThresholdPercent(90)
+            try {
+                val hostId = stack.seedHost("threshold-box")
+                stack.scriptUsage(CLAUDE_NDJSON)
+                stack.connect(hostId)
+                val viewModel = UsageViewModel(stack.fetcher, stack.settings)
+
+                viewModel.refresh()
+                runCurrent()
+
+                assertEquals(90.0, viewModel.state.value.warnPercent, 0.0)
+            } finally {
+                stack.settings.setUsageWarnThresholdPercent(AppSettings.DEFAULT_USAGE_WARN_PERCENT)
+            }
+        }
+
+    @Test
     fun `selected host refresh keeps the explicit host context`() = vmTest { stack ->
         val selected = stack.seedHost("selected")
         val other = stack.seedHost("other")
         stack.scriptUsage(CLAUDE_NDJSON)
         stack.connect(selected)
         stack.connect(other)
-        val viewModel = UsageViewModel(stack.fetcher)
+        val viewModel = UsageViewModel(stack.fetcher, stack.settings)
 
         viewModel.refresh(selected)
         runCurrent()
@@ -96,7 +116,7 @@ class UsageViewModelTest {
         val hostId = stack.seedHost()
         stack.scriptUsage(CLAUDE_NDJSON)
         stack.connect(hostId)
-        val viewModel = UsageViewModel(stack.fetcher)
+        val viewModel = UsageViewModel(stack.fetcher, stack.settings)
 
         viewModel.refresh()
         // Fires while the first refresh's fetch is still suspended on the

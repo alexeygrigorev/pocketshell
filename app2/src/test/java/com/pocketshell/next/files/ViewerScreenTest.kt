@@ -88,8 +88,9 @@ class ViewerScreenTest {
         composeRule.onNodeWithTag(VIEWER_BINARY_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(VIEWER_BINARY_NOTE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(VIEWER_TEXT_TAG).assertDoesNotExist()
-        // Editing an undecodable blob as text would corrupt it.
-        composeRule.onNodeWithTag(VIEWER_EDIT_TAG).assertIsNotEnabled()
+        // Editing an undecodable blob as text would corrupt it. The action is
+        // hidden rather than rendered as a dead disabled control.
+        composeRule.onNodeWithTag(VIEWER_EDIT_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -168,6 +169,86 @@ class ViewerScreenTest {
         composeRule.onNodeWithTag(VIEWER_LOADING_TAG).assertIsDisplayed()
     }
 
+    @Test
+    fun `the unsaved sheet offers save discard and keep editing`() {
+        var saved = 0
+        var discarded = 0
+        var kept = 0
+        composeRule.setContent {
+            PocketShellTheme {
+                UnsavedChangesSheetContent(
+                    state = state(
+                        path = "/w/README.md",
+                        editing = true,
+                        draft = "changed",
+                        content = ViewerContent.Text("before"),
+                        unsavedChangesVisible = true,
+                    ),
+                    onSave = { saved += 1 },
+                    onDiscard = { discarded += 1 },
+                    onKeepEditing = { kept += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(VIEWER_UNSAVED_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "README.md has unsaved edits. Leaving now will not update the file on the host.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_UNSAVED_SAVE_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_UNSAVED_DISCARD_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_UNSAVED_KEEP_TAG).performClick()
+
+        assertEquals(1, saved)
+        assertEquals(1, discarded)
+        assertEquals(1, kept)
+    }
+
+    @Test
+    fun `the conflict page exposes safe resolution actions`() {
+        var copied = 0
+        var reloaded = 0
+        var kept = 0
+        composeRule.setContent {
+            PocketShellTheme {
+                ViewerScreen(
+                    state = state(
+                        path = "/w/README.md",
+                        loaded = true,
+                        editing = true,
+                        draft = "phone draft",
+                        content = ViewerContent.Text("before"),
+                        conflict = ViewerFileConflict(
+                            path = "/w/README.md",
+                            loaded = RemoteFileMetadata(false, 6, 10),
+                            current = RemoteFileMetadata(false, 7, 20),
+                        ),
+                    ),
+                    onBack = {},
+                    onEdit = {},
+                    onDraftChange = {},
+                    onSave = {},
+                    onCancelEdit = {},
+                    onToggleMarkdown = {},
+                    onDismissSaved = {},
+                    onSaveAsCopy = { copied += 1 },
+                    onReloadRemote = { reloaded += 1 },
+                    onConflictKeepEditing = { kept += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(VIEWER_CONFLICT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("File changed on host").assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_CONFLICT_COPY_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_CONFLICT_RELOAD_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_CONFLICT_KEEP_TAG).performClick()
+
+        assertEquals(1, copied)
+        assertEquals(1, reloaded)
+        assertEquals(1, kept)
+    }
+
     // --- helpers ----------------------------------------------------------
 
     private fun setContent(
@@ -206,6 +287,8 @@ class ViewerScreenTest {
         saving: Boolean = false,
         savedMessage: String? = null,
         failure: String? = null,
+        unsavedChangesVisible: Boolean = false,
+        conflict: ViewerFileConflict? = null,
     ) = ViewerUiState(
         hostId = 1,
         path = path,
@@ -220,5 +303,7 @@ class ViewerScreenTest {
         saving = saving,
         savedMessage = savedMessage,
         failure = failure,
+        unsavedChangesVisible = unsavedChangesVisible,
+        conflict = conflict,
     )
 }

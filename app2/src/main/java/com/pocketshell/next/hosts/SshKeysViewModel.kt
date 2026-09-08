@@ -25,6 +25,10 @@ data class SshKeyRow(
     val publicKey: String? = null,
     val publicKeyLoading: Boolean = false,
     val publicKeyError: String? = null,
+    /** Friendly algorithm label, populated when the public half is available. */
+    val algorithm: String? = null,
+    /** OpenSSH SHA-256 fingerprint, populated with the public half. */
+    val publicFingerprint: String? = null,
 )
 
 /** What [SshKeysScreen] renders. */
@@ -66,22 +70,57 @@ class SshKeysViewModel @Inject constructor(
         }
     }
 
-    /** Generate a fresh key pair on-device under [name] (blank = a timestamped default). */
-    fun generate(name: String): Job {
+    /**
+     * Compatibility entry point for callers that only supplied a name. It now
+     * uses the same modern ED25519 default as the visible generate form.
+     */
+    fun generate(name: String): Job = generate(
+        SshKeyGenerationRequest(name = name),
+    )
+
+    /** Generate a fresh key pair using the type and protection the user chose. */
+    fun generate(request: SshKeyGenerationRequest): Job {
         if (_state.value.generating) return Job()
         _state.value = _state.value.copy(generating = true, message = null)
+        val passphrase = request.passphrase?.copyOf()
+        request.passphrase?.fill('\u0000')
         return viewModelScope.launch {
-            val result = runCatching {
-                val trimmed = name.trim()
-                if (trimmed.isEmpty()) keyStore.generateKey() else keyStore.generateKey(trimmed)
+            try {
+                val result = runCatching {
+                    if (request.protection == SshKeyProtection.PASSPHRASE &&
+                        (passphrase == null || passphrase.isEmpty())
+                    ) {
+                        error("Enter a passphrase and confirm it before generating the key")
+                    }
+                    val trimmed = request.name.trim()
+                    val selectedPassphrase = if (request.protection == SshKeyProtection.PASSPHRASE) {
+                        passphrase
+                    } else {
+                        null
+                    }
+                    if (trimmed.isEmpty()) {
+                        keyStore.generateKey(
+                            type = request.type,
+                            passphrase = selectedPassphrase,
+                        )
+                    } else {
+                        keyStore.generateKey(
+                            name = trimmed,
+                            type = request.type,
+                            passphrase = selectedPassphrase,
+                        )
+                    }
+                }
+                _state.value = _state.value.copy(
+                    generating = false,
+                    message = result.fold(
+                        onSuccess = { "Generated ${it.name}" },
+                        onFailure = { "Could not generate a key: ${it.message}" },
+                    ),
+                )
+            } finally {
+                passphrase?.fill('\u0000')
             }
-            _state.value = _state.value.copy(
-                generating = false,
-                message = result.fold(
-                    onSuccess = { "Generated ${it.name}" },
-                    onFailure = { "Could not generate a key: ${it.message}" },
-                ),
-            )
         }
     }
 
@@ -137,6 +176,8 @@ class SshKeysViewModel @Inject constructor(
                                 publicKey = publicKey,
                                 publicKeyLoading = false,
                                 publicKeyError = null,
+                                algorithm = SshKeyMaterial.keyAlgorithmLabel(publicKey),
+                                publicFingerprint = SshKeyMaterial.publicKeyFingerprint(publicKey),
                             )
                         },
                         onFailure = { failure ->

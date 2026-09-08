@@ -72,7 +72,7 @@ class SshKeyStoreTest {
 
         assertTrue(key.id > 0)
         assertEquals("laptop", key.name)
-        assertFalse("generated keys are never passphrase-protected", key.hasPassphrase)
+        assertFalse("the default generated key has no passphrase", key.hasPassphrase)
 
         val file = File(key.privateKeyPath)
         assertTrue("key file must exist at privateKeyPath", file.isFile)
@@ -84,8 +84,10 @@ class SshKeyStoreTest {
 
         val publicKey = store.readPublicKey(key)
         assertNotNull(publicKey)
-        assertTrue(publicKey!!.startsWith("ssh-rsa "))
+        assertTrue(publicKey!!.startsWith("ssh-ed25519 "))
         assertTrue(publicKey.split(' ').size >= 2)
+        assertEquals("ED25519", SshKeyMaterial.keyAlgorithmLabel(publicKey))
+        assertTrue(SshKeyMaterial.publicKeyFingerprint(publicKey).startsWith("SHA256:"))
 
         // Registered, and the fingerprint indexes it.
         assertEquals(listOf("laptop"), db.sshKeyDao().getAll().first().map { it.name })
@@ -102,6 +104,43 @@ class SshKeyStoreTest {
         assertNotEquals(first.fingerprint, second.fingerprint)
         assertTrue(File(first.privateKeyPath).isFile)
         assertTrue(File(second.privateKeyPath).isFile)
+    }
+
+    @Test
+    fun `generation supports an RSA compatibility key protected by a passphrase`() = runTest {
+        val key = store.generateKey(
+            name = "compatibility",
+            type = SshKeyGenerationType.RSA,
+            passphrase = "correct horse battery staple".toCharArray(),
+        )
+
+        assertTrue(key.hasPassphrase)
+        val pem = requireNotNull(store.readPem(key))
+        assertTrue(SshKeyMaterial.isEncrypted(pem))
+        assertTrue(store.readPublicKey(key, "correct horse battery staple".toCharArray())!!.startsWith("ssh-rsa "))
+        assertTrue(runCatching {
+            store.readPublicKey(key, "wrong".toCharArray())
+        }.isFailure)
+    }
+
+    @Test
+    fun `generation supports a protected modern key`() = runTest {
+        val key = store.generateKey(
+            name = "modern-protected",
+            type = SshKeyGenerationType.ED25519,
+            passphrase = "correct horse battery staple".toCharArray(),
+        )
+
+        assertTrue(key.hasPassphrase)
+        val pem = requireNotNull(store.readPem(key))
+        assertTrue(SshKeyMaterial.isEncrypted(pem))
+        assertTrue(
+            store.readPublicKey(key, "correct horse battery staple".toCharArray())
+                ?.startsWith("ssh-ed25519 ") == true,
+        )
+        assertTrue(runCatching {
+            store.readPublicKey(key, "wrong".toCharArray())
+        }.isFailure)
     }
 
     @Test
@@ -138,7 +177,7 @@ class SshKeyStoreTest {
             Proc-Type: 4,ENCRYPTED
             DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF
 
-            AAAA
+            AAAAAAAAAAAAAAAAAAAAAA==
             -----END RSA PRIVATE KEY-----
         """.trimIndent()
 
@@ -146,6 +185,17 @@ class SshKeyStoreTest {
         val key = store.importKey("x", classic)
         assertTrue(key.hasPassphrase)
         assertEquals(classic, File(key.privateKeyPath).readText())
+    }
+
+    @Test
+    fun `a truncated key-shaped PEM is refused before it is persisted`() = runTest {
+        val lines = UNENCRYPTED_PEM.lines()
+        val truncated = lines.dropLast(2).joinToString("\n") + "\n" + lines.last()
+
+        val error = runCatching { store.importKey("truncated", truncated) }.exceptionOrNull()
+
+        assertTrue(error is NotAPrivateKeyException)
+        assertTrue(db.sshKeyDao().getAll().first().isEmpty())
     }
 
     @Test
@@ -182,44 +232,17 @@ class SshKeyStoreTest {
     }
 
     private companion object {
-        /**
-         * An OpenSSH private-key container whose header names cipher `none` /
-         * kdf `none` — the bytes [SshKeyMaterial.isEncrypted] actually reads.
-         * Truncated after that header: the store never parses the key body, and
-         * committing a complete (even throwaway) private key to the repo to
-         * assert a header check would be a bad trade.
-         */
-        val UNENCRYPTED_PEM: String = """
-            -----BEGIN OPENSSH PRIVATE KEY-----
-            b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB
-            -----END OPENSSH PRIVATE KEY-----
-        """.trimIndent()
-
-        /**
-         * The same container shape with `aes256-ctr` / `bcrypt` named instead —
-         * an identical header to the one above, which is exactly why the
-         * encryption check has to parse the body.
-         */
-        val ENCRYPTED_OPENSSH_PEM: String = buildEncryptedOpenSshPem()
-
-        private fun buildEncryptedOpenSshPem(): String {
-            val body = java.io.ByteArrayOutputStream()
-            body.write("openssh-key-v1\u0000".toByteArray(Charsets.US_ASCII))
-            body.writeSshString("aes256-ctr")
-            body.writeSshString("bcrypt")
-            body.writeSshString("salt-and-rounds")
-            val base64 = java.util.Base64.getEncoder().encodeToString(body.toByteArray())
-            return buildString {
-                appendLine("-----BEGIN OPENSSH PRIVATE KEY-----")
-                base64.chunked(70).forEach { appendLine(it) }
-                append("-----END OPENSSH PRIVATE KEY-----")
-            }
+        /** A complete generated OpenSSH key used by the import tests. */
+        val UNENCRYPTED_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem()
         }
 
-        private fun java.io.ByteArrayOutputStream.writeSshString(value: String) {
-            val bytes = value.toByteArray(Charsets.US_ASCII)
-            write(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
-            write(bytes)
+        /** A complete generated encrypted OpenSSH key used by the import tests. */
+        val ENCRYPTED_OPENSSH_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem(
+                type = SshKeyGenerationType.ED25519,
+                passphrase = "test passphrase".toCharArray(),
+            )
         }
     }
 }

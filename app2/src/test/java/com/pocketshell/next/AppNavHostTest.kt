@@ -6,8 +6,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
+import org.junit.Assert.assertEquals
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -39,6 +41,8 @@ class AppNavHostTest {
      * shared test stack and never taps a host.
      */
     private val stack = TestConnectStack()
+    private var openSession: ((SessionRow) -> Unit)? = null
+    private var switchSession: ((SessionRow) -> Unit)? = null
 
     @After
     fun tearDown() {
@@ -50,6 +54,50 @@ class AppNavHostTest {
         setContentWithNav()
 
         composeRule.onNodeWithText("Hosts").assertExists()
+    }
+
+    @Test
+    fun `switching back to a session reuses its existing navigation entry`() {
+        val nav = setContentWithNav()
+
+        composeRule.runOnUiThread {
+            nav.navigate(Destination.Workspaces.route(hostId = 7))
+        }
+        composeRule.waitForIdle()
+        val open = requireNotNull(openSession)
+
+        composeRule.runOnUiThread { open(session("alpha", "/home/alexey/git/alpha")) }
+        composeRule.waitForIdle()
+        assertEquals(Destination.Session.pattern, nav.currentBackStackEntry?.destination?.route)
+        assertEquals(
+            "alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_SESSION_NAME),
+        )
+        assertEquals(
+            "/home/alexey/git/alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_WORKSPACE_PATH),
+        )
+
+        composeRule.runOnUiThread {
+            requireNotNull(switchSession)(session("beta", "/home/alexey/git/beta"))
+        }
+        composeRule.waitForIdle()
+        composeRule.runOnUiThread {
+            requireNotNull(switchSession)(session("alpha", "/home/alexey/git/alpha"))
+        }
+        composeRule.waitForIdle()
+
+        assertEquals(
+            "alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_SESSION_NAME),
+        )
+        assertEquals(
+            "/home/alexey/git/alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_WORKSPACE_PATH),
+        )
+        nav.popBackStack()
+        composeRule.waitForIdle()
+        assertEquals(Destination.Workspaces.pattern, nav.currentBackStackEntry?.destination?.route)
     }
 
     @Test
@@ -125,6 +173,8 @@ class AppNavHostTest {
     }
 
     private fun setContentWithNav(): NavHostController {
+        openSession = null
+        switchSession = null
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
@@ -168,13 +218,17 @@ class AppNavHostTest {
                 // resolves its ViewModel through `hiltViewModel()`. The
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
-                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, onOpenSession, _, _, _, _, _ ->
+                    openSession = onOpenSession
+                    Text("Tree(hostId=$hostId)")
+                },
                 // Same rationale again for U-4's terminal: the real screen
                 // resolves `SessionViewModel` through `hiltViewModel()` AND
                 // dials a host. The stand-in echoes both route arguments, which
                 // is what this suite is pinning — that a session name with a
                 // space and a `:` survives the encode/decode round trip.
-                sessionScreen = { hostId, sessionName, _, _ ->
+                sessionScreen = { hostId, sessionName, _, _, _, onOpenSession, _ ->
+                    switchSession = onOpenSession
                     Text("Session(hostId=$hostId, name=$sessionName)")
                 },
                 // Same rationale again: the P-4 port-forward route resolves its
@@ -212,4 +266,19 @@ class AppNavHostTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText(expectedLabel).assertExists("route '$route' did not render '$expectedLabel'")
     }
+
+    private fun session(name: String, workspace: String): SessionRow = SessionRow(
+        name = name,
+        id = null,
+        workspace = workspace,
+        tag = null,
+        engine = null,
+        profile = null,
+        agent = null,
+        agentState = null,
+        agentStateSource = null,
+        attached = true,
+        createdEpoch = 1L,
+        activityEpoch = null,
+    )
 }

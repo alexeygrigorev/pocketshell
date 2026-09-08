@@ -1,6 +1,7 @@
 package com.pocketshell.next.usage
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.next.settings.AppSettings
 import com.pocketshell.uikit.model.PillKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -63,6 +64,24 @@ class UsageGlanceViewModelTest {
         assertEquals(91, pill.percent)
         assertEquals("Codex", pill.provider)
         assertEquals(PillKind.Warn, pill.kind)
+    }
+
+    @Test
+    fun `the persisted warning threshold controls the glance severity`() = vmTest { stack ->
+        stack.settings.setUsageWarnThresholdPercent(95)
+        try {
+            val hostId = stack.seedHost("threshold-box")
+            stack.scriptUsage(CODEX_NEAR_LIMIT_NDJSON)
+            stack.connect(hostId)
+            val viewModel = viewModel(stack)
+
+            viewModel.refresh()
+            runCurrent()
+
+            assertEquals(PillKind.Ok, viewModel.state.value?.kind)
+        } finally {
+            stack.settings.setUsageWarnThresholdPercent(AppSettings.DEFAULT_USAGE_WARN_PERCENT)
+        }
     }
 
     @Test
@@ -237,6 +256,7 @@ class UsageGlanceViewModelTest {
         fetcher = stack.fetcher,
         connections = stack.registry,
         clients = stack.clients,
+        settings = stack.settings,
     )
 
     private fun vmTest(body: suspend TestScope.(TestUsageStack) -> Unit) = runTest {

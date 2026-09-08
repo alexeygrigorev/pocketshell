@@ -51,6 +51,8 @@ data class PassphrasePrompt(
  */
 data class ConnectUiState(
     val busyHostId: Long? = null,
+    /** Resolved label for the in-flight progress copy, when the row still exists. */
+    val busyHostLabel: String? = null,
     val prompt: TrustPrompt? = null,
     val passphrasePrompt: PassphrasePrompt? = null,
     val error: ConnectError? = null,
@@ -112,6 +114,10 @@ class ConnectViewModel @Inject constructor(
         _state.value = ConnectUiState(busyHostId = hostId)
         Log.i(TAG, "connect requested host=$hostId")
         activeJob = viewModelScope.launch {
+            val label = hostLabel(hostId)
+            if (_state.value.busyHostId == hostId) {
+                _state.value = _state.value.copy(busyHostLabel = label)
+            }
             runDial(hostId, "initial") { registry.getOrConnect(hostId) }
         }
     }
@@ -127,7 +133,10 @@ class ConnectViewModel @Inject constructor(
         val prompt = _state.value.prompt ?: return
         val retry = pending ?: return
         pending = null
-        _state.value = ConnectUiState(busyHostId = prompt.state.hostId)
+        _state.value = ConnectUiState(
+            busyHostId = prompt.state.hostId,
+            busyHostLabel = prompt.hostLabel,
+        )
         activeJob = viewModelScope.launch {
             val hostId = prompt.state.hostId
             Log.i(TAG, "trust accepted host=$hostId fingerprint=${prompt.state.fingerprintSha256}")
@@ -159,7 +168,10 @@ class ConnectViewModel @Inject constructor(
             value.fill('\u0000')
         }
         pendingUnlockKeyId = prompt.keyId
-        _state.value = ConnectUiState(busyHostId = prompt.hostId)
+        _state.value = ConnectUiState(
+            busyHostId = prompt.hostId,
+            busyHostLabel = prompt.hostLabel,
+        )
         activeJob = viewModelScope.launch {
             apply(prompt.hostId, registry.getOrConnect(prompt.hostId))
         }

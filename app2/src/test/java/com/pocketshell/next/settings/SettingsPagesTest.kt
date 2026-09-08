@@ -5,6 +5,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.release.ReleaseInfo
 import org.junit.Assert.assertEquals
@@ -34,6 +35,9 @@ class SettingsPagesTest {
         composeRule.onNodeWithTag(SETTINGS_TERMINAL_SIZE_SLIDER_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("36 px").assertIsDisplayed()
         composeRule.onNodeWithText("Text and input").assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_TERMINAL_SAMPLE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Show common keys").assertIsDisplayed()
+        composeRule.onNodeWithText("Esc, Tab, Ctrl and arrows when typing.").assertIsDisplayed()
     }
 
     @Test
@@ -50,6 +54,35 @@ class SettingsPagesTest {
         composeRule.onNodeWithText("German").assertIsDisplayed()
         composeRule.onNodeWithText("Language").performClick()
         assertEquals(1, opened)
+        composeRule.onNodeWithTag(SETTINGS_VOICE_REVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_VOICE_RECOGNITION_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("PocketShell asks for microphone access when you start dictating.")
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun `advanced reset is a real action and keeps the compatibility page reachable`() {
+        var resetCount = 0
+        composeRule.setContent {
+            AdvancedSettingsScreen(
+                settings = AppSettings(
+                    agentSubmitEnterDelayMs = 300,
+                    voiceSilenceThresholdSeconds = 8f,
+                    usageWarnThresholdPercent = 90,
+                ),
+                onBack = {},
+                onVoiceSilenceChange = {},
+                onUsageWarnThresholdChange = {},
+                onAgentSubmitEnterDelayChange = {},
+                onResetAdvancedDefaults = { resetCount++ },
+            )
+        }
+
+        composeRule.onNodeWithTag(SETTINGS_RESET_ADVANCED_TAG)
+            .performScrollTo()
+            .performClick()
+        assertEquals(1, resetCount)
+        composeRule.onNodeWithText("Reset advanced defaults").assertIsDisplayed()
     }
 
     @Test
@@ -87,7 +120,7 @@ class SettingsPagesTest {
         }
 
         composeRule.onNodeWithText("Release notes").performClick()
-        composeRule.onNodeWithText("Download v0.5.1").performClick()
+        composeRule.onNodeWithText("Open release").performClick()
         assertEquals(listOf(info.htmlUrl, info.apkUrl), opened)
     }
 

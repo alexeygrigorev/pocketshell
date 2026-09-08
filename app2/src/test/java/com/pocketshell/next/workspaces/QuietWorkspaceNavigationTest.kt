@@ -111,7 +111,7 @@ class QuietWorkspaceNavigationTest {
                             ) { Text("Back to workspaces") }
                         }
                     },
-                    sessionScreen = { _, _, onBack, _ ->
+                    sessionScreen = { _, _, onBack, _, _, _, _ ->
                         Column {
                             Button(
                                 onClick = onBack,

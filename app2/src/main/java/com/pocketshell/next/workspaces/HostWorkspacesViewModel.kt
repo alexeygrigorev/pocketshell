@@ -27,6 +27,8 @@ import kotlinx.coroutines.launch
 data class HostWorkspacesUiState(
     val hostId: Long = 0L,
     val hostLabel: String = "",
+    val hostAddress: String = "",
+    val hostUser: String = "",
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val loaded: Boolean = false,
@@ -365,7 +367,10 @@ class HostWorkspacesViewModel @Inject constructor(
                 finishFolder("This host is no longer saved on this device.")
                 return@launch
             }
-            val connection = resolveConnection() ?: return@launch
+            val connection = resolveConnection() ?: run {
+                finishFolder("Could not connect to this host.")
+                return@launch
+            }
             val path = childPath(parent, name)
             runCatching { connection.sftp().mkdir(path) }.fold(
                 onFailure = { error ->
@@ -412,7 +417,13 @@ class HostWorkspacesViewModel @Inject constructor(
             fail("This host is no longer saved on this device.")
             return
         }
-        _state.update { it.copy(hostLabel = host.name.ifBlank { host.hostname }) }
+        _state.update {
+            it.copy(
+                hostLabel = host.name.ifBlank { host.hostname },
+                hostAddress = "${host.hostname}:${host.port}",
+                hostUser = host.username,
+            )
+        }
 
         val connection = when (val outcome = registry.getOrConnect(hostId)) {
             is ConnectResult.Connected -> outcome.connection

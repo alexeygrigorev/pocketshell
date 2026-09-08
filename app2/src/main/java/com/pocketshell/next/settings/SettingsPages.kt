@@ -2,6 +2,8 @@ package com.pocketshell.next.settings
 
 import android.content.Context
 import android.os.Build
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -46,6 +48,7 @@ import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.roundToInt
@@ -144,6 +147,7 @@ internal fun AdvancedSettingsRoute(
         onVoiceSilenceChange = viewModel::setVoiceSilenceThresholdSeconds,
         onUsageWarnThresholdChange = viewModel::setUsageWarnThresholdPercent,
         onAgentSubmitEnterDelayChange = viewModel::setAgentSubmitEnterDelayMs,
+        onResetAdvancedDefaults = viewModel::resetAdvancedDefaults,
         modifier = modifier,
     )
 }
@@ -225,7 +229,49 @@ internal fun TerminalSettingsScreen(
         item {
             SettingsDescription(
                 title = "Text and input",
-                description = "The keyboard stays available while the terminal keeps its full grid.",
+                description = "App text follows your Android font-size setting.",
+            )
+        }
+        item {
+            Text(
+                text = "\$ git status\nOn branch main\nWorking tree clean",
+                color = PocketShellColors.TermText,
+                style = PocketShellType.bodyMono,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PocketShellDensity.rowPadH)
+                    .background(PocketShellColors.TermBg, PocketShellShapes.small)
+                    .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+                    .padding(PocketShellSpacing.md)
+                    .testTag(SETTINGS_TERMINAL_SAMPLE_TAG),
+            )
+        }
+        item { SectionHeader(label = "Input") }
+        item {
+            ListRow(
+                title = "Show common keys",
+                subtitle = "Esc, Tab, Ctrl and arrows when typing.",
+                leading = {
+                    androidx.compose.material3.Icon(
+                        PocketShellIcons.Keyboard,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                trailing = {
+                    Text(
+                        text = "Always on",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.metadata,
+                    )
+                },
+                modifier = Modifier.testTag(SETTINGS_COMMON_KEYS_TAG),
+            )
+        }
+        item {
+            SettingsDescription(
+                title = "Input stays separate from the grid",
+                description = "The keyboard overlays the terminal without resizing its grid.",
             )
         }
     }
@@ -260,9 +306,37 @@ internal fun VoiceSettingsScreen(
             )
         }
         item {
-            SettingsDescription(
+            ListRow(
                 title = "Review before sending",
-                description = "Dictation stops into an editable draft. PocketShell uses the system speech recognizer.",
+                subtitle = "Dictation always stops into an editable draft.",
+                leading = {
+                    androidx.compose.material3.Icon(
+                        PocketShellIcons.Eye,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                modifier = Modifier.testTag(SETTINGS_VOICE_REVIEW_TAG),
+            )
+        }
+        item {
+            ListRow(
+                title = "Speech recognition",
+                subtitle = "System recognizer",
+                leading = {
+                    androidx.compose.material3.Icon(
+                        PocketShellIcons.Mic,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                modifier = Modifier.testTag(SETTINGS_VOICE_RECOGNITION_TAG),
+            )
+        }
+        item {
+            SettingsDescription(
+                title = "Microphone access",
+                description = "PocketShell asks for microphone access when you start dictating.",
             )
         }
     }
@@ -276,7 +350,7 @@ internal fun LanguageSettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     SettingsPageScaffold(
-        title = "Language",
+        title = "Dictation language",
         pageTag = SETTINGS_LANGUAGE_PAGE_TAG,
         onBack = onBack,
         modifier = modifier,
@@ -333,7 +407,7 @@ internal fun ConnectionSettingsScreen(
         item {
             ListRow(
                 title = "Keep connection after leaving",
-                subtitle = "$graceLabel grace window",
+                subtitle = graceLabel,
                 leading = { androidx.compose.material3.Icon(PocketShellIcons.History, null, tint = PocketShellColors.TextSecondary) },
                 trailing = { NavigationChevron() },
                 onClick = onOpenGrace,
@@ -343,10 +417,31 @@ internal fun ConnectionSettingsScreen(
         item {
             SettingsDescription(
                 title = "App switching and recovery",
-                description = "A live connection stays open for the selected grace window when the app leaves the foreground.",
+                description = "This controls the phone’s connection. Remote sessions are not deliberately ended when the app leaves the foreground.",
             )
         }
-        item { SectionHeader(label = "Saved hosts") }
+        item {
+            ListRow(
+                title = "Reconnect when I return",
+                subtitle = "Reconnects to a live remote session automatically.",
+                leading = {
+                    androidx.compose.material3.Icon(
+                        PocketShellIcons.Refresh,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                trailing = {
+                    Text(
+                        text = "Automatic",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.metadata,
+                    )
+                },
+                modifier = Modifier.testTag(SETTINGS_CONNECTION_RECONNECT_TAG),
+            )
+        }
+        item { SectionHeader(label = "Manage saved hosts") }
         if (hosts.isEmpty()) {
             item {
                 EmptyState(
@@ -381,7 +476,7 @@ internal fun GraceSettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     SettingsPageScaffold(
-        title = "Connection grace",
+        title = "Keep connection",
         pageTag = SETTINGS_GRACE_PAGE_TAG,
         onBack = onBack,
         modifier = modifier,
@@ -390,7 +485,7 @@ internal fun GraceSettingsScreen(
         item {
             SettingsDescription(
                 title = "Choose how long a live connection stays available.",
-                description = "Longer windows make app switching easier and keep idle connections open longer.",
+                description = "This controls the phone’s connection. Remote sessions are not ended by this setting.",
             )
         }
         item {
@@ -424,6 +519,7 @@ internal fun AdvancedSettingsScreen(
     onVoiceSilenceChange: (Float) -> Unit,
     onUsageWarnThresholdChange: (Int) -> Unit,
     onAgentSubmitEnterDelayChange: (Int) -> Unit,
+    onResetAdvancedDefaults: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     SettingsPageScaffold(
@@ -435,8 +531,8 @@ internal fun AdvancedSettingsScreen(
         item { SectionHeader(label = "Timing") }
         item {
             SettingsSlider(
-                title = "Agent Enter delay",
-                description = "Wait after writing a message before sending Enter to the agent.",
+                title = "Enter-key delay",
+                description = "Pause after pasted input before sending Enter. Change only if input is left unsubmitted.",
                 value = settings.agentSubmitEnterDelayMs.toFloat(),
                 valueLabel = "${settings.agentSubmitEnterDelayMs} ms",
                 min = AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS.toFloat(),
@@ -450,7 +546,7 @@ internal fun AdvancedSettingsScreen(
         item {
             SettingsSlider(
                 title = "Silence window",
-                description = "How long the system recognizer waits after a pause before ending a turn.",
+                description = "Speech-recognizer pause handling. Recording still ends when you tap Stop.",
                 value = settings.voiceSilenceThresholdSeconds,
                 valueLabel = "${settings.voiceSilenceThresholdSeconds.roundToInt()} s",
                 min = AppSettings.MIN_VOICE_SILENCE_SECONDS,
@@ -476,6 +572,16 @@ internal fun AdvancedSettingsScreen(
                 valueTestTag = SETTINGS_USAGE_WARN_VALUE_TAG,
             )
         }
+        item {
+            PocketShellButton(
+                text = "Reset advanced defaults",
+                onClick = onResetAdvancedDefaults,
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier
+                    .padding(horizontal = PocketShellDensity.rowPadH)
+                    .testTag(SETTINGS_RESET_ADVANCED_TAG),
+            )
+        }
     }
 }
 
@@ -496,7 +602,7 @@ internal fun AboutScreen(
         item {
             SettingsDescription(
                 title = "PocketShell",
-                description = "A voice-first SSH client for workspaces that stay close at hand.",
+                description = "Workspaces first. Terminals stay terminals.",
             )
         }
         item {
@@ -529,7 +635,10 @@ internal fun UpdateScreen(
     modifier: Modifier = Modifier,
 ) {
     SettingsPageScaffold(
-        title = "Updates",
+        title = when (state) {
+            is SettingsUpdateCheckState.UpdateAvailable -> "Update available"
+            else -> "Updates"
+        },
         pageTag = SETTINGS_UPDATE_PAGE_TAG,
         onBack = onBack,
         modifier = modifier,
@@ -620,17 +729,18 @@ internal fun UpdateScreen(
                 item {
                     SettingsDescription(
                         title = "A newer PocketShell build is available.",
-                        description = if (state.info.publishedDateLabel.isBlank()) {
-                            "Release ${state.info.tagName}"
-                        } else {
-                            "Release ${state.info.tagName} · Published ${state.info.publishedDateLabel}"
+                        description = buildString {
+                            append("Release ${state.info.tagName}. Keep the app and host helper on compatible versions.")
+                            if (state.info.publishedDateLabel.isNotBlank()) {
+                                append(" Published ${state.info.publishedDateLabel}.")
+                            }
                         },
                     )
                 }
                 item {
                     ListRow(
                         title = "Release notes",
-                        subtitle = state.info.htmlUrl,
+                        subtitle = "Review changes before updating",
                         leading = { androidx.compose.material3.Icon(PocketShellIcons.External, null, tint = PocketShellColors.TextSecondary) },
                         trailing = { NavigationChevron() },
                         onClick = { onOpenUrl(state.info.htmlUrl) },
@@ -639,7 +749,7 @@ internal fun UpdateScreen(
                 }
                 item {
                     PocketShellButton(
-                        text = "Download ${state.info.tagName}",
+                        text = "Open release",
                         onClick = { onOpenUrl(state.info.apkUrl) },
                         variant = ButtonVariant.Primary,
                         modifier = Modifier
@@ -752,8 +862,8 @@ private fun SettingsSlider(
 }
 
 private fun graceDescription(millis: Long): String = when (millis) {
-    AppSettings.BACKGROUND_GRACE_30_SECONDS_MS -> "Quick app switches"
-    AppSettings.BACKGROUND_GRACE_1_MINUTE_MS -> "Short app switches"
+    AppSettings.BACKGROUND_GRACE_30_SECONDS_MS -> "Good for switching apps"
+    AppSettings.BACKGROUND_GRACE_1_MINUTE_MS -> "More time between app switches"
     AppSettings.BACKGROUND_GRACE_90_SECONDS_MS -> "Default recovery window"
     AppSettings.BACKGROUND_GRACE_5_MINUTES_MS -> "Longer app switches"
     AppSettings.BACKGROUND_GRACE_10_MINUTES_MS -> "Extended recovery window"

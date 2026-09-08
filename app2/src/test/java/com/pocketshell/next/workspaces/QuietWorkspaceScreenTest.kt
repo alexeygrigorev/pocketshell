@@ -172,6 +172,33 @@ class QuietWorkspaceScreenTest {
     }
 
     @Test
+    fun `root session opens with the workspace reported by the host`() {
+        val path = "/home/alexey/git"
+        val opened = mutableListOf<SessionRow>()
+        setHostContent(
+            state = HostWorkspacesUiState(
+                hostLabel = "hetzner",
+                loaded = true,
+                roots = listOf(
+                    WorkspaceRootProjection(
+                        key = path,
+                        label = "Git",
+                        displayPath = "~/git",
+                        path = path,
+                        workspaces = emptyList(),
+                        rootSessions = listOf(session("root-shell", path)),
+                    ),
+                ),
+            ),
+            onOpenSession = { opened += it },
+        )
+
+        composeRule.onNodeWithTag(workspaceSessionRowTag("root-shell")).performClick()
+
+        assertEquals(path, opened.single().workspace)
+    }
+
+    @Test
     fun `an empty registered root stays visible`() {
         setHostContent(
             state = HostWorkspacesUiState(
@@ -364,6 +391,7 @@ class QuietWorkspaceScreenTest {
     private fun setHostContent(
         state: HostWorkspacesUiState,
         onOpenWorkspace: (String) -> Unit = {},
+        onOpenSession: (SessionRow) -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -371,7 +399,7 @@ class QuietWorkspaceScreenTest {
                     state = state,
                     onRefresh = {},
                     onOpenWorkspace = onOpenWorkspace,
-                    onOpenSession = {},
+                    onOpenSession = onOpenSession,
                 )
             }
         }

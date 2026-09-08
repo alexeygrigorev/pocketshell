@@ -121,6 +121,21 @@ class HostWorkspacesViewModelTest {
         assertTrue(state.failure!!.contains("workspaces"))
     }
 
+    @Test
+    fun `folder creation clears its busy state when the host cannot connect`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        stack.factory.failWith = "connection refused"
+
+        val viewModel = viewModel(hostId)
+        viewModel.openCreateFolder("/home/testuser/git")
+        viewModel.setCreateFolderName("notes")
+        viewModel.createFolder()
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.creatingFolder)
+        assertTrue(viewModel.state.value.createFolderFailure!!.contains("connect"))
+    }
+
     private fun viewModel(hostId: Long) = HostWorkspacesViewModel(
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
         registry = stack.registry,

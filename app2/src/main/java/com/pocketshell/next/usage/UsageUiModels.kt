@@ -98,6 +98,8 @@ data class UsageScreenState(
     val connectedHostCount: Int = 0,
     /** The "limits just reset" banner content, or null when nothing recent. */
     val resetBanner: UsageResetBannerState? = null,
+    /** The persisted warning threshold used for every rendered quota surface. */
+    val warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
 ) {
     val providerCount: Int
         get() = hosts.sumOf { it.records.size }
@@ -137,6 +139,7 @@ fun usageScreenState(
     resetBanner: UsageResetBannerState? = null,
     selectedHostId: Long? = null,
     selectedHostName: String? = null,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
 ): UsageScreenState = UsageScreenState(
     selectedHostId = selectedHostId,
     selectedHostName = selectedHostName ?: snapshots.firstOrNull { it.hostId == selectedHostId }?.hostName,
@@ -168,6 +171,7 @@ fun usageScreenState(
     loaded = loaded,
     connectedHostCount = connectedHostCount,
     resetBanner = resetBanner,
+    warnPercent = warnPercent,
 )
 
 /**

@@ -163,16 +163,15 @@ class SshKeysViewModelTest {
     }
 
     private companion object {
-        val UNENCRYPTED_PEM: String = """
-            -----BEGIN OPENSSH PRIVATE KEY-----
-            b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB
-            -----END OPENSSH PRIVATE KEY-----
-        """.trimIndent()
+        val UNENCRYPTED_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem()
+        }
 
-        val ENCRYPTED_PEM: String = """
-            -----BEGIN ENCRYPTED PRIVATE KEY-----
-            AAAA
-            -----END ENCRYPTED PRIVATE KEY-----
-        """.trimIndent()
+        val ENCRYPTED_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem(
+                type = SshKeyGenerationType.RSA,
+                passphrase = "test passphrase".toCharArray(),
+            )
+        }
     }
 }

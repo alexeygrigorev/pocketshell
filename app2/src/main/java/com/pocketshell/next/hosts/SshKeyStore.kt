@@ -45,6 +45,8 @@ class SshKeyStore(
     suspend fun importKey(name: String, pem: String): SshKeyEntity {
         val trimmed = pem.trim()
         if (!SshKeyMaterial.looksLikePrivateKey(trimmed)) throw NotAPrivateKeyException()
+        runCatching { SshKeyMaterial.validatePrivateKey(trimmed) }
+            .getOrElse { throw NotAPrivateKeyException() }
         return persist(name, trimmed, SshKeyMaterial.isEncrypted(trimmed))
     }
 
@@ -55,9 +57,24 @@ class SshKeyStore(
      */
     suspend fun generateKey(
         name: String = "generated-${System.currentTimeMillis()}",
+        type: SshKeyGenerationType = SshKeyGenerationType.ED25519,
+        passphrase: CharArray? = null,
     ): SshKeyEntity {
-        val pem = withContext(dispatcher) { SshKeyMaterial.generateRsaPrivateKeyPem() }
-        return persist(name, pem.trim(), hasPassphrase = false)
+        val generatedPassphrase = passphrase
+            ?.takeIf { it.isNotEmpty() }
+            ?.copyOf()
+        return try {
+            val pem = withContext(dispatcher) {
+                SshKeyMaterial.generatePrivateKeyPem(type, generatedPassphrase)
+            }
+            persist(
+                name,
+                pem.trim(),
+                hasPassphrase = generatedPassphrase != null,
+            )
+        } finally {
+            generatedPassphrase?.fill('\u0000')
+        }
     }
 
     /** The `ssh_keys` row for [keyId], or `null` if it is gone. */

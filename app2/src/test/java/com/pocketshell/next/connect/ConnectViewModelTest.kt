@@ -149,6 +149,10 @@ class ConnectViewModelTest {
             runCurrent()
 
             assertEquals(hostId, stack.viewModel.state.value.busyHostId)
+            assertEquals(
+                "testuser@10.0.2.2:2222",
+                stack.viewModel.state.value.busyHostLabel,
+            )
             assertNull(stack.viewModel.state.value.navigateToHostId)
 
             retryGate.complete(Unit)

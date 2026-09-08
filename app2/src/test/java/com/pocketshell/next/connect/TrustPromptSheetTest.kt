@@ -50,7 +50,9 @@ class TrustPromptSheetTest {
         composeRule.onNodeWithText(UNKNOWN_TITLE).assertIsDisplayed()
         composeRule.onNodeWithText(UNKNOWN_EXPLANATION).assertIsDisplayed()
         composeRule.onNodeWithTag(TRUST_SHEET_FINGERPRINT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(TRUST_SHEET_COPY_FINGERPRINT_TAG).assertIsDisplayed()
         composeRule.onNodeWithText(unknown.fingerprintSha256).assertIsDisplayed()
+        composeRule.onNodeWithText("SHA-256").assertIsDisplayed()
         composeRule.onNodeWithText(HOST_LABEL).assertIsDisplayed()
         composeRule.onNodeWithText(UNKNOWN_TRUST_LABEL).assertIsDisplayed()
         composeRule.onNodeWithTag(TRUST_SHEET_TRUST_TAG).assertIsDisplayed()
@@ -75,6 +77,8 @@ class TrustPromptSheetTest {
         // BOTH keys on screen: that comparison is the decision the user makes.
         composeRule.onNodeWithText(mismatch.fingerprintSha256).assertIsDisplayed()
         composeRule.onNodeWithTag(TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(TRUST_SHEET_COPY_FINGERPRINT_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(TRUST_SHEET_COPY_PREVIOUS_FINGERPRINT_TAG).assertIsDisplayed()
         composeRule
             .onNodeWithText(requireNotNull(mismatch.previousFingerprintSha256))
             .assertIsDisplayed()

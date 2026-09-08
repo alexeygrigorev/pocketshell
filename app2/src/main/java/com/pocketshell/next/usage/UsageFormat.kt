@@ -26,8 +26,13 @@ import kotlin.math.max
  * from HH:mm"), and the rewrite deletes that cache path entirely. What is left
  * is one honest [usageSyncLabel]: syncing, or the time of the fetch on screen.
  */
-internal fun statusLabel(record: UsageProviderRecord): String =
-    usageProviderStatusUi(record).label
+internal fun statusLabel(
+    record: UsageProviderRecord,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+): String = usageProviderStatusUi(
+    record,
+    state = record.thresholdState(warnPercent = warnPercent),
+).label
 
 internal const val USAGE_DATA_UNAVAILABLE: String = "Usage data unavailable"
 internal const val REFRESH_USAGE_FAILED: String = "Refresh usage failed"
@@ -71,7 +76,9 @@ internal fun usageProviderStatusUi(
     val label = when {
         needsAuthSetup -> USAGE_AUTH_SETUP_REQUIRED
         state == UsageThresholdState.Exceeded -> "Exceeded"
-        record.status == UsageStatus.Warn || record.isNearLimit -> "Warn"
+        record.status == UsageStatus.Warn ||
+            state == UsageThresholdState.Approaching ||
+            state == UsageThresholdState.Critical -> "Warn"
         record.status == UsageStatus.Ok -> "OK"
         record.status == UsageStatus.Unsupported -> "Unsupported"
         record.status == UsageStatus.Error -> USAGE_DATA_UNAVAILABLE

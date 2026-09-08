@@ -2,9 +2,9 @@ package com.pocketshell.next.usage
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.settings.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class UsageViewModel @Inject constructor(
     private val fetcher: UsageFetcher,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(UsageScreenState())
@@ -56,6 +57,7 @@ class UsageViewModel @Inject constructor(
                 resetBanner = usageResetBannerState(result.resetEvents),
                 selectedHostId = selectedHostId,
                 selectedHostName = result.selectedHostName,
+                warnPercent = settings.settings.value.usageWarnThresholdPercent.toDouble(),
             )
         }
     }
@@ -84,6 +86,7 @@ class UsageGlanceViewModel @Inject constructor(
     private val fetcher: UsageFetcher,
     private val connections: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<UsageGlancePillState?>(null)
@@ -114,7 +117,7 @@ class UsageGlanceViewModel @Inject constructor(
             }
             _state.value = usageGlancePillState(
                 snapshots = result.snapshots,
-                warnPercent = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+                warnPercent = settings.settings.value.usageWarnThresholdPercent.toDouble(),
                 focus = focus,
             )
         }

@@ -14,7 +14,9 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
@@ -36,6 +38,8 @@ const val TRUST_SHEET_TITLE_TAG: String = "trust-sheet-title"
 const val TRUST_SHEET_EXPLANATION_TAG: String = "trust-sheet-explanation"
 const val TRUST_SHEET_FINGERPRINT_TAG: String = "trust-sheet-fingerprint"
 const val TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG: String = "trust-sheet-previous-fingerprint"
+const val TRUST_SHEET_COPY_FINGERPRINT_TAG: String = "trust-sheet-copy-fingerprint"
+const val TRUST_SHEET_COPY_PREVIOUS_FINGERPRINT_TAG: String = "trust-sheet-copy-previous-fingerprint"
 const val TRUST_SHEET_TRUST_TAG: String = "trust-sheet-trust"
 const val TRUST_SHEET_REJECT_TAG: String = "trust-sheet-reject"
 
@@ -149,8 +153,10 @@ fun TrustPromptSheetContent(
 
         Fingerprint(
             label = if (prompt.isMismatch) "New key presented now" else "Key fingerprint",
+            algorithm = prompt.fingerprintAlgorithm,
             value = prompt.fingerprintSha256,
             testTag = TRUST_SHEET_FINGERPRINT_TAG,
+            copyTestTag = TRUST_SHEET_COPY_FINGERPRINT_TAG,
         )
 
         // Rendered ONLY for a mismatch, and only because the state carries it:
@@ -159,8 +165,10 @@ fun TrustPromptSheetContent(
         prompt.previousFingerprintSha256?.let { previous ->
             Fingerprint(
                 label = "Key you trusted before",
+                algorithm = prompt.previousFingerprintAlgorithm ?: "Fingerprint digest",
                 value = previous,
                 testTag = TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG,
+                copyTestTag = TRUST_SHEET_COPY_PREVIOUS_FINGERPRINT_TAG,
             )
         }
 
@@ -196,13 +204,39 @@ fun TrustPromptSheetContent(
 
 /** One labelled fingerprint block: muted caption over the mono digest itself. */
 @Composable
-private fun Fingerprint(label: String, value: String, testTag: String) {
+private fun Fingerprint(
+    label: String,
+    algorithm: String,
+    value: String,
+    testTag: String,
+    copyTestTag: String,
+) {
+    val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-        Text(
-            text = label,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                )
+                Text(
+                    text = algorithm,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.metadata,
+                )
+            }
+            PocketShellButton(
+                text = "Copy",
+                onClick = { clipboard.setText(AnnotatedString(value)) },
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(copyTestTag),
+            )
+        }
         Text(
             text = value,
             color = PocketShellColors.Text,

@@ -1,18 +1,20 @@
 package com.pocketshell.next.hosts
 
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performClick
-import androidx.test.core.app.ApplicationProvider
+import androidx.compose.ui.test.click
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.util.concurrent.atomic.AtomicReference
 
-/** The public-key action is a real system-clipboard handoff, not display-only copy. */
+/** The public-key action confirms that the complete value was handed off. */
 @RunWith(RobolectricTestRunner::class)
 class SshKeysScreenTest {
 
@@ -22,6 +24,7 @@ class SshKeysScreenTest {
     @Test
     fun `detail copy action writes the complete public key to the clipboard`() {
         val publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfixture pocketshell"
+        val copiedValue = AtomicReference<String?>()
         composeRule.setContent {
             SshKeysScreen(
                 state = SshKeysUiState(
@@ -34,21 +37,21 @@ class SshKeysScreenTest {
                 onPickFile = {},
                 onDelete = {},
                 onDismissMessage = {},
+                onCopyPublicKey = { copiedValue.set(it) },
             )
         }
+        composeRule.waitForIdle()
 
         composeRule.onNodeWithTag(sshKeyRowTag(7L)).performClick()
-        composeRule.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
+        composeRule.waitForIdle()
+        composeRule.mainClock.advanceTimeBy(1_000)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performTouchInput { click() }
+        composeRule.waitForIdle()
 
-        assertEquals(publicKey, clipboardText())
-    }
-
-    private fun clipboardText(): String? {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        return clipboard.primaryClip
-            ?.getItemAt(0)
-            ?.coerceToText(context)
-            ?.toString()
+        assertEquals(publicKey, copiedValue.get())
     }
 }

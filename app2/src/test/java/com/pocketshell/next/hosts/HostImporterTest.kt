@@ -138,7 +138,7 @@ class HostImporterTest {
         assertTrue(outcome is ImportOutcome.Imported)
         val key = db.sshKeyDao().getAll().first().single()
         assertEquals("builder-key", key.name)
-        assertEquals(UNENCRYPTED_PEM, File(key.privateKeyPath).readText())
+        assertEquals(UNENCRYPTED_PEM.trim(), File(key.privateKeyPath).readText())
         assertEquals(key.id, db.hostDao().getAll().first().single().keyId)
     }
 
@@ -295,19 +295,15 @@ class HostImporterTest {
         )
 
     private companion object {
-        val UNENCRYPTED_PEM: String = """
-            -----BEGIN OPENSSH PRIVATE KEY-----
-            b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB
-            -----END OPENSSH PRIVATE KEY-----
-        """.trimIndent()
+        val UNENCRYPTED_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem()
+        }
 
-        val ENCRYPTED_PEM: String = """
-            -----BEGIN RSA PRIVATE KEY-----
-            Proc-Type: 4,ENCRYPTED
-            DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF
-
-            AAAA
-            -----END RSA PRIVATE KEY-----
-        """.trimIndent()
+        val ENCRYPTED_PEM: String by lazy {
+            SshKeyMaterial.generatePrivateKeyPem(
+                type = SshKeyGenerationType.RSA,
+                passphrase = "test passphrase".toCharArray(),
+            )
+        }
     }
 }

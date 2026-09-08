@@ -37,11 +37,90 @@ sealed interface TransferState {
     data object Idle : TransferState
 
     /** [name] is the file, [uploading] which direction. */
-    data class Running(val name: String, val uploading: Boolean) : TransferState
+    data class Running(
+        val name: String,
+        val uploading: Boolean,
+        val source: String? = null,
+        val destination: String? = null,
+        val bytesTransferred: Long = 0L,
+        val totalBytes: Long? = null,
+        val id: Long? = null,
+    ) : TransferState
 
-    data class Done(val message: String) : TransferState
+    data class Done(
+        val message: String,
+        val source: String? = null,
+        val destination: String? = null,
+        val id: Long? = null,
+    ) : TransferState
 
-    data class Failed(val message: String) : TransferState
+    data class Failed(
+        val message: String,
+        val source: String? = null,
+        val destination: String? = null,
+        val id: Long? = null,
+    ) : TransferState
+}
+
+/** The lifecycle state shown by the full Transfers surface. */
+enum class FileTransferStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+/**
+ * A durable-in-this-screen record of one upload or download.
+ *
+ * The transport API is deliberately whole-file shaped, so an unknown remote
+ * size is represented by a null [totalBytes] and the UI renders an indeterminate
+ * transfer. Local uploads can report measured stream bytes as they are read.
+ */
+data class FileTransferRecord(
+    val id: Long,
+    val name: String,
+    val uploading: Boolean,
+    val source: String,
+    val destination: String,
+    val bytesTransferred: Long = 0L,
+    val totalBytes: Long? = null,
+    val status: FileTransferStatus = FileTransferStatus.Running,
+    val message: String? = null,
+)
+
+/** State for the create-folder sheet. A failed request keeps the user's name. */
+data class CreateFolderUiState(
+    val visible: Boolean = false,
+    val name: String = "",
+    val submitting: Boolean = false,
+    val failure: String? = null,
+)
+
+/** State for creating one empty text file in the current remote folder. */
+data class NewTextFileUiState(
+    val visible: Boolean = false,
+    val name: String = "",
+    val submitting: Boolean = false,
+    val failure: String? = null,
+)
+
+/** State for the rename sheet. A failed request keeps the user's name. */
+data class RenameFileUiState(
+    val entry: SftpEntry? = null,
+    val name: String = "",
+    val submitting: Boolean = false,
+    val failure: String? = null,
+) {
+    val visible: Boolean get() = entry != null
+}
+
+/** State for the explicit destructive delete confirmation. */
+data class DeleteFileUiState(
+    val entry: SftpEntry? = null,
+    val submitting: Boolean = false,
+    val failure: String? = null,
+) {
+    val visible: Boolean get() = entry != null
 }
 
 /** Everything the file explorer renders. */
@@ -62,6 +141,22 @@ data class FileExplorerUiState(
      */
     val failure: String? = null,
     val transfer: TransferState = TransferState.Idle,
+    /** Records remain visible after a transfer completes or fails. */
+    val transferRecords: List<FileTransferRecord> = emptyList(),
+    /** The screen-level overflow sheet. */
+    val toolsVisible: Boolean = false,
+    /** The selected row's action sheet. */
+    val actionEntry: SftpEntry? = null,
+    val createFolder: CreateFolderUiState = CreateFolderUiState(),
+    val newTextFile: NewTextFileUiState = NewTextFileUiState(),
+    val renameFile: RenameFileUiState = RenameFileUiState(),
+    val deleteFile: DeleteFileUiState = DeleteFileUiState(),
+    /** The full transfer history surface is kept in this route's state. */
+    val transfersVisible: Boolean = false,
+    /** One-shot path emitted after a new empty file has been created. */
+    val newFilePathToOpen: String? = null,
+    /** A successful mutation message; unlike a failure it does not hide rows. */
+    val operationMessage: String? = null,
 ) {
     val crumbs: List<RemotePath.Crumb>
         get() = if (path.isBlank()) emptyList() else RemotePath.crumbs(path)
@@ -135,6 +230,9 @@ class FileExplorerViewModel @Inject constructor(
 
     private var listJob: Job? = null
     private var transferJob: Job? = null
+    private var mutationJob: Job? = null
+    private var nextTransferId: Long = 1L
+    private val retryActions = mutableMapOf<Long, () -> Unit>()
 
     /**
      * Lists the directory currently on screen (or resolves the start directory
@@ -168,6 +266,297 @@ class FileExplorerViewModel @Inject constructor(
         listJob = viewModelScope.launch { load(target) }
     }
 
+    /** Opens the screen-level file tools sheet. */
+    fun openTools() {
+        _state.update { it.copy(toolsVisible = true, operationMessage = null) }
+    }
+
+    fun dismissTools() {
+        _state.update { it.copy(toolsVisible = false) }
+    }
+
+    /** Opens actions for a single row; destructive actions are reached from here. */
+    fun openActions(entry: SftpEntry) {
+        _state.update { it.copy(toolsVisible = false, actionEntry = entry, operationMessage = null) }
+    }
+
+    fun dismissActions() {
+        _state.update { it.copy(actionEntry = null) }
+    }
+
+    fun openTransfers() {
+        _state.update { it.copy(toolsVisible = false, transfersVisible = true) }
+    }
+
+    fun dismissTransfers() {
+        _state.update { it.copy(transfersVisible = false) }
+    }
+
+    /** Opens the create-folder sheet for the directory currently on screen. */
+    fun openCreateFolder() {
+        if (_state.value.path.isBlank()) return
+        _state.update {
+            it.copy(
+                toolsVisible = false,
+                createFolder = CreateFolderUiState(visible = true),
+                operationMessage = null,
+            )
+        }
+    }
+
+    fun setCreateFolderName(name: String) {
+        if (_state.value.createFolder.submitting) return
+        _state.update {
+            it.copy(createFolder = it.createFolder.copy(name = name, failure = null))
+        }
+    }
+
+    fun dismissCreateFolder() {
+        if (_state.value.createFolder.submitting) return
+        _state.update { it.copy(createFolder = CreateFolderUiState()) }
+    }
+
+    /** Creates exactly one directory below the current file-browser location. */
+    fun createFolder() {
+        val current = _state.value
+        val directory = current.path
+        if (!current.createFolder.visible || current.createFolder.submitting || directory.isBlank()) return
+        val name = current.createFolder.name.trim()
+        val validation = validateRemoteLeafName(name, "Folder name")
+        if (validation != null) {
+            _state.update { it.copy(createFolder = it.createFolder.copy(failure = validation)) }
+            return
+        }
+        val target = RemotePath.join(directory, name)
+        _state.update {
+            it.copy(createFolder = it.createFolder.copy(submitting = true, failure = null))
+        }
+        mutationJob?.cancel()
+        mutationJob = viewModelScope.launch {
+            runCatching { sftp().mkdir(target) }.fold(
+                onSuccess = {
+                    _state.update {
+                        it.copy(
+                            createFolder = CreateFolderUiState(),
+                            operationMessage = "Created $name in $directory",
+                        )
+                    }
+                    load(directory)
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            createFolder = it.createFolder.copy(
+                                submitting = false,
+                                failure = "Could not create $name: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /** Opens the create-file form for the directory currently on screen. */
+    fun openNewTextFile() {
+        if (_state.value.path.isBlank()) return
+        _state.update {
+            it.copy(
+                toolsVisible = false,
+                newTextFile = NewTextFileUiState(visible = true),
+                operationMessage = null,
+            )
+        }
+    }
+
+    fun setNewTextFileName(name: String) {
+        if (_state.value.newTextFile.submitting) return
+        _state.update {
+            it.copy(newTextFile = it.newTextFile.copy(name = name, failure = null))
+        }
+    }
+
+    fun dismissNewTextFile() {
+        if (_state.value.newTextFile.submitting) return
+        _state.update { it.copy(newTextFile = NewTextFileUiState()) }
+    }
+
+    /** Creates an empty remote file and emits its path for the editor route. */
+    fun createNewTextFile() {
+        val current = _state.value
+        val directory = current.path
+        val form = current.newTextFile
+        if (!form.visible || form.submitting || directory.isBlank()) return
+        val name = form.name.trim()
+        val validation = validateRemoteLeafName(name, "File name")
+        if (validation != null) {
+            _state.update { it.copy(newTextFile = it.newTextFile.copy(failure = validation)) }
+            return
+        }
+        val target = RemotePath.join(directory, name)
+        _state.update { it.copy(newTextFile = it.newTextFile.copy(submitting = true, failure = null)) }
+        mutationJob?.cancel()
+        mutationJob = viewModelScope.launch {
+            runCatching {
+                val channel = sftp()
+                if (channel.stat(target) != null) {
+                    throw java.io.IOException("already exists: $target")
+                }
+                channel.write(target, ByteArray(0))
+            }.fold(
+                onSuccess = {
+                    _state.update {
+                        it.copy(
+                            newTextFile = NewTextFileUiState(),
+                            newFilePathToOpen = target,
+                            operationMessage = "Created $name in $directory",
+                        )
+                    }
+                    load(directory)
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            newTextFile = it.newTextFile.copy(
+                                submitting = false,
+                                failure = "Could not create $name: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /** Consumes the one-shot editor handoff emitted by [createNewTextFile]. */
+    fun consumeNewFilePath() {
+        _state.update { it.copy(newFilePathToOpen = null) }
+    }
+
+    fun openRename(entry: SftpEntry) {
+        _state.update {
+            it.copy(
+                actionEntry = null,
+                renameFile = RenameFileUiState(entry = entry, name = entry.name),
+                operationMessage = null,
+            )
+        }
+    }
+
+    fun setRenameName(name: String) {
+        if (_state.value.renameFile.submitting) return
+        _state.update { it.copy(renameFile = it.renameFile.copy(name = name, failure = null)) }
+    }
+
+    fun dismissRename() {
+        if (_state.value.renameFile.submitting) return
+        _state.update { it.copy(renameFile = RenameFileUiState()) }
+    }
+
+    /** Renames within the selected entry's parent directory. */
+    fun renameFile() {
+        val current = _state.value
+        val rename = current.renameFile
+        val entry = rename.entry ?: return
+        if (rename.submitting) return
+        val name = rename.name.trim()
+        val validation = validateRemoteLeafName(name, "File name")
+        if (validation != null) {
+            _state.update { it.copy(renameFile = it.renameFile.copy(failure = validation)) }
+            return
+        }
+        val target = RemotePath.join(RemotePath.parent(entry.path), name)
+        if (target == entry.path) {
+            _state.update { it.copy(renameFile = RenameFileUiState()) }
+            return
+        }
+        _state.update { it.copy(renameFile = it.renameFile.copy(submitting = true, failure = null)) }
+        val directory = current.path
+        mutationJob?.cancel()
+        mutationJob = viewModelScope.launch {
+            runCatching {
+                val channel = sftp()
+                if (channel.stat(target) != null) {
+                    throw java.io.IOException("already exists: $target")
+                }
+                channel.rename(entry.path, target)
+            }.fold(
+                onSuccess = {
+                    _state.update {
+                        it.copy(
+                            renameFile = RenameFileUiState(),
+                            operationMessage = "Renamed ${entry.name} to $name",
+                        )
+                    }
+                    load(directory)
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            renameFile = it.renameFile.copy(
+                                submitting = false,
+                                failure = "Could not rename ${entry.name}: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun requestDelete(entry: SftpEntry) {
+        _state.update {
+            it.copy(
+                actionEntry = null,
+                deleteFile = DeleteFileUiState(entry = entry),
+                operationMessage = null,
+            )
+        }
+    }
+
+    fun dismissDelete() {
+        if (_state.value.deleteFile.submitting) return
+        _state.update { it.copy(deleteFile = DeleteFileUiState()) }
+    }
+
+    /** Deletes only after the screen has explicitly opened the confirmation. */
+    fun confirmDelete() {
+        val current = _state.value
+        val delete = current.deleteFile
+        val entry = delete.entry ?: return
+        if (delete.submitting) return
+        _state.update { it.copy(deleteFile = delete.copy(submitting = true, failure = null)) }
+        val directory = current.path
+        mutationJob?.cancel()
+        mutationJob = viewModelScope.launch {
+            runCatching { sftp().delete(entry.path) }.fold(
+                onSuccess = {
+                    _state.update {
+                        it.copy(
+                            deleteFile = DeleteFileUiState(),
+                            operationMessage = "Deleted ${entry.name}",
+                        )
+                    }
+                    load(directory)
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            deleteFile = it.deleteFile.copy(
+                                submitting = false,
+                                failure = "Could not delete ${entry.name}: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun dismissOperationMessage() {
+        _state.update { it.copy(operationMessage = null) }
+    }
+
     /**
      * Uploads a device document into the directory on screen.
      *
@@ -180,19 +569,75 @@ class FileExplorerViewModel @Inject constructor(
     fun upload(displayName: String, declaredSize: Long, openStream: () -> InputStream?) {
         val directory = _state.value.path
         if (directory.isBlank() || _state.value.transferring) return
+        uploadAt(directory, displayName, declaredSize, openStream)
+    }
+
+    private fun uploadAt(
+        directory: String,
+        displayName: String,
+        declaredSize: Long,
+        openStream: () -> InputStream?,
+    ) {
+        if (directory.isBlank() || _state.value.transferring) return
         val name = sanitizeUploadName(displayName)
+        val target = RemotePath.join(directory, name)
+        val id = nextTransferId++
         if (declaredSize > MAX_UPLOAD_BYTES) {
-            _state.update { it.copy(transfer = TransferState.Failed(tooBigToUpload(name))) }
+            val failure = tooBigToUpload(name)
+            _state.update {
+                it.copy(
+                    transfer = TransferState.Failed(
+                        failure,
+                        source = "This device",
+                        destination = target,
+                        id = id,
+                    ),
+                    transferRecords = it.transferRecords + FileTransferRecord(
+                        id = id,
+                        name = name,
+                        uploading = true,
+                        source = "This device",
+                        destination = target,
+                        totalBytes = declaredSize.takeIf { size -> size >= 0L },
+                        status = FileTransferStatus.Failed,
+                        message = failure,
+                    ),
+                )
+            }
             return
         }
-        _state.update { it.copy(transfer = TransferState.Running(name, uploading = true)) }
+        val totalBytes = declaredSize.takeIf { it >= 0L }
+        _state.update {
+            it.copy(
+                transfer = TransferState.Running(
+                    name = name,
+                    uploading = true,
+                    source = "This device",
+                    destination = target,
+                    totalBytes = totalBytes,
+                    id = id,
+                ),
+                transferRecords = it.transferRecords + FileTransferRecord(
+                    id = id,
+                    name = name,
+                    uploading = true,
+                    source = "This device",
+                    destination = target,
+                    totalBytes = totalBytes,
+                ),
+            )
+        }
+        retryActions[id] = { uploadAt(directory, displayName, declaredSize, openStream) }
         transferJob?.cancel()
         transferJob = viewModelScope.launch {
-            val target = RemotePath.join(directory, name)
             val outcome = runCatching {
                 val bytes = withContext(dispatcher) {
                     val stream = openStream() ?: throw java.io.IOException("could not read $name")
-                    stream.use { readCapped(it, MAX_UPLOAD_BYTES, name) }
+                    stream.use {
+                        readCapped(it, MAX_UPLOAD_BYTES, name) { read ->
+                            updateTransferProgress(id, read)
+                        }
+                    }
                 }
                 sftp().write(target, bytes)
                 bytes.size.toLong()
@@ -203,16 +648,33 @@ class FileExplorerViewModel @Inject constructor(
                         it.copy(
                             transfer = TransferState.Done(
                                 "Uploaded $name (${formatSize(written)}) to $directory",
+                                source = "This device",
+                                destination = target,
+                                id = id,
                             ),
                         )
                     }
+                    finishTransfer(
+                        id = id,
+                        bytes = written,
+                        message = "Uploaded $name (${formatSize(written)}) to $directory",
+                    )
                     // The directory listing on screen predates the new file.
                     load(directory)
                 },
                 onFailure = { error ->
+                    val failure = "Upload failed: ${message(error)}"
                     _state.update {
-                        it.copy(transfer = TransferState.Failed("Upload failed: ${message(error)}"))
+                        it.copy(
+                            transfer = TransferState.Failed(
+                                failure,
+                                source = "This device",
+                                destination = target,
+                                id = id,
+                            ),
+                        )
                     }
+                    failTransfer(id, failure)
                 },
             )
         }
@@ -224,7 +686,28 @@ class FileExplorerViewModel @Inject constructor(
      */
     fun download(entry: SftpEntry, sink: (ByteArray) -> Unit) {
         if (entry.isDirectory || _state.value.transferring) return
-        _state.update { it.copy(transfer = TransferState.Running(entry.name, uploading = false)) }
+        val id = nextTransferId++
+        val source = entry.path
+        val destination = "This device"
+        _state.update {
+            it.copy(
+                transfer = TransferState.Running(
+                    name = entry.name,
+                    uploading = false,
+                    source = source,
+                    destination = destination,
+                    id = id,
+                ),
+                transferRecords = it.transferRecords + FileTransferRecord(
+                    id = id,
+                    name = entry.name,
+                    uploading = false,
+                    source = source,
+                    destination = destination,
+                ),
+            )
+        }
+        retryActions[id] = { download(entry, sink) }
         transferJob?.cancel()
         transferJob = viewModelScope.launch {
             val outcome = runCatching {
@@ -238,17 +721,40 @@ class FileExplorerViewModel @Inject constructor(
                         it.copy(
                             transfer = TransferState.Done(
                                 "Saved ${entry.name} (${formatSize(size)}) to your device",
+                                source = source,
+                                destination = destination,
+                                id = id,
                             ),
                         )
                     }
+                    finishTransfer(
+                        id = id,
+                        bytes = size,
+                        message = "Saved ${entry.name} (${formatSize(size)}) to your device",
+                    )
                 },
                 onFailure = { error ->
+                    val failure = "Download failed: ${message(error)}"
                     _state.update {
-                        it.copy(transfer = TransferState.Failed("Download failed: ${message(error)}"))
+                        it.copy(
+                            transfer = TransferState.Failed(
+                                failure,
+                                source = source,
+                                destination = destination,
+                                id = id,
+                            ),
+                        )
                     }
+                    failTransfer(id, failure)
                 },
             )
         }
+    }
+
+    /** Re-runs a failed transfer with the original source/destination closures. */
+    fun retryTransfer(id: Long) {
+        if (_state.value.transferring) return
+        retryActions[id]?.invoke()
     }
 
     /** Clears the transfer banner once the user has read it. */
@@ -327,6 +833,51 @@ class FileExplorerViewModel @Inject constructor(
         _state.update { it.copy(loading = false, failure = message) }
     }
 
+    private fun updateTransferProgress(id: Long, bytes: Long) {
+        _state.update { state ->
+            val record = state.transferRecords.firstOrNull { it.id == id } ?: return@update state
+            val updatedRecord = record.copy(bytesTransferred = bytes)
+            state.copy(
+                transfer = (state.transfer as? TransferState.Running)
+                    ?.takeIf { it.id == id }
+                    ?.copy(bytesTransferred = bytes)
+                    ?: state.transfer,
+                transferRecords = state.transferRecords.map {
+                    if (it.id == id) updatedRecord else it
+                },
+            )
+        }
+    }
+
+    private fun finishTransfer(id: Long, bytes: Long, message: String) {
+        _state.update { state ->
+            state.copy(
+                transferRecords = state.transferRecords.map {
+                    if (it.id == id) {
+                        it.copy(
+                            bytesTransferred = bytes,
+                            totalBytes = it.totalBytes ?: bytes,
+                            status = FileTransferStatus.Completed,
+                            message = message,
+                        )
+                    } else {
+                        it
+                    }
+                },
+            )
+        }
+    }
+
+    private fun failTransfer(id: Long, message: String) {
+        _state.update { state ->
+            state.copy(
+                transferRecords = state.transferRecords.map {
+                    if (it.id == id) it.copy(status = FileTransferStatus.Failed, message = message) else it
+                },
+            )
+        }
+    }
+
     private companion object {
         val MAX_UPLOAD_BYTES: Long = TransferLimits.MAX_UPLOAD_BYTES
         val MAX_DOWNLOAD_BYTES: Long = TransferLimits.MAX_DOWNLOAD_BYTES
@@ -363,6 +914,15 @@ internal fun sanitizeUploadName(displayName: String): String {
         cleaned.isEmpty() || cleaned == "." || cleaned == ".." -> "upload"
         else -> cleaned
     }
+}
+
+/** Validates one remote child name while leaving the form value untouched. */
+internal fun validateRemoteLeafName(name: String, label: String): String? {
+    if (name.isBlank()) return "$label is required"
+    if (name == "." || name == "..") return "$label cannot be . or .."
+    if (name.any { it == '/' || it == '\\' }) return "$label cannot contain a path separator"
+    if (name.any(Char::isISOControl)) return "$label contains an unsupported character"
+    return null
 }
 
 /**
@@ -408,7 +968,12 @@ internal object TransferLimits {
  * [com.pocketshell.core.transport.SftpChannel.read]: half a file written to the
  * host under its real name is worse than a failed upload.
  */
-internal fun readCapped(input: InputStream, maxBytes: Long, name: String): ByteArray {
+internal fun readCapped(
+    input: InputStream,
+    maxBytes: Long,
+    name: String,
+    onProgress: (Long) -> Unit = {},
+): ByteArray {
     val sink = ByteArrayOutputStream()
     val buffer = ByteArray(TransferLimits.COPY_CHUNK_BYTES)
     var total = 0L
@@ -418,6 +983,7 @@ internal fun readCapped(input: InputStream, maxBytes: Long, name: String): ByteA
         total += read
         if (total > maxBytes) throw java.io.IOException(tooBigToUpload(name))
         sink.write(buffer, 0, read)
+        onProgress(total)
     }
     return sink.toByteArray()
 }

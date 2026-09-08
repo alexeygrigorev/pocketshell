@@ -66,7 +66,11 @@ class DestinationsTest {
         )
         assertMatchesPattern(
             Destination.Session.pattern,
-            Destination.Session.route(hostId = 7, sessionName = "git-pocketshell"),
+            Destination.Session.route(
+                hostId = 7,
+                sessionName = "git-pocketshell",
+                workspacePath = "/home/alexey/git/pocketshell",
+            ),
         )
         assertMatchesPattern(
             Destination.Files.pattern,

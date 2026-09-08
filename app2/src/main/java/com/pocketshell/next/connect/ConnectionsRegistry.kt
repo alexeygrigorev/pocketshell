@@ -166,6 +166,13 @@ class ConnectionsRegistry(
     fun liveConnections(): List<HostConnection> =
         connections.values.filter { it.state.value.isLive() }
 
+    /** Closes and removes the connection for [hostId], if one is currently held. */
+    suspend fun close(hostId: Long) = mutex.withLock {
+        withContext(dispatcher) {
+            connections.remove(hostId)?.let { runCatching { it.close() } }
+        }
+    }
+
     /** Closes every connection and empties the table. Safe to call twice. */
     suspend fun closeAll() = mutex.withLock {
         withContext(dispatcher) {

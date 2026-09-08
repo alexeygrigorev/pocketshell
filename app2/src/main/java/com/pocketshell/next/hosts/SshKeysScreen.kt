@@ -2,6 +2,7 @@ package com.pocketshell.next.hosts
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -29,8 +32,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -45,6 +50,7 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.QuietChoiceRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
@@ -57,8 +63,16 @@ const val SSH_KEYS_LIST_TAG: String = "ssh-keys-list"
 const val SSH_KEYS_GENERATE_TAG: String = "ssh-keys-generate"
 const val SSH_KEYS_IMPORT_TAG: String = "ssh-keys-import"
 const val SSH_KEYS_PASTE_FIELD_TAG: String = "ssh-keys-paste-field"
+const val SSH_KEYS_IMPORT_CONFIRM_TAG: String = "ssh-keys-import-confirm"
 const val SSH_KEYS_PASTE_VISIBILITY_TAG: String = "ssh-keys-paste-visibility"
 const val SSH_KEYS_COPY_PUBLIC_KEY_TAG: String = "ssh-keys-copy-public-key"
+const val SSH_KEYS_COPY_FINGERPRINT_TAG: String = "ssh-keys-copy-fingerprint"
+const val SSH_KEYS_DETAIL_TAG: String = "ssh-keys-detail"
+const val SSH_KEYS_GENERATE_CONFIRM_TAG: String = "ssh-keys-generate-confirm"
+const val SSH_KEYS_GENERATE_ED25519_TAG: String = "ssh-keys-generate-ed25519"
+const val SSH_KEYS_GENERATE_RSA_TAG: String = "ssh-keys-generate-rsa"
+const val SSH_KEYS_GENERATE_NO_PASSPHRASE_TAG: String = "ssh-keys-generate-no-passphrase"
+const val SSH_KEYS_GENERATE_PASSPHRASE_TAG: String = "ssh-keys-generate-passphrase"
 
 fun sshKeyRowTag(keyId: Long): String = "ssh-key-row-$keyId"
 
@@ -202,17 +216,31 @@ fun SshKeysScreen(
     state: SshKeysUiState,
     onBack: () -> Unit,
     onUseKey: ((Long) -> Unit)? = null,
-    onGenerate: (String) -> Unit,
+    onGenerate: (SshKeyGenerationRequest) -> Unit,
     onImportPasted: (name: String, pem: String) -> Unit,
     onPickFile: () -> Unit,
     onDelete: (Long) -> Unit,
     onLoadPublicKey: (Long, CharArray?) -> Unit = { _, _ -> },
     onDismissMessage: () -> Unit,
+    onCopyPublicKey: ((String) -> Unit)? = null,
+    onCopyFingerprint: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val clipboard = LocalContext.current
-        .getSystemService(ClipboardManager::class.java)
+    val clipboard = LocalContext.current.applicationContext
+        .getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    val composeClipboard = LocalClipboardManager.current
+    val copyPublicKey: (String) -> Unit = { value ->
+        clipboard?.setPrimaryClip(ClipData.newPlainText("SSH public key", value))
+        runCatching { composeClipboard.setText(AnnotatedString(value)) }
+    }
+    val copyFingerprint: (String) -> Unit = { value ->
+        clipboard?.setPrimaryClip(ClipData.newPlainText("SSH key fingerprint", value))
+        runCatching { composeClipboard.setText(AnnotatedString(value)) }
+    }
+    val copyPublicKeyAction = onCopyPublicKey ?: copyPublicKey
+    val copyFingerprintAction = onCopyFingerprint ?: copyFingerprint
     var copiedKeyId by remember { mutableStateOf<Long?>(null) }
+    var copiedFingerprintKeyId by remember { mutableStateOf<Long?>(null) }
     var showGenerate by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<SshKeyRow?>(null) }
@@ -301,11 +329,11 @@ fun SshKeysScreen(
                     items(items = state.keys, key = { it.id }) { key ->
                         ListRow(
                             title = key.name,
-                            // Keep the list quiet; the full value remains
-                            // available in the detail sheet when it is real.
-                            subtitle = key.fingerprint
-                                .takeIf { it.isNotBlank() }
-                                ?.takeLast(FINGERPRINT_TAIL),
+                            subtitle = listOfNotNull(
+                                key.algorithm ?: key.publicKey?.let(SshKeyMaterial::keyAlgorithmLabel)
+                                    ?: "SSH key",
+                                if (key.hasPassphrase) "Passphrase protected" else "No passphrase",
+                            ).joinToString(" · "),
                             trailing = {
                                 Kebab(
                                     items = listOf(
@@ -326,14 +354,12 @@ fun SshKeysScreen(
     }
 
     if (showGenerate) {
-        NameDialog(
+        GenerateKeyDialog(
             title = "Generate a key",
             confirmLabel = "Generate",
-            helper = "A new RSA-3072 key is created on this device. Leave the name " +
-                "blank for a timestamped one.",
-            onConfirm = { name ->
+            onConfirm = { request ->
                 showGenerate = false
-                onGenerate(name)
+                onGenerate(request)
             },
             onDismiss = { showGenerate = false },
         )
@@ -374,17 +400,45 @@ fun SshKeysScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = PocketShellSpacing.lg)
-                    .padding(bottom = PocketShellSpacing.lg),
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .testTag(SSH_KEYS_DETAIL_TAG)
+                .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
             ) {
                 SheetHeader(title = key.name)
+                val keyAlgorithm = key.algorithm
+                    ?: key.publicKey?.let(SshKeyMaterial::keyAlgorithmLabel)
+                val publicFingerprint = key.publicFingerprint
+                    ?: key.publicKey?.let { publicKey ->
+                        runCatching { SshKeyMaterial.publicKeyFingerprint(publicKey) }.getOrNull()
+                    }
+                ListRow(
+                    title = "Type",
+                    subtitle = keyAlgorithm ?: "Read the public key to identify",
+                )
                 ListRow(
                     title = "Protection",
-                    subtitle = if (key.hasPassphrase) "Passphrase protected" else "No passphrase",
+                    subtitle = if (key.hasPassphrase) "Passphrase required" else "No passphrase",
                 )
-                if (key.fingerprint.isNotBlank()) {
-                    ListRow(title = "Fingerprint", subtitle = key.fingerprint)
+                if (publicFingerprint != null) {
+                    ListRow(title = "Fingerprint", subtitle = publicFingerprint)
+                    PocketShellButton(
+                        text = if (copiedFingerprintKeyId == key.id) "Fingerprint copied" else "Copy fingerprint",
+                        onClick = {
+                            copiedFingerprintKeyId = key.id
+                            copyFingerprintAction(publicFingerprint)
+                        },
+                        variant = ButtonVariant.Text,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(SSH_KEYS_COPY_FINGERPRINT_TAG),
+                    )
+                } else if (key.fingerprint.isNotBlank()) {
+                    // The stored digest is for import deduplication. It is not
+                    // presented as the server-installable public-key identity
+                    // until the public half has been read.
+                    ListRow(title = "Stored key digest", subtitle = key.fingerprint)
                 }
                 when {
                     key.publicKeyLoading -> Text(
@@ -407,10 +461,8 @@ fun SshKeysScreen(
                         PocketShellButton(
                             text = "Copy public key",
                             onClick = {
-                                clipboard?.setPrimaryClip(
-                                    ClipData.newPlainText("SSH public key", publicKey),
-                                )
                                 copiedKeyId = key.id
+                                copyPublicKeyAction(publicKey)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -495,18 +547,37 @@ private fun KeyPassphraseField(
 }
 
 @Composable
-private fun NameDialog(
+private fun GenerateKeyDialog(
     title: String,
     confirmLabel: String,
-    helper: String,
-    onConfirm: (String) -> Unit,
+    onConfirm: (SshKeyGenerationRequest) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
+    var type by remember { mutableStateOf(SshKeyGenerationType.ED25519) }
+    var protection by remember { mutableStateOf(SshKeyProtection.NONE) }
+    var passphrase by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    val protectionValid = protection == SshKeyProtection.NONE ||
+        (passphrase.isNotEmpty() && passphrase == confirmation)
     FormDialog(
         title = title,
         confirmLabel = confirmLabel,
-        onConfirm = { onConfirm(name) },
+        confirmEnabled = protectionValid,
+        confirmTestTag = SSH_KEYS_GENERATE_CONFIRM_TAG,
+        onConfirm = {
+            val request = SshKeyGenerationRequest(
+                name = name,
+                type = type,
+                protection = protection,
+                passphrase = passphrase.takeIf { protection == SshKeyProtection.PASSPHRASE }
+                    ?.toCharArray(),
+            )
+            name = ""
+            passphrase = ""
+            confirmation = ""
+            onConfirm(request)
+        },
         onDismiss = onDismiss,
     ) {
         OutlinedTextField(
@@ -516,7 +587,60 @@ private fun NameDialog(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Text(text = helper, color = PocketShellColors.TextSecondary)
+        Text(text = "Key type", color = PocketShellColors.TextSecondary)
+        QuietChoiceRow(
+            title = SshKeyGenerationType.ED25519.label,
+            subtitle = SshKeyGenerationType.ED25519.description,
+            selected = type == SshKeyGenerationType.ED25519,
+            onClick = { type = SshKeyGenerationType.ED25519 },
+            modifier = Modifier.testTag(SSH_KEYS_GENERATE_ED25519_TAG),
+        )
+        QuietChoiceRow(
+            title = SshKeyGenerationType.RSA.label,
+            subtitle = SshKeyGenerationType.RSA.description,
+            selected = type == SshKeyGenerationType.RSA,
+            onClick = { type = SshKeyGenerationType.RSA },
+            modifier = Modifier.testTag(SSH_KEYS_GENERATE_RSA_TAG),
+        )
+        Text(text = "Protection", color = PocketShellColors.TextSecondary)
+        QuietChoiceRow(
+            title = SshKeyProtection.NONE.label,
+            subtitle = SshKeyProtection.NONE.description,
+            selected = protection == SshKeyProtection.NONE,
+            onClick = { protection = SshKeyProtection.NONE },
+            modifier = Modifier.testTag(SSH_KEYS_GENERATE_NO_PASSPHRASE_TAG),
+        )
+        QuietChoiceRow(
+            title = SshKeyProtection.PASSPHRASE.label,
+            subtitle = SshKeyProtection.PASSPHRASE.description,
+            selected = protection == SshKeyProtection.PASSPHRASE,
+            onClick = { protection = SshKeyProtection.PASSPHRASE },
+            modifier = Modifier.testTag(SSH_KEYS_GENERATE_PASSPHRASE_TAG),
+        )
+        if (protection == SshKeyProtection.PASSPHRASE) {
+            OutlinedTextField(
+                value = passphrase,
+                onValueChange = { passphrase = it },
+                label = { Text("Passphrase") },
+                placeholder = { Text("Recommended") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = confirmation,
+                onValueChange = { confirmation = it },
+                label = { Text("Confirm passphrase") },
+                placeholder = { Text("Repeat passphrase") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Text(
+            text = "Add the public key to your server before connecting. Leave the name blank for a timestamped one.",
+            color = PocketShellColors.TextSecondary,
+        )
     }
 }
 
@@ -532,6 +656,7 @@ private fun PasteKeyDialog(
         title = "Paste a private key",
         confirmLabel = "Add",
         confirmEnabled = pem.isNotBlank(),
+        confirmTestTag = SSH_KEYS_IMPORT_CONFIRM_TAG,
         onConfirm = { onConfirm(name, pem) },
         onDismiss = onDismiss,
     ) {
@@ -567,5 +692,3 @@ private fun PasteKeyDialog(
         )
     }
 }
-
-private const val FINGERPRINT_TAIL = 12

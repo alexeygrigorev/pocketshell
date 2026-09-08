@@ -41,6 +41,23 @@ sealed interface ViewerContent {
     class Binary(val bytes: ByteArray) : ViewerContent
 }
 
+/** The remote metadata captured with the bytes the editor is showing. */
+data class RemoteFileMetadata(
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val modifiedEpochMs: Long,
+)
+
+/**
+ * An optimistic-save conflict. The draft remains in the editor until the user
+ * chooses a safe action from the conflict surface.
+ */
+data class ViewerFileConflict(
+    val path: String,
+    val loaded: RemoteFileMetadata,
+    val current: RemoteFileMetadata?,
+)
+
 /** Everything the file viewer renders. */
 data class ViewerUiState(
     val hostId: Long = 0,
@@ -61,6 +78,12 @@ data class ViewerUiState(
     /** Set for one banner after a successful save. */
     val savedMessage: String? = null,
     val failure: String? = null,
+    /** Metadata from the read that populated [content]. */
+    val remoteMetadata: RemoteFileMetadata? = null,
+    /** True when Back/Cancel opened the dirty-buffer confirmation sheet. */
+    val unsavedChangesVisible: Boolean = false,
+    /** Set when a save observes newer host metadata. */
+    val conflict: ViewerFileConflict? = null,
 ) {
     val name: String get() = if (path.isBlank()) "" else RemotePath.nameOf(path)
 
@@ -98,11 +121,10 @@ data class ViewerUiState(
  * ## Editing
  *
  * Only [FileKind.TEXT] is editable, and a save is a whole-file
- * [SftpChannel.write] of the buffer. There is no partial/patch write and no
- * conflict detection — if the file changed on the host since it was read, the
- * save wins. That matches every other editor on a phone and is the honest
- * behaviour for a single-user dev box; a merge UI is not something this screen
- * should grow.
+ * [SftpChannel.write] of the buffer. Before the write, the file's size/mtime
+ * metadata is compared with the metadata captured by the read. A mismatch keeps
+ * the draft open and moves the user to [ViewerFileConflict] instead of silently
+ * replacing newer host content.
  */
 @HiltViewModel
 class ViewerViewModel @Inject constructor(
@@ -141,7 +163,11 @@ class ViewerViewModel @Inject constructor(
      * too — re-reading would silently discard their buffer.
      */
     fun load() {
-        if (job?.isActive == true || _state.value.editing) return
+        load(force = false)
+    }
+
+    private fun load(force: Boolean) {
+        if (job?.isActive == true || (_state.value.editing && !force)) return
         _state.update { it.copy(loading = true, failure = null) }
         job = viewModelScope.launch { read() }
     }
@@ -150,7 +176,14 @@ class ViewerViewModel @Inject constructor(
     fun startEditing() {
         val text = (_state.value.content as? ViewerContent.Text)?.text ?: return
         _state.update {
-            it.copy(editing = true, draft = text, savedMessage = null, failure = null)
+            it.copy(
+                editing = true,
+                draft = text,
+                savedMessage = null,
+                failure = null,
+                conflict = null,
+                unsavedChangesVisible = false,
+            )
         }
     }
 
@@ -162,7 +195,37 @@ class ViewerViewModel @Inject constructor(
     /** Leaves the editor, discarding the buffer. */
     fun cancelEditing() {
         if (_state.value.saving) return
-        _state.update { it.copy(editing = false, draft = "", failure = null) }
+        _state.update {
+            it.copy(
+                editing = false,
+                draft = "",
+                failure = null,
+                conflict = null,
+                unsavedChangesVisible = false,
+            )
+        }
+    }
+
+    /**
+     * Handles a Back/Cancel intent without throwing away a dirty editor.
+     * Returns true when the caller may leave immediately.
+     */
+    fun requestBack(): Boolean {
+        val current = _state.value
+        if (current.dirty) {
+            _state.update { it.copy(unsavedChangesVisible = true) }
+            return false
+        }
+        return true
+    }
+
+    fun keepEditing() {
+        _state.update { it.copy(unsavedChangesVisible = false) }
+    }
+
+    /** Confirms the destructive "Discard edits" action in the unsaved sheet. */
+    fun discardChanges() {
+        cancelEditing()
     }
 
     /**
@@ -173,12 +236,31 @@ class ViewerViewModel @Inject constructor(
      * reads false — without a re-read round trip.
      */
     fun save() {
+        saveInternal(onSuccess = null)
+    }
+
+    /** Saves from the dirty-exit sheet and invokes [onSuccess] only after the host write. */
+    fun saveAndLeave(onSuccess: () -> Unit) {
+        saveInternal(onSuccess)
+    }
+
+    private fun saveInternal(onSuccess: (() -> Unit)?) {
         val current = _state.value
         if (!current.editing || current.saving) return
         _state.update { it.copy(saving = true, failure = null, savedMessage = null) }
         job = viewModelScope.launch {
             val draft = _state.value.draft
-            runCatching { sftp().write(path, draft.toByteArray()) }.fold(
+            val expected = _state.value.remoteMetadata
+            val outcome = runCatching {
+                val channel = sftp()
+                val currentMetadata = channel.stat(path)?.toRemoteFileMetadata()
+                if (expected != null && currentMetadata != expected) {
+                    throw ViewerRemoteConflictException(expected, currentMetadata)
+                }
+                channel.write(path, draft.toByteArray())
+                channel.stat(path)?.toRemoteFileMetadata()
+            }
+            outcome.fold(
                 onSuccess = {
                     _state.update {
                         it.copy(
@@ -187,19 +269,102 @@ class ViewerViewModel @Inject constructor(
                             draft = "",
                             content = ViewerContent.Text(draft),
                             savedMessage = "Saved ${RemotePath.nameOf(path)}",
+                            remoteMetadata = outcome.getOrNull(),
+                            unsavedChangesVisible = false,
+                            conflict = null,
                         )
                     }
+                    onSuccess?.invoke()
                 },
                 onFailure = { error ->
-                    // The editor STAYS open on failure: dropping the user back
-                    // to the read-only view would throw away the edit they just
-                    // failed to save.
-                    _state.update {
-                        it.copy(saving = false, failure = "Could not save: ${message(error)}")
+                    if (error is ViewerRemoteConflictException) {
+                        _state.update {
+                            it.copy(
+                                saving = false,
+                                failure = null,
+                                unsavedChangesVisible = false,
+                                conflict = ViewerFileConflict(
+                                    path = path,
+                                    loaded = error.expected,
+                                    current = error.actual,
+                                ),
+                            )
+                        }
+                    } else {
+                        // The editor STAYS open on failure: dropping the user
+                        // back to the read-only view would throw away the edit.
+                        _state.update {
+                            it.copy(saving = false, failure = "Could not save: ${message(error)}")
+                        }
                     }
                 },
             )
         }
+    }
+
+    /**
+     * Writes the draft to a fresh sibling path after a conflict. The candidate
+     * name is checked with stat before writing, so this action never overwrites
+     * another copy either.
+     */
+    fun saveAsCopy() {
+        val current = _state.value
+        if (!current.editing || current.saving || current.conflict == null) return
+        val draft = current.draft
+        _state.update { it.copy(saving = true, failure = null) }
+        job = viewModelScope.launch {
+            val outcome = runCatching {
+                val channel = sftp()
+                val parent = RemotePath.parent(path)
+                val base = "${RemotePath.nameOf(path)}.local-copy"
+                var candidate: String? = null
+                for (index in 0..100) {
+                    val suffix = if (index == 0) "" else "-$index"
+                    val option = RemotePath.join(parent, "$base$suffix")
+                    if (channel.stat(option) == null) {
+                        candidate = option
+                        break
+                    }
+                }
+                val destination = requireNotNull(candidate) { "could not find an unused copy name" }
+                channel.write(destination, draft.toByteArray())
+                destination
+            }
+            outcome.fold(
+                onSuccess = { destination ->
+                    _state.update {
+                        it.copy(
+                            saving = false,
+                            editing = false,
+                            draft = "",
+                            content = ViewerContent.Text(draft),
+                            savedMessage = "Saved a copy at ${RemotePath.nameOf(destination)}",
+                            conflict = null,
+                            unsavedChangesVisible = false,
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(saving = false, failure = "Could not save a copy: ${message(error)}")
+                    }
+                },
+            )
+        }
+    }
+
+    /** Drops the draft and reads the latest host version into the editor/viewer. */
+    fun reloadRemoteVersion() {
+        if (_state.value.saving) return
+        _state.update {
+            it.copy(
+                editing = false,
+                draft = "",
+                conflict = null,
+                unsavedChangesVisible = false,
+            )
+        }
+        load(force = true)
     }
 
     /** Flips a Markdown file between formatted output and raw source. */
@@ -216,8 +381,13 @@ class ViewerViewModel @Inject constructor(
     // ------------------------------------------------------------- internals
 
     private suspend fun read() {
-        runCatching { sftp().read(path, MAX_VIEW_BYTES) }.fold(
-            onSuccess = { bytes ->
+        runCatching {
+            val channel = sftp()
+            val metadata = channel.stat(path)?.toRemoteFileMetadata()
+                ?: throw IOException("no such file: $path")
+            metadata to channel.read(path, MAX_VIEW_BYTES)
+        }.fold(
+            onSuccess = { (metadata, bytes) ->
                 val kind = FileKindDetector.detect(path, bytes)
                 _state.update {
                     it.copy(
@@ -230,6 +400,8 @@ class ViewerViewModel @Inject constructor(
                             FileKind.BINARY -> ViewerContent.Binary(bytes)
                         },
                         failure = null,
+                        remoteMetadata = metadata,
+                        conflict = null,
                     )
                 }
             },
@@ -262,3 +434,16 @@ class ViewerViewModel @Inject constructor(
         const val MAX_VIEW_BYTES: Long = 12L * 1024 * 1024
     }
 }
+
+private fun com.pocketshell.core.transport.SftpEntry.toRemoteFileMetadata(): RemoteFileMetadata =
+    RemoteFileMetadata(
+        isDirectory = isDirectory,
+        sizeBytes = sizeBytes,
+        modifiedEpochMs = modifiedEpochMs,
+    )
+
+/** Internal control flow for a metadata mismatch; it is never shown verbatim. */
+private class ViewerRemoteConflictException(
+    val expected: RemoteFileMetadata,
+    val actual: RemoteFileMetadata?,
+) : IOException("remote file metadata changed")

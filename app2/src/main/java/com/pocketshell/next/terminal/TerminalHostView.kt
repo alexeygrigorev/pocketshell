@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
@@ -157,6 +158,7 @@ fun TerminalHostView(
     onResized: (cols: Int, rows: Int) -> Unit,
     ctrlArmed: Boolean = false,
     onControlBytes: (ByteArray) -> Unit = {},
+    onViewReady: (TerminalView?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Held across recompositions so a state change in the enclosing screen does
@@ -168,6 +170,7 @@ fun TerminalHostView(
     // A mutable holder it reads through is the seam; `SideEffect` keeps the
     // write out of the composition pass itself.
     val keyInput = remember { TerminalKeyInput() }
+    val currentOnViewReady = rememberUpdatedState(onViewReady)
     SideEffect {
         keyInput.ctrlArmed = ctrlArmed
         keyInput.onControlBytes = onControlBytes
@@ -189,6 +192,7 @@ fun TerminalHostView(
             // this composition (the ViewModel owns it), and a stale view
             // reference would keep an unattached View alive and repainting.
             session.updateTerminalSessionClient(NoOpTerminalSessionClient())
+            currentOnViewReady.value(null)
         }
     }
 
@@ -223,6 +227,7 @@ fun TerminalHostView(
                 attachSession(session)
                 paintBackgroundFrom(session)
                 repaintClient.view = this
+                currentOnViewReady.value(this)
             }
         },
         update = { view ->
@@ -231,6 +236,7 @@ fun TerminalHostView(
                 appliedTextSizePx[0] = textSizePx
             }
             repaintClient.view = view
+            currentOnViewReady.value(view)
             if (view.currentSession !== session) {
                 view.attachSession(session)
                 view.paintBackgroundFrom(session)
@@ -242,8 +248,24 @@ fun TerminalHostView(
         },
         onRelease = { view ->
             if (repaintClient.view === view) repaintClient.view = null
+            currentOnViewReady.value(null)
         },
     )
+}
+
+/**
+ * Copies the current native selection, including text temporarily stored when
+ * the selection action mode handed control to another menu.
+ */
+internal fun TerminalView.copySelectionToClipboard(): Boolean {
+    val text = getSelectedText()?.takeIf { it.isNotEmpty() }
+        ?: getStoredSelectedText()?.takeIf { it.isNotEmpty() }
+        ?: return false
+    val session = currentSession ?: return false
+    session.onCopyTextToClipboard(text)
+    stopTextSelectionMode()
+    unsetStoredSelectedText()
+    return true
 }
 
 /**

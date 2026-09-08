@@ -144,6 +144,7 @@ fun UsageScreen(
                             record = record,
                             expanded = record.displayName in expandedProviders,
                             now = now,
+                            warnPercent = state.warnPercent,
                             onToggle = {
                                 expandedProviders = if (record.displayName in expandedProviders) {
                                     expandedProviders - record.displayName
@@ -234,12 +235,13 @@ private fun UsageProviderRow(
     record: UsageProviderRecord,
     expanded: Boolean,
     now: Instant,
+    warnPercent: Double,
     onToggle: () -> Unit,
 ) {
     val constrained = record.mostConstrainedWindow
     val summary = listOfNotNull(
         constrained?.let { "${formatPercentUsed(it.percent)} · ${windowLabel(it.name)}" },
-        statusLabel(record).takeIf { constrained == null },
+        statusLabel(record, warnPercent).takeIf { constrained == null },
     ).joinToString(" · ")
     val hasDetails = record.windows.isNotEmpty() ||
         record.resetCredits != null ||
@@ -267,8 +269,18 @@ private fun UsageProviderRow(
             },
             onClick = onToggle.takeIf { hasDetails },
         )
+        if (!expanded && constrained != null) {
+            ProgressBar(
+                progress = (constrained.percent / 100.0).toFloat(),
+                kind = progressKind(constrained.percent, record.isBlocked, warnPercent),
+                modifier = Modifier
+                    .padding(horizontal = PocketShellDensity.rowPadH)
+                    .padding(bottom = PocketShellSpacing.sm)
+                    .testTag("${usageProviderToggleTag(record.provider)}-summary"),
+            )
+        }
         if (expanded) {
-            UsageProviderDetails(record = record, now = now)
+            UsageProviderDetails(record = record, now = now, warnPercent = warnPercent)
         }
     }
 }
@@ -277,8 +289,9 @@ private fun UsageProviderRow(
 private fun UsageProviderDetails(
     record: UsageProviderRecord,
     now: Instant,
+    warnPercent: Double,
 ) {
-    val status = record.thresholdState()
+    val status = record.thresholdState(warnPercent = warnPercent)
     val messages = listOfNotNull(
         record.blockReason.takeIf { record.windows.isEmpty() },
         usageTelemetryMessageForDisplay(record.lastError),
@@ -295,12 +308,12 @@ private fun UsageProviderDetails(
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         Text(
-            text = "Status · ${statusLabel(record)}",
+            text = "Status · ${statusLabel(record, warnPercent)}",
             color = thresholdTextColor(status),
             style = PocketShellType.metadata,
         )
         record.windows.forEach { window ->
-            UsageWindowRow(window = window, record = record, now = now)
+            UsageWindowRow(window = window, record = record, now = now, warnPercent = warnPercent)
         }
         record.resetCredits?.let { resetCredits ->
             UsageResetCreditsSection(resetCredits = resetCredits, now = now)
@@ -385,6 +398,7 @@ private fun UsageWindowRow(
     window: UsageWindow,
     record: UsageProviderRecord,
     now: Instant,
+    warnPercent: Double,
 ) {
     Column(modifier = Modifier.testTag(usageWindowRowTag(record.provider, window.name))) {
         Row(
@@ -411,7 +425,7 @@ private fun UsageWindowRow(
         Spacer(modifier = Modifier.height(PocketShellSpacing.xs + 2.dp))
         ProgressBar(
             progress = (window.percent / 100.0).toFloat(),
-            kind = progressKind(window.percent, record.isBlocked),
+            kind = progressKind(window.percent, record.isBlocked, warnPercent),
         )
         UsageResetFoot(
             window = window,
@@ -532,9 +546,13 @@ internal fun thresholdRowDescription(state: UsageThresholdState): String = when 
     UsageThresholdState.Exceeded -> exceededUsageDescription()
 }
 
-private fun progressKind(percent: Double, blocked: Boolean): ProgressKind = when {
+private fun progressKind(
+    percent: Double,
+    blocked: Boolean,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+): ProgressKind = when {
     blocked || percent >= 100.0 -> ProgressKind.Danger
-    percent >= UsageProviderRecord.WARN_PERCENT -> ProgressKind.Warn
+    percent >= warnPercent -> ProgressKind.Warn
     else -> ProgressKind.Default
 }
 

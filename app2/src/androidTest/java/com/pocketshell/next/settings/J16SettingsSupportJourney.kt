@@ -87,7 +87,7 @@ class J16SettingsSupportJourney {
         awaitTag(HOST_LIST_SETTINGS_TAG)
         compose.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)
-        JourneyScreenshots.capture("01-settings-index", JOURNEY)
+        capture("01-settings-index")
 
         compose.onNodeWithTag(settingsCategoryTag("voice")).performClick()
         awaitTag(SETTINGS_VOICE_PAGE_TAG)
@@ -95,7 +95,7 @@ class J16SettingsSupportJourney {
         awaitTag(SETTINGS_LANGUAGE_PAGE_TAG)
         compose.onNodeWithTag(voiceLanguageOptionTag("ru")).performClick()
         assertEquals("ru", appGraph().settingsRepository().settings.value.voiceLanguage)
-        JourneyScreenshots.capture("02-language", JOURNEY)
+        capture("02-language")
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         awaitTag(SETTINGS_VOICE_PAGE_TAG)
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
@@ -111,7 +111,7 @@ class J16SettingsSupportJourney {
             AppSettings.BACKGROUND_GRACE_5_MINUTES_MS,
             appGraph().settingsRepository().settings.value.backgroundGraceMillis,
         )
-        JourneyScreenshots.capture("03-grace", JOURNEY)
+        capture("03-grace")
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         awaitTag(SETTINGS_CONNECTIONS_PAGE_TAG)
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
@@ -120,7 +120,7 @@ class J16SettingsSupportJourney {
         compose.onNodeWithTag(settingsCategoryTag("about")).performClick()
         awaitTag(SETTINGS_ABOUT_PAGE_TAG)
         compose.onNodeWithText("Installed version").assertIsDisplayed()
-        JourneyScreenshots.capture("04-about", JOURNEY)
+        capture("04-about")
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)
 
@@ -128,7 +128,7 @@ class J16SettingsSupportJourney {
         awaitTag(DIAGNOSTICS_PAGE_TAG)
         compose.onNodeWithText("j2610 support handoff", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Share all (1)").assertIsDisplayed().assertIsEnabled()
-        JourneyScreenshots.capture("05-diagnostics", JOURNEY)
+        capture("05-diagnostics")
 
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         compose.onNodeWithTag(CRASH_REPORTS_SHARE_ALL_TAG).performClick()
@@ -136,7 +136,7 @@ class J16SettingsSupportJourney {
             "Share all must hand the real archive to Android's native chooser",
             waitForNativeChooser(instrumentation),
         )
-        JourneyScreenshots.capture("06-share-chooser", JOURNEY)
+        capture("06-share-chooser")
     }
 
     private fun awaitTag(tag: String) {
@@ -144,6 +144,26 @@ class J16SettingsSupportJourney {
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(tag).assertIsDisplayed()
+    }
+
+    /** Preserve real-window evidence after the connected-test app is removed. */
+    private fun capture(name: String): File {
+        val file = JourneyScreenshots.capture(name, JOURNEY)
+        val outputDir = InstrumentationRegistry.getArguments()
+            .getString("additionalTestOutputDir")
+            ?.takeIf { it.isNotBlank() }
+            ?: return file
+        runCatching {
+            val targetDir = File(outputDir, JOURNEY).apply { mkdirs() }
+            file.parentFile?.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("${file.nameWithoutExtension}") }
+                ?.forEach { artifact ->
+                    val target = File(targetDir, artifact.name)
+                    artifact.copyTo(target, overwrite = true)
+                    println("J16_SCREENSHOT ${target.absolutePath}")
+                }
+        }
+        return file
     }
 
     private fun waitForNativeChooser(instrumentation: Instrumentation): Boolean {

@@ -25,4 +25,3 @@
 # fixed or removed) or by RE-TRIAGING it (a fresh `added`/`expires` in both
 # places, and a reason that says why it is still broken) — never let a row sit
 # expired.
-com.pocketshell.next.usage.J12UsagePanelJourney#theSessionPillFocusesTheSessionsDetectedAgentAndDropsTheWindowToken	2586	2026-09-06	2026-09-20	the Docker agents fixture's `sessions list` arm reads aplexer rows from ~/.pocketshell-fixture-aplexer.json instead of enumerating live ones, so the app cannot see the real aplexer session this journey creates; #2586 fixes that. Also waiting on the fixture's aplexer 0.1.3 pin, which emits no `agent` key (#2580 detection, #2581 CLI pass-through + pin bump).

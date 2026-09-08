@@ -418,8 +418,8 @@ fi
 hostcli_tasks="$(sed -n 's/^UNIT_SHARED_TASKS=//p' <<<"$hostcli_plan")"
 if [[ " $hostcli_tasks " == *" :shared:core-usage:test "* ]] &&
    [[ " $hostcli_tasks " == *" :shared:core-storage:test "* ]] &&
-   [[ " $hostcli_tasks " == *" :shared:ui-kit:test "* ]]; then
-  ok "16a-2 a tools/pocketshell change runs the SHARED-module readers of the wire (core-usage / core-storage / ui-kit) — the round-2 B6 hole"
+   [[ " $hostcli_tasks " == *" :shared:core-hostapi:test "* ]]; then
+  ok "16a-2 a tools/pocketshell change runs the SHARED-module readers of the wire (core-usage / core-storage / core-hostapi) — the round-2 B6 hole"
 else
   bad "16a-2 a host-CLI change does NOT run the shared-module wire readers: $hostcli_tasks"
 fi

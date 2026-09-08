@@ -66,6 +66,13 @@ state model. A lane that uses a non-default fixture port passes
 wrapper or uses the agents-pool workflow described in
 [docker-emulator-runbook.md](docker-emulator-runbook.md).
 
+Network-fault journeys under `connected-test.sh --pool` are isolated per lane
+(issue #2128): the claimed agents port derives that lane's Toxiproxy SSH/API
+ports and compose project. The default `--no-pool` path keeps the single
+fixture ports for local and nightly runs. If a pool lane's proxy is recreated
+mid-run, the wrapper fails with a fixture error rather than reporting an empty
+session list as an app result.
+
 User-facing changes require reviewer evidence from the real app: capture the
 screen with `adb exec-out screencap -p > /tmp/pocketshell-screen.png`, include
 the Docker target and command, and report the visible result on the issue.

@@ -22,12 +22,24 @@ scan_roots() {
   done
 
   local matches
-  matches="$(rg -n -i 'tmux' "${roots[@]}" \
-    --glob '!**/build/**' \
-    --glob '!shared/core-terminal/src/main/java/com/termux/**' \
-    --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/AppDatabase.kt' \
-    --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/LegacyVersionOneMigration.kt' \
-    || true)"
+  if command -v rg >/dev/null 2>&1; then
+    matches="$(rg -n -i 'tmux' "${roots[@]}" \
+      --glob '!**/build/**' \
+      --glob '!shared/core-terminal/src/main/java/com/termux/**' \
+      --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/AppDatabase.kt' \
+      --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/LegacyVersionOneMigration.kt' \
+      || true)"
+  else
+    # Ubuntu runners have grep but may not have ripgrep. Keep this fallback's
+    # exclusions aligned with the product surface above so the guard remains
+    # blocking instead of silently skipping its scan.
+    matches="$(grep -RniE 'tmux' "${roots[@]}" \
+      --exclude-dir=build \
+      --exclude-dir=termux \
+      --exclude=AppDatabase.kt \
+      --exclude=LegacyVersionOneMigration.kt \
+      || true)"
+  fi
   if [[ -n "$matches" ]]; then
     echo "check-product-tmux-absent: FAIL — tmux reference found in product code:" >&2
     printf '%s\n' "$matches" >&2

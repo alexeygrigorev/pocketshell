@@ -166,6 +166,7 @@ ADB="$fake_adb"
 DEVICE_OUTPUT_DIR="/sdcard/fake-output"
 TEST_PACKAGE="com.pocketshell.app.test"
 APP_PACKAGE="com.pocketshell.app"
+TEST_RUNNER="com.pocketshell.next.HiltNextTestRunner"
 INSTRUMENTATION_ATTEMPTS=2
 FAKE_ADB_STATE="$tmpdir/adb-state"
 export FAKE_ADB_STATE

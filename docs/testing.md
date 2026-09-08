@@ -37,6 +37,30 @@ The first command statically checks the image, shims, and journey sources. The
 Docker mode builds the image, runs the bundled-aplexer lifecycle self-check, and
 probes create → list → attach → kill against an actual container.
 
+## Disk preflight
+
+The canonical local gates check free space before claiming an emulator, Docker
+fixture, or Gradle output lock. This keeps an `ENOSPC` capacity problem distinct
+from a product or test failure (issue #1989).
+
+| Free space on the gate's filesystem | Behaviour |
+|---|---|
+| below 10 GiB | refuse to start, exit **76**, and print the cleanup command |
+| 10–20 GiB | run with a `WARN: disk preflight` line naming the cleanup command |
+| above 20 GiB | run silently |
+
+`connected-test.sh --cleanup-suffixes` is exempt because it builds nothing and
+is the recovery path for a full box. Use `scripts/disk-cleanup.sh` for the
+serialized safe-list cleanup; it defaults to a dry run and `--apply` performs
+the bounded cleanup.
+
+Release validation has a larger fixed admission budget:
+
+| Free space on the release-validation filesystem | Behaviour |
+|---|---|
+| below 24 GiB | refuse the release validation, exit **76**, and print the safe cleanup command |
+| 24 GiB or more | reclaim stale copied worktrees, then start normally |
+
 ## Android emulator
 
 The maintained local AVD is `test`. The SDK paths on the maintainer box are:

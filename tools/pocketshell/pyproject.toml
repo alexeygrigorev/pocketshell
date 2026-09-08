@@ -81,8 +81,12 @@ dependencies = [
     # so the pinned wheel is the ONLY aplexer this CLI can run. Bumping the
     # pin is a deliberate, reviewed change.
     #
-    # 0.1.4 is required for the session tree to say WHICH agent is running.
-    # Through 0.1.3 a snapshot row's only agent-ish field was `engine`, and
+    # 0.1.5 is required for PocketShell's plain attach path. `a attach
+    # --no-status` removes aplexer's status chrome and reserved row while
+    # forwarding raw input and every PTY resize, so the Android terminal gets
+    # the full screen without a second terminal UI. 0.1.4 is also required
+    # for the session tree to say WHICH agent is running. Through 0.1.3 a
+    # snapshot row's only agent-ish field was `engine`, and
     # `engine` cannot answer that question: every session PocketShell creates
     # is `engine: "shell"` with the agent launched by hand inside it, so a
     # tree full of claude/codex/opencode sessions is indistinguishable from a
@@ -166,12 +170,12 @@ dependencies = [
     # no bundled aplexer at all, so `sessions create` there fails loud (there
     # is no PATH fallback — D22).
     #
-    # Install-surface note (unchanged in 0.1.4): as of 0.1.2 the wheels moved
+    # Install-surface note (unchanged in 0.1.5): as of 0.1.2 the wheels moved
     # from manylinux_2_17 to manylinux_2_28, raising the minimum glibc from
     # 2.17 to 2.28. Linux hosts older than that (CentOS 7, Ubuntu 18.04) can
     # no longer install pocketshell at all now that aplexer is a hard
     # dependency. Flagged, not solved here — see docs/aplexer-integration.md.
-    "aplexer==0.1.4; sys_platform == 'linux'",
+    "aplexer==0.1.5; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -237,7 +241,8 @@ required-version = "==0.10.11"
 # runtime dep landed at 00:32:04Z) for the session-tree regression fix above,
 # and now past aplexer 0.1.4's 2026-09-06T16:14:52Z PyPI upload (its
 # `aplexer-client` runtime dep landed at 16:14:48Z) for the `agent` field.
-exclude-newer = "2026-09-06T17:00:00Z"
+# 0.1.5 uploaded at 21:06:11Z (client at 21:06:06Z) for plain attach.
+exclude-newer = "2026-09-08T22:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -26,6 +26,7 @@ import com.pocketshell.uikit.components.TerminalHotkeysPage
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 
 /**
  * The dedicated terminal-hotkeys panel in its own [ModalBottomSheet] (#2521,
@@ -56,6 +57,7 @@ fun TerminalHotkeysSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
         modifier = modifier,
         contentWindowInsets = {
             WindowInsets.safeDrawing.only(

@@ -103,6 +103,39 @@ class SshKeysViewModelTest {
     }
 
     @Test
+    fun `loading an unencrypted detail asynchronously exposes the complete public key`() = runTest {
+        viewModel.import("id_ed25519", UNENCRYPTED_PEM).join()
+        val row = viewModel.state.first { it.keys.isNotEmpty() }.keys.single()
+
+        viewModel.loadPublicKey(row.id).join()
+
+        val loaded = viewModel.state.value.keys.single()
+        assertFalse(loaded.publicKeyLoading)
+        assertEquals(SshKeyMaterial.publicKeyLine(UNENCRYPTED_PEM), loaded.publicKey)
+        assertNull(loaded.publicKeyError)
+    }
+
+    @Test
+    fun `loading a missing detail file leaves loading and reports a useful error`() = runTest {
+        val id = db.sshKeyDao().insert(
+            com.pocketshell.core.storage.entity.SshKeyEntity(
+                name = "missing",
+                privateKeyPath = File(temporaryFolder.root, "missing-key").absolutePath,
+            ),
+        )
+        val row = viewModel.state.first { it.keys.any { key -> key.id == id } }
+            .keys.single()
+
+        viewModel.loadPublicKey(row.id)
+
+        val failed = viewModel.state.first {
+            it.keys.single().publicKeyError != null && !it.keys.single().publicKeyLoading
+        }.keys.single()
+        assertEquals("The private key file is missing", failed.publicKeyError)
+        assertNull(failed.publicKey)
+    }
+
+    @Test
     fun `an encrypted key is added and defers passphrase entry until needed`() = runTest {
         viewModel.import("locked", ENCRYPTED_PEM).join()
 

@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.SessionTreeUiState
@@ -374,17 +375,21 @@ class QuietWorkspaceScreenTest {
     @Test
     fun `workspace actions expose folder creation and removal`() {
         val openedCreate = mutableListOf<Boolean>()
-        setWorkspaceContent(
-            state = SessionTreeUiState(
-                hostId = 7,
-                workspacePath = "/home/alexey/git/empty",
-                loaded = true,
-            ),
-            onOpenCreateFolder = { openedCreate += true },
-        )
-
-        composeRule.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
-        composeRule.onNodeWithTag(WORKSPACE_CREATE_FOLDER_TAG).performClick()
+        composeRule.setContent {
+            PocketShellTheme {
+                WorkspaceActionsContent(
+                    onNewSession = {},
+                    onBrowseFiles = {},
+                    onCopyPath = {},
+                    onReorder = {},
+                    onCreateFolder = { openedCreate += true },
+                    onRemove = {},
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(WORKSPACE_CREATE_FOLDER_TAG).performScrollTo().performClick()
         assertEquals(listOf(true), openedCreate)
     }
 

@@ -63,6 +63,9 @@ class SettingsNavigationTest {
     fun setUp() {
         clearCrashReports()
         stack = TestConnectStack()
+        stack.factory.script = { connection ->
+            connection.sftpFixture().seedDirectory("/home/alexey/git/pocketshell")
+        }
         hostId = runBlocking {
             val keyId = stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
             stack.db.hostDao().insert(
@@ -172,8 +175,6 @@ class SettingsNavigationTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag(CRASH_REPORTS_BACK_TAG).assertExists()
-        composeRule.onNodeWithText("Back").assertExists()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(CRASH_REPORTS_BACK_TAG).performClick()
         composeRule.waitForIdle()
 
@@ -250,6 +251,7 @@ class SettingsNavigationTest {
                         viewModel = WorkspaceRootsViewModel(
                             projectRootDao = stack.db.projectRootDao(),
                             hostDao = stack.db.hostDao(),
+                            registry = stack.registry,
                             savedStateHandle = SavedStateHandle(
                                 mapOf(Destination.ARG_HOST_ID to hostId),
                             ),

@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -13,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.defaultMinSize
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -110,7 +110,7 @@ fun PocketShellButton(
     ) {
         Text(
             text = text,
-            style = if (compact) PocketShellType.button else LocalTextStyle.current,
+            style = if (compact) PocketShellType.bodyDense else PocketShellType.button,
             fontWeight = if (variant == ButtonVariant.Primary) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
@@ -137,11 +137,14 @@ fun PocketShellButton(
     // action sits flush in a banner/dialog row; the standard variants keep
     // Material's default content padding untouched.
     val contentPadding = if (compact) CompactContentPadding else null
+    // Compact changes only the label padding. Every visible button keeps the
+    // Quiet 56dp button minimum even when it appears inside a banner.
+    val sizedModifier = modifier.defaultMinSize(minHeight = 56.dp)
     when (variant) {
         ButtonVariant.Primary -> {
             Button(
                 onClick = onClick,
-                modifier = modifier,
+                modifier = sizedModifier,
                 enabled = enabled,
                 shape = ButtonShape,
                 contentPadding = contentPadding ?: ButtonDefaults.ContentPadding,
@@ -162,7 +165,7 @@ fun PocketShellButton(
             // other variants applies; the accent border is the only differentiator.
             Button(
                 onClick = onClick,
-                modifier = modifier,
+                modifier = sizedModifier,
                 enabled = enabled,
                 shape = ButtonShape,
                 contentPadding = contentPadding ?: ButtonDefaults.ContentPadding,
@@ -184,7 +187,7 @@ fun PocketShellButton(
         ButtonVariant.Text -> {
             TextButton(
                 onClick = onClick,
-                modifier = modifier,
+                modifier = sizedModifier,
                 enabled = enabled,
                 shape = ButtonShape,
                 contentPadding = contentPadding ?: ButtonDefaults.TextButtonContentPadding,
@@ -201,7 +204,7 @@ fun PocketShellButton(
             // "destructive confirmation uses red text only on the confirm action").
             TextButton(
                 onClick = onClick,
-                modifier = modifier,
+                modifier = sizedModifier,
                 enabled = enabled,
                 shape = ButtonShape,
                 contentPadding = contentPadding ?: ButtonDefaults.TextButtonContentPadding,

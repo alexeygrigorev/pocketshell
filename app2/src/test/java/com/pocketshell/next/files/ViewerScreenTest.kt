@@ -110,21 +110,18 @@ class ViewerScreenTest {
     }
 
     @Test
-    fun `editing swaps the header actions for Save and Cancel`() {
+    fun `editing exposes Save in the header and leaves through the dirty sheet`() {
         var saved = 0
-        var cancelled = 0
         setContent(
             state(loaded = true, editing = true, draft = "x", content = ViewerContent.Text("x")),
             onSave = { saved += 1 },
-            onCancelEdit = { cancelled += 1 },
         )
 
         composeRule.onNodeWithTag(VIEWER_EDIT_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(VIEWER_SAVE_TAG).performClick()
-        composeRule.onNodeWithTag(VIEWER_CANCEL_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_CANCEL_TAG).assertDoesNotExist()
 
         assertEquals(1, saved)
-        assertEquals(1, cancelled)
     }
 
     @Test
@@ -134,7 +131,7 @@ class ViewerScreenTest {
         )
 
         composeRule.onNodeWithTag(VIEWER_SAVE_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(VIEWER_CANCEL_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(VIEWER_CANCEL_TAG).assertDoesNotExist()
         composeRule.onNodeWithText("Saving…").assertIsDisplayed()
     }
 

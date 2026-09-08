@@ -4,9 +4,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.click
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -22,34 +20,23 @@ class SshKeysScreenTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `detail copy action writes the complete public key to the clipboard`() {
+    fun `detail content copy action writes the complete public key to the clipboard`() {
         val publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfixture pocketshell"
         val copiedValue = AtomicReference<String?>()
         composeRule.setContent {
-            SshKeysScreen(
-                state = SshKeysUiState(
-                    loaded = true,
-                    keys = listOf(SshKeyRow(7L, "work-key", "SHA256:fixture", publicKey = publicKey)),
-                ),
-                onBack = {},
-                onGenerate = {},
-                onImportPasted = { _, _ -> },
-                onPickFile = {},
-                onDelete = {},
-                onDismissMessage = {},
+            SshKeyDetailContent(
+                key = SshKeyRow(7L, "work-key", "SHA256:fixture", publicKey = publicKey),
+                onClose = {},
                 onCopyPublicKey = { copiedValue.set(it) },
+                onCopyFingerprint = {},
             )
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(sshKeyRowTag(7L)).performClick()
-        composeRule.waitForIdle()
-        composeRule.mainClock.advanceTimeBy(1_000)
-        composeRule.waitForIdle()
         composeRule.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG)
             .performScrollTo()
             .assertIsDisplayed()
-            .performTouchInput { click() }
+            .performClick()
         composeRule.waitForIdle()
 
         assertEquals(publicKey, copiedValue.get())

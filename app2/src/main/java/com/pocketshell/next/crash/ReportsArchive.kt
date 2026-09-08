@@ -50,7 +50,11 @@ object ReportsArchive {
      * Returns [destination] for call-site chaining. The caller owns the
      * lifecycle of [destination].
      */
-    fun packInto(reportFiles: List<File>, destination: File): File {
+    fun packInto(
+        reportFiles: List<File>,
+        destination: File,
+        contentTransform: (String) -> String = { it },
+    ): File {
         destination.parentFile?.mkdirs()
         val usedNames = HashSet<String>()
         ZipOutputStream(destination.outputStream().buffered()).use { zip ->
@@ -58,7 +62,8 @@ object ReportsArchive {
                 if (!file.isFile) continue
                 val entryName = uniqueEntryName(file.name, usedNames)
                 zip.putNextEntry(ZipEntry(entryName))
-                file.inputStream().use { input -> input.copyTo(zip) }
+                val content = file.readText()
+                zip.write(contentTransform(content).toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
             }
         }

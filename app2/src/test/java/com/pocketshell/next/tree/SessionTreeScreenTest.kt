@@ -17,7 +17,6 @@ import com.pocketshell.core.hostapi.SessionListError
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
-import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -102,7 +101,7 @@ class SessionTreeScreenTest {
     }
 
     @Test
-    fun `a row shows relative activity and never engine, tag or implementation text`() {
+    fun `a row shows a readable name and kind instead of raw identifiers`() {
         setContent(
             state(
                 loaded = true,
@@ -112,15 +111,16 @@ class SessionTreeScreenTest {
                         "/home/a/git/aplexer",
                         activity = NOW - 7_200,
                                                 tag = "yolo",
-                        engine = "codex",
+                        agent = "codex",
                     ),
                 ),
             ),
         )
 
-        composeRule.onNodeWithText("2h ago").assertIsDisplayed()
-        composeRule.onNodeWithText("aplexer · yolo · 2h ago").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("codex").assertDoesNotExist()
+        composeRule.onNodeWithText("yolo").assertIsDisplayed()
+        composeRule.onNodeWithText("Codex").assertIsDisplayed()
+        composeRule.onNodeWithText("2h ago").assertDoesNotExist()
+        composeRule.onNodeWithText("aplexer-follow:yolo").assertDoesNotExist()
     }
 
     @Test
@@ -143,7 +143,7 @@ class SessionTreeScreenTest {
      * Attached is the green dot only.
      */
     @Test
-    fun `the tree has no agent badge or chip and an attached row keeps its green dot`() {
+    fun `the tree has no agent badge, chip or connection status dot`() {
         setContent(
             state(
                 loaded = true,
@@ -174,7 +174,7 @@ class SessionTreeScreenTest {
         composeRule.onNodeWithContentDescription("Working").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("claude").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("codex").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription(ATTACHED_DESCRIPTION).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(ATTACHED_DESCRIPTION).assertDoesNotExist()
         composeRule.onNodeWithTag(sessionRowTag("waiting-agent")).assertIsDisplayed()
     }
 
@@ -235,17 +235,20 @@ class SessionTreeScreenTest {
      * test is RED until that action exists and fires `onOpenPorts`.
      */
     @Test
-    fun `tapping Ports in the header opens port forwarding`() {
+    fun `host tools exposes the ports action`() {
         var files = 0
         var ports = 0
-        setContent(
-            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
-            onOpenFiles = { files += 1 },
-            onOpenPorts = { ports += 1 },
-        )
-
-        composeRule.onNodeWithTag(SESSION_TREE_FILES_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).assertIsDisplayed()
+        composeRule.setContent {
+            PocketShellTheme {
+                SessionTreeHostToolsContent(
+                    onOpenFiles = { files += 1 },
+                    onOpenPorts = { ports += 1 },
+                    onOpenUsage = {},
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).performClick()
 
         assertEquals(1, ports)
@@ -266,8 +269,6 @@ class SessionTreeScreenTest {
         )
 
         composeRule.onNodeWithTag(SESSION_TREE_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_TREE_BACK_TAG).performClick()
 
         assertEquals(1, backs)
@@ -279,38 +280,40 @@ class SessionTreeScreenTest {
      * caller; this test is RED until that action exists and fires `onOpenUsage`.
      */
     @Test
-    fun `tapping Usage in the header opens the usage panel`() {
+    fun `host tools exposes the usage action`() {
         var usage = 0
-        setContent(
-            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
-            onOpenUsage = { usage += 1 },
-        )
-
-        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).assertIsDisplayed()
+        composeRule.setContent {
+            PocketShellTheme {
+                SessionTreeHostToolsContent(
+                    onOpenFiles = {},
+                    onOpenPorts = {},
+                    onOpenUsage = { usage += 1 },
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
 
         assertEquals(1, usage)
     }
 
     @Test
-    fun `a glance pill sits beside Usage when a reading exists and also opens the panel`() {
+    fun `host tools keeps usage out of the tree header`() {
         var usage = 0
-        setContent(
-            state(loaded = true, sessions = listOf(row("claude-main", "/w", activity = NOW))),
-            onOpenUsage = { usage += 1 },
-            usagePillState = UsageGlancePillState(
-                percent = 72,
-                provider = "Codex",
-                window = "7d",
-                kind = PillKind.Warn,
-                stale = false,
-                fetchedClock = "13:40",
-            ),
-        )
-
-        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
+        composeRule.setContent {
+            PocketShellTheme {
+                SessionTreeHostToolsContent(
+                    onOpenFiles = {},
+                    onOpenPorts = {},
+                    onOpenUsage = { usage += 1 },
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
 
         assertEquals(1, usage)
     }
@@ -453,7 +456,9 @@ class SessionTreeScreenTest {
 
         composeRule.onNodeWithTag(STOP_SESSION_TITLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
-        composeRule.onNodeWithText(stopSessionMessage("api")).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            stopSessionMessage("api", workspace = "/w", host = "host #7"),
+        ).assertIsDisplayed()
         composeRule.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
         assertEquals(1, confirmed)
@@ -534,6 +539,7 @@ class SessionTreeScreenTest {
         activity: Long?,
         tag: String? = null,
         engine: String? = null,
+        agent: String? = null,
         attached: Boolean = false,
         agentState: AgentState? = null,
         agentStateSource: AgentStateSource? = null,
@@ -545,7 +551,7 @@ class SessionTreeScreenTest {
         tag = tag,
         engine = engine,
         profile = null,
-        agent = null,
+        agent = agent,
         agentState = agentState,
         agentStateSource = agentStateSource,
         attached = attached,

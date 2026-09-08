@@ -43,6 +43,8 @@ data class WorkspaceProjection(
     val sessions: List<SessionRow>,
     /** True only when the host's durable membership list contains this path. */
     val durable: Boolean,
+    /** Durable membership order; inferred session workspaces sort after it. */
+    val membershipOrder: Int = Int.MAX_VALUE,
 )
 
 /**
@@ -84,6 +86,30 @@ fun sessionKindLabel(session: SessionRow): String = when (
         .filter(String::isNotBlank)
         .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
         .ifBlank { "Terminal" }
+}
+
+/**
+ * Chooses a readable row label without changing the host identity used for
+ * navigation. Generated shell tags become "Terminal"; meaningful tags keep
+ * their short leaf so two sessions remain distinguishable.
+ */
+fun sessionDisplayNames(sessions: List<SessionRow>): Map<String, String> {
+    val occurrences = mutableMapOf<String, Int>()
+    return sessions.associate { session ->
+        val base = readableSessionName(session.name)
+        val occurrence = (occurrences[base] ?: 0) + 1
+        occurrences[base] = occurrence
+        session.name to if (occurrence == 1) base else "$base $occurrence"
+    }
+}
+
+/** Converts a host session identifier into the short name shown in the UI. */
+fun readableSessionName(name: String): String {
+    val leaf = name.substringAfterLast(':').trim()
+    return when (leaf.lowercase()) {
+        "", "shell", "terminal", "default" -> "Terminal"
+        else -> leaf
+    }
 }
 
 /** The label used for sessions that do not belong to a known root. */
@@ -133,32 +159,19 @@ fun projectWorkspaceRoots(
     configured.forEach { rootSpecs.putIfAbsent(it.key, it) }
 
     val canonicalMemberships = linkedMapOf<String, WorkspaceMembership>()
-    for (membership in memberships) {
+    val membershipOrders = mutableMapOf<String, Int>()
+    for ((membershipIndex, membership) in memberships.withIndex()) {
         val path = canonicalRemotePath(membership.path, resolvedHome) ?: continue
-        canonicalMemberships.putIfAbsent(
-            path,
-            membership.copy(
-                path = path,
-                displayPath = membership.displayPath.trim().ifEmpty { path },
-            ),
-        )
-    }
-
-    if (configured.isEmpty()) {
-        (canonicalMemberships.keys + sessions.mapNotNull { canonicalRemotePath(it.workspace, resolvedHome) })
-            .forEach { path ->
-                inferredRootForPath(path, resolvedHome)?.let { rootPath ->
-                    rootSpecs.putIfAbsent(
-                        rootPath,
-                        RootSpec(
-                            path = rootPath,
-                            label = pathLabel(rootPath, resolvedHome),
-                            order = Long.MAX_VALUE,
-                            configured = false,
-                        ),
-                    )
-                }
-            }
+        if (canonicalMemberships.putIfAbsent(
+                path,
+                membership.copy(
+                    path = path,
+                    displayPath = membership.displayPath.trim().ifEmpty { path },
+                ),
+            ) == null
+        ) {
+            membershipOrders[path] = membershipIndex
+        }
     }
 
     val rootBuckets = linkedMapOf<String, RootBucket>()
@@ -175,12 +188,18 @@ fun projectWorkspaceRoots(
                     configured = false,
                 )
             }
+        // A configured root is already a navigable host location. If the host
+        // registry also reports that exact path as a workspace, keep sessions
+        // in the root-level group rather than rendering a second child row
+        // with the same identity.
+        if (root.configured && path == root.path) continue
         val bucket = rootBuckets.getOrPut(root.key) { RootBucket(root) }
         val workspace = MutableWorkspace(
             path = path,
             displayPath = membership.displayPath,
             sessions = mutableListOf(),
             durable = true,
+            membershipOrder = membershipOrders[path] ?: Int.MAX_VALUE,
         )
         durableRows[path] = workspace
         bucket.workspaces[path] = workspace
@@ -227,6 +246,7 @@ fun projectWorkspaceRoots(
                         compareBy<MutableWorkspace> {
                             explicitOrder[it.path] ?: Int.MAX_VALUE
                         }
+                            .thenBy { it.membershipOrder }
                             .thenBy { workspaceCreated(it.sessions) }
                             .thenBy { it.path },
                     )
@@ -237,6 +257,7 @@ fun projectWorkspaceRoots(
                             displayPath = workspace.displayPath,
                             sessions = workspace.sessions.sortedWith(SESSION_ORDER),
                             durable = workspace.durable,
+                            membershipOrder = workspace.membershipOrder,
                         )
                     },
             )
@@ -309,6 +330,7 @@ private data class MutableWorkspace(
     val displayPath: String,
     val sessions: MutableList<SessionRow>,
     val durable: Boolean,
+    val membershipOrder: Int = Int.MAX_VALUE,
 )
 
 private const val OTHER_WORKSPACE_ROOT_KEY = "::quiet-other::"
@@ -347,24 +369,6 @@ private fun pathWithin(path: String, root: String?, home: String?): Boolean {
     val canonicalRoot = canonicalRemotePath(root, home) ?: return false
     val canonicalPath = canonicalRemotePath(path, home) ?: return false
     return canonicalPath == canonicalRoot || canonicalPath.startsWith("$canonicalRoot/")
-}
-
-private fun inferredRootForPath(path: String, home: String?): String? {
-    val canonicalHome = canonicalRemotePath(home)
-    if (canonicalHome != null) {
-        if (path == canonicalHome) return canonicalHome
-        if (path.startsWith("$canonicalHome/")) {
-            val relative = path.removePrefix("$canonicalHome/")
-            val first = relative.substringBefore('/').takeIf { it.isNotEmpty() } ?: return canonicalHome
-            return "$canonicalHome/$first"
-        }
-        return null
-    }
-    return if (path.startsWith('/')) {
-        path.split('/').filter { it.isNotEmpty() }.take(2).joinToString("/").let { "/$it" }
-    } else {
-        null
-    }
 }
 
 private fun inferRemoteHome(paths: List<String>): String? {

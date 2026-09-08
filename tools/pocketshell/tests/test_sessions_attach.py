@@ -24,7 +24,9 @@ def test_attach_execs_the_resolved_aplexer_binary(monkeypatch) -> None:
     result = CliRunner().invoke(sessions.sessions_group, ["attach", "project:shell"])
 
     assert result.exit_code == 0, result.output
-    assert executed == [["/fake/a", "attach", "b3feff71-4a78-4055-a2d3-6c99187ecffb"]]
+    assert executed == [
+        ["/fake/a", "attach", "--no-status", "b3feff71-4a78-4055-a2d3-6c99187ecffb"]
+    ]
 
 
 def test_attach_fails_loudly_when_listing_cannot_reach_aplexer(monkeypatch) -> None:

@@ -78,15 +78,8 @@ fun ReorderWorkspacesScreen(
         ScreenHeader(
             title = "Reorder workspaces",
             subtitle = state.hostLabel,
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(REORDER_WORKSPACES_BACK_TAG),
-                )
-            },
+            onBack = onBack,
+            backTestTag = REORDER_WORKSPACES_BACK_TAG,
         )
 
         when {

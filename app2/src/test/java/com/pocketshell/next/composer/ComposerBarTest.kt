@@ -140,7 +140,7 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_STAGING_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("Uploading 2 of 3 · shot.png").assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).assertIsNotEnabled()
     }
 
     @Test
@@ -160,6 +160,7 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
@@ -209,6 +210,7 @@ class ComposerBarTest {
         var toggled = 0
         setContent(ComposerUiState(), onToggleHistory = { toggled += 1 })
 
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).performClick()
 
         assertEquals(1, toggled)
@@ -224,9 +226,10 @@ class ComposerBarTest {
     fun `idle controls sit on one row with grouped tools insert send and mic`() {
         setContent(ComposerUiState(draft = "hello", micAvailable = true))
 
-        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
@@ -238,7 +241,7 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_DISCARD_TAG).assertDoesNotExist()
 
         assertSameRow(COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
-        assertSameRow(COMPOSER_ATTACH_TAG, COMPOSER_HISTORY_TAG, COMPOSER_SLASH_TRIGGER_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_TOOLS_TRIGGER_TAG, COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
     }
 
     /**
@@ -349,12 +352,12 @@ class ComposerBarTest {
         }
         val stop = controls.getValue(COMPOSER_STOP_RECORDING_TAG)
         assertEquals(
-            "the stop control is squashed — the recording row has run out of width",
-            44f,
+            "the stop control keeps the 48dp touch target",
+            48f,
             stop.width / density,
             0.5f,
         )
-        assertEquals(44f, stop.height / density, 0.5f)
+        assertEquals(48f, stop.height / density, 0.5f)
     }
 
     @Test
@@ -362,6 +365,7 @@ class ComposerBarTest {
         var draft = ""
         setContent(ComposerUiState(), onDraftChange = { draft = it })
 
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
         composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).performClick()
 
         assertEquals("/", draft)

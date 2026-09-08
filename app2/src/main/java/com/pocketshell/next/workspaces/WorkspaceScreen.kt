@@ -4,11 +4,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,6 +26,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -49,9 +55,11 @@ import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 const val WORKSPACE_SCREEN_TAG: String = "workspace-screen"
@@ -107,6 +115,7 @@ fun WorkspaceRoute(
         onOpenReorder = onOpenReorder,
         onCreateSession = viewModel::openCreateSheet,
         onSubmitCreate = viewModel::createSession,
+        onRefreshEngines = viewModel::refreshEngines,
         onDismissCreate = viewModel::dismissCreateSheet,
         onRequestStop = viewModel::requestStopSession,
         onConfirmStop = viewModel::confirmStopSession,
@@ -135,6 +144,7 @@ fun WorkspaceScreen(
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (CreateSessionRequest) -> Unit = {},
+    onRefreshEngines: () -> Unit = {},
     onDismissCreate: () -> Unit = {},
     onRequestStop: (String) -> Unit = {},
     onConfirmStop: () -> Unit = {},
@@ -146,7 +156,11 @@ fun WorkspaceScreen(
     onConfirmRemoveFromList: () -> Unit = {},
 ) {
     val clipboard = LocalClipboardManager.current
+    val displayNames = remember(state.workspaceSessions) {
+        sessionDisplayNames(state.workspaceSessions)
+    }
     var removeDialogVisible by remember { mutableStateOf(false) }
+    var workspaceActionsOpen by remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -155,53 +169,13 @@ fun WorkspaceScreen(
         ScreenHeader(
             title = workspaceLabel(state.workspacePath),
             subtitle = workspaceSubtitle(state),
-            titleMaxLines = Int.MAX_VALUE,
-            subtitleMaxLines = Int.MAX_VALUE,
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(WORKSPACE_BACK_TAG),
-                )
-            },
+            titleMaxLines = 2,
+            subtitleMaxLines = 2,
+            onBack = onBack,
+            backTestTag = WORKSPACE_BACK_TAG,
             trailing = {
-                Kebab(
-                    items = listOf(
-                        KebabItem(
-                            label = WORKSPACE_NEW_SESSION_LABEL,
-                            onClick = onCreateSession,
-                            testTag = WORKSPACE_NEW_SESSION_TAG,
-                        ),
-                        KebabItem(label = "Files", onClick = onOpenFiles),
-                        KebabItem(label = "Ports", onClick = onOpenPorts),
-                        KebabItem(label = "Usage", onClick = onOpenUsage),
-                        KebabItem(
-                            label = "Copy folder path",
-                            onClick = {
-                                state.workspacePath?.let { path ->
-                                    clipboard.setText(AnnotatedString(path))
-                                }
-                            },
-                            testTag = WORKSPACE_COPY_PATH_TAG,
-                        ),
-                        KebabItem(
-                            label = "Reorder workspaces",
-                            onClick = onOpenReorder,
-                            testTag = WORKSPACE_REORDER_TAG,
-                        ),
-                        KebabItem(
-                            label = "Create folder",
-                            onClick = onOpenCreateFolder,
-                            testTag = WORKSPACE_CREATE_FOLDER_TAG,
-                        ),
-                        KebabItem(
-                            label = "Remove from list",
-                            onClick = { removeDialogVisible = true },
-                            testTag = WORKSPACE_REMOVE_FROM_LIST_TAG,
-                        ),
-                    ),
+                KebabTrigger(
+                    onClick = { workspaceActionsOpen = true },
                     contentDescription = "Workspace actions",
                     triggerTestTag = WORKSPACE_ACTIONS_TAG,
                 )
@@ -291,6 +265,7 @@ fun WorkspaceScreen(
                     ) { session ->
                         WorkspaceSessionRow(
                             session = session,
+                            displayName = displayNames[session.name] ?: session.name,
                             onClick = { onOpenSession(session.name) },
                             onRequestStop = { onRequestStop(session.name) },
                         )
@@ -318,8 +293,40 @@ fun WorkspaceScreen(
         CreateSessionSheet(
             state = state.create,
             defaultFolder = state.suggestedFolder,
+            existingSessionNames = state.workspaceSessions.map { it.name },
             onSubmit = onSubmitCreate,
             onCancel = onDismissCreate,
+            onRefreshEngines = onRefreshEngines,
+        )
+    }
+
+    if (workspaceActionsOpen) {
+        WorkspaceActionsSheet(
+            onNewSession = {
+                workspaceActionsOpen = false
+                onCreateSession()
+            },
+            onBrowseFiles = {
+                workspaceActionsOpen = false
+                onOpenFiles()
+            },
+            onCopyPath = {
+                workspaceActionsOpen = false
+                state.workspacePath?.let { path -> clipboard.setText(AnnotatedString(path)) }
+            },
+            onReorder = {
+                workspaceActionsOpen = false
+                onOpenReorder()
+            },
+            onCreateFolder = {
+                workspaceActionsOpen = false
+                onOpenCreateFolder()
+            },
+            onRemove = {
+                workspaceActionsOpen = false
+                removeDialogVisible = true
+            },
+            onDismiss = { workspaceActionsOpen = false },
         )
     }
 
@@ -375,7 +382,11 @@ fun WorkspaceScreen(
     state.pendingStop?.let { name ->
         ConfirmDialog(
             title = STOP_SESSION_TITLE,
-            message = stopSessionMessage(name),
+            message = stopSessionMessage(
+                name = readableSessionName(name),
+                workspace = state.workspacePath,
+                host = "host #${state.hostId}",
+            ),
             confirmLabel = STOP_SESSION_CONFIRM_LABEL,
             destructive = true,
             onConfirm = onConfirmStop,
@@ -388,18 +399,112 @@ fun WorkspaceScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WorkspaceActionsSheet(
+    onNewSession: () -> Unit,
+    onBrowseFiles: () -> Unit,
+    onCopyPath: () -> Unit,
+    onReorder: () -> Unit,
+    onCreateFolder: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = com.pocketshell.uikit.theme.PocketShellColors.Surface,
+        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
+        modifier = Modifier.testTag(WORKSPACE_ACTIONS_TAG),
+    ) {
+        WorkspaceActionsContent(
+            onNewSession = onNewSession,
+            onBrowseFiles = onBrowseFiles,
+            onCopyPath = onCopyPath,
+            onReorder = onReorder,
+            onCreateFolder = onCreateFolder,
+            onRemove = onRemove,
+            onDismiss = onDismiss,
+        )
+    }
+}
+
+/** The workspace action body, separate from the modal container for deterministic UI tests. */
+@Composable
+internal fun WorkspaceActionsContent(
+    onNewSession: () -> Unit,
+    onBrowseFiles: () -> Unit,
+    onCopyPath: () -> Unit,
+    onReorder: () -> Unit,
+    onCreateFolder: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = PocketShellSpacing.lg),
+    ) {
+        SheetHeader(
+            title = "Workspace actions",
+            subtitle = "Manage this workspace",
+            onClose = onDismiss,
+        )
+        ListRow(
+            title = WORKSPACE_NEW_SESSION_LABEL,
+            subtitle = "Start another terminal here",
+            onClick = onNewSession,
+            modifier = Modifier.testTag(WORKSPACE_NEW_SESSION_TAG),
+        )
+        ListRow(
+            title = "Browse files",
+            subtitle = "Open this folder in Files",
+            onClick = onBrowseFiles,
+        )
+        ListRow(
+            title = "Copy folder path",
+            subtitle = "Copy the canonical remote path",
+            onClick = onCopyPath,
+            modifier = Modifier.testTag(WORKSPACE_COPY_PATH_TAG),
+        )
+        ListRow(
+            title = "Reorder workspaces",
+            subtitle = "Change the host list order",
+            onClick = onReorder,
+            modifier = Modifier.testTag(WORKSPACE_REORDER_TAG),
+        )
+        ListRow(
+            title = "Create folder",
+            subtitle = "Create a child folder here",
+            onClick = onCreateFolder,
+            modifier = Modifier.testTag(WORKSPACE_CREATE_FOLDER_TAG),
+        )
+        ListRow(
+            title = "Remove from list",
+            subtitle = "Keeps the folder and running sessions",
+            onClick = onRemove,
+            modifier = Modifier.testTag(WORKSPACE_REMOVE_FROM_LIST_TAG),
+        )
+    }
+}
+
 @Composable
 private fun WorkspaceSessionRow(
     session: SessionRow,
+    displayName: String = session.name,
     onClick: () -> Unit,
     onRequestStop: () -> Unit,
 ) {
     ListRow(
-        title = session.name,
+        title = displayName,
         subtitle = sessionKindLabel(session),
-        titleStyle = com.pocketshell.uikit.theme.PocketShellType.title,
+        leading = { SessionKindMark(agent = session.agent) },
+        titleStyle = com.pocketshell.uikit.theme.PocketShellType.body,
         subtitleStyle = com.pocketshell.uikit.theme.PocketShellType.metadata,
-        titleWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        titleWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+        titleMaxLines = 2,
         trailing = {
             Kebab(
                 items = listOf(

@@ -214,7 +214,7 @@ private fun ConnectPassphraseSheet(
                 PocketShellSpacing.sm,
             ),
         ) {
-            SheetHeader(title = "Unlock SSH key")
+            SheetHeader(title = "Unlock SSH key", onClose = onDismiss)
             Text(
                 text = "${prompt.hostLabel} needs ${prompt.keyName}.",
                 color = PocketShellColors.Text,

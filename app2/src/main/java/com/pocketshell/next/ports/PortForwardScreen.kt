@@ -125,19 +125,9 @@ fun PortForwardScreen(
         ScreenHeader(
             title = state.hostName,
             subtitle = state.hostSubtitle.ifBlank { state.connection.label },
-            leading = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    PocketShellButton(
-                        text = "Back",
-                        onClick = onBack,
-                        variant = ButtonVariant.Text,
-                        compact = true,
-                        modifier = Modifier.testTag(PORT_FORWARD_BACK_TAG),
-                    )
-                    Spacer(Modifier.width(PocketShellSpacing.sm))
-                    StatusDot(status = state.connection.toConnectionStatus(state.enabled))
-                }
-            },
+            onBack = onBack,
+            backTestTag = PORT_FORWARD_BACK_TAG,
+            trailing = { StatusDot(status = state.connection.toConnectionStatus(state.enabled)) },
         )
 
         ForwardingToggleRow(enabled = state.enabled, onEnabledChange = onSetEnabled)
@@ -307,7 +297,7 @@ private fun ShowAllPortsRow(checked: Boolean, hiddenCount: Int, onCheckedChange:
         leading = {
             Checkbox(
                 checked = checked,
-                onCheckedChange = onCheckedChange,
+                onCheckedChange = null,
                 colors = CheckboxDefaults.colors(
                     checkedColor = PocketShellColors.Accent,
                     uncheckedColor = PocketShellColors.TextSecondary,

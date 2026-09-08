@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor.ConnectionState
@@ -88,6 +89,9 @@ class PortForwardScreenTest {
             onTogglePort = { toggled += it },
         )
 
+        composeRule
+            .onNodeWithTag(PORT_TABLE_TAG)
+            .performScrollToNode(hasText("9000"))
         composeRule.onNodeWithTag(portRowTag(9_000)).performClick()
 
         assertEquals(listOf(9_000), toggled)
@@ -231,8 +235,6 @@ class PortForwardScreenTest {
         setContent(state(enabled = false), onBack = { backs += 1 })
 
         composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(PORT_FORWARD_BACK_TAG).performClick()
 
         assertEquals(1, backs)

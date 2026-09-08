@@ -11,19 +11,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-scan_roots() {
-  local -a roots=("$@")
-  local root
-  for root in "${roots[@]}"; do
-    if [[ ! -d "$root" ]]; then
-      echo "check-product-tmux-absent: FAIL — missing scan root: $root" >&2
+scan_paths() {
+  local -a paths=("$@")
+  local path
+  for path in "${paths[@]}"; do
+    if [[ ! -e "$path" ]]; then
+      echo "check-product-tmux-absent: FAIL — missing scan path: $path" >&2
       return 1
     fi
   done
 
   local matches
   if command -v rg >/dev/null 2>&1; then
-    matches="$(rg -n -i 'tmux' "${roots[@]}" \
+    matches="$(rg -n -i 'tmux' "${paths[@]}" \
       --glob '!**/build/**' \
       --glob '!shared/core-terminal/src/main/java/com/termux/**' \
       --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/AppDatabase.kt' \
@@ -33,7 +33,7 @@ scan_roots() {
     # Ubuntu runners have grep but may not have ripgrep. Keep this fallback's
     # exclusions aligned with the product surface above so the guard remains
     # blocking instead of silently skipping its scan.
-    matches="$(grep -RniE 'tmux' "${roots[@]}" \
+    matches="$(grep -RniE 'tmux' "${paths[@]}" \
       --exclude-dir=build \
       --exclude-dir=termux \
       --exclude=AppDatabase.kt \
@@ -62,13 +62,20 @@ self_test() {
 
   mkdir -p "$tmp/product"
   printf '%s\n' 'val backend = "tmux"' > "$tmp/product/Runtime.kt"
-  if scan_roots "$tmp/product"; then
+  if scan_paths "$tmp/product"; then
     echo "check-product-tmux-absent: self-test FAIL — planted product hit was missed" >&2
     return 1
   fi
 
+  printf '%s\n' '[project.scripts]' 'backend = "tmux"' > "$tmp/product/pyproject.toml"
+  if scan_paths "$tmp/product/pyproject.toml"; then
+    echo "check-product-tmux-absent: self-test FAIL — manifest-file scan missed planted product hit" >&2
+    return 1
+  fi
+
   printf '%s\n' 'val backend = "aplexer"' > "$tmp/product/Runtime.kt"
-  if ! scan_roots "$tmp/product"; then
+  printf '%s\n' '[project.scripts]' 'pocketshell = "pocketshell.cli:main"' > "$tmp/product/pyproject.toml"
+  if ! scan_paths "$tmp/product"; then
     echo "check-product-tmux-absent: self-test FAIL — clean product tree was rejected" >&2
     return 1
   fi
@@ -85,8 +92,10 @@ if [[ "${1:-}" != "" ]]; then
   exit 2
 fi
 
-scan_roots \
+scan_paths \
   tools/pocketshell/src \
+  tools/pocketshell/pyproject.toml \
   app2/src/main \
+  app2/build.gradle.kts \
   shared/*/src/main
 echo "check-product-tmux-absent: OK — product session paths are aplexer-only"

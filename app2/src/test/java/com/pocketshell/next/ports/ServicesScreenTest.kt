@@ -99,6 +99,29 @@ class ServicesScreenTest {
     }
 
     @Test
+    fun `only a verified active service exposes the browser action`() {
+        val opened = mutableListOf<String>()
+        setContent(
+            state(
+                enabled = true,
+                connection = ConnectionState.Connected,
+                rows = listOf(
+                    tunnel(5173, "vite", TunnelInfo.Status.FORWARDING, localPort = 35173),
+                    tunnel(8000, "python", TunnelInfo.Status.FORWARDING, localPort = 38000),
+                ),
+            ).copy(
+                verifiedHttpServices = mapOf(5173 to "http://127.0.0.1:35173"),
+            ),
+            onOpenBrowser = { opened += it },
+        )
+
+        composeRule.onNodeWithTag(serviceOpenTag(5173)).assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag(serviceOpenTag(8000)).assertDoesNotExist()
+
+        assertEquals(listOf("http://127.0.0.1:35173"), opened)
+    }
+
+    @Test
     fun `lost connection shows an actionable error instead of an empty catalog`() {
         setContent(
             state(
@@ -116,6 +139,7 @@ class ServicesScreenTest {
         onSetDiscovery: (Boolean) -> Unit = {},
         onOpenTunnel: (Int) -> Unit = {},
         onAddTunnel: (Int?) -> Unit = {},
+        onOpenBrowser: (String) -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -125,6 +149,8 @@ class ServicesScreenTest {
                     onSetDiscovery = onSetDiscovery,
                     onOpenTunnel = onOpenTunnel,
                     onAddTunnel = onAddTunnel,
+                    verifiedHttpServices = state.verifiedHttpServices,
+                    onOpenBrowser = onOpenBrowser,
                 )
             }
         }

@@ -132,20 +132,15 @@ class HostListNavigationTest {
     }
 
     @Test
-    fun `tapping Settings in the empty state navigates to Settings`() {
-        val nav = setContent()
+    fun `the empty state has one first-run action`() {
+        setContent()
 
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
         }
 
-        composeRule.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("Settings").fetchSemanticsNodes().isNotEmpty()
-        }
-
-        assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
-        composeRule.onNodeWithText("Settings").assertExists()
+        composeRule.onNodeWithText("Add host").assertExists()
+        composeRule.onNodeWithTag(HOST_LIST_SETTINGS_TAG).assertDoesNotExist()
     }
 
     /**

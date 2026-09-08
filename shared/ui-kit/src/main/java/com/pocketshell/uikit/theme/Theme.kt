@@ -39,7 +39,7 @@ private val PocketShellDarkColorScheme = darkColorScheme(
     onError = PocketShellColors.Background,
     errorContainer = PocketShellColors.Surface,
     onErrorContainer = PocketShellColors.Red,
-    scrim = Color.Black,
+    scrim = PocketShellColors.Scrim,
 )
 
 /**

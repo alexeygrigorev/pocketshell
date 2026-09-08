@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -57,6 +58,7 @@ internal fun ComposerModalBottomSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
         modifier = modifier.composerImeAnchorPolicy(sheetState),
         dragHandle = { ComposerDragHandle() },
         contentWindowInsets = {

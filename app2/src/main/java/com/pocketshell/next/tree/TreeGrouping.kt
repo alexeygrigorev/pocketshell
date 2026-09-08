@@ -7,7 +7,7 @@ import com.pocketshell.core.hostapi.SessionRow
  * root — blank/null workspace, `$HOME` itself, or a path outside `$HOME`.
  */
 const val OTHER_ROOT_KEY: String = "::other::"
-const val OTHER_ROOT_LABEL: String = "other"
+const val OTHER_ROOT_LABEL: String = "Other"
 
 /** @see OTHER_ROOT_LABEL */
 const val OTHER_WORKSPACE_LABEL: String = OTHER_ROOT_LABEL

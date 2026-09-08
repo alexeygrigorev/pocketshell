@@ -6,10 +6,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -40,22 +45,24 @@ import com.pocketshell.next.tree.STOP_SESSION_MESSAGE_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.STOP_SESSION_TITLE_TAG
 import com.pocketshell.next.tree.stopSessionMessage
-import com.pocketshell.next.usage.UsageGlancePill
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.next.usage.UsageGlanceViewModel
+import com.pocketshell.next.workspaces.readableSessionName
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
-import com.pocketshell.uikit.components.Kebab
-import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.KebabTrigger
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SessionLauncherBar
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 import com.termux.terminal.TerminalSession
 
 /** Stable test tags for the session screen's own chrome. */
@@ -133,6 +140,7 @@ fun SessionRoute(
         object : SessionSink {
             override val isLive: Boolean get() = viewModel.uiState.value is SessionUiState.Live
             override fun sendBytes(bytes: ByteArray) = viewModel.sendBytes(bytes)
+            override val sendFailures = viewModel.sendFailures
         }
     }
     LaunchedEffect(hostId, sessionName, sink) {
@@ -233,6 +241,7 @@ fun SessionScreen(
     onUseHistoryEntry: (SentMessage) -> Unit,
     onPermissionDenied: () -> Unit = {},
     sessionSwitcherState: SessionSwitcherUiState = SessionSwitcherUiState(),
+    sessionLabel: String = readableSessionName(sessionName),
     modifier: Modifier = Modifier,
     cellMetrics: TerminalCellMetrics = rememberTerminalCellMetrics(),
     initiallyShowComposer: Boolean = false,
@@ -258,44 +267,17 @@ fun SessionScreen(
             .testTag(SESSION_SCREEN_TAG),
     ) {
         ScreenHeader(
-            title = sessionName,
-            subtitle = statusLine(state),
+            title = if (sessionEnded) "Session ended" else sessionLabel,
+            subtitle = if (sessionEnded) sessionLabel else statusLine(state),
+            titleMaxLines = 2,
+            subtitleMaxLines = 2,
             titleTestTag = SESSION_TITLE_TAG,
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SESSION_BACK_TAG),
-                )
-            },
+            onBack = onBack,
+            backTestTag = SESSION_BACK_TAG,
             trailing = {
-                if (usagePillState != null) {
-                    UsageGlancePill(state = usagePillState, onClick = onOpenUsage)
-                } else {
-                    PocketShellButton(
-                        text = "Usage",
-                        onClick = onOpenUsage,
-                        variant = ButtonVariant.Text,
-                        compact = true,
-                        modifier = Modifier.testTag(SESSION_USAGE_TAG),
-                    )
-                }
-                Kebab(
-                    items = listOf(
-                        KebabItem(
-                            label = "Terminal actions",
-                            onClick = { terminalActionsOpen = true },
-                            testTag = SESSION_ACTIONS_ITEM_TAG,
-                        ),
-                        KebabItem(
-                            label = STOP_SESSION_ITEM_LABEL,
-                            onClick = { pendingStop = true },
-                            testTag = STOP_SESSION_ITEM_TAG,
-                        ),
-                    ),
-                    contentDescription = "Session actions",
+                KebabTrigger(
+                    onClick = { terminalActionsOpen = true },
+                    contentDescription = "Terminal actions",
                     triggerTestTag = SESSION_HEADER_KEBAB_TAG,
                 )
             },
@@ -329,7 +311,7 @@ fun SessionScreen(
             when (state) {
                 SessionUiState.Connecting -> EmptyState(
                     title = "Attaching…",
-                    description = "Opening a terminal on \"$sessionName\".",
+                    description = "Opening a terminal on \"$sessionLabel\".",
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag(SESSION_CONNECTING_TAG),
@@ -381,54 +363,43 @@ fun SessionScreen(
                     )
                 }
 
-                is SessionUiState.Failed -> Column(modifier = Modifier.fillMaxSize()) {
-                    Banner(
-                        text = state.message,
-                        role = BannerRole.Error,
-                        maxLines = 4,
-                        trailingContent = {
-                            PocketShellButton(
-                                text = "Retry",
-                                onClick = onRetry,
-                                variant = ButtonVariant.Text,
-                                compact = true,
-                                modifier = Modifier.testTag(SESSION_RETRY_TAG),
-                            )
-                        },
-                        modifier = Modifier
-                            .padding(horizontal = PocketShellSpacing.md)
-                            .padding(bottom = PocketShellSpacing.sm)
-                            .testTag(SESSION_ERROR_BANNER_TAG),
+                is SessionUiState.Failed -> if (sessionEnded) {
+                    SessionEndedBody(
+                        sessionName = sessionName,
+                        sessionLabel = sessionLabel,
+                        exitCode = endedExitCode(state.message),
+                        state = sessionSwitcherState,
+                        onOpenSession = onOpenSession,
+                        onOpenNewSession = onOpenNewSession,
+                        onBack = onBack,
+                        modifier = Modifier.testTag(SESSION_ENDED_TAG),
                     )
-                    EmptyState(
-                        title = if (sessionEnded) "Session ended" else "Not attached",
-                        description = if (sessionEnded) {
-                            "The remote process has exited. Go back to the workspace to choose " +
-                                "another session."
-                        } else {
-                            "Tap Retry, or go back to the session list to pick another session."
-                        },
-                        action = if (sessionEnded) {
-                            {
+                } else {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Banner(
+                            text = state.message,
+                            role = BannerRole.Error,
+                            maxLines = 4,
+                            trailingContent = {
                                 PocketShellButton(
-                                    text = "Back to workspace",
-                                    onClick = onBack,
-                                    variant = ButtonVariant.Secondary,
+                                    text = "Retry",
+                                    onClick = onRetry,
+                                    variant = ButtonVariant.Text,
+                                    compact = true,
+                                    modifier = Modifier.testTag(SESSION_RETRY_TAG),
                                 )
-                            }
-                        } else {
-                            null
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .then(
-                                if (sessionEnded) {
-                                    Modifier.testTag(SESSION_ENDED_TAG)
-                                } else {
-                                    Modifier
-                                },
-                            ),
-                    )
+                            },
+                            modifier = Modifier
+                                .padding(horizontal = PocketShellSpacing.md)
+                                .padding(bottom = PocketShellSpacing.sm)
+                                .testTag(SESSION_ERROR_BANNER_TAG),
+                        )
+                        EmptyState(
+                            title = "Not attached",
+                            description = "Tap Retry, or go back to the session list to pick another session.",
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             }
         }
@@ -453,7 +424,7 @@ fun SessionScreen(
 
     if (composerOpen && !sessionEnded) {
         val sendAndMaybeDismiss: () -> Unit = {
-            if (onSend()) composerOpen = false
+            if (!sessionEnded && onSend()) composerOpen = false
         }
         val dismiss = {
             onCancelRecording()
@@ -462,6 +433,7 @@ fun SessionScreen(
         if (embedComposerInWindow) {
             PromptComposerSheet(
                 state = composerState,
+                targetLabel = sessionLabel,
                 onDismiss = dismiss,
                 onDraftChange = onDraftChange,
                 onSend = sendAndMaybeDismiss,
@@ -469,16 +441,24 @@ fun SessionScreen(
                 onAttach = onAttach,
                 onMicTap = onMicTap,
                 onCancelRecording = onCancelRecording,
-                onToggleHistory = onToggleHistory,
+                onToggleHistory = {
+                    composerOpen = false
+                    onToggleHistory()
+                },
                 onTogglePreview = onTogglePreview,
                 onRemoveAttachment = onRemoveAttachment,
                 onDismissNotice = onDismissNotice,
                 onDiscard = onDiscardDraft,
                 onPermissionDenied = onPermissionDenied,
+                onOpenHotkeys = {
+                    composerOpen = false
+                    hotkeysOpen = true
+                },
             )
         } else {
             PromptComposerContent(
                 state = composerState,
+                targetLabel = sessionLabel,
                 onClose = dismiss,
                 onDraftChange = onDraftChange,
                 onSend = sendAndMaybeDismiss,
@@ -486,11 +466,18 @@ fun SessionScreen(
                 onAttach = onAttach,
                 onMicTap = onMicTap,
                 onCancelRecording = onCancelRecording,
-                onToggleHistory = onToggleHistory,
+                onToggleHistory = {
+                    composerOpen = false
+                    onToggleHistory()
+                },
                 onTogglePreview = onTogglePreview,
                 onRemoveAttachment = onRemoveAttachment,
                 onDismissNotice = onDismissNotice,
                 onDiscard = onDiscardDraft,
+                onOpenHotkeys = {
+                    composerOpen = false
+                    hotkeysOpen = true
+                },
             )
         }
     }
@@ -514,6 +501,10 @@ fun SessionScreen(
             onBrowseFiles = {
                 terminalActionsOpen = false
                 onOpenFiles()
+            },
+            onOpenUsage = {
+                terminalActionsOpen = false
+                onOpenUsage()
             },
             onCopySelection = {
                 copyTerminalSelection?.invoke()
@@ -550,7 +541,10 @@ fun SessionScreen(
     if (composerState.historyOpen) {
         MessageHistorySheet(
             messages = composerState.history,
-            onPick = onUseHistoryEntry,
+            onPick = { message ->
+                onUseHistoryEntry(message)
+                composerOpen = true
+            },
             onDismiss = onToggleHistory,
         )
     }
@@ -558,7 +552,11 @@ fun SessionScreen(
     if (pendingStop) {
         ConfirmDialog(
             title = STOP_SESSION_TITLE,
-            message = stopSessionMessage(sessionName),
+            message = stopSessionMessage(
+                name = sessionLabel,
+                workspace = sessionSwitcherState.sessions.firstOrNull { it.name == sessionName }?.workspace,
+                host = "this host",
+            ),
             confirmLabel = STOP_SESSION_CONFIRM_LABEL,
             destructive = true,
             onConfirm = {
@@ -573,6 +571,103 @@ fun SessionScreen(
         )
     }
 }
+
+@Composable
+private fun SessionEndedBody(
+    sessionName: String,
+    sessionLabel: String = readableSessionName(sessionName),
+    exitCode: Int?,
+    state: SessionSwitcherUiState,
+    onOpenSession: (SessionRow) -> Unit,
+    onOpenNewSession: () -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val otherSessions = state.sessions.filter { it.name != sessionName }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md),
+    ) {
+        Text(
+            text = "Terminal in $sessionLabel has ended.",
+            color = PocketShellColors.Text,
+            style = PocketShellType.body,
+        )
+        exitCode?.let { code ->
+            Text(
+                text = "Exit code: $code",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.metadata,
+                modifier = Modifier.padding(top = PocketShellSpacing.xs),
+            )
+        }
+        Text(
+            text = "The workspace is still here. Open another session or start a new one.",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.body,
+            modifier = Modifier.padding(top = PocketShellSpacing.xs),
+        )
+        SectionHeader(
+            label = "Other sessions",
+            count = otherSessions.size.takeIf { it > 0 },
+            modifier = Modifier.padding(top = PocketShellSpacing.lg),
+        )
+        when {
+            state.loading -> Text(
+                text = "Reading sessions…",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.body,
+                modifier = Modifier.padding(vertical = PocketShellSpacing.md),
+            )
+            state.failure != null && otherSessions.isEmpty() -> Text(
+                text = "Sessions unavailable: ${state.failure}",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.body,
+                modifier = Modifier.padding(vertical = PocketShellSpacing.md),
+            )
+            otherSessions.isEmpty() -> Text(
+                text = "No other sessions are running.",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.body,
+                modifier = Modifier.padding(vertical = PocketShellSpacing.md),
+            )
+            else -> LazyColumn(modifier = Modifier.weight(1f)) {
+                items(otherSessions, key = { "${it.workspace}:${it.name}" }) { session ->
+                    ListRow(
+                        title = session.name,
+                        subtitle = endedSessionSubtitle(session),
+                        onClick = { onOpenSession(session) },
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = PocketShellSpacing.md),
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            PocketShellButton(
+                text = "New session",
+                onClick = onOpenNewSession,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier.weight(1f),
+            )
+            PocketShellButton(
+                text = "Back to workspace",
+                onClick = onBack,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+private fun endedSessionSubtitle(session: SessionRow): String = listOfNotNull(
+    session.agent?.replaceFirstChar { it.uppercase() },
+    session.profile,
+).ifEmpty { listOf("Terminal · Running") }.joinToString(" · ")
 
 @Composable
 private fun Terminal(
@@ -611,3 +706,6 @@ private fun statusLine(state: SessionUiState): String = when (state) {
 
 private fun String.looksLikeEndedSession(): Boolean =
     contains(" ended.") || contains(" ended (exit ") || contains(" ended:")
+
+private fun endedExitCode(message: String): Int? =
+    Regex("ended \\(exit (-?\\d+)\\)").find(message)?.groupValues?.getOrNull(1)?.toIntOrNull()

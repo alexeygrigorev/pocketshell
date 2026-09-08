@@ -64,6 +64,8 @@ class SettingsViewModel @Inject constructor(
 
     fun setAgentSubmitEnterDelayMs(delayMs: Int) = repository.setAgentSubmitEnterDelayMs(delayMs)
 
+    fun setDefaultHostId(hostId: Long?) = repository.setDefaultHostId(hostId)
+
     fun resetAdvancedDefaults() = repository.resetAdvancedDefaults()
 
     private companion object {

@@ -15,14 +15,16 @@ import com.pocketshell.uikit.theme.PocketShellType
 @Composable
 fun WorkspaceRow(
     title: String,
-    subtitle: String,
+    subtitle: String? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     testTag: String? = null,
+    subtitleContent: (@Composable () -> Unit)? = null,
 ) {
     ListRow(
         title = title,
         subtitle = subtitle,
+        subtitleContent = subtitleContent,
         trailing = { NavigationChevron() },
         onClick = onClick,
         titleMaxLines = 2,

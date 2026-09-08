@@ -523,7 +523,10 @@ def sessions_attach(ctx: click.Context, name: str) -> None:
         click.echo(f"pocketshell: session {row.name!r} has no aplexer id.", err=True)
         ctx.exit(ATTACH_EXIT_NOT_FOUND)
         return
-    _exec([resolution.path, "attach", str(row.aplexer_id)])
+    # PocketShell owns the session header, status and controls. Ask aplexer
+    # for its plain full-screen relay so its terminal attach UI cannot leak
+    # Multiplexer chrome into the Android terminal.
+    _exec([resolution.path, "attach", "--no-status", str(row.aplexer_id)])
 
 
 def _emit_kill_failure(

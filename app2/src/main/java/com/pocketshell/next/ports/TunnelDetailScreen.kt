@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,6 +38,7 @@ import kotlinx.coroutines.withContext
 const val TUNNEL_DETAIL_TAG = "tunnel_detail"
 const val TUNNEL_COPY_ADDRESS_TAG = "tunnel_copy_address"
 const val TUNNEL_STOP_TAG = "tunnel_stop"
+const val TUNNEL_OPEN_BROWSER_TAG = "tunnel_open_browser"
 
 @Composable
 fun TunnelDetailRoute(
@@ -55,13 +57,18 @@ fun TunnelDetailRoute(
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    LaunchedEffect(tunnel?.remotePort, tunnel?.localPort, tunnel?.status) {
+        viewModel.verifyHttpServices(listOfNotNull(tunnel))
+    }
     TunnelDetailScreen(
         hostName = state.hostName,
         tunnel = tunnel,
         manual = remotePort in state.manualRemotePorts,
         manualName = manualName,
+        verifiedUrl = state.verifiedHttpServices[remotePort],
         onBack = onBack,
         onCopyAddress = { localPort -> clipboard.setText(AnnotatedString("127.0.0.1:$localPort")) },
+        onOpenBrowser = { launchServiceUrl(context, it) },
         onStop = {
             if (remotePort in state.manualRemotePorts) {
                 coroutineScope.launch {
@@ -86,6 +93,8 @@ fun TunnelDetailScreen(
     onBack: () -> Unit,
     onCopyAddress: (Int) -> Unit,
     onStop: () -> Unit,
+    verifiedUrl: String? = null,
+    onOpenBrowser: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -99,14 +108,7 @@ fun TunnelDetailScreen(
                 ?: tunnel?.process?.ifBlank { "Port ${tunnel.remotePort}" }
                 ?: "Tunnel",
             subtitle = hostName,
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onBack,
         )
         if (tunnel == null) {
             EmptyState(
@@ -139,6 +141,16 @@ fun TunnelDetailScreen(
                     .fillMaxWidth()
                     .testTag(TUNNEL_COPY_ADDRESS_TAG),
             )
+            if (verifiedUrl != null) {
+                PocketShellButton(
+                    text = "Open in browser",
+                    onClick = { onOpenBrowser(verifiedUrl) },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(TUNNEL_OPEN_BROWSER_TAG),
+                )
+            }
             PocketShellButton(
                 text = if (manual) "Remove tunnel" else "Stop tunnel",
                 onClick = onStop,

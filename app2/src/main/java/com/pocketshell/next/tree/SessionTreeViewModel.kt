@@ -331,6 +331,14 @@ class SessionTreeViewModel @Inject constructor(
         }
     }
 
+    /** Re-check host engine capability from the unavailable-agent sheet. */
+    fun refreshEngines() {
+        if (!_state.value.create.visible || _state.value.create.submitting) return
+        updateCreate { it.copy(enginesLoading = true, enginesFailure = null) }
+        pickerInFlight?.cancel()
+        pickerInFlight = viewModelScope.launch { loadPickerOptions() }
+    }
+
     /**
      * `pocketshell sessions create --json` for [request], then refresh the
      * listing and ask the screen to open it.
@@ -571,6 +579,20 @@ class SessionTreeViewModel @Inject constructor(
                 }
             }
             val target = RemotePath.join(parent, name)
+            val existing = runCatching { connection.sftp().stat(target) }.getOrElse { error ->
+                failCreateFolder(userMessage(error, "Could not inspect the new folder: "))
+                return@launch
+            }
+            if (existing != null) {
+                failCreateFolder(
+                    if (existing.isDirectory) {
+                        "A folder already exists there. Choose it from the folder browser."
+                    } else {
+                        "A file already exists there; choose a different folder name."
+                    },
+                )
+                return@launch
+            }
             runCatching { connection.sftp().mkdir(target) }.fold(
                 onSuccess = {
                     _state.update { it.copy(workspaceAction = WorkspaceActionState()) }

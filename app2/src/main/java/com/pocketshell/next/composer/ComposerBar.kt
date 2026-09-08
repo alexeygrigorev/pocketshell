@@ -50,7 +50,9 @@ import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -70,6 +72,8 @@ const val COMPOSER_PREVIEW_TAG: String = "composer-preview"
 const val COMPOSER_PREVIEW_VIEW_TAG: String = "composer-preview-view"
 const val COMPOSER_DISCARD_TAG: String = "composer-discard"
 const val COMPOSER_UNDELIVERED_TAG: String = "composer-undelivered"
+const val COMPOSER_DELIVERY_UNCERTAIN_TAG: String = "composer-delivery-uncertain"
+const val COMPOSER_SESSION_ENDED_TAG: String = "composer-session-ended"
 const val COMPOSER_NOTICE_TAG: String = "composer-notice"
 const val COMPOSER_STAGING_TAG: String = "composer-staging"
 const val COMPOSER_SLASH_TAG: String = "composer-slash"
@@ -78,11 +82,15 @@ const val COMPOSER_TIMER_TAG: String = "composer-timer"
 const val COMPOSER_WAVEFORM_TAG: String = "composer-waveform"
 const val COMPOSER_TRANSCRIBING_TAG: String = "composer-transcribing"
 const val COMPOSER_CONTROLS_ROW_TAG: String = "composer-controls-row"
+const val COMPOSER_TOOLS_TAG: String = "composer-tools"
+const val COMPOSER_TOOLS_TRIGGER_TAG: String = "composer-tools-trigger"
 
 fun composerSlashRowTag(command: String): String = "composer-slash-row:$command"
 
 /** The text a send that never left the device puts on screen. */
 const val COMPOSER_UNDELIVERED_TEXT: String = "Not delivered — session offline. Your draft was kept."
+const val COMPOSER_DELIVERY_UNCERTAIN_TEXT: String =
+    "Delivery uncertain — the session connection dropped. Review before resending."
 
 /**
  * The Stop control's accessible name (#2598).
@@ -129,8 +137,12 @@ fun ComposerBar(
     onDismissNotice: () -> Unit,
     onDiscard: () -> Unit,
     modifier: Modifier = Modifier,
+    deliveryEnabled: Boolean = true,
+    deliveryDisabledMessage: String? = null,
+    onOpenHotkeys: () -> Unit = {},
 ) {
     var field by remember { mutableStateOf(TextFieldValue(state.draft, TextRange(state.draft.length))) }
+    var toolsOpen by remember { mutableStateOf(false) }
     // Re-seed only when the ViewModel's draft CHANGES to something the editor
     // did not produce: a send clearing it, a history tap replacing it,
     // dictation rewriting it. Keyed on `state.draft`, so a keystroke (which
@@ -170,6 +182,14 @@ fun ComposerBar(
             .testTag(COMPOSER_TAG),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
+        deliveryDisabledMessage?.let { message ->
+            Banner(
+                text = message,
+                role = BannerRole.Warning,
+                maxLines = 3,
+                modifier = Modifier.testTag(COMPOSER_SESSION_ENDED_TAG),
+            )
+        }
         NoticeRow(state.notice, onDismissNotice)
 
         state.staging?.let { progress ->
@@ -228,19 +248,43 @@ fun ComposerBar(
             }
         }
 
+        if (toolsOpen && state.recording == RecordingState.Idle) {
+            ComposerToolsPanel(
+                state = state,
+                onDismiss = { toolsOpen = false },
+                onAttach = {
+                    toolsOpen = false
+                    onAttach()
+                },
+                onHistory = {
+                    toolsOpen = false
+                    onToggleHistory()
+                },
+                onSlash = {
+                    toolsOpen = false
+                    val seeded = SlashCommandAutocomplete.insertText(field, "/")
+                    field = seeded
+                    onDraftChange(seeded.text)
+                },
+                onHotkeys = {
+                    toolsOpen = false
+                    onOpenHotkeys()
+                },
+                onClear = {
+                    toolsOpen = false
+                    onDiscard()
+                },
+            )
+        }
+
         ControlsRow(
             state = state,
             onSend = commitSend,
+            deliveryEnabled = deliveryEnabled,
             onInsert = onInsert,
-            onAttach = onAttach,
+            onOpenTools = { toolsOpen = !toolsOpen },
             onMicTap = onMicTap,
             onCancelRecording = onCancelRecording,
-            onToggleHistory = onToggleHistory,
-            onSlashTap = {
-                val seeded = SlashCommandAutocomplete.insertText(field, "/")
-                field = seeded
-                onDraftChange(seeded.text)
-            },
         )
     }
 }
@@ -263,6 +307,21 @@ private fun NoticeRow(notice: ComposerNotice?, onDismiss: () -> Unit) {
                 )
             },
             modifier = Modifier.testTag(COMPOSER_UNDELIVERED_TAG),
+        )
+
+        ComposerNotice.DeliveryUncertain -> Banner(
+            text = COMPOSER_DELIVERY_UNCERTAIN_TEXT,
+            role = BannerRole.Warning,
+            maxLines = 3,
+            trailingContent = {
+                PocketShellButton(
+                    text = "Dismiss",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
+            },
+            modifier = Modifier.testTag(COMPOSER_DELIVERY_UNCERTAIN_TAG),
         )
 
         is ComposerNotice.Problem -> Banner(
@@ -342,12 +401,11 @@ private fun DraftField(value: TextFieldValue, onValueChange: (TextFieldValue) ->
 private fun ControlsRow(
     state: ComposerUiState,
     onSend: () -> Unit,
+    deliveryEnabled: Boolean,
     onInsert: () -> Unit,
-    onAttach: () -> Unit,
+    onOpenTools: () -> Unit,
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
-    onToggleHistory: () -> Unit,
-    onSlashTap: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -357,11 +415,9 @@ private fun ControlsRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (state.recording == RecordingState.Idle) {
-            ComposerEditingToolsGroup(
+            ComposerToolsTrigger(
                 enabled = !state.busy,
-                onAttach = onAttach,
-                onHistory = onToggleHistory,
-                onSlashTap = onSlashTap,
+                onClick = onOpenTools,
             )
         }
         Spacer(modifier = Modifier.weight(1f))
@@ -369,12 +425,12 @@ private fun ControlsRow(
             RecordingState.Idle -> {
                 InsertButton(
                     onClick = onInsert,
-                    enabled = state.canSend && !state.busy,
+                    enabled = deliveryEnabled && state.canSend && !state.busy,
                     modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
                 )
                 SendButton(
                     onClick = onSend,
-                    enabled = state.canSend && !state.busy,
+                    enabled = deliveryEnabled && state.canSend && !state.busy,
                     modifier = Modifier.testTag(COMPOSER_SEND_TAG),
                 )
                 MicTriggerButton(
@@ -390,13 +446,13 @@ private fun ControlsRow(
                 )
                 InsertButton(
                     onClick = onInsert,
-                    enabled = state.canSend && !state.busy,
+                    enabled = deliveryEnabled && state.canSend && !state.busy,
                     recording = true,
                     modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
                 )
                 SendButton(
                     onClick = onSend,
-                    enabled = state.canSend && !state.busy,
+                    enabled = deliveryEnabled && state.canSend && !state.busy,
                     recording = true,
                     modifier = Modifier.testTag(COMPOSER_SEND_TAG),
                 )
@@ -417,7 +473,7 @@ private fun ControlsRow(
                 )
                 SendButton(
                     onClick = onSend,
-                    enabled = state.canSend && !state.busy,
+                    enabled = deliveryEnabled && state.canSend && !state.busy,
                     recording = true,
                     modifier = Modifier.testTag(COMPOSER_SEND_TAG),
                 )
@@ -427,47 +483,108 @@ private fun ControlsRow(
 }
 
 /**
- * v0.4.47 left tools pill: attachment, history and slash-command icons
- * (#701 / #787 / #2529).
+ * The composer has one quiet entry point for secondary actions. The expanded
+ * panel is rendered inside the existing composer surface, so opening it never
+ * stacks a second modal over the draft.
  */
 @Composable
-private fun ComposerEditingToolsGroup(
+private fun ComposerToolsTrigger(
     enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    ToolGlyphButton(
+        icon = PocketShellIcons.Plus,
+        contentDescription = "Add to input",
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.testTag(COMPOSER_TOOLS_TRIGGER_TAG),
+    )
+}
+
+@Composable
+private fun ComposerToolsPanel(
+    state: ComposerUiState,
+    onDismiss: () -> Unit,
     onAttach: () -> Unit,
     onHistory: () -> Unit,
-    onSlashTap: () -> Unit,
-    modifier: Modifier = Modifier,
+    onSlash: () -> Unit,
+    onHotkeys: () -> Unit,
+    onClear: () -> Unit,
 ) {
-    Row(
-        modifier = modifier
-            .clip(ComposerActionPillShape)
-            .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
-            .padding(horizontal = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev)
+            .testTag(COMPOSER_TOOLS_TAG),
     ) {
-        ToolGlyphButton(
+        SheetHeader(
+            title = "Add to input",
+            onClose = onDismiss,
+            closeContentDescription = "Close input tools",
+        )
+        ComposerToolRow(
+            title = "Attach file",
+            subtitle = "Android document picker",
             icon = PocketShellIcons.Paperclip,
-            contentDescription = "Attach files",
             onClick = onAttach,
-            enabled = enabled,
-            modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+            testTag = COMPOSER_ATTACH_TAG,
         )
-        ToolGlyphButton(
+        ComposerToolRow(
+            title = "Recent prompts",
             icon = PocketShellIcons.History,
-            contentDescription = "Message history",
             onClick = onHistory,
-            enabled = enabled,
-            modifier = Modifier.testTag(COMPOSER_HISTORY_TAG),
+            testTag = COMPOSER_HISTORY_TAG,
         )
-        ToolGlyphButton(
+        ComposerToolRow(
+            title = "Slash commands",
+            subtitle = "Insert a supported command into the draft",
             icon = PocketShellIcons.Code,
-            contentDescription = "Slash commands",
-            onClick = onSlashTap,
-            enabled = enabled,
-            modifier = Modifier.testTag(COMPOSER_SLASH_TRIGGER_TAG),
+            onClick = onSlash,
+            testTag = COMPOSER_SLASH_TRIGGER_TAG,
+        )
+        ComposerToolRow(
+            title = "Terminal keys",
+            subtitle = "Send special keys to the current terminal",
+            icon = PocketShellIcons.Keyboard,
+            onClick = onHotkeys,
+            testTag = "composer-tools-hotkeys",
+        )
+        ComposerToolRow(
+            title = "Clear draft",
+            subtitle = if (state.draft.isBlank() && state.attachments.isEmpty()) {
+                "Nothing to clear"
+            } else {
+                "Remove the current text and attachments"
+            },
+            icon = PocketShellIcons.Close,
+            onClick = onClear,
+            testTag = COMPOSER_DISCARD_TAG,
         )
     }
+}
+
+@Composable
+private fun ComposerToolRow(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    testTag: String,
+    subtitle: String? = null,
+) {
+    ListRow(
+        title = title,
+        subtitle = subtitle,
+        leading = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = PocketShellColors.TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        },
+        onClick = onClick,
+        modifier = Modifier.testTag(testTag),
+    )
 }
 
 @Composable
@@ -544,12 +661,12 @@ private fun InsertButton(
             .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
             .border(1.dp, PocketShellColors.Border, ComposerActionPillShape)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Insert without submitting" }
+            .semantics { contentDescription = "Paste without submitting" }
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "Insert",
+            text = "Paste",
             color = if (enabled) PocketShellColors.Text else PocketShellColors.TextMuted,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
@@ -633,9 +750,9 @@ private val ComposerActionPillRadius = 22.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
 /** Draft sits between bodyMedium (14) and titleMedium (16); the old field used 15. */
 private val ComposerDraftFontSize = 15.sp
-private val ComposerIdlePillHeight = 44.dp
+private val ComposerIdlePillHeight = 48.dp
 private val ComposerRecordingPillHeight = 48.dp
-private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 40.dp
+private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 48.dp
 private val COMPOSER_STOP_GLYPH_SIZE = 15.dp
 
 /**

@@ -53,6 +53,7 @@ const val SERVICES_ACTIVE_TAG = "services_active_tunnels"
 const val SERVICES_AVAILABLE_TAG = "services_available"
 
 fun servicesRowTag(remotePort: Int): String = "service-row-$remotePort"
+fun serviceOpenTag(remotePort: Int): String = "service-open-$remotePort"
 
 /** The host-scoped Quiet entry point for forwarding and discovered services. */
 @Composable
@@ -65,6 +66,8 @@ fun ServicesRoute(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val discovered = state.discoveredRows.ifEmpty { state.rows }
+    val activeForVerification = discovered.filter { it.status == TunnelInfo.Status.FORWARDING }
     // Keep the Quiet route on the same real foreground-service lifecycle as the
     // original port-forward route. The Room-backed enabled flag is read again
     // after process death, so reopening this destination remounts every enabled
@@ -72,12 +75,17 @@ fun ServicesRoute(
     LaunchedEffect(state.enabled) {
         if (state.enabled) ForwardService.resume(context)
     }
+    LaunchedEffect(activeForVerification.map { it.remotePort to it.localPort }) {
+        viewModel.verifyHttpServices(activeForVerification)
+    }
     ServicesScreen(
         state = state,
         onBack = onBack,
         onSetDiscovery = viewModel::setEnabled,
         onOpenTunnel = onOpenTunnel,
         onAddTunnel = onAddTunnel,
+        verifiedHttpServices = state.verifiedHttpServices,
+        onOpenBrowser = { launchServiceUrl(context, it) },
         modifier = modifier,
     )
 }
@@ -97,6 +105,8 @@ fun ServicesScreen(
     onSetDiscovery: (Boolean) -> Unit,
     onOpenTunnel: (Int) -> Unit,
     onAddTunnel: (Int?) -> Unit,
+    verifiedHttpServices: Map<Int, String> = emptyMap(),
+    onOpenBrowser: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Services is the explicit discovery surface, so it must include ports
@@ -115,15 +125,8 @@ fun ServicesScreen(
         ScreenHeader(
             title = "Services & tunnels",
             subtitle = state.hostName.ifBlank { state.hostSubtitle },
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SERVICES_BACK_TAG),
-                )
-            },
+            onBack = onBack,
+            backTestTag = SERVICES_BACK_TAG,
             trailing = {
                 Text(
                     text = state.connection.quietLabel(state.enabled),
@@ -181,6 +184,8 @@ fun ServicesScreen(
                             active = true,
                             manual = tunnel.remotePort in state.manualRemotePorts,
                             manualName = state.manualTunnelNames[tunnel.remotePort],
+                            verifiedUrl = verifiedHttpServices[tunnel.remotePort],
+                            onOpenBrowser = onOpenBrowser,
                             onClick = { onOpenTunnel(tunnel.remotePort) },
                         )
                     }
@@ -193,6 +198,8 @@ fun ServicesScreen(
                             active = false,
                             manual = tunnel.remotePort in state.manualRemotePorts,
                             manualName = state.manualTunnelNames[tunnel.remotePort],
+                            verifiedUrl = verifiedHttpServices[tunnel.remotePort],
+                            onOpenBrowser = onOpenBrowser,
                             onClick = if (tunnel.remotePort in state.manualRemotePorts) {
                                 { onOpenTunnel(tunnel.remotePort) }
                             } else {
@@ -248,6 +255,8 @@ private fun ServiceRow(
     active: Boolean,
     manual: Boolean,
     manualName: String?,
+    verifiedUrl: String?,
+    onOpenBrowser: (String) -> Unit,
     onClick: () -> Unit,
 ) {
     val title = manualName?.trim().takeUnless { it.isNullOrEmpty() }
@@ -268,11 +277,21 @@ private fun ServiceRow(
             )
         },
         trailing = {
-            Text(
-                text = if (active || manual) "Details" else "Add",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.metadata,
-            )
+            if (active && verifiedUrl != null) {
+                PocketShellButton(
+                    text = "Open",
+                    onClick = { onOpenBrowser(verifiedUrl) },
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(serviceOpenTag(tunnel.remotePort)),
+                )
+            } else {
+                Text(
+                    text = if (active || manual) "Details" else "Add",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.metadata,
+                )
+            }
         },
         modifier = Modifier.testTag(servicesRowTag(tunnel.remotePort)),
         onClick = onClick,

@@ -95,6 +95,19 @@ class SshKeyStoreTest {
     }
 
     @Test
+    fun `the unencrypted agents fixture reads its embedded public key`() = runTest {
+        val fixtureDir = File("../tests/docker")
+        val privateKey = File(fixtureDir, "test_key").readText()
+        val expectedPublicKey = File(fixtureDir, "test_key.pub").readText().trim()
+        val key = store.importKey("fixture-key", privateKey)
+
+        val actualPublicKey = requireNotNull(store.readPublicKey(key))
+        // The app deliberately emits its own stable comment; the authorized
+        // key payload is the contract shared with the fixture.
+        assertEquals(expectedPublicKey.substringBeforeLast(' '), actualPublicKey.substringBeforeLast(' '))
+    }
+
+    @Test
     fun `two generated keys are distinct rows with distinct files`() = runTest {
         val first = store.generateKey("k")
         val second = store.generateKey("k")

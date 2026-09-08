@@ -148,14 +148,7 @@ fun AddEditHostScreen(
     ) {
         ScreenHeader(
             title = "Connection details",
-            trailing = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = onCancel,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onCancel,
         )
 
         if (state.loading) {

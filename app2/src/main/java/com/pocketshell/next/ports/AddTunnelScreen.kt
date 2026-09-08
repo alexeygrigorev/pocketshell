@@ -146,14 +146,7 @@ fun AddTunnelScreen(
     ) {
         ScreenHeader(
             title = "Add tunnel",
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onBack,
         )
         Column(
             modifier = Modifier

@@ -68,7 +68,7 @@ class PromptComposerPermissionTest {
     }
 
     @Test
-    fun `the title hides when the ime is up`() {
+    fun `the title stays visible when the ime is up`() {
         composeRule.setContent {
             PocketShellTheme {
                 PromptComposerContent(
@@ -90,7 +90,7 @@ class PromptComposerPermissionTest {
             }
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()

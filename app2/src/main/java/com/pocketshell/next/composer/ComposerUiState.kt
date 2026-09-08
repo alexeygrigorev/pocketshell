@@ -1,5 +1,8 @@
 package com.pocketshell.next.composer
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+
 /**
  * Where the composer's send goes (rewrite task P-1).
  *
@@ -21,6 +24,10 @@ interface SessionSink {
 
     /** Writes [bytes] to the session. Must not throw. */
     fun sendBytes(bytes: ByteArray)
+
+    /** Emits when a PTY write failed after the composer thought the session was live. */
+    val sendFailures: Flow<Unit>
+        get() = emptyFlow()
 }
 
 /**
@@ -35,6 +42,9 @@ interface SessionSink {
 sealed interface ComposerNotice {
 
     data object Undelivered : ComposerNotice
+
+    /** PTY input was attempted, but the connection dropped before delivery was knowable. */
+    data object DeliveryUncertain : ComposerNotice
 
     /** Something failed (an upload, a connection) — [message] says what. */
     data class Problem(val message: String) : ComposerNotice
@@ -82,4 +92,6 @@ data class ComposerUiState(
 
     /** The draft survived a send that did not leave the device. */
     val undelivered: Boolean get() = notice is ComposerNotice.Undelivered
+
+    val deliveryUncertain: Boolean get() = notice is ComposerNotice.DeliveryUncertain
 }

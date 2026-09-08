@@ -130,8 +130,12 @@ object SshKeyMaterial {
      * after the caller has completed the real unlock flow.
      */
     fun publicKeyLine(content: String, passphrase: CharArray? = null): String {
-        ensureBouncyCastle()
         unencryptedOpenSshPublicKeyLine(content)?.let { return it }
+        // An unencrypted OpenSSH key carries its public half in clear text.
+        // Read that record before installing the BC provider: Android may
+        // already expose a platform provider under the same name, and the
+        // private-key parser is unnecessary for this fast, deterministic path.
+        ensureBouncyCastle()
         SSHClient().use { client ->
             val provider = loadKeyProvider(client, content, passphrase)
             val publicKey = provider.public

@@ -20,6 +20,7 @@ import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -60,6 +61,7 @@ fun MessageHistorySheet(
         sheetState = rememberModalBottomSheetState(),
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
     ) {
         Column(
             modifier = Modifier

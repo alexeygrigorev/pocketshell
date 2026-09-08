@@ -211,23 +211,11 @@ fun HostListScreen(
                 title = "Your work, from here.",
                 description = "Connect to a development machine to open its workspaces and terminals.",
                 action = {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
-                    ) {
-                        PocketShellButton(
-                            text = "Add host",
-                            onClick = { showAddHostMethods = true },
-                            modifier = Modifier.testTag(HOST_LIST_ADD_FOOTER_TAG),
-                        )
-                        PocketShellButton(
-                            text = "Settings",
-                            onClick = onOpenSettings,
-                            variant = ButtonVariant.Text,
-                            compact = true,
-                            modifier = Modifier.testTag(HOST_LIST_SETTINGS_TAG),
-                        )
-                    }
+                    PocketShellButton(
+                        text = "Add host",
+                        onClick = { showAddHostMethods = true },
+                        modifier = Modifier.testTag(HOST_LIST_ADD_FOOTER_TAG),
+                    )
                 },
             )
 
@@ -344,7 +332,7 @@ private fun AddHostMethodSheet(
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
-            SheetHeader(title = "Add host")
+            SheetHeader(title = "Add host", onClose = onDismiss)
             ListRow(
                 title = "Scan a QR code",
                 subtitle = "Import from your computer",

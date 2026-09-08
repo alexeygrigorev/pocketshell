@@ -4,8 +4,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -15,14 +17,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -112,6 +117,10 @@ fun HostWorkspacesRoute(
 ) {
     val state by viewModel.state.collectAsState()
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LaunchedEffect(state.openWorkspacePath) {
+        val path = viewModel.consumeOpenWorkspace() ?: return@LaunchedEffect
+        onOpenWorkspace(path)
+    }
     HostWorkspacesScreen(
         state = state,
         onRefresh = viewModel::refresh,
@@ -192,15 +201,8 @@ fun HostWorkspacesScreen(
         ScreenHeader(
             title = state.hostLabel.ifBlank { "Workspaces" },
             subtitle = hostWorkspacesSubtitle(state),
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(HOST_WORKSPACES_BACK_TAG),
-                )
-            },
+            onBack = onBack,
+            backTestTag = HOST_WORKSPACES_BACK_TAG,
             trailing = {
                 KebabTrigger(
                     onClick = { hostToolsVisible = true },
@@ -280,6 +282,19 @@ fun HostWorkspacesScreen(
                     modifier = Modifier.testTag(HOST_WORKSPACES_EMPTY_TAG),
                 )
 
+                state.statusUnavailable && state.roots.isEmpty() -> EmptyState(
+                    title = "Status unavailable",
+                    description = state.failure ?: "Could not refresh this host.",
+                    action = {
+                        PocketShellButton(
+                            text = "Retry",
+                            onClick = onRefresh,
+                            modifier = Modifier.testTag(HOST_WORKSPACES_RETRY_TAG),
+                        )
+                    },
+                    modifier = Modifier.testTag(HOST_WORKSPACES_EMPTY_TAG),
+                )
+
                 state.isEmptyAndHealthy -> EmptyState(
                     title = "No workspaces",
                     description = "Durable workspaces on this host will appear here.",
@@ -301,6 +316,7 @@ fun HostWorkspacesScreen(
                     filteredRoots(state).forEach { root ->
                         itemContent(
                             root = root,
+                            sessionsUnavailable = state.statusUnavailable || state.errors.isNotEmpty(),
                             onOpenWorkspace = onOpenWorkspace,
                             onOpenSession = onOpenSession,
                             onOpenAddWorkspace = onOpenAddWorkspace,
@@ -404,6 +420,10 @@ fun HostWorkspacesScreen(
     if (state.addWorkspaceBrowserVisible) {
         WorkspaceFolderBrowserSheet(
             state = state,
+            existingWorkspacePaths = state.roots
+                .flatMap { root -> root.workspaces }
+                .map { workspace -> workspace.path }
+                .toSet(),
             onBrowse = onBrowseWorkspaceFolder,
             onChoose = onChooseWorkspaceFolder,
             onDismiss = onDismissWorkspaceBrowser,
@@ -493,6 +513,7 @@ fun HostWorkspacesScreen(
 
 private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     root: WorkspaceRootProjection,
+    sessionsUnavailable: Boolean,
     onOpenWorkspace: (String) -> Unit,
     onOpenSession: (SessionRow) -> Unit,
     onOpenAddWorkspace: (String) -> Unit,
@@ -530,6 +551,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     }
 
     if (root.rootSessions.isNotEmpty()) {
+        val displayNames = sessionDisplayNames(root.rootSessions)
         item(key = "root-sessions:${root.key}") {
             SectionHeader(
                 label = HOST_WORKSPACES_IN_ROOT_LABEL,
@@ -542,6 +564,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
         ) { session ->
             WorkspaceSessionRow(
                 session = session,
+                displayName = displayNames[session.name] ?: session.name,
                 onClick = { onOpenSession(session) },
             )
         }
@@ -562,7 +585,12 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
         ) { workspace ->
             WorkspaceRow(
                 title = workspace.label,
-                subtitle = workspaceSessionSummary(workspace.sessions),
+                subtitleContent = {
+                    SessionKindSummary(
+                        sessions = workspace.sessions,
+                        unavailable = sessionsUnavailable,
+                    )
+                },
                 onClick = { onOpenWorkspace(workspace.path) },
                 testTag = workspaceRowTag(workspace.path),
             )
@@ -571,13 +599,19 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
 }
 
 @Composable
-private fun WorkspaceSessionRow(session: SessionRow, onClick: () -> Unit) {
+private fun WorkspaceSessionRow(
+    session: SessionRow,
+    displayName: String = session.name,
+    onClick: () -> Unit,
+) {
     ListRow(
-        title = session.name,
+        title = displayName,
         subtitle = sessionKindLabel(session),
-        titleStyle = PocketShellType.title,
+        leading = { SessionKindMark(agent = session.agent) },
+        titleStyle = PocketShellType.body,
         subtitleStyle = PocketShellType.metadata,
-        titleWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        titleWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+        titleMaxLines = 2,
         onClick = onClick,
         modifier = Modifier.testTag(workspaceSessionRowTag(session.name)),
     )
@@ -628,6 +662,8 @@ private fun RootActionsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
     ) {
         RootActionsSheetContent(
             root = root,
@@ -637,6 +673,7 @@ private fun RootActionsSheet(
             onCopyPath = onCopyPath,
             onBrowse = onBrowse,
             onRemove = onRemove,
+            onDismiss = onDismiss,
         )
     }
 }
@@ -654,20 +691,20 @@ internal fun RootActionsSheetContent(
     onCopyPath: () -> Unit,
     onBrowse: () -> Unit,
     onRemove: () -> Unit,
+    onDismiss: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
             .padding(bottom = PocketShellSpacing.lg),
     ) {
-        Text(
-            text = root.displayPath,
-            color = PocketShellColors.Text,
-            style = PocketShellType.title,
-            modifier = Modifier.padding(
-                horizontal = PocketShellSpacing.lg,
-                vertical = PocketShellSpacing.sm,
-            ),
+        SheetHeader(
+            title = root.displayPath,
+            subtitle = "Root actions",
+            onClose = onDismiss,
+            modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
         )
         RootActionRow(
             title = "Add workspace",
@@ -741,6 +778,8 @@ private fun HostToolsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
         modifier = Modifier.testTag(HOST_WORKSPACES_HOST_TOOLS_TAG),
     ) {
         Column(
@@ -748,14 +787,11 @@ private fun HostToolsSheet(
                 .fillMaxWidth()
                 .padding(bottom = PocketShellSpacing.lg),
         ) {
-            Text(
-                text = "Host tools",
-                color = PocketShellColors.Text,
-                style = PocketShellType.title,
-                modifier = Modifier.padding(
-                    horizontal = PocketShellSpacing.lg,
-                    vertical = PocketShellSpacing.sm,
-                ),
+            SheetHeader(
+                title = "Host tools",
+                subtitle = "Utilities for this host",
+                onClose = onDismiss,
+                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
             )
             HostToolRow("Browse host files", onOpenFiles, SESSION_TREE_FILES_TAG)
             HostToolRow("Services & tunnels", onOpenPorts, SESSION_TREE_PORTS_TAG)
@@ -792,6 +828,8 @@ private fun HostConnectionDetailsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
     ) {
         Column(
             modifier = Modifier
@@ -821,30 +859,32 @@ private fun HostConnectionDetailsSheet(
 @Composable
 private fun WorkspaceFolderBrowserSheet(
     state: HostWorkspacesUiState,
+    existingWorkspacePaths: Set<String>,
     onBrowse: (String) -> Unit,
     onChoose: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val currentPath = state.addWorkspaceBrowsePath
     val rootPath = canonicalRemotePath(state.addWorkspaceRootPath)
+    val canonicalCurrentPath = canonicalRemotePath(currentPath)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
         modifier = Modifier.testTag(HOST_WORKSPACES_FOLDER_BROWSER_TAG),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(androidx.compose.foundation.rememberScrollState())
                 .padding(bottom = PocketShellSpacing.lg),
         ) {
-            Text(
-                text = "Choose folder",
-                color = PocketShellColors.Text,
-                style = PocketShellType.title,
-                modifier = Modifier.padding(
-                    horizontal = PocketShellSpacing.lg,
-                    vertical = PocketShellSpacing.sm,
-                ),
+            SheetHeader(
+                title = "Choose folder",
+                subtitle = "Browse a workspace folder",
+                onClose = onDismiss,
+                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
             )
             Text(
                 text = currentPath,
@@ -853,7 +893,11 @@ private fun WorkspaceFolderBrowserSheet(
                 modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
             )
             PocketShellButton(
-                text = "Use this folder",
+                text = if (canonicalCurrentPath != null && canonicalCurrentPath in existingWorkspacePaths) {
+                    "Open this workspace"
+                } else {
+                    "Use this folder"
+                },
                 onClick = { onChoose(currentPath) },
                 variant = ButtonVariant.Primary,
                 modifier = Modifier
@@ -897,9 +941,14 @@ private fun WorkspaceFolderBrowserSheet(
                     )
                 } else {
                     state.addWorkspaceFolders.forEach { folder ->
+                        val alreadyAdded = canonicalRemotePath(folder.path) in existingWorkspacePaths
                         ListRow(
                             title = folder.name,
-                            subtitle = folder.path,
+                            subtitle = if (alreadyAdded) {
+                                "Already added · ${folder.path}"
+                            } else {
+                                folder.path
+                            },
                             onClick = { onBrowse(folder.path) },
                         )
                     }

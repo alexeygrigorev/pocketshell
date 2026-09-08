@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.Text
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,7 +27,7 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * The core compact list row — the one source of truth for every dense row in
+ * The core list row — the one source of truth for flat rows in
  * the app (host list, sessions, settings, conversation list, port-forward
  * panel, …). Encodes the issue #489 row pattern and the design language locked
  * on #479:
@@ -43,27 +44,20 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * - **[leading]** (optional) — status dot ([StatusDot]) / avatar / icon. Pass
  *   `null` for a flush-left title (e.g. settings rows).
- * - **title** — the primary scan target, [PocketShellType.bodyDense]`(13)`
- *   Medium on the bright text token.
+ * - **title** — the primary scan target, [PocketShellType.body] (18sp) on the
+ *   bright text token.
  * - **[subtitle]** (optional) — paths / IDs / `user@host`, rendered
- *   [PocketShellType.bodyMono]`(13)` on the muted token. The default is a
+ *   [PocketShellType.metadata] (16sp) on the muted token. The default is a
  *   single ellipsised line; callers such as [WorkspaceRow] may opt into a
  *   second line when the label itself is part of navigation.
  * - **[trailing]** (optional) — badge ([Badge]) / count / kebab ([Kebab]). One
  *   overflow affordance per row (design language: avoid multiple inline action
  *   buttons).
  *
- * ### Density vs. touch floor (#461 Δ6)
+ * ### Density and touch floor
  *
- * The row **paints compact**: [PocketShellDensity.rowMinHeight]`(44)` floor,
- * [PocketShellDensity.rowPadV]`(8)` / [PocketShellDensity.rowPadH]`(12)` padding
- * — so more rows fit per screen. When [onClick] is set the whole row becomes the
- * tap target and its minimum height is raised to the
- * [PocketShellDensity.tapTargetMin]`(48)` a11y floor via
- * `Modifier.defaultMinSize`. **The floor is baked in here** so consuming screens
- * cannot regress the hit area below 48dp by accident — that is the whole point
- * of extracting this row into ui-kit. (The 44dp paint floor still applies for
- * the non-clickable / decorative case.)
+ * Rows use the Quiet 72dp minimum and 20dp screen gutter. The whole row is the
+ * tap target when [onClick] is supplied, and wrapped content is allowed to grow.
  *
  * Colours stay on the always-dark raw tokens (#477 single dark scheme) so the
  * row never flips with the system light setting.
@@ -81,28 +75,33 @@ fun ListRow(
     titleStyle: TextStyle = PocketShellType.body,
     subtitleStyle: TextStyle = PocketShellType.metadata,
     titleWeight: FontWeight? = null,
+    subtitleContent: (@Composable () -> Unit)? = null,
 ) {
     // Every standard row is a 72dp minimum hit target. WorkspaceRow raises
     // this to the separate 88dp workspace navigation target.
     val minHeight = PocketShellDensity.rowMinHeight
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .defaultMinSize(minHeight = minHeight)
-            .then(
-                if (onClick != null) {
-                    Modifier.clickable(role = Role.Button, onClick = onClick)
-                } else {
-                    Modifier
-                },
-            )
-            .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
-            ),
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        modifier = if (onClick == null) modifier.fillMaxWidth() else Modifier.fillMaxWidth(),
     ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = minHeight)
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(role = Role.Button, onClick = onClick)
+                    } else {
+                        Modifier
+                    },
+                )
+                .then(if (onClick != null) modifier else Modifier)
+                .padding(
+                    horizontal = PocketShellDensity.rowPadH,
+                    vertical = PocketShellDensity.rowPadV,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
         if (leading != null) {
             // A fixed-width leading box keeps every row's title left edge
             // aligned regardless of whether the leading slot is an 8dp dot or a
@@ -122,15 +121,19 @@ fun ListRow(
                 maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (subtitle != null) {
+            if (subtitle != null || subtitleContent != null) {
                 Spacer(modifier = Modifier.size(2.dp))
-                Text(
-                    text = subtitle,
-                    color = PocketShellColors.TextMuted,
-                    style = subtitleStyle,
-                    maxLines = subtitleMaxLines,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (subtitleContent != null) {
+                    subtitleContent()
+                } else {
+                    Text(
+                        text = requireNotNull(subtitle),
+                        color = PocketShellColors.TextMuted,
+                        style = subtitleStyle,
+                        maxLines = subtitleMaxLines,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
 
@@ -143,5 +146,10 @@ fun ListRow(
                 trailing()
             }
         }
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
+            color = PocketShellColors.BorderSoft,
+        )
     }
 }

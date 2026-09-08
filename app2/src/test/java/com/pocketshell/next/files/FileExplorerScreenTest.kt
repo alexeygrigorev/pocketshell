@@ -3,10 +3,12 @@ package com.pocketshell.next.files
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.transport.SftpEntry
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -117,9 +119,26 @@ class FileExplorerScreenTest {
 
         composeRule.onNodeWithTag(FILE_EXPLORER_TRANSFER_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("Uploading photo.png…").assertIsDisplayed()
-        composeRule.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(fileDownloadTag("a.txt")).assertIsNotEnabled()
-        // A running transfer has no dismiss — there is nothing to dismiss yet.
+    }
+
+    @Test
+    fun `file tools disable upload while a transfer is running`() {
+        composeRule.setContent {
+            PocketShellTheme {
+                FileToolsSheetContent(
+                    path = "/w",
+                    canUpload = false,
+                    onUpload = {},
+                    onCreateFolder = {},
+                    onNewTextFile = {},
+                    onOpenTransfers = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertHasNoClickAction()
         composeRule.onNodeWithText("Dismiss").assertDoesNotExist()
     }
 
@@ -149,15 +168,13 @@ class FileExplorerScreenTest {
 
     @Test
     fun `up is disabled at the root, where there is nowhere to go`() {
-        setContent(state(path = "/", loaded = true))
-
-        composeRule.onNodeWithTag(FILE_EXPLORER_UP_TAG).assertIsNotEnabled()
+        setToolsContent(path = "/", canGoUp = false)
+        composeRule.onNodeWithTag(FILE_EXPLORER_UP_TAG).assertHasNoClickAction()
     }
 
     @Test
     fun `up is enabled below the root`() {
-        setContent(state(path = "/home", loaded = true))
-
+        setToolsContent(path = "/home", canGoUp = true)
         composeRule.onNodeWithTag(FILE_EXPLORER_UP_TAG).assertIsEnabled()
     }
 
@@ -180,7 +197,7 @@ class FileExplorerScreenTest {
         composeRule.onNodeWithText("Upload files").performClick()
         composeRule.onNodeWithText("Create folder").performClick()
         composeRule.onNodeWithText("New text file").performClick()
-        composeRule.onNodeWithText("Transfers").performClick()
+        composeRule.onNodeWithText("Transfers").performScrollTo().performClick()
 
         assertEquals(listOf("upload", "folder", "new", "transfers"), actions)
     }
@@ -240,6 +257,23 @@ class FileExplorerScreenTest {
                 )
             }
         }
+    }
+
+    private fun setToolsContent(path: String, canGoUp: Boolean) {
+        composeRule.setContent {
+            PocketShellTheme {
+                FileToolsSheetContent(
+                    path = path,
+                    canGoUp = canGoUp,
+                    onUpload = {},
+                    onCreateFolder = {},
+                    onNewTextFile = {},
+                    onOpenTransfers = {},
+                    onDismiss = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
     }
 
     private fun state(

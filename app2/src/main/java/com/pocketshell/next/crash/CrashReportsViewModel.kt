@@ -106,7 +106,11 @@ internal class CrashReportsViewModel @Inject constructor(
                 val dir = reportArchivesDir()
                 pruneOldReportArchives(dir)
                 val name = ReportsArchive.archiveFileName(deviceLabel(), clock)
-                ReportsArchive.packInto(reportFiles, File(dir, name))
+                ReportsArchive.packInto(
+                    reportFiles = reportFiles,
+                    destination = File(dir, name),
+                    contentTransform = CrashReportFormatter::redactForSharing,
+                )
             }.getOrElse { error ->
                 _shareAllState.value = ShareAllState.Failed(
                     error.message ?: "Could not build the reports archive.",

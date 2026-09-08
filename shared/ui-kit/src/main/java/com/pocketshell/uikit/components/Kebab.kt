@@ -68,12 +68,10 @@ data class KebabItem(
  * inline action buttons). Generalises the merged-#455 host-card kebab so every
  * screen's row overflow renders identically.
  *
- * - The trigger is a 40dp circular [PocketShellColors.SurfaceElev] container
+ * - The trigger is a 48dp circular [PocketShellColors.SurfaceElev] container
  *   with a 1dp [PocketShellColors.BorderSoft] hairline border (design-system §8
  *   "always-visible affordance"), holding the Quiet registry's `more` vector.
- *   40dp container already clears the 48dp touch floor once `minimumInteractive`
- *   semantics expand around it; the explicit 40dp visible chrome matches the
- *   mockup.
+ *   so the visible control itself satisfies the 48dp touch floor.
  * - The menu opens on [PocketShellColors.SurfaceElev] (the
  *   `surfaceContainerHigh`-equivalent raw token in our single dark scheme) with
  *   each row at [PocketShellType.bodyDense]`(13)` + an optional leading icon.
@@ -87,10 +85,7 @@ data class KebabItem(
  * screen that already has stable instrumentation for its overflow button can
  * adopt this component without breaking existing tests.
  *
- * [triggerSize] defaults to the compact 40dp visual used by most rows. Screens
- * that need the trigger itself to be the full touch target (for example dense
- * session rows with long names) can raise it to their a11y floor without adding
- * a second clickable wrapper around the menu.
+ * [triggerSize] defaults to the 48dp Quiet touch target.
  */
 @Composable
 fun Kebab(
@@ -98,7 +93,7 @@ fun Kebab(
     modifier: Modifier = Modifier,
     contentDescription: String = "More actions",
     triggerTestTag: String = KEBAB_BUTTON_TAG,
-    triggerSize: Dp = 40.dp,
+    triggerSize: Dp = 48.dp,
     expanded: Boolean? = null,
     onExpandedChange: ((Boolean) -> Unit)? = null,
 ) {
@@ -170,7 +165,7 @@ fun KebabTrigger(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     triggerTestTag: String = KEBAB_BUTTON_TAG,
-    triggerSize: Dp = 40.dp,
+    triggerSize: Dp = 48.dp,
 ) {
     Box(
         modifier = modifier

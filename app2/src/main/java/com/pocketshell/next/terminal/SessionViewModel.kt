@@ -25,8 +25,10 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -163,6 +165,9 @@ class SessionViewModel @Inject constructor(
     private val _uiState = MutableStateFlow<SessionUiState>(SessionUiState.Connecting)
 
     val uiState: StateFlow<SessionUiState> = _uiState.asStateFlow()
+
+    private val _sendFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val sendFailures = _sendFailures.asSharedFlow()
 
     /**
      * One-shot: the host accepted the kill, so the screen should pop back to
@@ -302,7 +307,13 @@ class SessionViewModel @Inject constructor(
      */
     fun sendBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
-        val target = channel ?: return
+        val target = channel ?: run {
+            // A caller may observe Live just before the channel is retired by
+            // the reconnect watcher. Report that race to the composer instead
+            // of silently dropping the write after it cleared its draft.
+            _sendFailures.tryEmit(Unit)
+            return
+        }
         viewModelScope.launch {
             try {
                 target.write(bytes)
@@ -314,6 +325,7 @@ class SessionViewModel @Inject constructor(
                 // it its own failure message would mean a drop noticed by typing
                 // ended the screen while a drop noticed by the output pump
                 // reconnected.
+                _sendFailures.tryEmit(Unit)
                 val status = withTimeoutOrNull(EXIT_STATUS_GRACE_MS) { target.exit.await() }
                 settleEnd(target, status, finalClose = status == null && isFinalClose())
             }
@@ -781,9 +793,10 @@ class SessionViewModel @Inject constructor(
     private fun endedMessage(exitCode: Int?): String {
         val name = sessionLabel
         val subject = if (name == null) "The session" else "Session \"$name\""
-        return when {
-            exitCode == null || exitCode == 0 -> "$subject ended."
-            else -> "$subject ended (exit $exitCode)."
+        return if (exitCode == null) {
+            "$subject ended."
+        } else {
+            "$subject ended (exit $exitCode)."
         }
     }
 

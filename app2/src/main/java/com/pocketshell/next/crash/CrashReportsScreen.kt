@@ -387,7 +387,13 @@ internal fun DiagnosticReportScreen(
                         ) {
                             PocketShellButton(
                                 text = "Share report",
-                                onClick = { shareReport(context, report, body) },
+                                onClick = {
+                                    shareReport(
+                                        context,
+                                        report,
+                                        CrashReportFormatter.redactForSharing(body),
+                                    )
+                                },
                                 variant = ButtonVariant.Primary,
                                 modifier = Modifier.testTag(CRASH_REPORT_SHARE_TAG),
                             )
@@ -427,15 +433,8 @@ private fun DiagnosticsHeader(
 ) {
     ScreenHeader(
         title = title,
-        leading = {
-            PocketShellButton(
-                text = "Back",
-                onClick = onBack,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(CRASH_REPORTS_BACK_TAG),
-            )
-        },
+        onBack = onBack,
+        backTestTag = CRASH_REPORTS_BACK_TAG,
     )
 }
 

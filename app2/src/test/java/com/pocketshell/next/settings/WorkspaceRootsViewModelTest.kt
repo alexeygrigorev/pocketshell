@@ -6,6 +6,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.connect.FakeHostConnectionFactory
+import com.pocketshell.next.connect.RoomTrustStore
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,6 +33,7 @@ import org.robolectric.annotation.Config
 class WorkspaceRootsViewModelTest {
 
     private lateinit var db: AppDatabase
+    private lateinit var registry: ConnectionsRegistry
     private var hostId: Long = 0
 
     @Before
@@ -38,7 +42,27 @@ class WorkspaceRootsViewModelTest {
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
-        ).allowMainThreadQueries().build()
+        )
+            .allowMainThreadQueries()
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
+            .build()
+        val factory = FakeHostConnectionFactory()
+        factory.script = { connection ->
+            val sftp = connection.sftpFixture()
+            listOf(
+                "/home/alexey/git/pocketshell",
+                "/a",
+                "/b",
+                "/home/alexey/proj",
+            ).forEach(sftp::seedDirectory)
+        }
+        registry = ConnectionsRegistry(
+            factory = factory,
+            trustStore = RoomTrustStore(db.hostDao(), Dispatchers.Unconfined),
+            hostDao = db.hostDao(),
+            dispatcher = Dispatchers.Unconfined,
+        )
         runBlocking {
             val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
             hostId = db.hostDao().insert(
@@ -56,6 +80,7 @@ class WorkspaceRootsViewModelTest {
     private fun viewModel(id: Long = hostId): WorkspaceRootsViewModel = WorkspaceRootsViewModel(
         projectRootDao = db.projectRootDao(),
         hostDao = db.hostDao(),
+        registry = registry,
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to id)),
         dispatcher = UnconfinedTestDispatcher(),
     )
@@ -124,10 +149,10 @@ class WorkspaceRootsViewModelTest {
         val roots = vm.state.first { it.roots.size == 2 }.roots
         val toDelete = roots.first { it.path == "/a" }
 
-        vm.deleteRoot(toDelete)
+        vm.deleteRoot(toDelete).join()
 
-        val remaining = vm.state.first { it.roots.size == 1 }.roots
-        assertEquals("/b", remaining.single().path)
+        val remaining = db.projectRootDao().getByHostId(hostId).first()
+        assertEquals(listOf("/b"), remaining.map { it.path })
     }
 
     @Test

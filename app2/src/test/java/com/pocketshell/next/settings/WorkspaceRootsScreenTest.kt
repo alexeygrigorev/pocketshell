@@ -37,7 +37,7 @@ class WorkspaceRootsScreenTest {
     }
 
     @Test
-    fun `typing a path and tapping add reports both fields and clears them`() {
+    fun `typing a path and tapping add reports both fields`() {
         var added: Pair<String, String>? = null
         setContent(onAddRoot = { label, path -> added = label to path })
 
@@ -46,8 +46,6 @@ class WorkspaceRootsScreenTest {
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_ADD_TAG).performClick()
 
         assertEquals("Pocketshell" to "/home/alexey/git/pocketshell", added)
-        // The add control disables again once the fields it just cleared are empty.
-        composeRule.onNodeWithTag(WORKSPACE_ROOTS_ADD_TAG).assertIsNotEnabled()
     }
 
     @Test
@@ -72,8 +70,6 @@ class WorkspaceRootsScreenTest {
         setContent(onBack = { backCount++ })
 
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_BACK_TAG).performClick()
 
         assertEquals(1, backCount)

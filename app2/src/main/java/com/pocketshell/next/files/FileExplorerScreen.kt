@@ -15,13 +15,16 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -34,7 +37,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,7 +68,9 @@ import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.flow.collect
 import java.util.concurrent.TimeUnit
 
 /** Stable test tags. Rows are keyed by the host's own file names. */
@@ -288,6 +295,21 @@ fun FileExplorerScreen(
     onDismissNewTextFile: () -> Unit = {},
     onDismissOperationMessage: () -> Unit = {},
 ) {
+    val scrollPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
+    val savedPosition = scrollPositions[state.path]
+    val listState = remember(state.path) {
+        LazyListState(
+            firstVisibleItemIndex = savedPosition?.first ?: 0,
+            firstVisibleItemScrollOffset = savedPosition?.second ?: 0,
+        )
+    }
+    LaunchedEffect(state.path, listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { position ->
+            scrollPositions[state.path] = position
+        }
+    }
     if (state.transfersVisible) {
         TransfersScreen(
             state = state,
@@ -307,38 +329,13 @@ fun FileExplorerScreen(
         ScreenHeader(
             title = state.path.takeIf { it.isNotBlank() }?.let { RemotePath.nameOf(it) } ?: "Files",
             subtitle = state.path.ifBlank { "Opening…" },
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onBack,
             trailing = {
-                Row {
-                    PocketShellButton(
-                        text = "Up",
-                        onClick = onUp,
-                        variant = ButtonVariant.Text,
-                        compact = true,
-                        enabled = state.path.isNotBlank() && state.path != RemotePath.ROOT,
-                        modifier = Modifier.testTag(FILE_EXPLORER_UP_TAG),
-                    )
-                    PocketShellButton(
-                        text = "Upload",
-                        onClick = onUpload,
-                        variant = ButtonVariant.Primary,
-                        compact = true,
-                        enabled = state.loaded && !state.transferring,
-                        modifier = Modifier.testTag(FILE_EXPLORER_UPLOAD_TAG),
-                    )
-                    KebabTrigger(
-                        contentDescription = "File tools",
-                        onClick = onOpenTools,
-                        triggerTestTag = FILE_EXPLORER_ACTIONS_TAG,
-                    )
-                }
+                KebabTrigger(
+                    contentDescription = "File tools",
+                    onClick = onOpenTools,
+                    triggerTestTag = FILE_EXPLORER_ACTIONS_TAG,
+                )
             },
         )
 
@@ -405,6 +402,7 @@ fun FileExplorerScreen(
                 modifier = Modifier
                     .weight(1f)
                     .testTag(FILE_EXPLORER_LIST_TAG),
+                state = listState,
                 contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
             ) {
                 items(state.entries, key = { it.path }) { entry ->
@@ -424,6 +422,7 @@ fun FileExplorerScreen(
     if (state.toolsVisible) {
         FileToolsSheet(
             state = state,
+            onUp = onUp,
             onUpload = {
                 onDismissTools()
                 onUpload()
@@ -613,7 +612,7 @@ private fun FileRow(
             if (!entry.isDirectory) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     PocketShellButton(
-                        text = "Save",
+                        text = "Download",
                         onClick = onDownload,
                         variant = ButtonVariant.Text,
                         compact = true,
@@ -649,6 +648,7 @@ private fun FileRow(
 @Composable
 private fun FileToolsSheet(
     state: FileExplorerUiState,
+    onUp: () -> Unit,
     onUpload: () -> Unit,
     onCreateFolder: () -> Unit,
     onNewTextFile: () -> Unit,
@@ -658,11 +658,15 @@ private fun FileToolsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
         modifier = Modifier.testTag(FILE_EXPLORER_TOOLS_SHEET_TAG),
         containerColor = PocketShellColors.Surface,
     ) {
         FileToolsSheetContent(
             path = state.path,
+            onUp = onUp,
+            canGoUp = state.path.isNotBlank() && state.path != RemotePath.ROOT,
+            canUpload = state.loaded && !state.transferring,
             onUpload = onUpload,
             onCreateFolder = onCreateFolder,
             onNewTextFile = onNewTextFile,
@@ -676,6 +680,9 @@ private fun FileToolsSheet(
 @Composable
 internal fun FileToolsSheetContent(
     path: String,
+    onUp: () -> Unit = {},
+    canGoUp: Boolean = path.isNotBlank() && path != RemotePath.ROOT,
+    canUpload: Boolean = true,
     onUpload: () -> Unit,
     onCreateFolder: () -> Unit,
     onNewTextFile: () -> Unit,
@@ -686,6 +693,8 @@ internal fun FileToolsSheetContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
             .padding(bottom = PocketShellSpacing.lg)
             .testTag(FILE_EXPLORER_TOOLS_SHEET_TAG),
     ) {
@@ -699,10 +708,20 @@ internal fun FileToolsSheetContent(
             onClose = onDismiss,
         )
         FileToolRow(
+            title = "Up to parent",
+            subtitle = "Stay in Files and browse the parent folder",
+            icon = PocketShellIcons.Up,
+            onClick = onUp,
+            enabled = canGoUp,
+            testTag = FILE_EXPLORER_UP_TAG,
+        )
+        FileToolRow(
             title = "Upload files",
             subtitle = "Android document picker",
             icon = PocketShellIcons.Upload,
             onClick = onUpload,
+            enabled = canUpload,
+            testTag = FILE_EXPLORER_UPLOAD_TAG,
         )
         FileToolRow(
             title = "Create folder",
@@ -785,6 +804,7 @@ private fun FileActionSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
         modifier = Modifier.testTag(FILE_EXPLORER_FILE_ACTIONS_TAG),
         containerColor = PocketShellColors.Surface,
     ) {
@@ -859,6 +879,7 @@ private fun CreateFolderSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
         modifier = Modifier.testTag(FILE_EXPLORER_CREATE_FOLDER_TAG),
         containerColor = PocketShellColors.Surface,
     ) {
@@ -900,7 +921,7 @@ internal fun CreateFolderSheetContent(
             .testTag(FILE_EXPLORER_CREATE_FOLDER_TAG),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
-        SheetHeader(title = "Create folder", subtitle = parent)
+        SheetHeader(title = "Create folder", subtitle = parent, onClose = onDismiss)
         state.failure?.let { failure ->
             Banner(text = failure, role = BannerRole.Error)
         }
@@ -954,6 +975,7 @@ private fun NewTextFileSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
         modifier = Modifier.testTag(FILE_EXPLORER_NEW_TEXT_FILE_SHEET_TAG),
         containerColor = PocketShellColors.Surface,
     ) {
@@ -976,7 +998,7 @@ private fun NewTextFileSheet(
                 .testTag(FILE_EXPLORER_NEW_TEXT_FILE_SHEET_TAG),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
-            SheetHeader(title = "New text file", subtitle = parent)
+            SheetHeader(title = "New text file", subtitle = parent, onClose = onDismiss)
             state.failure?.let { failure ->
                 Banner(text = failure, role = BannerRole.Error)
             }
@@ -1030,6 +1052,7 @@ private fun RenameFileSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
         modifier = Modifier.testTag(FILE_EXPLORER_RENAME_TAG),
         containerColor = PocketShellColors.Surface,
     ) {
@@ -1071,7 +1094,7 @@ internal fun RenameFileSheetContent(
             .testTag(FILE_EXPLORER_RENAME_TAG),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
-        SheetHeader(title = "Rename file")
+        SheetHeader(title = "Rename file", onClose = onDismiss)
         state.failure?.let { failure ->
             Banner(text = failure, role = BannerRole.Error)
         }

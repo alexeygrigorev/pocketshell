@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +24,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.ImeAction
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -32,6 +35,7 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.next.workspaces.canonicalRemotePath
 
 /** Stable test tags. */
 const val WORKSPACE_ROOTS_LIST_TAG: String = "workspace-roots-list"
@@ -39,6 +43,7 @@ const val WORKSPACE_ROOTS_BACK_TAG: String = "workspace-roots-back"
 const val WORKSPACE_ROOTS_LABEL_FIELD_TAG: String = "workspace-roots-label-field"
 const val WORKSPACE_ROOTS_PATH_FIELD_TAG: String = "workspace-roots-path-field"
 const val WORKSPACE_ROOTS_ADD_TAG: String = "workspace-roots-add"
+const val WORKSPACE_ROOTS_CREATE_TAG: String = "workspace-roots-create"
 const val WORKSPACE_ROOTS_EMPTY_TAG: String = "workspace-roots-empty"
 
 fun workspaceRootRowTag(rootId: Long): String = "workspace-root-$rootId"
@@ -64,6 +69,7 @@ fun WorkspaceRootsRoute(
         state = state,
         onBack = onBack,
         onAddRoot = viewModel::addRoot,
+        onCreateRoot = viewModel::createRoot,
         onDeleteRoot = viewModel::deleteRoot,
         modifier = modifier,
     )
@@ -84,11 +90,18 @@ fun WorkspaceRootsScreen(
     state: WorkspaceRootsUiState,
     onBack: () -> Unit,
     onAddRoot: (label: String, path: String) -> Unit,
+    onCreateRoot: (label: String, path: String) -> Unit = { _, _ -> },
     onDeleteRoot: (WorkspaceRootRow) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var label by remember { mutableStateOf("") }
     var path by remember { mutableStateOf("") }
+    LaunchedEffect(state.successNonce) {
+        if (state.successNonce > 0) {
+            label = ""
+            path = ""
+        }
+    }
 
     Column(
         modifier = modifier
@@ -97,15 +110,8 @@ fun WorkspaceRootsScreen(
     ) {
         ScreenHeader(
             title = if (state.hostName.isBlank()) "Workspace roots" else "Roots · ${state.hostName}",
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(WORKSPACE_ROOTS_BACK_TAG),
-                )
-            },
+            onBack = onBack,
+            backTestTag = WORKSPACE_ROOTS_BACK_TAG,
         )
 
         Column(
@@ -134,15 +140,31 @@ fun WorkspaceRootsScreen(
                     .fillMaxWidth()
                     .testTag(WORKSPACE_ROOTS_LABEL_FIELD_TAG),
             )
+            state.failure?.let { failure ->
+                Banner(
+                    text = failure,
+                    role = BannerRole.Error,
+                    modifier = Modifier.testTag("workspace-roots-error"),
+                )
+            }
+            if (state.canCreate && state.createPath == canonicalRemotePath(path.trim().trimEnd('/'))) {
+                PocketShellButton(
+                    text = "Create folder on host",
+                    onClick = { onCreateRoot(label, path) },
+                    variant = ButtonVariant.Secondary,
+                    enabled = !state.adding,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(WORKSPACE_ROOTS_CREATE_TAG),
+                )
+            }
             PocketShellButton(
-                text = "Add root",
+                text = if (state.adding) "Checking…" else "Add root",
                 onClick = {
                     onAddRoot(label, path)
-                    label = ""
-                    path = ""
                 },
                 variant = ButtonVariant.Primary,
-                enabled = path.isNotBlank(),
+                enabled = path.isNotBlank() && !state.adding,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(WORKSPACE_ROOTS_ADD_TAG),

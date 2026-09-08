@@ -10,9 +10,8 @@ import androidx.compose.ui.unit.dp
  * freehand `.dp` literals so the 4 dp grid stays enforced; if a padding/gap/margin
  * value doesn't land on a rung, it's a bug or scope creep (§3).
  *
- * The defaults deliberately favour the tighter rungs for the dev-tool density the
- * maintainer asked for (#461 Δ6) — see [PocketShellDensity] for the row/chip knobs
- * that consume these.
+ * The scale follows the Quiet design kit. Row and touch dimensions live in
+ * [PocketShellDensity] so spacing and hit targets cannot drift independently.
  */
 object PocketShellSpacing {
     /** 4 dp — micro-gaps (icon-to-label, breadcrumb separators). */
@@ -21,16 +20,24 @@ object PocketShellSpacing {
     /** 8 dp — standard gap (chip-to-chip, row-to-row padding), key bar gap. */
     val sm = 8.dp
 
-    /** 12 dp — card internal padding, row vertical padding (the compact default). */
+    /** 12 dp — local control gaps and compact inline padding. */
     val md = 12.dp
 
     /** 16 dp — large padding (app bar, sheet header, host-card internal), dialog padding. */
     val lg = 16.dp
+
+    /** 20 dp — the Quiet screen gutter and primary page inset. */
+    val xl = 20.dp
+
+    /** 24 dp — sheet and large surface inset. */
+    val xxl = 24.dp
+
+    /** 32 dp — separation between independent content sections. */
+    val section = 32.dp
 }
 
 /**
- * PocketShell density knob (#461 Δ6) — the compact dev-tool defaults for rows,
- * chips, and trees.
+ * PocketShell geometry shared by rows, chips and the workspace tree.
  *
  * **Visual density is kept separate from the touch floor.** [rowPadV]/[chipPadV]
  * shrink the *paint* so more rows fit per screen, while [tapTargetMin] (48 dp) is
@@ -48,11 +55,11 @@ object PocketShellDensity {
     /** 72 dp — the Quiet standard row's minimum touch and reading height. */
     val standardRowMinHeight = 72.dp
 
-    /** 12 dp — row vertical padding. Rows may grow for wrapped content. */
-    val rowPadV = 12.dp
+    /** 16 dp — row vertical padding. Rows may grow for wrapped content. */
+    val rowPadV = 16.dp
 
-    /** 12 dp — row horizontal padding. */
-    val rowPadH = 12.dp
+    /** 20 dp — Quiet screen gutter used by standard and workspace rows. */
+    val rowPadH = 20.dp
 
     /** 6 dp — chip vertical padding. */
     val chipPadV = 6.dp
@@ -60,8 +67,8 @@ object PocketShellDensity {
     /** 10 dp — chip horizontal padding. */
     val chipPadH = 10.dp
 
-    /** 8 dp — gap between sections / stacked groups. */
-    val sectionGap = 8.dp
+    /** 32 dp — separation between independent sections. */
+    val sectionGap = 32.dp
 
     /** 16 dp — indent applied per workspace-tree nesting level. */
     val treeIndent = 16.dp

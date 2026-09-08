@@ -6,6 +6,9 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.composer.COMPOSER_INSERT_TAG
 import com.pocketshell.next.composer.COMPOSER_SEND_TAG
@@ -16,15 +19,15 @@ import com.pocketshell.next.composer.ComposerNotice
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
-import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
+import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.stopSessionMessage
-import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
+import com.pocketshell.next.terminal.TERMINAL_ACTIONS_USAGE_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -62,12 +65,13 @@ class SessionScreenTest {
     }
 
     @Test
-    fun `a failure shows the message it was given and never a terminal`() {
+    fun `an ended session shows the ended page and never a terminal`() {
         setContent(SessionUiState.Failed("Session \"$SESSION\" ended (exit 3)."))
 
-        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Session \"$SESSION\" ended (exit 3).").assertIsDisplayed()
-        // "attaching" and "not attached" must not look the same.
+        composeRule.onNodeWithTag(SESSION_ENDED_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Session ended").assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_CONNECTING_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_TERMINAL_TAG).assertDoesNotExist()
     }
@@ -78,8 +82,6 @@ class SessionScreenTest {
         setContent(SessionUiState.Connecting, onBack = { backs += 1 })
 
         composeRule.onNodeWithTag(SESSION_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_BACK_TAG).performClick()
 
         assertEquals(1, backs)
@@ -91,20 +93,19 @@ class SessionScreenTest {
      * error belong on that screen, not as a missing button.
      */
     @Test
-    fun `usage is reachable when the glance pill has no reading`() {
+    fun `usage is reachable from terminal actions`() {
         var opened = 0
         setContent(SessionUiState.Connecting, onOpenUsage = { opened += 1 })
 
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Usage").assertIsDisplayed()
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).performClick()
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
+        composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).performClick()
 
         assertEquals(1, opened)
     }
 
     @Test
-    fun `the glance pill is the usage tap target when a reading exists`() {
+    fun `usage reading does not add a second header action`() {
         var opened = 0
         setContent(
             SessionUiState.Connecting,
@@ -120,8 +121,9 @@ class SessionScreenTest {
         )
 
         composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
+        composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).performClick()
 
         assertEquals(1, opened)
     }
@@ -148,16 +150,15 @@ class SessionScreenTest {
             ),
         )
 
-        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Claude").assertIsDisplayed()
-        composeRule.onNodeWithText("38%").assertIsDisplayed()
-        // The tokens the cross-provider pill would have shown must be absent.
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
+        // Usage readings stay in the usage page rather than crowding the terminal header.
+        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
+        // The tokens the old cross-provider pill would have shown must be absent.
+        composeRule.onNodeWithText("Claude").assertDoesNotExist()
+        composeRule.onNodeWithText("38%").assertDoesNotExist()
         composeRule.onNodeWithText("Claude 7d").assertDoesNotExist()
         composeRule.onNodeWithText("7d").assertDoesNotExist()
         composeRule.onNodeWithText("5h").assertDoesNotExist()
-        composeRule
-            .onNodeWithContentDescription("Usage Claude 38%")
-            .assertIsDisplayed()
     }
 
     @Test
@@ -321,11 +322,12 @@ class SessionScreenTest {
     }
 
     @Test
-    fun `a failed session keeps the composer launcher so a draft can still be kept`() {
-        setContent(SessionUiState.Failed("no route to host"))
+    fun `an ended session has no composer launcher`() {
+        setContent(SessionUiState.Failed("Session \"$SESSION\" ended (exit 3)."))
 
-        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_ENDED_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertDoesNotExist()
     }
 
@@ -344,7 +346,7 @@ class SessionScreenTest {
     }
 
     @Test
-    fun `header kebab Stop session confirms then reports the name`() {
+    fun `header kebab End session confirms with host context`() {
         var stopped = 0
         setContent(
             SessionUiState.Live(createRemoteTerminalSession()),
@@ -352,10 +354,11 @@ class SessionScreenTest {
         )
 
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
-        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).assertIsDisplayed()
-        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).performClick()
+        composeRule.onNodeWithTag(TERMINAL_ACTIONS_SHEET_TAG).performTouchInput { swipeUp() }
+        composeRule.onNodeWithTag(STOP_SESSION_ITEM_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(STOP_SESSION_ITEM_TAG).performClick()
         composeRule.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
-        composeRule.onNodeWithText(stopSessionMessage(SESSION)).assertIsDisplayed()
+        composeRule.onNodeWithText(stopSessionMessage(SESSION, host = "this host")).assertIsDisplayed()
         composeRule.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
         assertEquals(1, stopped)
@@ -370,7 +373,8 @@ class SessionScreenTest {
         )
 
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
-        composeRule.onNodeWithText(STOP_SESSION_ITEM_LABEL).performClick()
+        composeRule.onNodeWithTag(TERMINAL_ACTIONS_SHEET_TAG).performTouchInput { swipeUp() }
+        composeRule.onNodeWithTag(STOP_SESSION_ITEM_TAG).performClick()
         composeRule.onNodeWithTag(STOP_SESSION_CANCEL_TAG).performClick()
 
         assertEquals(0, stopped)

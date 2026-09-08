@@ -55,8 +55,6 @@ class UsageScreenTest {
         }
 
         composeRule.onNodeWithTag(USAGE_BACK_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText("‹").assertDoesNotExist()
         composeRule.onNodeWithTag(USAGE_BACK_TAG).performClick()
 
         assertEquals(1, backs)

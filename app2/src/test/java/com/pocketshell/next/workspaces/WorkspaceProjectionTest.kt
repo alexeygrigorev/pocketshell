@@ -36,6 +36,10 @@ class WorkspaceProjectionTest {
                 WorkspaceMembership("/home/alexey/git/app", "~/git/app"),
                 WorkspaceMembership("/home/alexey/work/app", "~/work/app"),
             ),
+            registeredRoots = listOf(
+                RegisteredWorkspaceRoot("/home/alexey/git", "Git"),
+                RegisteredWorkspaceRoot("/home/alexey/work", "Work"),
+            ),
         )
 
         assertEquals(listOf("~/git", "~/work"), result.map { it.displayPath })
@@ -67,6 +71,22 @@ class WorkspaceProjectionTest {
 
         val root = result.single()
         assertEquals("Git", root.label)
+        assertEquals(listOf("root-shell"), root.rootSessions.map { it.name })
+        assertEquals(listOf("app"), root.workspaces.map { it.label })
+    }
+
+    @Test
+    fun `a membership equal to a configured root does not create a duplicate child`() {
+        val result = projectWorkspaceRoots(
+            sessions = listOf(session("root-shell", "/home/alexey/git")),
+            memberships = listOf(
+                WorkspaceMembership("/home/alexey/git", "~/git"),
+                WorkspaceMembership("/home/alexey/git/app", "~/git/app"),
+            ),
+            registeredRoots = listOf(RegisteredWorkspaceRoot("/home/alexey/git", "Git")),
+        )
+
+        val root = result.single()
         assertEquals(listOf("root-shell"), root.rootSessions.map { it.name })
         assertEquals(listOf("app"), root.workspaces.map { it.label })
     }

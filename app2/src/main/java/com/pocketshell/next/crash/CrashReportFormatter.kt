@@ -10,6 +10,36 @@ import java.time.Instant
  */
 object CrashReportFormatter {
 
+    /**
+     * Removes identity and location data before a report leaves the device.
+     * The local file remains complete for on-device review; this is the default
+     * representation used by both the single-report and archive share paths.
+     */
+    fun redactForSharing(report: String): String = buildString {
+        var inException = false
+        report.lineSequence().forEach { line ->
+            when {
+                line == "Exception" -> {
+                    inException = true
+                    appendLine(line)
+                }
+                inException -> appendLine(redactSensitiveText(line))
+                line.startsWith("Host:") ||
+                    line.startsWith("Hostname:") ||
+                    line.startsWith("User:") ||
+                    line.startsWith("Session:") ||
+                    line.startsWith("Directory:") ||
+                    line.startsWith("Action:") -> appendLine(line.substringBefore(':') + ": [redacted]")
+                line.startsWith("Exception summary:") -> {
+                    val value = line.removePrefix("Exception summary:").trim()
+                    appendLine("Exception summary: ${value.substringBefore(':')}")
+                }
+                line.startsWith("Top frame:") -> appendLine("Top frame: [redacted]")
+                else -> appendLine(redactSensitiveText(line))
+            }
+        }
+    }.trimEnd() + "\n"
+
     fun format(
         throwable: Throwable,
         threadName: String,
@@ -72,4 +102,10 @@ object CrashReportFormatter {
         throwable.printStackTrace(PrintWriter(writer))
         return writer.toString().trimEnd()
     }
+
+    private fun redactSensitiveText(value: String): String = value
+        .replace(Regex("(?i)(/home/|/users/|/var/home/)[^\\s:)]+"), "<path>")
+        .replace(Regex("(?i)~/[^\\s:)]+"), "<path>")
+        .replace(Regex("(?i)(authorization|bearer|password|passphrase|token|secret|private key)\\s*[=:]\\s*[^\\s]+"), "$1=[redacted]")
+        .replace(Regex("-----BEGIN [^-]+ PRIVATE KEY-----.*", RegexOption.IGNORE_CASE), "<private-key-redacted>")
 }

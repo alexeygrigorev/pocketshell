@@ -398,6 +398,9 @@ def test_aplexer_is_pinned_exactly() -> None:
       scan on a session directory that has no `session.json` yet, which is the
       state every `a start` creates for 26-43 ms, so a session being created
       blanked the phone's aplexer session rows (aplexer#2 / aplexer#3).
+    * 0.1.5, never 0.1.4 — `a attach --no-status` keeps the Android terminal
+      plain: no status chrome or reserved row, raw input reaches the worker,
+      and PTY resize geometry still propagates to the session.
     * 0.1.4, never 0.1.3 — 0.1.3 emits no `agent` field, so the session tree
       cannot say WHICH agent a session is running. `engine` cannot stand in
       for it: every session PocketShell creates is `engine: "shell"` with the
@@ -409,7 +412,7 @@ def test_aplexer_is_pinned_exactly() -> None:
     """
     requirement = _aplexer_requirement()
     pin = requirement.split(";")[0].strip()
-    assert pin == "aplexer==0.1.4", pin
+    assert pin == "aplexer==0.1.5", pin
 
 
 def test_aplexer_dependency_marker_is_linux_only() -> None:

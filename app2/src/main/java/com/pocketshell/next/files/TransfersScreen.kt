@@ -57,14 +57,7 @@ fun TransfersScreen(
         ScreenHeader(
             title = "Transfers",
             subtitle = "Remote file transfers",
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onBack,
         )
 
         if (state.transferRecords.isEmpty()) {

@@ -164,15 +164,8 @@ fun QrScannerScreen(
             .background(PocketShellColors.Background),
     ) {
         ScreenHeader(
-            title = "Scan host QR",
-            trailing = {
-                PocketShellButton(
-                    text = "Close",
-                    onClick = onClose,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            title = if (state is QrScannerViewModel.State.Review) "Review import" else "Scan host QR",
+            onBack = onClose,
         )
 
         when (state) {

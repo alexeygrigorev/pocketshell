@@ -84,7 +84,7 @@ class QuietThemeTokenTest {
             assertEquals(PocketShellColors.BorderSoft, mapped.outlineVariant)
             assertEquals(PocketShellColors.Red, mapped.error)
             assertEquals(PocketShellColors.Background, mapped.onError)
-            assertEquals(Color.Black, mapped.scrim)
+            assertEquals(PocketShellColors.Scrim, mapped.scrim)
         }
     }
 

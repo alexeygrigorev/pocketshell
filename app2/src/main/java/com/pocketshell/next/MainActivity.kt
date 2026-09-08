@@ -1,5 +1,6 @@
 package com.pocketshell.next
 
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
@@ -14,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -25,6 +27,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
+import androidx.core.view.WindowCompat
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
 import com.pocketshell.next.connect.ConnectionsRegistry
@@ -111,6 +114,15 @@ class MainActivity : FragmentActivity() {
         // WindowInsets.ime, so sheets/forms that opt into imePadding keep
         // working. The session column must not consume those insets.
         enableEdgeToEdge()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+        window.statusBarColor = AndroidColor.rgb(16, 23, 30)
+        window.navigationBarColor = AndroidColor.rgb(16, 23, 30)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         setContent {
             PocketShellTheme {
@@ -139,10 +151,12 @@ class MainActivity : FragmentActivity() {
                     val settingsViewModel: SettingsViewModel = hiltViewModel()
                     val appSettings by settingsViewModel.state.collectAsState()
                     CompositionLocalProvider(LocalAppSettings provides appSettings) {
-                        AppNavHost(
-                            modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
-                            connections = connections,
-                        )
+                            AppNavHost(
+                                modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
+                                connections = connections,
+                                startupHostId = appSettings.defaultHostId,
+                                onHostOpened = settingsViewModel::setDefaultHostId,
+                            )
                     }
                 }
             }
@@ -211,6 +225,10 @@ fun AppNavHost(
     navController: NavHostController = rememberNavController(),
     modifier: Modifier = Modifier,
     connections: ConnectionsRegistry? = null,
+    /** Last host to resume; null keeps the Hosts landing screen. */
+    startupHostId: Long? = null,
+    /** Persists the host selection without making the host list own settings. */
+    onHostOpened: (Long) -> Unit = {},
     hostsScreen: @Composable (HostListActions) -> Unit = { actions ->
         HostListRoute(
             onOpenHost = actions.onOpenHost,
@@ -424,7 +442,10 @@ fun AppNavHost(
             ) { onOpenHost ->
                 hostsScreen(
                     HostListActions(
-                        onOpenHost = onOpenHost,
+                        onOpenHost = { hostId ->
+                            onHostOpened(hostId)
+                            onOpenHost(hostId)
+                        },
                         // Task P-6: the management routes are plain
                         // navigations, deliberately NOT gated by the connect
                         // gate — editing a host must work while the host is
@@ -770,5 +791,13 @@ fun AppNavHost(
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
             hostUsageScreen(hostId) { navController.popBackStack() }
         }
+    }
+
+    LaunchedEffect(startupHostId) {
+        val hostId = startupHostId ?: return@LaunchedEffect
+        if (hostId <= 0L || navController.currentDestination?.route != Destination.Hosts.pattern) {
+            return@LaunchedEffect
+        }
+        navController.navigate(Destination.Workspaces.route(hostId))
     }
 }

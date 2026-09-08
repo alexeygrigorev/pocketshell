@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,11 +27,14 @@ import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.workspaces.canonicalRemotePath
+import com.pocketshell.next.workspaces.sessionDisplayNames
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import androidx.compose.ui.unit.dp
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -113,60 +117,71 @@ fun SessionSwitcherSheet(
     onOpenSession: (SessionRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val displayNames = sessionDisplayNames(state.sessions)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
     ) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 560.dp)
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(SESSION_SWITCHER_SHEET_TAG),
         ) {
-            SheetHeader(
-                title = "Sessions",
-                subtitle = "Switch terminals in this workspace.",
-                onClose = onDismiss,
-            )
-            ListRow(
-                title = "New session",
-                subtitle = "Start another terminal here.",
-                onClick = onNewSession,
-                modifier = Modifier.testTag(SESSION_SWITCHER_NEW_TAG),
-            )
+            item {
+                SheetHeader(
+                    title = "Sessions",
+                    subtitle = "Switch terminals in this workspace.",
+                    onClose = onDismiss,
+                )
+            }
+            item {
+                ListRow(
+                    title = "New session",
+                    subtitle = "Start another terminal here.",
+                    onClick = onNewSession,
+                    modifier = Modifier.testTag(SESSION_SWITCHER_NEW_TAG),
+                )
+            }
             when {
-                state.loading -> EmptyState(
-                    title = "Loading sessions…",
-                    modifier = Modifier
-                        .padding(vertical = PocketShellSpacing.lg)
-                        .testTag(SESSION_SWITCHER_LOADING_TAG),
-                )
-                state.failure != null && state.sessions.isEmpty() -> EmptyState(
-                    title = "Sessions unavailable",
-                    description = state.failure,
-                    modifier = Modifier.testTag(SESSION_SWITCHER_ERROR_TAG),
-                )
-                state.sessions.isEmpty() -> EmptyState(
-                    title = "No other sessions",
-                    description = "Start another session from this workspace.",
-                    modifier = Modifier.testTag(SESSION_SWITCHER_EMPTY_TAG),
-                )
-                else -> LazyColumn {
-                    items(state.sessions, key = { "${it.workspace}:${it.name}" }) { session ->
-                        ListRow(
-                            title = session.name,
-                            subtitle = if (session.name == currentSessionName) {
-                                "Current session"
-                            } else {
-                                sessionSwitcherSubtitle(session)
-                            },
-                            onClick = { onOpenSession(session) },
-                            modifier = Modifier.testTag(sessionSwitcherRowTag(session.name)),
-                        )
-                    }
+                state.loading -> item {
+                    EmptyState(
+                        title = "Loading sessions…",
+                        modifier = Modifier
+                            .padding(vertical = PocketShellSpacing.lg)
+                            .testTag(SESSION_SWITCHER_LOADING_TAG),
+                    )
+                }
+                state.failure != null && state.sessions.isEmpty() -> item {
+                    EmptyState(
+                        title = "Sessions unavailable",
+                        description = state.failure,
+                        modifier = Modifier.testTag(SESSION_SWITCHER_ERROR_TAG),
+                    )
+                }
+                state.sessions.isEmpty() -> item {
+                    EmptyState(
+                        title = "No other sessions",
+                        description = "Start another session from this workspace.",
+                        modifier = Modifier.testTag(SESSION_SWITCHER_EMPTY_TAG),
+                    )
+                }
+                else -> items(state.sessions, key = { "${it.workspace}:${it.name}" }) { session ->
+                    ListRow(
+                        title = displayNames[session.name] ?: "Terminal",
+                        subtitle = if (session.name == currentSessionName) {
+                            "Current session"
+                        } else {
+                            sessionSwitcherSubtitle(session)
+                        },
+                        onClick = { onOpenSession(session) },
+                        modifier = Modifier.testTag(sessionSwitcherRowTag(session.name)),
+                    )
                 }
             }
         }
@@ -183,6 +198,7 @@ private fun sessionSwitcherSubtitle(session: SessionRow): String = listOfNotNull
 fun TerminalActionsSheet(
     onSessions: () -> Unit,
     onBrowseFiles: () -> Unit,
+    onOpenUsage: () -> Unit,
     onCopySelection: () -> Unit,
     onDetach: () -> Unit,
     onEndSession: () -> Unit,
@@ -193,6 +209,7 @@ fun TerminalActionsSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
+        shape = PocketShellShapes.large,
     ) {
         Column(
             modifier = Modifier
@@ -202,11 +219,18 @@ fun TerminalActionsSheet(
                 .testTag(TERMINAL_ACTIONS_SHEET_TAG),
         ) {
             SheetHeader(title = "Terminal", onClose = onDismiss)
-            TerminalActionRow("Sessions in workspace", onSessions, TERMINAL_ACTIONS_SESSIONS_TAG)
-            TerminalActionRow("Browse workspace files", onBrowseFiles, TERMINAL_ACTIONS_FILES_TAG)
-            TerminalActionRow("Copy selection", onCopySelection, TERMINAL_ACTIONS_COPY_TAG)
-            TerminalActionRow("Detach and keep running", onDetach, TERMINAL_ACTIONS_DETACH_TAG)
-            TerminalActionRow(STOP_SESSION_ITEM_LABEL, onEndSession, STOP_SESSION_ITEM_TAG)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp),
+            ) {
+                item { TerminalActionRow("Sessions in workspace", onSessions, TERMINAL_ACTIONS_SESSIONS_TAG) }
+                item { TerminalActionRow("Browse workspace files", onBrowseFiles, TERMINAL_ACTIONS_FILES_TAG) }
+                item { TerminalActionRow("Usage", onOpenUsage, TERMINAL_ACTIONS_USAGE_TAG) }
+                item { TerminalActionRow("Copy selection", onCopySelection, TERMINAL_ACTIONS_COPY_TAG) }
+                item { TerminalActionRow("Detach and keep running", onDetach, TERMINAL_ACTIONS_DETACH_TAG) }
+                item { TerminalActionRow(STOP_SESSION_ITEM_LABEL, onEndSession, STOP_SESSION_ITEM_TAG) }
+            }
         }
     }
 }
@@ -219,5 +243,6 @@ private fun TerminalActionRow(title: String, onClick: () -> Unit, testTag: Strin
 const val TERMINAL_ACTIONS_SHEET_TAG: String = "terminal-actions-sheet"
 const val TERMINAL_ACTIONS_SESSIONS_TAG: String = "terminal-actions-sessions"
 const val TERMINAL_ACTIONS_FILES_TAG: String = "terminal-actions-files"
+const val TERMINAL_ACTIONS_USAGE_TAG: String = "terminal-actions-usage"
 const val TERMINAL_ACTIONS_COPY_TAG: String = "terminal-actions-copy"
 const val TERMINAL_ACTIONS_DETACH_TAG: String = "terminal-actions-detach"

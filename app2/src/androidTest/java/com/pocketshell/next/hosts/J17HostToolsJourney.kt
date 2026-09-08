@@ -131,6 +131,8 @@ class J17HostToolsJourney {
         compose.onNodeWithTag(SSH_KEYS_PASTE_FIELD_TAG)
             .performTextInput(AgentsFixture.privateKeyPem())
         compose.onNodeWithTag(SSH_KEYS_IMPORT_CONFIRM_TAG).performClick()
+        awaitTag(SSH_KEYS_IMPORT_REVIEW_TAG)
+        compose.onNodeWithTag(SSH_KEYS_IMPORT_REVIEW_CONFIRM_TAG).performClick()
         awaitText("Added", substring = true)
         capture("05-ssh-key-imported")
 

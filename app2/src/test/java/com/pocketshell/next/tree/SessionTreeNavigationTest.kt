@@ -14,8 +14,8 @@ import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.PortForwardUiState
 import com.pocketshell.next.ports.SERVICES_SCREEN_TAG
+import com.pocketshell.next.ports.SERVICES_BACK_TAG
 import com.pocketshell.next.ports.ServicesScreen
-import com.pocketshell.next.usage.USAGE_BACK_TAG
 import com.pocketshell.next.usage.USAGE_SCREEN_TAG
 import com.pocketshell.next.usage.UsageScreen
 import com.pocketshell.next.usage.UsageScreenState
@@ -60,11 +60,10 @@ class SessionTreeNavigationTest {
 
     @Test
     fun `tree Usage opens the usage panel`() {
-        val nav = setContentWithNav()
+        val nav = setContentWithNav(directHostTools = true)
         composeRule.runOnUiThread { nav.navigate(Destination.Tree.route(hostId = 7)) }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         composeRule.waitForIdle()
 
@@ -81,14 +80,14 @@ class SessionTreeNavigationTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag(SERVICES_SCREEN_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Back").performClick()
+        composeRule.onNodeWithTag(SERVICES_BACK_TAG).performClick()
         composeRule.waitForIdle()
 
         assertEquals(Destination.Tree.pattern, nav.currentBackStackEntry?.destination?.route)
         composeRule.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
     }
 
-    private fun setContentWithNav(): NavHostController {
+    private fun setContentWithNav(directHostTools: Boolean = false): NavHostController {
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
@@ -98,15 +97,24 @@ class SessionTreeNavigationTest {
                     hostsScreen = { Text("Hosts") },
                     connectViewModel = { stack.viewModel },
                     workspacesScreen = { _, _, _, _, _, onOpenPorts, onBack, onOpenUsage ->
-                        SessionTreeScreen(
-                            state = SessionTreeUiState(hostId = 7, loaded = true),
-                            onRefresh = {},
-                            onOpenSession = {},
-                            onOpenFiles = {},
-                            onOpenPorts = onOpenPorts,
-                            onBack = onBack,
-                            onOpenUsage = onOpenUsage,
-                        )
+                        if (directHostTools) {
+                            SessionTreeHostToolsContent(
+                                onOpenFiles = {},
+                                onOpenPorts = onOpenPorts,
+                                onOpenUsage = onOpenUsage,
+                                onDismiss = {},
+                            )
+                        } else {
+                            SessionTreeScreen(
+                                state = SessionTreeUiState(hostId = 7, loaded = true),
+                                onRefresh = {},
+                                onOpenSession = {},
+                                onOpenFiles = {},
+                                onOpenPorts = onOpenPorts,
+                                onBack = onBack,
+                                onOpenUsage = onOpenUsage,
+                            )
+                        }
                     },
                     servicesScreen = { onBack, _, _ ->
                         ServicesScreen(

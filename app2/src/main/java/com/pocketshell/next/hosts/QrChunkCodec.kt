@@ -32,11 +32,13 @@ object QrChunkCodec {
     const val ENVELOPE_PREFIX: String = "pocketshell.qr.v1?"
 
     /**
-     * Per-chunk budget in raw bytes, before base64. 1500 raw bytes inflate to
-     * ~2000 base64 chars, plus ~80 for the envelope tokens — comfortably inside
-     * the practical QR limit.
+     * Per-chunk budget for newly emitted envelopes, in raw bytes before
+     * base64. 1000 raw bytes inflate to ~1334 base64 chars, plus the envelope
+     * tokens — enough room for M-level correction in a 720px QR. The decoder
+     * deliberately accepts larger v1 chunks so envelopes emitted by older
+     * clients (up to the former 1500-byte budget) remain compatible.
      */
-    const val CHUNK_SIZE: Int = 1500
+    const val CHUNK_SIZE: Int = 1000
 
     private val encoder: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
     private val decoder: Base64.Decoder = Base64.getUrlDecoder()

@@ -73,8 +73,16 @@ const val SSH_KEYS_GENERATE_ED25519_TAG: String = "ssh-keys-generate-ed25519"
 const val SSH_KEYS_GENERATE_RSA_TAG: String = "ssh-keys-generate-rsa"
 const val SSH_KEYS_GENERATE_NO_PASSPHRASE_TAG: String = "ssh-keys-generate-no-passphrase"
 const val SSH_KEYS_GENERATE_PASSPHRASE_TAG: String = "ssh-keys-generate-passphrase"
+const val SSH_KEYS_IMPORT_REVIEW_TAG: String = "ssh-keys-import-review"
+const val SSH_KEYS_IMPORT_REVIEW_CONFIRM_TAG: String = "ssh-keys-import-review-confirm"
 
 fun sshKeyRowTag(keyId: Long): String = "ssh-key-row-$keyId"
+
+/** A private key held briefly while the user reviews its metadata. */
+data class SshKeyImportCandidate(
+    val name: String,
+    val pem: String,
+)
 
 /**
  * Route-level entry point for the key manager.
@@ -103,6 +111,7 @@ fun SshKeysRoute(
     var fallbackPassphrase by remember { mutableStateOf("") }
     var fallbackInFlight by remember { mutableStateOf(false) }
     var fallbackError by remember { mutableStateOf<String?>(null) }
+    var fileImportCandidate by remember { mutableStateOf<SshKeyImportCandidate?>(null) }
     val unlockGate = remember { SshKeyUnlockInFlightGate() }
 
     LaunchedEffect(deviceUnlockAvailable, state.loaded, protectedKeys.map { it.id }) {
@@ -120,11 +129,7 @@ fun SshKeysRoute(
         val text = runCatching {
             context.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
         }.getOrNull()
-        if (text == null) {
-            viewModel.import(name, "")
-        } else {
-            viewModel.import(name, text)
-        }
+        fileImportCandidate = SshKeyImportCandidate(name = name, pem = text.orEmpty())
     }
 
     if (!unlocked) {
@@ -196,6 +201,8 @@ fun SshKeysRoute(
             onDelete = { keyId -> viewModel.delete(keyId) },
             onLoadPublicKey = viewModel::loadPublicKey,
             onDismissMessage = viewModel::clearMessage,
+            initialImportCandidate = fileImportCandidate,
+            onInitialImportConsumed = { fileImportCandidate = null },
             modifier = modifier,
         )
     }
@@ -224,6 +231,8 @@ fun SshKeysScreen(
     onDismissMessage: () -> Unit,
     onCopyPublicKey: ((String) -> Unit)? = null,
     onCopyFingerprint: ((String) -> Unit)? = null,
+    initialImportCandidate: SshKeyImportCandidate? = null,
+    onInitialImportConsumed: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val clipboard = LocalContext.current.applicationContext
@@ -244,11 +253,16 @@ fun SshKeysScreen(
     var showGenerate by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<SshKeyRow?>(null) }
+    var pendingImport by remember { mutableStateOf<SshKeyImportCandidate?>(null) }
     var selectedKeyId by remember { mutableStateOf<Long?>(null) }
     val selectedDetail = state.keys.firstOrNull { it.id == selectedKeyId }
 
     LaunchedEffect(selectedKeyId) {
         selectedKeyId?.let { onLoadPublicKey(it, null) }
+    }
+
+    LaunchedEffect(initialImportCandidate) {
+        initialImportCandidate?.let { pendingImport = it }
     }
 
     Column(
@@ -258,14 +272,7 @@ fun SshKeysScreen(
     ) {
         ScreenHeader(
             title = "SSH keys",
-            trailing = {
-                PocketShellButton(
-                    text = "Done",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                )
-            },
+            onBack = onBack,
         )
 
         state.message?.let { message ->
@@ -369,17 +376,39 @@ fun SshKeysScreen(
         PasteKeyDialog(
             onConfirm = { name, pem ->
                 showPaste = false
-                onImportPasted(name, pem)
+                pendingImport = SshKeyImportCandidate(name = name, pem = pem)
             },
             onDismiss = { showPaste = false },
+        )
+    }
+
+    pendingImport?.let { candidate ->
+        KeyImportReviewSheet(
+            candidate = candidate,
+            onConfirm = {
+                pendingImport = null
+                if (initialImportCandidate == candidate) onInitialImportConsumed()
+                onImportPasted(candidate.name, candidate.pem)
+            },
+            onDismiss = {
+                pendingImport = null
+                if (initialImportCandidate == candidate) onInitialImportConsumed()
+            },
         )
     }
 
     pendingDelete?.let { key ->
         ConfirmDialog(
             title = "Delete ${key.name}?",
-            message = "Hosts using this key are removed from this device. " +
-                "The authorized key on the server is not changed.",
+            message = buildString {
+                if (key.dependentHostNames.isEmpty()) {
+                    append("No configured hosts use this key. ")
+                } else {
+                    append("Used by: ${key.dependentHostNames.joinToString()}. ")
+                    append("Those hosts will also be removed from this device. ")
+                }
+                append("The authorized key on the server is not changed.")
+            },
             confirmLabel = "Delete",
             destructive = true,
             onConfirm = {
@@ -396,117 +425,218 @@ fun SshKeysScreen(
             containerColor = PocketShellColors.Surface,
             shape = PocketShellShapes.large,
         ) {
-            Column(
+            SshKeyDetailContent(
+                key = key,
+                copiedKeyId = copiedKeyId,
+                copiedFingerprintKeyId = copiedFingerprintKeyId,
+                onClose = { selectedKeyId = null },
+                onCopyPublicKey = { value ->
+                    copiedKeyId = key.id
+                    copyPublicKeyAction(value)
+                },
+                onCopyFingerprint = { value ->
+                    copiedFingerprintKeyId = key.id
+                    copyFingerprintAction(value)
+                },
+                onLoadPublicKey = onLoadPublicKey,
+                onUseKey = onUseKey?.let { useKey ->
+                    {
+                        selectedKeyId = null
+                        useKey(key.id)
+                    }
+                },
+                onRemove = {
+                    selectedKeyId = null
+                    pendingDelete = key
+                },
+            )
+        }
+    }
+}
+
+/**
+ * The key detail content is separate from the sheet shell so the rendered
+ * actions can be verified without relying on a platform sheet animation in
+ * host-side tests.
+ */
+@Composable
+internal fun SshKeyDetailContent(
+    key: SshKeyRow,
+    copiedKeyId: Long? = null,
+    copiedFingerprintKeyId: Long? = null,
+    onClose: () -> Unit,
+    onCopyPublicKey: (String) -> Unit,
+    onCopyFingerprint: (String) -> Unit,
+    onLoadPublicKey: (Long, CharArray?) -> Unit = { _, _ -> },
+    onUseKey: (() -> Unit)? = null,
+    onRemove: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = PocketShellSpacing.lg)
+            .padding(bottom = PocketShellSpacing.lg)
+            .testTag(SSH_KEYS_DETAIL_TAG)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        SheetHeader(title = key.name, onClose = onClose)
+        val keyAlgorithm = key.algorithm
+            ?: key.publicKey?.let(SshKeyMaterial::keyAlgorithmLabel)
+        val publicFingerprint = key.publicFingerprint
+            ?: key.publicKey?.let { publicKey ->
+                runCatching { SshKeyMaterial.publicKeyFingerprint(publicKey) }.getOrNull()
+            }
+        ListRow(
+            title = "Type",
+            subtitle = keyAlgorithm ?: "Read the public key to identify",
+        )
+        ListRow(
+            title = "Protection",
+            subtitle = if (key.hasPassphrase) "Passphrase required" else "No passphrase",
+        )
+        ListRow(
+            title = "Used by",
+            subtitle = key.dependentHostNames.takeIf { it.isNotEmpty() }?.joinToString()
+                ?: "No configured hosts",
+        )
+        if (publicFingerprint != null) {
+            ListRow(title = "Fingerprint", subtitle = publicFingerprint)
+            PocketShellButton(
+                text = if (copiedFingerprintKeyId == key.id) "Fingerprint copied" else "Copy fingerprint",
+                onClick = { onCopyFingerprint(publicFingerprint) },
+                variant = ButtonVariant.Text,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
-                .padding(horizontal = PocketShellSpacing.lg)
-                .padding(bottom = PocketShellSpacing.lg)
-                .testTag(SSH_KEYS_DETAIL_TAG)
-                .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-            ) {
-                SheetHeader(title = key.name)
-                val keyAlgorithm = key.algorithm
-                    ?: key.publicKey?.let(SshKeyMaterial::keyAlgorithmLabel)
-                val publicFingerprint = key.publicFingerprint
-                    ?: key.publicKey?.let { publicKey ->
-                        runCatching { SshKeyMaterial.publicKeyFingerprint(publicKey) }.getOrNull()
-                    }
-                ListRow(
-                    title = "Type",
-                    subtitle = keyAlgorithm ?: "Read the public key to identify",
+                    .testTag(SSH_KEYS_COPY_FINGERPRINT_TAG),
+            )
+        } else if (key.fingerprint.isNotBlank()) {
+            // The stored digest is for import deduplication. It is not
+            // presented as the server-installable public-key identity until
+            // the public half has been read.
+            ListRow(title = "Stored key digest", subtitle = key.fingerprint)
+        }
+        when {
+            key.publicKeyLoading -> Text(
+                text = "Reading public key…",
+                color = PocketShellColors.TextSecondary,
+            )
+
+            key.publicKey != null -> {
+                val publicKey = key.publicKey
+                Text(
+                    text = "Public key",
+                    color = PocketShellColors.TextSecondary,
                 )
-                ListRow(
-                    title = "Protection",
-                    subtitle = if (key.hasPassphrase) "Passphrase required" else "No passphrase",
-                )
-                if (publicFingerprint != null) {
-                    ListRow(title = "Fingerprint", subtitle = publicFingerprint)
-                    PocketShellButton(
-                        text = if (copiedFingerprintKeyId == key.id) "Fingerprint copied" else "Copy fingerprint",
-                        onClick = {
-                            copiedFingerprintKeyId = key.id
-                            copyFingerprintAction(publicFingerprint)
-                        },
-                        variant = ButtonVariant.Text,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(SSH_KEYS_COPY_FINGERPRINT_TAG),
-                    )
-                } else if (key.fingerprint.isNotBlank()) {
-                    // The stored digest is for import deduplication. It is not
-                    // presented as the server-installable public-key identity
-                    // until the public half has been read.
-                    ListRow(title = "Stored key digest", subtitle = key.fingerprint)
-                }
-                when {
-                    key.publicKeyLoading -> Text(
-                        text = "Reading public key…",
-                        color = PocketShellColors.TextSecondary,
-                    )
-
-                    key.publicKey != null -> {
-                        val publicKey = key.publicKey
-                        Text(
-                            text = "Public key",
-                            color = PocketShellColors.TextSecondary,
-                        )
-                        SelectionContainer {
-                            Text(
-                                text = key.publicKey,
-                                color = PocketShellColors.Text,
-                            )
-                        }
-                        PocketShellButton(
-                            text = "Copy public key",
-                            onClick = {
-                                copiedKeyId = key.id
-                                copyPublicKeyAction(publicKey)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG),
-                        )
-                        if (copiedKeyId == key.id) {
-                            Text(
-                                text = "Copied public key",
-                                color = PocketShellColors.TextSecondary,
-                            )
-                        }
-                    }
-
-                    key.hasPassphrase -> KeyPassphraseField(
-                        key = key,
-                        onUnlock = { passphrase -> onLoadPublicKey(key.id, passphrase) },
-                    )
-
-                    else -> Text(
-                        text = "The public key is unavailable because the private key file could not be read.",
-                        color = PocketShellColors.TextSecondary,
-                    )
-                }
-                onUseKey?.let { useKey ->
-                    PocketShellButton(
-                        text = "Use this key",
-                        onClick = {
-                            selectedKeyId = null
-                            useKey(key.id)
-                        },
-                        variant = ButtonVariant.Primary,
-                        modifier = Modifier.fillMaxWidth(),
+                SelectionContainer {
+                    Text(
+                        text = publicKey,
+                        color = PocketShellColors.Text,
                     )
                 }
                 PocketShellButton(
-                    text = "Remove key from device",
-                    onClick = {
-                        selectedKeyId = null
-                        pendingDelete = key
-                    },
-                    variant = ButtonVariant.Destructive,
-                    modifier = Modifier.fillMaxWidth(),
+                    text = "Copy public key",
+                    onClick = { onCopyPublicKey(publicKey) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG),
                 )
+                if (copiedKeyId == key.id) {
+                    Text(
+                        text = "Copied public key",
+                        color = PocketShellColors.TextSecondary,
+                    )
+                }
             }
+
+            key.hasPassphrase -> KeyPassphraseField(
+                key = key,
+                onUnlock = { passphrase -> onLoadPublicKey(key.id, passphrase) },
+            )
+
+            else -> Text(
+                text = key.publicKeyError?.let {
+                    "Could not read the public key. Try again."
+                } ?: "The public key is unavailable because the private key file could not be read.",
+                color = PocketShellColors.TextSecondary,
+            )
+        }
+        if (key.publicKeyError != null && !key.hasPassphrase) {
+            PocketShellButton(
+                text = "Retry reading public key",
+                onClick = { onLoadPublicKey(key.id, null) },
+                variant = ButtonVariant.Text,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        onUseKey?.let {
+            PocketShellButton(
+                text = "Use this key",
+                onClick = it,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        PocketShellButton(
+            text = "Remove key from device",
+            onClick = onRemove,
+            variant = ButtonVariant.Destructive,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun KeyImportReviewSheet(
+    candidate: SshKeyImportCandidate,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        shape = PocketShellShapes.large,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .testTag(SSH_KEYS_IMPORT_REVIEW_TAG),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            SheetHeader(title = "Review key", onClose = onDismiss)
+            Text(
+                text = "Review before saving. The private key text stays on this device and is not shown here.",
+                color = PocketShellColors.TextSecondary,
+            )
+            ListRow(
+                title = candidate.name.trim().ifEmpty { "imported-key" },
+                subtitle = if (candidate.pem.isBlank()) {
+                    "No readable key data"
+                } else {
+                    "Private key ready to validate and save"
+                },
+            )
+            PocketShellButton(
+                text = "Add key",
+                enabled = candidate.pem.isNotBlank(),
+                onClick = onConfirm,
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(SSH_KEYS_IMPORT_REVIEW_CONFIRM_TAG),
+            )
+            PocketShellButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }

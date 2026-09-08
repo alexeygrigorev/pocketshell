@@ -1,5 +1,8 @@
 package com.pocketshell.next.hosts
 
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
@@ -43,6 +46,7 @@ class SshKeysViewModelTest {
     private lateinit var db: AppDatabase
     private lateinit var keyStore: SshKeyStore
     private lateinit var viewModel: SshKeysViewModel
+    private val viewModelStore = ViewModelStore()
     private val unlocker = object : SshKeyUnlocker {
         override fun rememberPassphrase(keyId: Long, value: CharArray) = Unit
         override fun copyPassphrase(keyId: Long): CharArray? = null
@@ -61,11 +65,19 @@ class SshKeysViewModelTest {
             db.sshKeyDao(),
             UnconfinedTestDispatcher(),
         )
-        viewModel = SshKeysViewModel(db.sshKeyDao(), keyStore, unlocker)
+        val created = SshKeysViewModel(db.sshKeyDao(), keyStore, unlocker)
+        viewModel = ViewModelProvider(
+            viewModelStore,
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T = created as T
+            },
+        )[SshKeysViewModel::class.java]
     }
 
     @After
     fun tearDown() {
+        viewModelStore.clear()
         db.close()
         Dispatchers.resetMain()
     }
@@ -100,6 +112,39 @@ class SshKeysViewModelTest {
         val state = viewModel.state.first { it.message == "Added id_ed25519" && it.keys.any { key -> key.name == "id_ed25519" } }
         assertEquals(listOf("id_ed25519"), state.keys.map { it.name })
         assertEquals("Added id_ed25519", state.message)
+    }
+
+    @Test
+    fun `loading an unencrypted detail asynchronously exposes the complete public key`() = runTest {
+        viewModel.import("id_ed25519", UNENCRYPTED_PEM).join()
+        val row = viewModel.state.first { it.keys.isNotEmpty() }.keys.single()
+
+        viewModel.loadPublicKey(row.id).join()
+
+        val loaded = viewModel.state.value.keys.single()
+        assertFalse(loaded.publicKeyLoading)
+        assertEquals(SshKeyMaterial.publicKeyLine(UNENCRYPTED_PEM), loaded.publicKey)
+        assertNull(loaded.publicKeyError)
+    }
+
+    @Test
+    fun `loading a missing detail file leaves loading and reports a useful error`() = runTest {
+        val id = db.sshKeyDao().insert(
+            com.pocketshell.core.storage.entity.SshKeyEntity(
+                name = "missing",
+                privateKeyPath = File(temporaryFolder.root, "missing-key").absolutePath,
+            ),
+        )
+        val row = viewModel.state.first { it.keys.any { key -> key.id == id } }
+            .keys.single()
+
+        viewModel.loadPublicKey(row.id)
+
+        val failed = viewModel.state.first {
+            it.keys.single().publicKeyError != null && !it.keys.single().publicKeyLoading
+        }.keys.single()
+        assertEquals("The private key file is missing", failed.publicKeyError)
+        assertNull(failed.publicKey)
     }
 
     @Test

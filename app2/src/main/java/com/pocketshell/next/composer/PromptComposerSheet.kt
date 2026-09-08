@@ -5,15 +5,12 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.core.content.ContextCompat
 import com.pocketshell.uikit.components.SheetHeader
@@ -62,6 +59,7 @@ fun decideMicTap(hasRecordAudioPermission: Boolean, recording: Boolean): MicTapA
 @Composable
 fun PromptComposerSheet(
     state: ComposerUiState,
+    targetLabel: String = "Terminal",
     onDismiss: () -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -77,6 +75,9 @@ fun PromptComposerSheet(
     onPermissionDenied: () -> Unit,
     modifier: Modifier = Modifier,
     hasRecordAudioPermission: (() -> Boolean)? = null,
+    deliveryEnabled: Boolean = true,
+    deliveryDisabledMessage: String? = null,
+    onOpenHotkeys: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val permissionGranted: () -> Boolean = hasRecordAudioPermission ?: {
@@ -101,9 +102,9 @@ fun PromptComposerSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         modifier = modifier,
     ) {
-        val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
         PromptComposerContent(
             state = state,
+            targetLabel = targetLabel,
             onClose = dismiss,
             onDraftChange = onDraftChange,
             onSend = onSend,
@@ -127,7 +128,9 @@ fun PromptComposerSheet(
             onRemoveAttachment = onRemoveAttachment,
             onDismissNotice = onDismissNotice,
             onDiscard = onDiscard,
-            imeVisible = imeVisible,
+            deliveryEnabled = deliveryEnabled,
+            deliveryDisabledMessage = deliveryDisabledMessage,
+            onOpenHotkeys = onOpenHotkeys,
         )
     }
 }
@@ -139,6 +142,7 @@ fun PromptComposerSheet(
 @Composable
 fun PromptComposerContent(
     state: ComposerUiState,
+    targetLabel: String = "Terminal",
     onClose: () -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -153,21 +157,20 @@ fun PromptComposerContent(
     onDiscard: () -> Unit,
     modifier: Modifier = Modifier,
     imeVisible: Boolean = false,
+    deliveryEnabled: Boolean = true,
+    deliveryDisabledMessage: String? = null,
+    onOpenHotkeys: () -> Unit = {},
 ) {
-    // IME inset is a FLAG (#801/#1622/#790): hide the title row while the
-    // keyboard is up. Do not subtract ime from sheet height and also
-    // imePadding() the same column — Material's sheet already sits on the
-    // keyboard.
+    val title = targetLabel.trim().takeIf { it.isNotEmpty() }?.let { "Input to $it" }
+        ?: COMPOSER_SHEET_TITLE
     Column(modifier = modifier.navigationBarsPadding()) {
-        if (!imeVisible) {
-            SheetHeader(
-                title = COMPOSER_SHEET_TITLE,
-                titleTestTag = COMPOSER_TITLE_TAG,
-                onClose = onClose,
-                closeContentDescription = "Close Prompt Composer",
-                closeTestTag = COMPOSER_CLOSE_TAG,
-            )
-        }
+        SheetHeader(
+            title = title,
+            titleTestTag = COMPOSER_TITLE_TAG,
+            onClose = onClose,
+            closeContentDescription = "Close Prompt Composer",
+            closeTestTag = COMPOSER_CLOSE_TAG,
+        )
         ComposerBar(
             state = state,
             onDraftChange = onDraftChange,
@@ -181,6 +184,9 @@ fun PromptComposerContent(
             onRemoveAttachment = onRemoveAttachment,
             onDismissNotice = onDismissNotice,
             onDiscard = onDiscard,
+            deliveryEnabled = deliveryEnabled,
+            deliveryDisabledMessage = deliveryDisabledMessage,
+            onOpenHotkeys = onOpenHotkeys,
         )
     }
 }

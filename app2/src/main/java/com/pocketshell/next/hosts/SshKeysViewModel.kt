@@ -3,6 +3,7 @@ package com.pocketshell.next.hosts
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.storage.dao.SshKeyDao
+import com.pocketshell.core.storage.dao.SshKeyHostReference
 import com.pocketshell.next.connect.SshKeyUnlocker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -11,7 +12,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -29,6 +29,8 @@ data class SshKeyRow(
     val algorithm: String? = null,
     /** OpenSSH SHA-256 fingerprint, populated with the public half. */
     val publicFingerprint: String? = null,
+    /** Configured hosts that would be removed by the key's cascade delete. */
+    val dependentHostNames: List<String> = emptyList(),
 )
 
 /** What [SshKeysScreen] renders. */
@@ -62,8 +64,21 @@ class SshKeysViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            sshKeyDao.getAll()
-                .map { keys -> keys.map { SshKeyRow(it.id, it.name, it.fingerprint, it.hasPassphrase) } }
+            kotlinx.coroutines.flow.combine(
+                sshKeyDao.getAll(),
+                sshKeyDao.getHostReferences(),
+            ) { keys, references ->
+                val hostsByKey = references.groupBy(SshKeyHostReference::keyId)
+                keys.map {
+                    SshKeyRow(
+                        id = it.id,
+                        name = it.name,
+                        fingerprint = it.fingerprint,
+                        hasPassphrase = it.hasPassphrase,
+                        dependentHostNames = hostsByKey[it.id].orEmpty().map(SshKeyHostReference::hostName),
+                    )
+                }
+            }
                 .collect { rows ->
                     _state.value = _state.value.copy(keys = rows, loaded = true)
                 }
@@ -146,21 +161,21 @@ class SshKeysViewModel @Inject constructor(
      * sheet. [passphrase] is copied only inside the store call and is scrubbed
      * in this finally block; it is never emitted through UI state.
      */
-    fun loadPublicKey(keyId: Long, passphrase: CharArray? = null) {
+    fun loadPublicKey(keyId: Long, passphrase: CharArray? = null): Job {
         val row = _state.value.keys.firstOrNull { it.id == keyId } ?: run {
             passphrase?.fill('\u0000')
-            return
+            return Job()
         }
         if (row.publicKeyLoading) {
             passphrase?.fill('\u0000')
-            return
+            return Job()
         }
         _state.value = _state.value.copy(
             keys = _state.value.keys.map {
                 if (it.id == keyId) it.copy(publicKeyLoading = true, publicKeyError = null) else it
             },
         )
-        viewModelScope.launch {
+        return viewModelScope.launch {
             val result = runCatching {
                 val key = keyStore.lookup(keyId)
                     ?: error("That SSH key is no longer on this device")

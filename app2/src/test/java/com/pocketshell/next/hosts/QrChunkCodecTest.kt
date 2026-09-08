@@ -6,6 +6,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Base64
+import java.util.zip.CRC32
 
 /**
  * [QrChunkCodec] and [QrChunkAssembler] on the plain JVM — no Robolectric, no
@@ -18,6 +20,20 @@ import org.junit.Test
  * emitter's QRs from scanning, and nothing else in the build would notice.
  */
 class QrChunkCodecTest {
+
+    @Test
+    fun `a legacy 1500-byte v1 part remains decodable`() {
+        val chunk = "z".repeat(1500).toByteArray(Charsets.UTF_8)
+        val checksum = CRC32().apply { update(chunk) }.value.toString(16).padStart(8, '0')
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(chunk)
+        val envelope = QrChunkCodec.ENVELOPE_PREFIX +
+            "part=1/1&id=legacy15&checksum=$checksum&payload=$encoded"
+
+        val decoded = QrChunkCodec.decodePart(envelope).getOrThrow()
+
+        assertEquals(1500, decoded.chunk.size)
+        assertTrue(chunk.contentEquals(decoded.chunk))
+    }
 
     @Test
     fun `a small payload encodes as a single part and round-trips`() {

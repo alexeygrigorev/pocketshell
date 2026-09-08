@@ -3,7 +3,7 @@ package com.pocketshell.next.settings
 /**
  * Every user-tunable preference app2 has (rewrite task P-6).
  *
- * ## Six fields, not sixteen
+ * ## Seven fields, not sixteen
  *
  * The old client's `AppSettings` carried sixteen. Most of them configured
  * machinery the rewrite deleted, so porting them would have shipped a settings
@@ -19,7 +19,7 @@ package com.pocketshell.next.settings
  * | `terminalKeyboardMode` | app2's terminal pins char-based input (see `TerminalHostView`'s client) — a smart-text mode no longer exists to select. |
  * | `conversationFontSizeSp`, `showSystemNotes`, `defaultAgentSessionView` | The conversation view (U-10) is cut by the scope amendment. |
  * | `hostDetailViewMode` | The tree/flat toggle: app2 has one session-tree presentation (U-3). |
- * | `defaultHostId` | The open-on-launch destination. app2 always starts on the host list; "startup" is not in P-6's KEEP list. |
+ * | `defaultHostId` | The last host workspace list to resume on launch. Null keeps the Hosts landing screen. |
  * | `voiceTranscriptionProvider` | Whisper-vs-Android picker. Composer mic is Android `SpeechRecognizer` only (#2529). |
  *
  * `agentSubmitEnterDelayMs` was on that drop list (P-6: "agent surfaces are
@@ -34,6 +34,8 @@ package com.pocketshell.next.settings
  * one with no repository, no `Context` and no disk.
  */
 data class AppSettings(
+    /** Last host the user opened; null means launch on the Hosts list. */
+    val defaultHostId: Long? = null,
     /**
      * Terminal glyph size in RAW DEVICE PIXELS.
      *

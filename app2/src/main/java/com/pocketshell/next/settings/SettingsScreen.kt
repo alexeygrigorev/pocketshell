@@ -200,15 +200,8 @@ internal fun SettingsHeader(
     ScreenHeader(
         title = title,
         modifier = modifier,
-        leading = {
-            PocketShellButton(
-                text = "Back",
-                onClick = onBack,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(SETTINGS_BACK_TAG),
-            )
-        },
+        onBack = onBack,
+        backTestTag = SETTINGS_BACK_TAG,
     )
 }
 

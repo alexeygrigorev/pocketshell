@@ -8,12 +8,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -21,6 +22,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import com.pocketshell.uikit.icons.PocketShellIcons
 
 /**
  * Shared screen header — the title block that sits atop the tree, host list,
@@ -34,20 +36,16 @@ import com.pocketshell.uikit.theme.PocketShellType
  * └───────────────────────────────────────────────────────┘
  * ```
  *
- * - **Title** rides [PocketShellType.bodyDense] bumped to SemiBold so it reads
- *   as the primary heading without pulling in the heavier M3 `headlineSmall`
- *   (the dev-tool density wants a tight header, not a marketing hero).
+ * - **Title** uses the Quiet screen style (28sp/34sp) and the optional subtitle
+ *   uses the 16sp metadata rung.
  * - **Subtitle** (optional) is the `N x · M y` facet line — muted, dense — the
  *   same count-subtitle vocabulary `ListRow`/`SectionHeader` use. Callers build
  *   the string (e.g. `"4 hosts · 7 sessions"`); this component does not invent
  *   pluralisation.
- * - **Leading slot** (optional) is a left-aligned `@Composable` lambda for a
- *   back affordance / status dot — the detail-screen variant (the folder tree's
- *   `‹` back chevron + active dot, #479 Slice A). List/dashboard headers leave
- *   it null so the title sits flush-left.
- * - **Trailing slot** (optional) is a right-aligned `@Composable` lambda for the
- *   header's toggles / actions (refresh, add, a density toggle, …). It lays out
- *   on the same baseline as the title so a row of icon buttons sits flush-right.
+ * - **[onBack]** renders the shared 48dp navigation affordance. The legacy
+ *   [leading] slot remains for non-navigation context.
+ * - **[trailing]** is one meaningful secondary action, normally a kebab that
+ *   owns occasional page actions.
  *
  * Density follows [PocketShellDensity] horizontal/vertical row padding so the
  * header lines up with the rows beneath it. Colours stay on the always-dark raw
@@ -59,19 +57,21 @@ import com.pocketshell.uikit.theme.PocketShellType
  *   folder tree's `FOLDER_LIST_TITLE_TAG` / counts tag) keep their existing
  *   instrumentation hooks after migrating onto [ScreenHeader].
  *
- * This is presentational only — no click handling on the header itself; wire
- * any affordance through [leading] / [trailing].
+ * This is presentational only — wire navigation through [onBack] and the one
+ * secondary affordance through [trailing].
  */
 @Composable
 fun ScreenHeader(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
-    subtitleMaxLines: Int = 1,
-    titleMaxLines: Int = 1,
+    subtitleMaxLines: Int = 2,
+    titleMaxLines: Int = 2,
     titleStyle: TextStyle = PocketShellType.screen,
     titleTestTag: String? = null,
     subtitleTestTag: String? = null,
+    onBack: (() -> Unit)? = null,
+    backTestTag: String? = null,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
@@ -79,21 +79,42 @@ fun ScreenHeader(
         modifier = modifier
             .fillMaxWidth()
             .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
+                start = if (onBack != null || leading != null) PocketShellSpacing.md else PocketShellSpacing.xl,
+                end = PocketShellSpacing.md,
+                top = PocketShellSpacing.lg,
+                bottom = PocketShellSpacing.xl,
             ),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
-        if (leading != null) {
-            leading()
-            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+        when {
+            onBack != null -> {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .size(PocketShellDensity.tapTargetMin)
+                        .let { base -> if (backTestTag == null) base else base.testTag(backTestTag) },
+                ) {
+                    Icon(
+                        imageVector = PocketShellIcons.Back,
+                        contentDescription = "Back",
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                }
+            }
+            leading != null -> {
+                leading()
+                Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+            }
         }
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(top = PocketShellSpacing.xs),
+        ) {
             Text(
                 text = title,
                 color = PocketShellColors.Text,
                 style = titleStyle,
-                fontWeight = FontWeight.Bold,
                 maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (titleTestTag != null) Modifier.testTag(titleTestTag) else Modifier,

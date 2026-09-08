@@ -2,12 +2,12 @@ package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -75,7 +75,7 @@ fun SegmentedToggle(
                         color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
                         shape = PocketShellShapes.small,
                     )
-                    .clickable(role = Role.Tab, onClick = { onSelected(index) })
+                    .selectable(selected = selected, role = Role.Tab) { onSelected(index) }
                     .padding(
                         horizontal = PocketShellDensity.chipPadH,
                         vertical = PocketShellDensity.chipPadV,

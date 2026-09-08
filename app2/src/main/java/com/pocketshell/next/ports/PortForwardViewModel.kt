@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -46,6 +48,8 @@ data class PortForwardUiState(
     val manualRemotePorts: Set<Int> = emptySet(),
     /** Durable Quiet labels for manually added tunnels, keyed by remote port. */
     val manualTunnelNames: Map<Int, String> = emptyMap(),
+    /** Remote port to a locally verified HTTP(S) URL, for the browser handoff. */
+    val verifiedHttpServices: Map<Int, String> = emptyMap(),
     val showAllPorts: Boolean = false,
     /** Rows the default filter is hiding right now. */
     val hiddenCount: Int = 0,
@@ -91,6 +95,8 @@ class PortForwardViewModel @Inject constructor(
      * still re-filter immediately instead of waiting for the next emission.
      */
     private var allTunnels: List<TunnelInfo> = emptyList()
+    private var verificationJob: Job? = null
+    private var verificationKey: List<Pair<Int, Int>> = emptyList()
 
     init {
         viewModelScope.launch {
@@ -168,6 +174,31 @@ class PortForwardViewModel @Inject constructor(
     fun setShowAllPorts(showAll: Boolean) {
         _state.value = _state.value.copy(showAllPorts = showAll).reFiltered()
         viewModelScope.launch { showAllPortsStore.setShowAll(showAll) }
+    }
+
+    /**
+     * Verifies active local forwards before the UI offers an external browser
+     * handoff. The result is deliberately ephemeral: it must be checked again
+     * when the forward or its local port changes.
+     */
+    fun verifyHttpServices(tunnels: List<TunnelInfo>) {
+        val candidates = tunnels
+            .filter { it.status == TunnelInfo.Status.FORWARDING }
+            .distinctBy { it.remotePort }
+        val key = candidates.map { it.remotePort to it.localPort }
+        if (key == verificationKey) return
+
+        verificationKey = key
+        verificationJob?.cancel()
+        _state.value = _state.value.copy(verifiedHttpServices = emptyMap())
+        verificationJob = viewModelScope.launch(Dispatchers.IO) {
+            val verified = candidates.mapNotNull { tunnel ->
+                LocalServiceVerifier.verify(tunnel)?.let { tunnel.remotePort to it }
+            }.toMap()
+            if (key == verificationKey) {
+                _state.value = _state.value.copy(verifiedHttpServices = verified)
+            }
+        }
     }
 
     /**

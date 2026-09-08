@@ -3,6 +3,7 @@ package com.pocketshell.next.tree
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -10,24 +11,29 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.zIndex
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.core.hostapi.SessionRow
-import com.pocketshell.next.usage.UsageGlancePill
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.next.usage.UsageGlanceViewModel
+import com.pocketshell.next.workspaces.SessionKindMark
+import com.pocketshell.next.workspaces.sessionKindLabel
+import com.pocketshell.next.workspaces.sessionDisplayNames
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -35,13 +41,13 @@ import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
-import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
-import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -76,6 +82,7 @@ const val SESSION_TREE_BACK_TAG: String = "session-tree-back"
 
 /** The header action that opens this host's usage panel (issue #2532). */
 const val SESSION_TREE_USAGE_TAG: String = "session-tree-usage"
+const val SESSION_TREE_ACTIONS_TAG: String = "session-tree-actions"
 
 fun sessionRowTag(name: String): String = "session-row-$name"
 
@@ -83,18 +90,24 @@ fun sessionRowMenuTag(name: String): String = "session-row-menu-$name"
 
 fun rootHeaderTag(key: String): String = "root-header-$key"
 
-/** Overflow item and confirmation copy for Stop session (issue #2535). */
-const val STOP_SESSION_ITEM_LABEL: String = "Stop session"
-const val STOP_SESSION_TITLE: String = "Stop session?"
-const val STOP_SESSION_CONFIRM_LABEL: String = "Stop"
+/** Overflow item and confirmation copy for ending a session (issue #2535). */
+const val STOP_SESSION_ITEM_LABEL: String = "End session"
+const val STOP_SESSION_TITLE: String = "End session?"
+const val STOP_SESSION_CONFIRM_LABEL: String = "End"
 const val STOP_SESSION_ITEM_TAG: String = "session-stop-item"
 const val STOP_SESSION_CONFIRM_TAG: String = "session-stop-confirm"
 const val STOP_SESSION_CANCEL_TAG: String = "session-stop-cancel"
 const val STOP_SESSION_TITLE_TAG: String = "session-stop-title"
 const val STOP_SESSION_MESSAGE_TAG: String = "session-stop-message"
 
-fun stopSessionMessage(name: String): String =
-    "Stop \"$name\"? This kills the session on the host. Anything running in it stops, and there is no undo."
+fun stopSessionMessage(name: String, workspace: String? = null, host: String? = null): String {
+    val context = listOfNotNull(
+        workspace?.trim()?.takeIf { it.isNotEmpty() }?.let { "workspace \"$it\"" },
+        host?.trim()?.takeIf { it.isNotEmpty() },
+    ).joinToString(" on ")
+    val location = context.takeIf { it.isNotEmpty() }?.let { " in $it" }.orEmpty()
+    return "End \"$name\"$location? This ends the session and anything running in it. There is no undo."
+}
 
 fun folderHeaderTag(key: String): String = "folder-header-$key"
 
@@ -141,6 +154,7 @@ fun SessionTreeRoute(
         onOpenSession = onOpenSession,
         onCreateSession = viewModel::openCreateSheet,
         onSubmitCreate = viewModel::createSession,
+        onRefreshEngines = viewModel::refreshEngines,
         onDismissCreate = viewModel::dismissCreateSheet,
         onRequestStop = viewModel::requestStopSession,
         onConfirmStop = viewModel::confirmStopSession,
@@ -212,12 +226,14 @@ fun SessionTreeScreen(
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (CreateSessionRequest) -> Unit = {},
+    onRefreshEngines: () -> Unit = {},
     onDismissCreate: () -> Unit = {},
     onRequestStop: (String) -> Unit = {},
     onConfirmStop: () -> Unit = {},
     onCancelStop: () -> Unit = {},
     nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
+    var hostToolsOpen by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -235,6 +251,7 @@ fun SessionTreeScreen(
             onOpenUsage = onOpenUsage,
             usagePillState = usagePillState,
             nowSec = nowSec,
+            onOpenHostTools = { hostToolsOpen = true },
         )
 
         // Bottom-end FAB over the list, the one create affordance on this
@@ -258,19 +275,50 @@ fun SessionTreeScreen(
         }
     }
 
+    if (hostToolsOpen) {
+        SessionTreeHostToolsSheet(
+            onOpenFiles = {
+                hostToolsOpen = false
+                onOpenFiles()
+            },
+            onOpenPorts = {
+                hostToolsOpen = false
+                onOpenPorts()
+            },
+            onOpenUsage = {
+                hostToolsOpen = false
+                onOpenUsage()
+            },
+            onDismiss = { hostToolsOpen = false },
+        )
+    }
+
     if (state.create.visible) {
         CreateSessionSheet(
             state = state.create,
             defaultFolder = state.suggestedFolder,
+            existingSessionNames = state.roots
+                .flatMap { root -> root.folders.flatMap { folder -> folder.rows } }
+                .map { it.name },
             onSubmit = onSubmitCreate,
             onCancel = onDismissCreate,
+            onRefreshEngines = onRefreshEngines,
         )
     }
 
     state.pendingStop?.let { name ->
+        val pendingSession = state.roots
+            .asSequence()
+            .flatMap { it.folders.asSequence() }
+            .flatMap { it.rows.asSequence() }
+            .firstOrNull { it.name == name }
         ConfirmDialog(
             title = STOP_SESSION_TITLE,
-            message = stopSessionMessage(name),
+            message = stopSessionMessage(
+                name = com.pocketshell.next.workspaces.readableSessionName(name),
+                workspace = pendingSession?.workspace,
+                host = "host #${state.hostId}",
+            ),
             confirmLabel = STOP_SESSION_CONFIRM_LABEL,
             destructive = true,
             onConfirm = onConfirmStop,
@@ -297,7 +345,13 @@ private fun SessionTreeBody(
     onOpenUsage: () -> Unit,
     usagePillState: UsageGlancePillState?,
     nowSec: Long,
+    onOpenHostTools: () -> Unit,
 ) {
+    val displayNames = remember(state.roots) {
+        sessionDisplayNames(
+            state.roots.flatMap { root -> root.folders.flatMap { folder -> folder.rows } },
+        )
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -306,44 +360,14 @@ private fun SessionTreeBody(
         ScreenHeader(
             title = "Sessions",
             subtitle = headerSubtitle(state),
-            leading = {
-                PocketShellButton(
-                    text = "Back",
-                    onClick = onBack,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SESSION_TREE_BACK_TAG),
-                )
-            },
-            // Tasks P-3a / P-4 / issue #2532: Files, Ports and Usage are
-            // host-scoped, so they live in this header rather than behind a
-            // menu. The glance pill rides next to Usage when a reading exists;
-            // the Usage text button stays so the panel is always reachable.
+            onBack = onBack,
+            backTestTag = SESSION_TREE_BACK_TAG,
             trailing = {
-                PocketShellButton(
-                    text = "Files",
-                    onClick = onOpenFiles,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SESSION_TREE_FILES_TAG),
+                KebabTrigger(
+                    onClick = onOpenHostTools,
+                    contentDescription = "Host tools",
+                    triggerTestTag = SESSION_TREE_ACTIONS_TAG,
                 )
-                PocketShellButton(
-                    text = "Ports",
-                    onClick = onOpenPorts,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SESSION_TREE_PORTS_TAG),
-                )
-                PocketShellButton(
-                    text = "Usage",
-                    onClick = onOpenUsage,
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.testTag(SESSION_TREE_USAGE_TAG),
-                )
-                usagePillState?.let { pillState ->
-                    UsageGlancePill(state = pillState, onClick = onOpenUsage)
-                }
             },
         )
 
@@ -454,7 +478,7 @@ private fun SessionTreeBody(
                                 val row = folder.rows[index]
                                 SessionTreeRow(
                                     row = row,
-                                    nowSec = nowSec,
+                                    displayName = displayNames[row.name] ?: row.name,
                                     indentLevels = if (folder.untracked) 1 else 2,
                                     onClick = { onOpenSession(row.name) },
                                     onRequestStop = { onRequestStop(row.name) },
@@ -469,29 +493,21 @@ private fun SessionTreeBody(
 }
 
 /**
- * One session row: attach dot, session name, optional relative activity.
- *
- * No engine/agent chrome — U-9 stays cut. The leading dot is always drawn
- * (green when attached, muted when not) rather than drawn-only-when-attached,
- * so every row's title starts at the same x and a column of rows scans as a
- * column.
+ * One session row. Host connectivity and process attachment are not agent
+ * state, so the row uses a muted program mark rather than a green status dot.
  */
 @Composable
 private fun SessionTreeRow(
     row: SessionRow,
-    nowSec: Long,
+    displayName: String = row.name,
     indentLevels: Int,
     onClick: () -> Unit,
     onRequestStop: () -> Unit,
 ) {
     ListRow(
-        title = row.name,
-        subtitle = relativeActivityLabel(row.activityEpoch, nowSec),
-        leading = {
-            StatusDot(
-                status = if (row.attached) ConnectionStatus.Connected else ConnectionStatus.Idle,
-            )
-        },
+        title = displayName,
+        subtitle = sessionKindLabel(row),
+        leading = { SessionKindMark(agent = row.agent) },
         trailing = {
             Kebab(
                 items = listOf(
@@ -508,14 +524,7 @@ private fun SessionTreeRow(
         onClick = onClick,
         modifier = Modifier
             .padding(start = PocketShellDensity.treeIndent * indentLevels)
-            .testTag(sessionRowTag(row.name))
-            .then(
-                if (row.attached) {
-                    Modifier.semantics { contentDescription = ATTACHED_DESCRIPTION }
-                } else {
-                    Modifier
-                },
-            ),
+            .testTag(sessionRowTag(row.name)),
     )
 }
 
@@ -531,5 +540,68 @@ private fun plural(count: Int, noun: String): String = if (count == 1) noun else
 /** The host-side error text, deduplicated for a compact banner. */
 private fun partialErrors(state: SessionTreeUiState): String =
     state.errors.map { it.message }.distinct().joinToString("; ")
+
+/** Host-scoped utilities live in one sheet so they do not compete with rows. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionTreeHostToolsSheet(
+    onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onOpenUsage: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = PocketShellColors.Surface,
+        modifier = Modifier.testTag(SESSION_TREE_ACTIONS_TAG),
+    ) {
+        SessionTreeHostToolsContent(
+            onOpenFiles = onOpenFiles,
+            onOpenPorts = onOpenPorts,
+            onOpenUsage = onOpenUsage,
+            onDismiss = onDismiss,
+        )
+    }
+}
+
+/** The sheet body, kept separate so the action semantics can be verified without modal animation. */
+@Composable
+internal fun SessionTreeHostToolsContent(
+    onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onOpenUsage: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = PocketShellSpacing.lg),
+    ) {
+        SheetHeader(
+            title = "Host tools",
+            subtitle = "Utilities for this host",
+            onClose = onDismiss,
+        )
+        ListRow(
+            title = "Files",
+            subtitle = "Browse the remote filesystem",
+            onClick = onOpenFiles,
+            modifier = Modifier.testTag(SESSION_TREE_FILES_TAG),
+        )
+        ListRow(
+            title = "Services & tunnels",
+            subtitle = "Forward a remote service",
+            onClick = onOpenPorts,
+            modifier = Modifier.testTag(SESSION_TREE_PORTS_TAG),
+        )
+        ListRow(
+            title = "Usage",
+            subtitle = "Provider capacity on this host",
+            onClick = onOpenUsage,
+            modifier = Modifier.testTag(SESSION_TREE_USAGE_TAG),
+        )
+    }
+}
 
 internal const val ATTACHED_DESCRIPTION: String = "Attached"

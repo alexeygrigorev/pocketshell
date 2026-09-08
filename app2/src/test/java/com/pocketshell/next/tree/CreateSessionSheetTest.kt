@@ -7,6 +7,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -52,11 +54,12 @@ class CreateSessionSheetTest {
 
         composeRule.onNodeWithTag(CREATE_SESSION_SHEET_TAG).assertIsDisplayed()
         composeRule.onNodeWithText(CREATE_SESSION_TITLE).assertIsDisplayed()
-        composeRule.onNodeWithText(CREATE_SESSION_HINT).assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_TYPE_AGENT_TAG).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("More options").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_CANCEL_TAG).assertIsDisplayed()
 
@@ -160,6 +163,8 @@ class CreateSessionSheetTest {
         composeRule.onNodeWithTag(CREATE_SESSION_ERROR_TAG).assertIsDisplayed()
         composeRule.onNodeWithText(failure).assertIsDisplayed()
         // Still editable and still submittable — this is a retry, not a dead end.
+        composeRule.onNodeWithText("More options").performScrollTo().performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsEnabled()
     }
@@ -200,8 +205,9 @@ class CreateSessionSheetTest {
 
         composeRule.onNodeWithTag(createSessionEngineTag("claude")).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(createSessionEngineTag("codex")).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(createSessionEngineTag("opencode")).assertDoesNotExist()
-        composeRule.onNodeWithTag(createSessionEngineTag("disabled")).assertDoesNotExist()
+        composeRule.onNodeWithTag(createSessionEngineTag("opencode")).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag(createSessionEngineTag("disabled")).performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Not available", substring = true).assertCountEquals(2)
         composeRule.onNodeWithText("Claude").assertIsDisplayed()
         composeRule.onNodeWithText("Codex").assertIsDisplayed()
     }
@@ -228,6 +234,8 @@ class CreateSessionSheetTest {
         )
 
         composeRule.onNodeWithTag(createSessionEngineTag("claude")).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("More options").performScrollTo().performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag(CREATE_SESSION_PROFILE_TAG).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsEnabled().performClick()
 

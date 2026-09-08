@@ -35,6 +35,8 @@ data class HostWorkspacesUiState(
     val roots: List<WorkspaceRootProjection> = emptyList(),
     val errors: List<SessionListError> = emptyList(),
     val failure: String? = null,
+    /** True when the rows are the last known projection and the refresh failed. */
+    val statusUnavailable: Boolean = false,
     /** Client-side filter over the bounded durable workspace listing. */
     val searchQuery: String = "",
     val addWorkspaceVisible: Boolean = false,
@@ -47,6 +49,8 @@ data class HostWorkspacesUiState(
     val addWorkspaceFolders: List<WorkspaceFolderEntry> = emptyList(),
     val addWorkspaceBrowseLoading: Boolean = false,
     val addWorkspaceBrowseFailure: String? = null,
+    /** Set after a successful add so the selected folder opens immediately. */
+    val openWorkspacePath: String? = null,
     val createFolderVisible: Boolean = false,
     val createFolderParentPath: String = "",
     val createFolderName: String = "",
@@ -56,7 +60,8 @@ data class HostWorkspacesUiState(
     val workspaceCount: Int get() = roots.sumOf { it.workspaces.size }
     val sessionCount: Int get() = roots.sumOf { it.sessionCount }
     val isEmptyAndHealthy: Boolean
-        get() = loaded && roots.isEmpty() && errors.isEmpty() && failure == null
+        get() = loaded && roots.isEmpty() && errors.isEmpty() &&
+            failure == null && !statusUnavailable
 }
 
 /** One directory child offered by the root-scoped workspace picker. */
@@ -109,6 +114,12 @@ class HostWorkspacesViewModel @Inject constructor(
 
     fun setSearchQuery(query: String) {
         _state.update { it.copy(searchQuery = query) }
+    }
+
+    fun consumeOpenWorkspace(): String? {
+        val path = _state.value.openWorkspacePath ?: return null
+        _state.update { it.copy(openWorkspacePath = null) }
+        return path
     }
 
     /** Moves a saved root and persists the placement for future refreshes. */
@@ -321,6 +332,20 @@ class HostWorkspacesViewModel @Inject constructor(
                     return@launch
                 }
             }
+            val entry = runCatching { connection.sftp().stat(canonicalPath) }.getOrElse { error ->
+                finishAdd(userMessage(error, "Could not inspect the workspace folder: "))
+                return@launch
+            }
+            when {
+                entry == null -> {
+                    finishAdd("That folder does not exist on the host.")
+                    return@launch
+                }
+                !entry.isDirectory -> {
+                    finishAdd("That path is a file, not a workspace folder.")
+                    return@launch
+                }
+            }
             clients.create(connection).addWorkspace(host.treeIdentity, canonicalPath).fold(
                 onSuccess = {
                     _state.update {
@@ -330,6 +355,7 @@ class HostWorkspacesViewModel @Inject constructor(
                             addWorkspaceRootPath = "",
                             addWorkspacePath = "",
                             addWorkspaceFailure = null,
+                            openWorkspacePath = canonicalPath,
                         )
                     }
                     refresh()
@@ -372,6 +398,20 @@ class HostWorkspacesViewModel @Inject constructor(
                 return@launch
             }
             val path = childPath(parent, name)
+            val existing = runCatching { connection.sftp().stat(path) }.getOrElse { error ->
+                finishFolder(userMessage(error, "Could not inspect the new folder: "))
+                return@launch
+            }
+            if (existing != null) {
+                finishFolder(
+                    if (existing.isDirectory) {
+                        "A folder already exists there. Add the existing folder instead."
+                    } else {
+                        "A file already exists there; choose a different folder name."
+                    },
+                )
+                return@launch
+            }
             runCatching { connection.sftp().mkdir(path) }.fold(
                 onFailure = { error ->
                     finishFolder(userMessage(error, "Could not create the folder: "))
@@ -499,13 +539,19 @@ class HostWorkspacesViewModel @Inject constructor(
                 ),
                 errors = sessions.errors,
                 failure = null,
+                statusUnavailable = false,
             )
         }
     }
 
     private fun fail(message: String) {
         _state.update { current ->
-            current.copy(loading = false, refreshing = false, failure = message)
+            current.copy(
+                loading = false,
+                refreshing = false,
+                failure = message,
+                statusUnavailable = current.loaded,
+            )
         }
     }
 

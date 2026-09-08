@@ -174,15 +174,8 @@ private fun UsageHeader(
     ScreenHeader(
         title = "Usage",
         subtitle = hostName ?: "Connected hosts",
-        leading = {
-            PocketShellButton(
-                text = "Back",
-                onClick = onBack,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(USAGE_BACK_TAG),
-            )
-        },
+        onBack = onBack,
+        backTestTag = USAGE_BACK_TAG,
         trailing = {
             Kebab(
                 triggerTestTag = USAGE_OVERFLOW_TAG,

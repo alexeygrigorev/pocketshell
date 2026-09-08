@@ -42,9 +42,28 @@ class TunnelDetailScreenTest {
         composeRule.onNodeWithText("Remove tunnel").assertDoesNotExist()
     }
 
+    @Test
+    fun `verified tunnel detail exposes browser handoff`() {
+        val opened = mutableListOf<String>()
+        setContent(
+            manual = false,
+            verifiedUrl = "https://127.0.0.1:35173",
+            onOpenBrowser = { opened += it },
+        )
+
+        composeRule.onNodeWithTag(TUNNEL_OPEN_BROWSER_TAG)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+
+        assertEquals(listOf("https://127.0.0.1:35173"), opened)
+    }
+
     private fun setContent(
         manual: Boolean,
         onStop: () -> Unit = {},
+        verifiedUrl: String? = null,
+        onOpenBrowser: (String) -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -60,6 +79,8 @@ class TunnelDetailScreenTest {
                     onBack = {},
                     onCopyAddress = {},
                     onStop = onStop,
+                    verifiedUrl = verifiedUrl,
+                    onOpenBrowser = onOpenBrowser,
                 )
             }
         }

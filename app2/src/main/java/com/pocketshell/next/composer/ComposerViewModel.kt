@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -111,6 +112,8 @@ class ComposerViewModel @Inject constructor(
     private var stageJob: Job? = null
     private var historyJob: Job? = null
     private var deliveryJob: Job? = null
+    private var failureJob: Job? = null
+    private var pendingDelivery: PendingDelivery? = null
 
     /**
      * Points the composer at one session and its send path.
@@ -136,11 +139,15 @@ class ComposerViewModel @Inject constructor(
         this.sink = sink
         _state.update { it.copy(micAvailable = dictation.isAvailable()) }
         val key = ComposerText.sessionKey(hostId, sessionName)
-        if (sessionKey == key) return
+        if (sessionKey == key) {
+            observeFailures(sink)
+            return
+        }
         handOff()
         this.hostId = hostId
         this.sessionKey = key
         this.homeDir = null
+        observeFailures(sink)
         // Nothing is known about the new session's draft until its load lands
         // (or the user types), so nothing may be written under its key yet.
         draftKnown = false
@@ -164,6 +171,13 @@ class ComposerViewModel @Inject constructor(
             history.recent(key, HISTORY_LIMIT).collectLatest { rows ->
                 _state.update { it.copy(history = rows.map(::toSentMessage)) }
             }
+        }
+    }
+
+    private fun observeFailures(sink: SessionSink) {
+        failureJob?.cancel()
+        failureJob = viewModelScope.launch {
+            sink.sendFailures.collect { onDeliveryUncertain() }
         }
     }
 
@@ -201,8 +215,11 @@ class ComposerViewModel @Inject constructor(
         val leaving = sessionKey
         loadJob?.cancel()
         stageJob?.cancel()
+        failureJob?.cancel()
+        failureJob = null
         persistJob?.cancel()
         persistJob = null
+        pendingDelivery = null
         dictation.release()
         val outgoing = _state.value
         if (leaving != null && draftKnown) {
@@ -234,8 +251,14 @@ class ComposerViewModel @Inject constructor(
             // Typing is the acknowledgement of an undelivered chip: the user has
             // seen it and moved on. A failure the user cannot dismiss by acting
             // on it is a failure that stays on screen forever.
-            it.copy(draft = text, notice = it.notice.takeUnless { n -> n is ComposerNotice.Undelivered })
+            it.copy(
+                draft = text,
+                notice = it.notice.takeUnless {
+                    it is ComposerNotice.Undelivered || it is ComposerNotice.DeliveryUncertain
+                },
+            )
         }
+        pendingDelivery = null
         persist()
     }
 
@@ -244,11 +267,15 @@ class ComposerViewModel @Inject constructor(
 
     /** Throws away the draft and its staged attachments. */
     fun discard() {
+        pendingDelivery = null
         _state.update { it.copy(draft = "", attachments = emptyList(), notice = null, previewing = false) }
         persistNow()
     }
 
-    fun dismissNotice() = _state.update { it.copy(notice = null) }
+    fun dismissNotice() {
+        pendingDelivery = null
+        _state.update { it.copy(notice = null) }
+    }
 
     // ---------------------------------------------------------------- sending
 
@@ -303,11 +330,13 @@ class ComposerViewModel @Inject constructor(
         record(body, delivered)
 
         if (delivered) {
+            pendingDelivery = PendingDelivery(body)
             _state.update {
                 it.copy(draft = "", attachments = emptyList(), notice = null, previewing = false)
             }
             persistNow()
         } else {
+            pendingDelivery = null
             _state.update { it.copy(notice = ComposerNotice.Undelivered) }
         }
     }
@@ -454,6 +483,7 @@ class ComposerViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        failureJob?.cancel()
         dictation.release()
         super.onCleared()
     }
@@ -512,7 +542,16 @@ class ComposerViewModel @Inject constructor(
         val delayMs = settings.settings.value.agentSubmitEnterDelayMs.toLong()
         viewModelScope.launch {
             delay(delayMs)
-            target.sendBytes(ComposerText.enterBytes())
+            // The body and Enter are intentionally separate writes. If the
+            // link disappears in that gap, sendBytes() has no channel to write
+            // to and therefore cannot emit its asynchronous failure signal;
+            // surface the same delivery-uncertain state here instead of
+            // silently losing the submit half after clearing the draft.
+            if (target.isLive) {
+                target.sendBytes(ComposerText.enterBytes())
+            } else {
+                onDeliveryUncertain()
+            }
         }
     }
 
@@ -532,6 +571,27 @@ class ComposerViewModel @Inject constructor(
             }
         }
     }
+
+    /** Restores a message for review when a live PTY write later fails. */
+    private fun onDeliveryUncertain() {
+        val pending = pendingDelivery ?: return
+        pendingDelivery = null
+        draftKnown = true
+        _state.update { current ->
+            if (current.draft.isBlank() && current.attachments.isEmpty()) {
+                current.copy(
+                    draft = pending.body,
+                    notice = ComposerNotice.DeliveryUncertain,
+                    previewing = false,
+                )
+            } else {
+                current.copy(notice = ComposerNotice.DeliveryUncertain)
+            }
+        }
+        persistNow()
+    }
+
+    private data class PendingDelivery(val body: String)
 
     /**
      * Debounced draft persistence.

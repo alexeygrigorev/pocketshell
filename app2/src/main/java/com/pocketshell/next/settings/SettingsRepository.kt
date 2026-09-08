@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * ## SharedPreferences, like the rest of app2's small stores
  *
- * Five scalars with one write per user tap. Room would need a schema bump for
+ * A small set of scalars with one write per user tap. Room would need a schema bump for
  * state that is never queried relationally; DataStore would add a version
  * catalog entry for nothing. `ShowAllPortsStore` made the same call for the
  * same reason.
@@ -80,6 +80,15 @@ class SettingsRepository @Inject constructor(
     /** The current settings, hot. Never a default that is corrected later. */
     val settings: StateFlow<AppSettings>
         get() = _settings.asStateFlow()
+
+    /** Remembers the host whose workspace list should be resumed next launch. */
+    fun setDefaultHostId(hostId: Long?) {
+        if (_settings.value.defaultHostId == hostId) return
+        write {
+            if (hostId == null) remove(KEY_DEFAULT_HOST_ID) else putLong(KEY_DEFAULT_HOST_ID, hostId)
+        }
+        _settings.value = _settings.value.copy(defaultHostId = hostId)
+    }
 
     /** Terminal glyph size in raw device pixels, snapped to the slider grid. */
     fun setTerminalTextSizePx(sizePx: Int) {
@@ -183,6 +192,7 @@ class SettingsRepository @Inject constructor(
      * setting the UI cannot represent — a slider pinned off its own track.
      */
     private fun readSnapshot(prefs: SharedPreferences): AppSettings = AppSettings(
+        defaultHostId = prefs.safeLongOrNull(KEY_DEFAULT_HOST_ID),
         terminalTextSizePx = snapTerminalTextSize(
             prefs.safeInt(KEY_TERMINAL_TEXT_SIZE_PX, AppSettings.DEFAULT_TERMINAL_TEXT_SIZE_PX),
         ),
@@ -312,6 +322,10 @@ class SettingsRepository @Inject constructor(
     private fun SharedPreferences.safeLong(key: String, default: Long): Long =
         runCatching { getLong(key, default) }.getOrElse { drop(key); default }
 
+    private fun SharedPreferences.safeLongOrNull(key: String): Long? =
+        if (!contains(key)) null else runCatching { getLong(key, 0L) }
+            .getOrElse { drop(key); null }
+
     private fun SharedPreferences.safeFloat(key: String, default: Float): Float =
         runCatching { getFloat(key, default) }.getOrElse { drop(key); default }
 
@@ -338,5 +352,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
+        const val KEY_DEFAULT_HOST_ID = "default_host_id"
     }
 }

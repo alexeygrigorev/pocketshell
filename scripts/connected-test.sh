@@ -596,7 +596,7 @@ if [[ -n "$CONNECTED_EVIDENCE_DIR" ]]; then
     ssh -i "$evidence_ssh_key" -p "${POCKETSHELL_AGENTS_PORT:-2222}" \
       -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      testuser@127.0.0.1 "printf 'issue1944 ssh ready '; tmux -V"
+      testuser@127.0.0.1 "command -v a && command -v aplexer && pocketshell sessions list --json >/dev/null && printf 'issue1944 ssh ready aplexer'"
   } > "$CONNECTED_EVIDENCE_DIR/docker-ssh-readiness.log" 2>&1
   rm -f "$evidence_ssh_key"
 fi

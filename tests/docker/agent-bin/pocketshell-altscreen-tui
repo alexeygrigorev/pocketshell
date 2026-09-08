@@ -3,8 +3,8 @@
 
 Issue #2555: a finger drag on the phone's terminal used to be answered with
 synthesised `KEYCODE_DPAD_UP`/`DOWN` whenever the app's emulator was on the
-ALTERNATE screen with no mouse tracking — which is the state a stock-config
-tmux attach and an aplexer attach onto an alt-screen workload both produce.
+ALTERNATE screen with no mouse tracking — which is the state an aplexer attach
+onto an alt-screen workload produces.
 In an agent TUI or a shell, arrow-up is prompt/command history, so scrolling
 back rewrote what the user was typing.
 
@@ -23,8 +23,8 @@ program already in the image has all three:
 `less` has (1) and (2) but not (3), and its exact repaint is a busybox
 implementation detail a regression test should not depend on. So this exists.
 
-Driven by `J15TerminalScrollJourney` from BOTH backends: directly, as a tmux
-pane's command, and through `a attach`, as the aplexer fixture's workload.
+Driven by `J15TerminalScrollJourney` through `a attach` as the aplexer
+fixture's workload.
 
 Keys: arrows move the cursor line, `q` quits. Everything else is recorded and
 otherwise ignored.
@@ -40,7 +40,7 @@ import tty
 BANNER = "POCKETSHELL-ALTSCREEN-TUI"
 
 # Small enough that the header lines survive on the SHORTEST viewport any
-# caller uses (a seeded 80x24 tmux pane). The alternate screen keeps no
+# caller uses (a seeded 80x24 terminal). The alternate screen keeps no
 # scrollback, so a frame taller than the pane would push BANNER/CURSOR/KEYS —
 # the whole oracle — off the top with no way to get them back.
 BODY_LINES = 12
@@ -51,8 +51,8 @@ KEY_LOG = os.environ.get(
 )
 
 # CSI (`ESC [ A`) is what a terminal sends with DECCKM off; SS3 (`ESC O A`) is
-# what the SAME key sends once an application has turned DECCKM on, which tmux
-# does on every attach. Both spellings have to be recognised or the oracle
+# what the SAME key sends once an application has turned DECCKM on. Both
+# spellings have to be recognised or the oracle
 # would miss half of the reported bug.
 ARROWS = {
     "\x1b[A": "UP",

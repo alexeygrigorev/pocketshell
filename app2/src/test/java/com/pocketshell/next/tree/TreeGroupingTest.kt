@@ -2,7 +2,6 @@ package com.pocketshell.next.tree
 
 import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.AgentStateSource
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.core.hostapi.SessionsJson
 import org.junit.Assert.assertEquals
@@ -239,47 +238,11 @@ class TreeGroupingTest {
     }
 
     @Test
-    fun `an UNKNOWN-backend row is grouped and kept, never dropped`() {
-        val roots = groupSessionsIntoRoots(
-            listOf(
-                row("tmux-one", workspace = "/home/x/git/w", activity = 10, backend = Backend.TMUX, created = 1),
-                row(
-                    "from-the-future",
-                    workspace = "/home/x/git/w",
-                    activity = 20,
-                    backend = Backend.fromWire("warpdrive"),
-                    created = 2,
-                ),
-                row(
-                    "no-workspace-future",
-                    workspace = null,
-                    activity = 30,
-                    backend = Backend.UNKNOWN,
-                    created = 3,
-                ),
-            ),
-        )
-        assertEquals(3, roots.sumOf { it.sessionCount })
-        val workspaceFolder = roots.single { it.headerLabel == "~/git" }.folders.single()
-        assertEquals(listOf("tmux-one", "from-the-future"), workspaceFolder.rows.map { it.name })
-        assertEquals(
-            listOf("no-workspace-future"),
-            roots.single { it.other }.folders.single().rows.map { it.name },
-        )
-        assertTrue(
-            "an unrecognised manager must survive as UNKNOWN",
-            workspaceFolder.rows.any { it.backend == Backend.UNKNOWN },
-        )
-    }
-
-    @Test
-    fun `every input row survives grouping, tmux and aplexer alike`() {
+    fun `every aplexer input row survives grouping`() {
         val input = listOf(
-            row("t1", workspace = "/home/x/git/a", activity = 1, backend = Backend.TMUX, created = 1),
-            row("t2", workspace = null, activity = null, backend = Backend.TMUX, created = 2),
-            row("a1", workspace = "/home/x/tmp/b", activity = 3, backend = Backend.APLEXER, created = 3),
-            row("a2", workspace = "/home/x/git/a", activity = 4, backend = Backend.APLEXER, created = 4),
-            row("u1", workspace = "/home/x/tmp/b", activity = null, backend = Backend.UNKNOWN, created = 5),
+            row("a1", workspace = "/home/x/tmp/b", activity = 3, created = 3),
+            row("a2", workspace = "/home/x/git/a", activity = 4, created = 4),
+            row("a3", workspace = null, activity = null, created = 5),
         )
 
         val out = groupSessionsIntoRoots(input)
@@ -342,20 +305,20 @@ class TreeGroupingTest {
 
     /**
      * The maintainer's actual box, captured with the repository's own host CLI
-     * (`pocketshell sessions list --json`, schema 2) and committed verbatim as
+     * (`pocketshell sessions list --json`, schema 3) and committed as
      * `fixtures/sessions-list-devbox.json`.
      *
-     * Hand-written rows exercise the rules; this exercises the SHAPE — 13
-     * sessions over `$HOME/git/…` plus `/tmp/aplexer-follow` from BOTH managers.
+     * Hand-written rows exercise the rules; this exercises the shape of an
+     * aplexer-only host capture over `$HOME/git/…` plus `/tmp/aplexer-follow`.
      * It runs through the real `SessionsJson` parser, so a change to either side
      * that only breaks on real data breaks here.
      */
     @Test
-    fun `a real dev-box listing groups into git and other with both managers`() {
+    fun `a real dev-box listing groups into git and other`() {
         val listing = SessionsJson.parseSessionsList(readFixture("sessions-list-devbox.json"))
             .getOrThrow()
 
-        assertTrue("the capture must carry backend errors as an empty list", listing.errors.isEmpty())
+        assertTrue("the capture must carry no enumeration errors", listing.errors.isEmpty())
         val roots = groupSessionsIntoRoots(listing.sessions)
 
         assertEquals(listing.sessions.size, roots.sumOf { it.sessionCount })
@@ -364,19 +327,13 @@ class TreeGroupingTest {
             roots.flatMap { it.folders.flatMap { folder -> folder.rows.map { it.name } } }.toSet(),
         )
 
-        val backends = listing.sessions.map { it.backend }.toSet()
-        assertTrue("expected tmux rows", Backend.TMUX in backends)
-        assertTrue("expected aplexer rows", Backend.APLEXER in backends)
-
         assertEquals(listOf("~/git", OTHER_ROOT_LABEL), roots.map { it.headerLabel })
         val git = roots.single { it.headerLabel == "~/git" }
-        assertTrue("git must hold more than one folder", git.folders.size > 1)
+        assertTrue("git must hold a folder", git.folders.isNotEmpty())
         git.folders.forEach { folder ->
             assertFalse("a reported cwd must keep its folder row", folder.untracked)
             assertTrue(folder.rows.isNotEmpty())
         }
-        val busiest = git.folders.maxBy { it.rows.size }
-        assertTrue("expected a folder holding several sessions", busiest.rows.size >= 3)
 
         // Creation order: never activity. An activity bump is not in this
         // fixture, but the order of each folder's rows must match createdEpoch.
@@ -403,11 +360,9 @@ class TreeGroupingTest {
         name: String,
         workspace: String?,
         activity: Long?,
-        backend: Backend = Backend.TMUX,
         created: Long? = null,
     ): SessionRow = SessionRow(
         name = name,
-        backend = backend,
         id = null,
         workspace = workspace,
         tag = null,

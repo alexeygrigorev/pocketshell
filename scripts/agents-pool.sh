@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Agents-fixture pool CLI (issue #724) — the Docker half of parallel journey
 # testing. The AVD half (a pool of N emulators) is scripts/avd-pool.sh; this
-# brings up N ISOLATED deterministic `agents` SSH/tmux fixtures, each on its own
-# host port, so two emulator lanes never corrupt each other's tmux state.
+# brings up N ISOLATED deterministic `agents` SSH/aplexer fixtures, each on its
+# own host port, so two emulator lanes never corrupt each other's session state.
 #
 # Subcommands:
 #   up [PORT...]     bring up an agents fixture lane for each PORT (default: the
@@ -20,7 +20,7 @@ set -euo pipefail
 # #1842). It is the legacy single-lane fixture (container
 # `pocketshell-test-agents`), and ~a dozen non-pool scripts recreate it
 # unconditionally without taking the port lock — so a lane handed 2222 holds a
-# lock nobody consults and gets its tmux server wiped mid-run. This CLI still
+# lock nobody consults and gets its session registry replaced mid-run. This CLI still
 # manages it on request (`up 2222` / `down 2222` reproduce the legacy identity
 # for the single-lane tooling); it is only barred from lane ALLOCATION.
 #
@@ -46,8 +46,8 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/agents-pool.sh <up|down|status> [PORT...]
 
-Brings up a pool of isolated deterministic `agents` SSH/tmux fixtures on
-distinct host ports so parallel emulator lanes get independent tmux state.
+Brings up a pool of isolated deterministic `agents` SSH/aplexer fixtures on
+distinct host ports so parallel emulator lanes get independent session state.
 
   up [PORT...]     bring up + wait-healthy a fixture lane per PORT (default pool)
   down [PORT...]   tear down the fixture lane(s) per PORT (default pool)

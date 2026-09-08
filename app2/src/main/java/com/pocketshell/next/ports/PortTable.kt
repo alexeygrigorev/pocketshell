@@ -105,7 +105,7 @@ internal fun RowScope.PortBodyCell(
         text = text,
         modifier = Modifier.weight(weight),
         color = color,
-        style = if (monospace) PocketShellType.bodyMono else PocketShellType.bodyDense,
+        style = if (monospace) PocketShellType.bodyMono else PocketShellType.body,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )

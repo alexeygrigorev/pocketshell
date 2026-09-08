@@ -41,7 +41,35 @@ class UsageFetcher @Inject constructor(
         val snapshots: Map<Long, UsageSnapshot>,
         val resetEvents: List<UsageResetEvent>,
         val connectedHostCount: Int,
+        val selectedHostName: String? = null,
     )
+
+    /**
+     * One host-scoped round for the Quiet Usage route. It reads the same live
+     * connection and server-side command as [fetchAll], but never aggregates a
+     * second host into the selected host's screen.
+     */
+    suspend fun fetchHost(hostId: Long): Result {
+        val host = hostDao.getById(hostId) ?: return Result(
+            snapshots = emptyMap(),
+            resetEvents = emptyList(),
+            connectedHostCount = 0,
+        )
+        if (connections.current(hostId) == null) {
+            return Result(
+                snapshots = emptyMap(),
+                resetEvents = emptyList(),
+                connectedHostCount = 0,
+                selectedHostName = host.name,
+            )
+        }
+        return Result(
+            snapshots = mapOf(hostId to fetchHostUsage(hostId, host.name)),
+            resetEvents = fetchResetEvents(hostId),
+            connectedHostCount = 1,
+            selectedHostName = host.name,
+        )
+    }
 
     suspend fun fetchAll(): Result = coroutineScope {
         val connectedHosts = hostDao.getAll().first()

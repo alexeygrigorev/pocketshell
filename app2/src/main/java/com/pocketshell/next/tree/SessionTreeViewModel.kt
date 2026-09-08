@@ -3,16 +3,20 @@ package com.pocketshell.next.tree
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.hostapi.BackendError
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.ProfileInfo
+import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.core.hostapi.SessionListError
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.files.RemotePath
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.workspaces.canonicalRemotePath
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -52,8 +56,12 @@ data class SessionTreeUiState(
     /** At least one listing has succeeded, so [roots] is a real answer. */
     val loaded: Boolean = false,
     val roots: List<SessionRoot> = emptyList(),
+    /** Non-null when this instance backs the persistent workspace route. */
+    val workspacePath: String? = null,
+    /** Live sessions whose host-reported cwd matches [workspacePath]. */
+    val workspaceSessions: List<SessionRow> = emptyList(),
     /** Backends that failed to enumerate. Non-empty ⇒ this list may be short. */
-    val errors: List<BackendError> = emptyList(),
+    val errors: List<SessionListError> = emptyList(),
     /** The whole listing failed. Distinct from "empty and healthy". */
     val failure: String? = null,
     /**
@@ -64,8 +72,11 @@ data class SessionTreeUiState(
     val pendingStop: String? = null,
     /** Everything the create-session sheet needs (task U-6). */
     val create: CreateSessionState = CreateSessionState(),
+    /** Folder actions owned by the workspace route. */
+    val workspaceAction: WorkspaceActionState = WorkspaceActionState(),
 ) {
-    val sessionCount: Int get() = roots.sumOf { it.sessionCount }
+    val sessionCount: Int
+        get() = if (workspacePath != null) workspaceSessions.size else roots.sumOf { it.sessionCount }
 
     /** True when the screen should say "no sessions" rather than stay blank. */
     val isEmptyAndHealthy: Boolean
@@ -82,7 +93,7 @@ data class SessionTreeUiState(
      * host's own default apply.
      */
     val suggestedFolder: String
-        get() = roots.asSequence()
+        get() = workspacePath ?: roots.asSequence()
             .flatMap { it.folders }
             .flatMap { it.rows }
             .filter { it.workspace?.startsWith("/") == true }
@@ -90,6 +101,14 @@ data class SessionTreeUiState(
             ?.workspace
             ?: ""
 }
+
+/** State for the explicit create-folder action on a workspace. */
+data class WorkspaceActionState(
+    val createFolderVisible: Boolean = false,
+    val createFolderName: String = "",
+    val creatingFolder: Boolean = false,
+    val createFolderFailure: String? = null,
+)
 
 /**
  * The create-session sheet's state (task U-6, journey J04).
@@ -102,9 +121,8 @@ data class SessionTreeUiState(
  *
  * [notice] carries the "that session already existed" message. The host CLI's
  * create is idempotent and reports `created: false` for a name that was already
- * there — a SUCCESS, per [com.pocketshell.core.hostapi.CreatedSession]. Treating
- * it as a failure would be the bug: the user asked for that session and now has
- * it, which is exactly what they wanted.
+ * there — a SUCCESS, per [com.pocketshell.core.hostapi.CreatedSession]. The
+ * tree stays on screen so the user can choose that existing row explicitly.
  */
 data class CreateSessionState(
     /** The sheet is on screen. */
@@ -176,6 +194,7 @@ class SessionTreeViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val registry: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
 ) : ViewModel() {
 
@@ -183,13 +202,21 @@ class SessionTreeViewModel @Inject constructor(
         savedStateHandle.get<Long>(Destination.ARG_HOST_ID),
     ) { "SessionTreeViewModel needs a ${Destination.ARG_HOST_ID} argument" }
 
-    private val _state = MutableStateFlow(SessionTreeUiState(hostId = hostId))
+    private val workspacePath: String? = savedStateHandle
+        .get<String>(Destination.ARG_WORKSPACE_PATH)
+        ?.let(::canonicalRemotePath)
+
+    private val _state = MutableStateFlow(
+        SessionTreeUiState(hostId = hostId, workspacePath = workspacePath),
+    )
     val state: StateFlow<SessionTreeUiState> = _state.asStateFlow()
 
     private var inFlight: Job? = null
     private var createInFlight: Job? = null
     private var pickerInFlight: Job? = null
     private var stopInFlight: Job? = null
+    private var folderInFlight: Job? = null
+    private var removeWorkspaceInFlight: Job? = null
 
     /**
      * Set when a mutation finished while [inFlight] was still reading, and
@@ -309,13 +336,14 @@ class SessionTreeViewModel @Inject constructor(
      * listing and ask the screen to open it.
      *
      * A session that already existed comes back `created == false`, which is a
-     * SUCCESS: the sheet closes, the tree refreshes and the screen opens that
-     * session, with a notice saying it was already there. A FAILURE leaves the
-     * sheet open with its text intact so the user can fix the folder and retry.
+     * SUCCESS: the sheet closes and the tree refreshes with a notice saying it
+     * was already there. The screen does not silently resume that existing
+     * session; the user chooses its row explicitly. A FAILURE leaves the sheet
+     * open with its text intact so the user can fix the folder and retry.
      *
-     * [CreateSessionRequest.engine] / [CreateSessionRequest.profile] /
-     * [CreateSessionRequest.backend] are forwarded when set and omitted when
-     * null, so a Shell create with the host-default backend is still
+     * [CreateSessionRequest.engine] / [CreateSessionRequest.profile] are
+     * forwarded when set and omitted when null, so a Shell create with the
+     * host-default backend is still
      * `sessions create --json -- NAME`.
      */
     fun createSession(request: CreateSessionRequest) {
@@ -335,7 +363,6 @@ class SessionTreeViewModel @Inject constructor(
                 cwd = request.cwd?.trim()?.takeIf { it.isNotEmpty() },
                 engine = request.engine?.trim()?.takeIf { it.isNotEmpty() },
                 profile = request.profile?.trim()?.takeIf { it.isNotEmpty() },
-                backend = request.backend?.trim()?.takeIf { it.isNotEmpty() },
             )
         }
     }
@@ -412,7 +439,6 @@ class SessionTreeViewModel @Inject constructor(
         cwd: String?,
         engine: String?,
         profile: String?,
-        backend: String?,
     ) {
         val connection = when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> outcome.connection
@@ -424,7 +450,6 @@ class SessionTreeViewModel @Inject constructor(
                 cwd = cwd,
                 engine = engine,
                 profile = profile,
-                backend = backend,
             )
             .fold(
                 onSuccess = { created ->
@@ -436,12 +461,12 @@ class SessionTreeViewModel @Inject constructor(
                             notice = if (created.created) {
                                 null
                             } else {
-                                "Session \"${created.name}\" already existed — opened it."
+                                "Session \"${created.name}\" already exists — choose it from the list to open it."
                             },
-                            // The HOST's name for what it made, not the typed
-                            // one: an aplexer-backed create answers with its own
-                            // `workspace:tag` display name.
-                            openRequest = created.name,
+                            // Only a newly created session is opened by the
+                            // explicit New session action. An idempotent
+                            // existing result must remain an explicit row tap.
+                            openRequest = created.name.takeIf { created.created },
                         )
                     }
                     // Same reason as the kill path: the new session must not
@@ -483,6 +508,118 @@ class SessionTreeViewModel @Inject constructor(
         _state.update { current -> current.copy(create = block(current.create)) }
     }
 
+    // --- workspace actions -------------------------------------------------
+
+    fun openCreateFolder() {
+        if (workspacePath == null) return
+        _state.update {
+            it.copy(
+                workspaceAction = WorkspaceActionState(createFolderVisible = true),
+            )
+        }
+    }
+
+    fun dismissCreateFolder() {
+        if (_state.value.workspaceAction.creatingFolder) return
+        _state.update { it.copy(workspaceAction = WorkspaceActionState()) }
+    }
+
+    fun setCreateFolderName(name: String) {
+        _state.update {
+            it.copy(
+                workspaceAction = it.workspaceAction.copy(
+                    createFolderName = name,
+                    createFolderFailure = null,
+                ),
+            )
+        }
+    }
+
+    /** Creates exactly one child directory in this workspace. */
+    fun createFolder() {
+        val parent = workspacePath ?: return
+        val action = _state.value.workspaceAction
+        val name = action.createFolderName.trim()
+        val invalid = name.isEmpty() || name == "." || name == ".." ||
+            name.any { it == '/' || it == '\\' || it.isISOControl() }
+        if (invalid) {
+            _state.update {
+                it.copy(
+                    workspaceAction = action.copy(
+                        createFolderVisible = true,
+                        createFolderFailure = "Use one folder name without separators.",
+                    ),
+                )
+            }
+            return
+        }
+        if (folderInFlight?.isActive == true) return
+        _state.update {
+            it.copy(
+                workspaceAction = action.copy(
+                    creatingFolder = true,
+                    createFolderFailure = null,
+                ),
+            )
+        }
+        folderInFlight = viewModelScope.launch {
+            val connection = when (val outcome = resolveConnection()) {
+                is ConnectionOutcome.Ready -> outcome.connection
+                is ConnectionOutcome.Unavailable -> {
+                    failCreateFolder(outcome.message)
+                    return@launch
+                }
+            }
+            val target = RemotePath.join(parent, name)
+            runCatching { connection.sftp().mkdir(target) }.fold(
+                onSuccess = {
+                    _state.update { it.copy(workspaceAction = WorkspaceActionState()) }
+                },
+                onFailure = { error ->
+                    failCreateFolder(userMessage(error, "Could not create the folder: "))
+                },
+            )
+        }
+    }
+
+    /** Removes only durable host membership; the remote folder and sessions survive. */
+    fun removeWorkspaceFromList(onRemoved: () -> Unit) {
+        val path = workspacePath ?: return
+        if (removeWorkspaceInFlight?.isActive == true) return
+        removeWorkspaceInFlight = viewModelScope.launch {
+            val host = hostDao.getById(hostId)
+            if (host == null) {
+                fail("This host is no longer saved on this device.")
+                return@launch
+            }
+            val connection = when (val outcome = resolveConnection()) {
+                is ConnectionOutcome.Ready -> outcome.connection
+                is ConnectionOutcome.Unavailable -> {
+                    fail(outcome.message)
+                    return@launch
+                }
+            }
+            clients.create(connection).removeWorkspace(host.treeIdentity, path).fold(
+                onSuccess = { onRemoved() },
+                onFailure = { error ->
+                    fail(userMessage(error, "Could not remove the workspace from the list: "))
+                },
+            )
+        }
+    }
+
+    private fun failCreateFolder(message: String) {
+        _state.update {
+            it.copy(
+                workspaceAction = it.workspaceAction.copy(
+                    createFolderVisible = true,
+                    creatingFolder = false,
+                    createFolderFailure = message,
+                ),
+            )
+        }
+    }
+
     private suspend fun load() {
         when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> applyListing(outcome.connection)
@@ -519,6 +656,11 @@ class SessionTreeViewModel @Inject constructor(
             .map { it.path }
         clients.create(connection).listSessions().fold(
             onSuccess = { listing ->
+                val workspaceSessions = workspacePath?.let { path ->
+                    listing.sessions.filter { session ->
+                        canonicalRemotePath(session.workspace) == path
+                    }
+                }.orEmpty()
                 _state.update { current ->
                     current.copy(
                         loading = false,
@@ -528,6 +670,7 @@ class SessionTreeViewModel @Inject constructor(
                             sessions = listing.sessions,
                             registeredRoots = registered,
                         ),
+                        workspaceSessions = workspaceSessions,
                         errors = listing.errors,
                         // A successful listing clears a previous failure; the
                         // partial-backend banner is driven by `errors`, which

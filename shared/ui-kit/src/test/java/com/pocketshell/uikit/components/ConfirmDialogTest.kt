@@ -120,7 +120,7 @@ class ConfirmDialogTest {
             PocketShellTheme {
                 ConfirmDialog(
                     title = "Stop this session?",
-                    message = "This ends the tmux session on the host.",
+                    message = "This stops the session on the host.",
                     confirmLabel = "Stop",
                     onConfirm = { confirmed++ },
                     onDismiss = { dismissed++ },

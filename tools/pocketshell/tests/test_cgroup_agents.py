@@ -1,11 +1,11 @@
 """Tests for cgroup/scope-based agent classification (issue #809 / #811).
 
 The classifier reads a cgroup-v2 ``/sys/fs/cgroup`` tree plus ``/proc`` to map
-each pane's ``pane_pid`` to its ``tmuxctl-<session>.scope`` and classify the
+each pane's ``pane_pid`` to its ``aplexer-workload-<session>.scope`` and classify the
 agent process running inside. These tests build a **synthetic** ``/proc``-like
 and cgroupfs-like tree on ``tmp_path`` and point the classifier at it via the
 injectable ``proc_root`` / ``cgroup_mount`` roots, so nothing depends on a live
-tmux/agent session — they reproduce the real on-box layout proven in the #811
+session/agent session — they reproduce the real on-box layout proven in the #811
 design spike (claude as ``comm=claude``; codex node-wrapped as
 ``comm=MainThread`` + ``cmdline=node …/codex``; etc.).
 """
@@ -68,7 +68,7 @@ class _FakeHost:
         """Create a synthetic ``/proc/<pid>`` whose cgroup line names ``scope``.
 
         When ``scope`` is ``None`` the cgroup line points at a bare login path
-        with no tmuxctl/spawn scope (the non-tmuxctl session case).
+        with no workload scope (the non-aplexer session case).
         """
         proc_dir = self.proc_root / str(pid)
         proc_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +168,7 @@ def test_classify_token_substring_does_not_false_positive() -> None:
 
 def test_claude_scope(host: _FakeHost) -> None:
     """A scope with a bare `comm=claude` shell child classifies as claude."""
-    scope = "tmuxctl-git-pocketshell.scope"
+    scope = "aplexer-workload-git-pocketshell.scope"
     host.add_proc(2647034, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(
         2647069,
@@ -188,9 +188,9 @@ def test_codex_node_wrapped_scope(host: _FakeHost) -> None:
     """Node-wrapped codex: comm is `MainThread`, cmdline carries node …/codex.
 
     This is the exact live layout proven in the #811 spike for
-    `tmuxctl-git-3d-models.scope`.
+    `aplexer-workload-git-3d-models.scope`.
     """
-    scope = "tmuxctl-git-3d-models.scope"
+    scope = "aplexer-workload-git-3d-models.scope"
     host.add_proc(756261, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(
         756501,
@@ -218,7 +218,7 @@ def test_codex_node_wrapped_scope(host: _FakeHost) -> None:
 
 
 def test_opencode_scope(host: _FakeHost) -> None:
-    scope = "tmuxctl-git-faq-assistant.scope"
+    scope = "aplexer-workload-git-faq-assistant.scope"
     host.add_proc(900001, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(
         900002, scope=scope, comm="opencode", cmdline="opencode --foo"
@@ -232,7 +232,7 @@ def test_opencode_scope(host: _FakeHost) -> None:
 
 
 def test_grok_scope(host: _FakeHost) -> None:
-    scope = "tmuxctl-git-pocketshell.scope"
+    scope = "aplexer-workload-git-pocketshell.scope"
     host.add_proc(910001, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(
         910002,
@@ -250,7 +250,7 @@ def test_grok_scope(host: _FakeHost) -> None:
 
 def test_plain_shell_scope_is_none(host: _FakeHost) -> None:
     """A scope with only a plain shell (no agent) classifies as `none`."""
-    scope = "tmuxctl-git-datamailer.scope"
+    scope = "aplexer-workload-git-datamailer.scope"
     host.add_proc(800001, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(800002, scope=scope, comm="vim", cmdline="vim notes.txt")
     host.set_scope_procs(scope, [800001, 800002])
@@ -269,10 +269,10 @@ def test_missing_pid_is_unknown(host: _FakeHost) -> None:
     assert result.evidence_pid is None
 
 
-def test_no_tmuxctl_scope_is_none_with_null_scope(host: _FakeHost) -> None:
-    """A non-tmuxctl pane (login scope) reports scope=None.
+def test_no_sessionctl_scope_is_none_with_null_scope(host: _FakeHost) -> None:
+    """A non-workload pane (login scope) reports scope=None.
 
-    The pid resolves (cgroup readable) but there is no tmuxctl/spawn scope, so
+    The pid resolves (cgroup readable) but there is no workload scope, so
     we cannot read a scope's cgroup.procs — degrade to `unknown` rather than
     pretending we proved "no agent".
     """
@@ -290,7 +290,7 @@ def test_scope_procs_missing_is_unknown(host: _FakeHost) -> None:
     Simulates the session ending between the pane read and the procs read:
     the scope basename is still reported, but agent_kind is `unknown`.
     """
-    scope = "tmuxctl-git-ended.scope"
+    scope = "aplexer-workload-git-ended.scope"
     host.add_proc(810001, scope=scope, comm="bash", cmdline="/bin/bash -l")
     # Deliberately do NOT call set_scope_procs — no cgroup.procs file.
     result = _classify(host, 810001)
@@ -304,7 +304,7 @@ def test_proc_vanishes_between_enumeration_and_read(host: _FakeHost) -> None:
     The classifier must not crash when a pid races away after the
     cgroup.procs read; it skips it and still classifies the survivors.
     """
-    scope = "tmuxctl-git-race.scope"
+    scope = "aplexer-workload-git-race.scope"
     host.add_proc(820001, scope=scope, comm="bash", cmdline="/bin/bash -l")
     host.add_proc(
         820003, scope=scope, comm="claude", cmdline="claude --skip"
@@ -326,12 +326,12 @@ def test_batch_classifies_each_pane_and_isolates_failures(
     host: _FakeHost,
 ) -> None:
     """One bad pane (invalid pane_pid) must not sink the rest of the batch."""
-    claude_scope = "tmuxctl-git-pocketshell.scope"
+    claude_scope = "aplexer-workload-git-pocketshell.scope"
     host.add_proc(100, scope=claude_scope, comm="bash", cmdline="/bin/bash")
     host.add_proc(101, scope=claude_scope, comm="claude", cmdline="claude")
     host.set_scope_procs(claude_scope, [100, 101])
 
-    shell_scope = "tmuxctl-git-plain.scope"
+    shell_scope = "aplexer-workload-git-plain.scope"
     host.add_proc(200, scope=shell_scope, comm="bash", cmdline="/bin/bash")
     host.set_scope_procs(shell_scope, [200])
 
@@ -361,7 +361,7 @@ def test_batch_classifies_each_pane_and_isolates_failures(
 
 def test_batch_pane_id_passthrough_and_correlation(host: _FakeHost) -> None:
     """pane_id is passed through verbatim so the client can correlate."""
-    scope = "tmuxctl-git-pocketshell.scope"
+    scope = "aplexer-workload-git-pocketshell.scope"
     host.add_proc(300, scope=scope, comm="bash", cmdline="/bin/bash")
     host.add_proc(301, scope=scope, comm="claude", cmdline="claude")
     host.set_scope_procs(scope, [300, 301])
@@ -381,7 +381,7 @@ def test_batch_empty_panes() -> None:
 
 def test_result_json_omits_evidence_pid_when_absent(host: _FakeHost) -> None:
     """The `none` result envelope has no evidence_pid key (compact wire)."""
-    scope = "tmuxctl-git-empty.scope"
+    scope = "aplexer-workload-git-empty.scope"
     host.add_proc(400, scope=scope, comm="bash", cmdline="/bin/bash")
     host.set_scope_procs(scope, [400])
     results = cgroup_agents.kind_for_panes(

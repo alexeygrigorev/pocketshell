@@ -2,14 +2,13 @@
 
 Skeleton landed in the first PR of issue
 [#170](https://github.com/alexeygrigorev/pocketshell/issues/170). Follow-up
-PRs add subgroups: `jobs` (#170 second PR), `sessions` (#218),
+PRs add subgroups: `sessions` (#218),
 `agent-log` (#217), `daemon` (#219), and `repos` (#220).
 The foreground static server is `serve` (#2333).
 
 Per the D22 locked principle (no backwards compatibility, hard cuts only)
 the PocketShell Android app probes for this single binary instead of
-`quse` / `tmuxctl`: usage runs `pocketshell usage --json` (#231) and jobs
-run `pocketshell jobs ...` (a direct namespace swap from `tmuxctl jobs`).
+`quse`: usage runs `pocketshell usage --json` (#231).
 The cutover is complete; the app no longer probes the old binaries.
 """
 
@@ -31,26 +30,25 @@ from pocketshell.env import env_group
 from pocketshell.engines import engines_group
 from pocketshell.github import github_group
 from pocketshell.hooks import hooks_group
-from pocketshell.jobs import jobs_group
 from pocketshell.logs import logs_group
 from pocketshell.profiles import profiles_group
 from pocketshell.prune_attachments import prune_attachments_command
 from pocketshell.push import push_group
 from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
-from pocketshell.send import send_command
 from pocketshell.sessions import sessions_group
 from pocketshell.serve import serve_command
 from pocketshell.tree import tree_group
 from pocketshell.usage import usage_command
+from pocketshell.workspaces import workspaces_group
 
 
 @click.group(
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Unified server-side helper for the PocketShell Android client.\n\n"
-        "Subcommands replace the separately-installed `quse`, `tmuxctl`, "
-        "and `qr-share` CLIs. Today `usage`, `jobs`, `sessions`, "
+        "Subcommands replace the separately-installed `quse` and `qr-share` "
+        "CLIs. Today `usage`, `sessions`, "
         "`agent-log`, `repos`, `github`, `daemon`, `serve`, and `qr-share` are wired "
         "up; more subcommands will land in follow-up rounds."
     ),
@@ -65,12 +63,7 @@ cli.add_command(agent_group, name="agent")
 cli.add_command(agents_group, name="agents")
 cli.add_command(profiles_group, name="profiles")
 cli.add_command(engines_group, name="engines")
-cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
-# Issue #2122 (epic #2121): the acknowledged outbound delivery primitive. The
-# exec's exit status IS the delivery acknowledgement, replacing the client's
-# bounded terminal-observation guess.
-cli.add_command(send_command, name="send")
 cli.add_command(tree_group, name="tree")
 cli.add_command(agent_log_command, name="agent-log")
 cli.add_command(repos_group, name="repos")
@@ -86,6 +79,7 @@ cli.add_command(push_group, name="push")
 register_push_card_commands(push_group)
 cli.add_command(qr_share_command, name="qr-share")
 cli.add_command(serve_command, name="serve")
+cli.add_command(workspaces_group, name="workspaces")
 
 
 # ---------------------------------------------------------------------------

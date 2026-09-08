@@ -8,6 +8,7 @@ import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.transport.AuthMaterial
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
@@ -47,14 +48,14 @@ import kotlinx.coroutines.sync.withLock
  *
  * ## What is persisted, and where
  *
- * `hosts.enabled` is the durable intent: "forwarding is on for this host". It is
- * the only forwarding state that survives process death, which is what makes
- * [resumeEnabled] a complete answer to "what should be running?" — the service
- * re-reads that column instead of keeping its own registry.
+ * `hosts.enabled` is the durable intent: "forwarding is on for this host". The
+ * [PortRemappingDao] rows are the durable manual remote-to-local choices. Both
+ * are re-read by [resumeEnabled] through the service instead of being kept in
+ * a second registry, so a saved manual tunnel returns after process death.
  *
  * Per-port opt-ins ([togglePort]) are deliberately session-scoped, held by the
- * supervisor's desired-state set: they survive reconnects (their whole point) but
- * not a process restart, where re-discovery re-derives the useful ones anyway.
+ * supervisor's desired-state set: they survive reconnects but not a process
+ * restart, where ordinary discovery re-derives the useful in-window ports.
  *
  * ## No authority/barrier machinery
  *
@@ -129,6 +130,8 @@ class ForwardingController @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val mutex = Mutex()
+    /** Serializes the check-and-insert part of manual tunnel creation. */
+    private val manualMutationMutex = Mutex()
     private val active = mutableMapOf<Long, ActiveHost>()
 
     private val _snapshot = MutableStateFlow<List<HostForwarding>>(emptyList())
@@ -216,9 +219,76 @@ class ForwardingController @Inject constructor(
         supervisor?.togglePort(remotePort)
     }
 
+    /**
+     * Persists a user-requested tunnel and starts forwarding for the host.
+     *
+     * The port-forward engine already has a durable remote→local remapping
+     * contract. Services & tunnels is a clearer front end for that contract;
+     * it must not grow a second in-memory tunnel implementation. Restarting a
+     * mounted supervisor makes the new mapping take effect immediately and
+     * keeps reconnect restoration on the same existing path.
+     */
+    suspend fun addManualTunnel(
+        hostId: Long,
+        remotePort: Int,
+        localPort: Int,
+        name: String = defaultManualTunnelName(remotePort),
+    ) {
+        require(remotePort in VALID_PORT_RANGE) { "remote port must be in 1..65535" }
+        require(localPort in VALID_PORT_RANGE) { "local port must be in 1..65535" }
+        val normalizedName = name.trim().ifBlank { defaultManualTunnelName(remotePort) }
+        manualMutationMutex.withLock {
+            localPortCollision(hostId, localPort)?.let { collision ->
+                throw LocalPortCollisionException(localPort, collision)
+            }
+            remappingDao.insert(
+                PortRemappingEntity(
+                    hostId = hostId,
+                    remotePort = remotePort,
+                    localPort = localPort,
+                    name = normalizedName,
+                ),
+            )
+            restartIfMounted(hostId)
+            if (!isRunning(hostId)) start(hostId)
+        }
+        // The durable remapping is also the durable manual opt-in. The
+        // supervisor seeds that port into every new connection, including an
+        // out-of-window port, so a process/supervisor restart restores exactly
+        // the mapping the user still has saved.
+    }
+
+    /** Returns a user-facing validation message when [localPort] is unavailable. */
+    suspend fun localPortCollision(hostId: Long, localPort: Int): String? {
+        if (localPort !in VALID_PORT_RANGE) return null
+        remappingDao.getByLocalPort(localPort)?.let { mapping ->
+            return "Local port $localPort is already used by " +
+                mapping.name.ifBlank { "port ${mapping.remotePort}" }
+        }
+        val live = _snapshot.value
+            .asSequence()
+            .flatMap { it.tunnels.asSequence() }
+            .firstOrNull { it.status == TunnelInfo.Status.FORWARDING && it.localPort == localPort }
+        return live?.let {
+            "Local port $localPort is already forwarding remote port ${it.remotePort}"
+        }
+    }
+
+    /** Removes a durable mapping and applies the change to a live host. */
+    suspend fun removeManualTunnel(hostId: Long, remotePort: Int) {
+        remappingDao.deleteByRemotePort(hostId, remotePort)
+        restartIfMounted(hostId)
+    }
+
     /** Hint that the network changed — every mounted supervisor retries now. */
     suspend fun reconnectNow() {
         mutex.withLock { active.values.toList() }.forEach { it.supervisor.reconnectNow() }
+    }
+
+    private suspend fun restartIfMounted(hostId: Long) {
+        if (!isRunning(hostId)) return
+        stop(hostId)
+        start(hostId)
     }
 
     // ----------------------------------------------------------------- internals
@@ -338,6 +408,10 @@ class ForwardingController @Inject constructor(
     }
 
     internal companion object {
+        private val VALID_PORT_RANGE = 1..65_535
+
+        private fun defaultManualTunnelName(remotePort: Int): String = "Port $remotePort"
+
         /**
          * Shown on the row and in the notification when the host key is not
          * confirmed. Deliberately free of the host name: it is rendered against
@@ -369,3 +443,9 @@ class ForwardingController @Inject constructor(
         )
     }
 }
+
+/** A saved or active tunnel already owns the requested device-local port. */
+class LocalPortCollisionException(
+    val localPort: Int,
+    val existing: String,
+) : IllegalArgumentException("Local port $localPort is already in use by $existing")

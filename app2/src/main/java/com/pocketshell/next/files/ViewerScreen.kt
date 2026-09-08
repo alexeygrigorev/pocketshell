@@ -1,19 +1,30 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.pocketshell.next.files
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.activity.compose.BackHandler
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -24,6 +35,7 @@ import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.fileIconClassForName
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -37,6 +49,14 @@ const val VIEWER_EDIT_TAG: String = "file-viewer-edit"
 const val VIEWER_SAVE_TAG: String = "file-viewer-save"
 const val VIEWER_CANCEL_TAG: String = "file-viewer-cancel"
 const val VIEWER_MARKDOWN_TOGGLE_TAG: String = "file-viewer-markdown-toggle"
+const val VIEWER_UNSAVED_TAG: String = "file-viewer-unsaved"
+const val VIEWER_UNSAVED_SAVE_TAG: String = "file-viewer-unsaved-save"
+const val VIEWER_UNSAVED_DISCARD_TAG: String = "file-viewer-unsaved-discard"
+const val VIEWER_UNSAVED_KEEP_TAG: String = "file-viewer-unsaved-keep"
+const val VIEWER_CONFLICT_TAG: String = "file-viewer-conflict"
+const val VIEWER_CONFLICT_COPY_TAG: String = "file-viewer-conflict-copy"
+const val VIEWER_CONFLICT_RELOAD_TAG: String = "file-viewer-conflict-reload"
+const val VIEWER_CONFLICT_KEEP_TAG: String = "file-viewer-conflict-keep"
 
 /**
  * Route-level entry point: binds the Hilt-provided [ViewerViewModel] to the
@@ -57,15 +77,32 @@ fun ViewerRoute(
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.load() }
 
+    BackHandler {
+        if (viewModel.requestBack()) onBack()
+    }
+
     ViewerScreen(
         state = state,
-        onBack = onBack,
+        onBack = {
+            if (viewModel.requestBack()) onBack()
+        },
         onEdit = viewModel::startEditing,
         onDraftChange = viewModel::onDraftChange,
         onSave = viewModel::save,
-        onCancelEdit = viewModel::cancelEditing,
+        onCancelEdit = {
+            if (viewModel.requestBack()) viewModel.cancelEditing()
+        },
         onToggleMarkdown = viewModel::toggleMarkdownRendering,
         onDismissSaved = viewModel::dismissSavedMessage,
+        onSaveAndLeave = { viewModel.saveAndLeave(onBack) },
+        onDiscardChanges = {
+            viewModel.discardChanges()
+            onBack()
+        },
+        onKeepEditing = viewModel::keepEditing,
+        onSaveAsCopy = viewModel::saveAsCopy,
+        onReloadRemote = viewModel::reloadRemoteVersion,
+        onConflictKeepEditing = viewModel::keepEditing,
         modifier = modifier,
     )
 }
@@ -96,6 +133,7 @@ fun ViewerRoute(
  * Stateless, so it renders identically from a journey, a Robolectric test and a
  * design render.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ViewerScreen(
     state: ViewerUiState,
@@ -107,6 +145,12 @@ fun ViewerScreen(
     onToggleMarkdown: () -> Unit,
     onDismissSaved: () -> Unit,
     modifier: Modifier = Modifier,
+    onSaveAndLeave: () -> Unit = onSave,
+    onDiscardChanges: () -> Unit = onCancelEdit,
+    onKeepEditing: () -> Unit = {},
+    onSaveAsCopy: () -> Unit = {},
+    onReloadRemote: () -> Unit = {},
+    onConflictKeepEditing: () -> Unit = onKeepEditing,
 ) {
     Column(
         modifier = modifier
@@ -121,7 +165,16 @@ fun ViewerScreen(
             title = state.name.ifBlank { "File" },
             subtitle = state.path,
             leading = { FileTypeIcon(iconClass = fileIconClassForName(state.name)) },
-            trailing = { ViewerActions(state, onBack, onEdit, onSave, onCancelEdit, onToggleMarkdown) },
+            trailing = {
+                ViewerActions(
+                    state = state,
+                    onBack = onBack,
+                    onEdit = onEdit,
+                    onSave = onSave,
+                    onCancelEdit = onCancelEdit,
+                    onToggleMarkdown = onToggleMarkdown,
+                )
+            },
         )
 
         state.savedMessage?.let { saved ->
@@ -155,10 +208,29 @@ fun ViewerScreen(
             )
         }
 
-        ViewerBody(
+        if (state.conflict != null) {
+            FileConflictSurface(
+                state = state,
+                onSaveAsCopy = onSaveAsCopy,
+                onReloadRemote = onReloadRemote,
+                onKeepEditing = onConflictKeepEditing,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            ViewerBody(
+                state = state,
+                onDraftChange = onDraftChange,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+
+    if (state.unsavedChangesVisible) {
+        UnsavedChangesSheet(
             state = state,
-            onDraftChange = onDraftChange,
-            modifier = Modifier.weight(1f),
+            onSave = onSaveAndLeave,
+            onDiscard = onDiscardChanges,
+            onKeepEditing = onKeepEditing,
         )
     }
 }
@@ -235,7 +307,14 @@ private fun ViewerActions(
     onToggleMarkdown: () -> Unit,
 ) {
     Row {
-        if (state.editing) {
+        if (state.conflict != null) {
+            PocketShellButton(
+                text = "Back",
+                onClick = onBack,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        } else if (state.editing) {
             PocketShellButton(
                 text = "Cancel",
                 onClick = onCancelEdit,
@@ -268,14 +347,154 @@ private fun ViewerActions(
                     modifier = Modifier.testTag(VIEWER_MARKDOWN_TOGGLE_TAG),
                 )
             }
-            PocketShellButton(
-                text = "Edit",
-                onClick = onEdit,
-                variant = ButtonVariant.Primary,
-                compact = true,
-                enabled = state.editable,
-                modifier = Modifier.testTag(VIEWER_EDIT_TAG),
-            )
+            if (state.editable) {
+                PocketShellButton(
+                    text = "Edit",
+                    onClick = onEdit,
+                    variant = ButtonVariant.Primary,
+                    compact = true,
+                    modifier = Modifier.testTag(VIEWER_EDIT_TAG),
+                )
+            }
         }
+    }
+}
+
+/** The explicit state/action surface for a remote metadata conflict. */
+@Composable
+private fun FileConflictSurface(
+    state: ViewerUiState,
+    onSaveAsCopy: () -> Unit,
+    onReloadRemote: () -> Unit,
+    onKeepEditing: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val conflict = requireNotNull(state.conflict)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg)
+            .testTag(VIEWER_CONFLICT_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+    ) {
+        Text(
+            text = "File changed on host",
+            color = PocketShellColors.Text,
+            style = com.pocketshell.uikit.theme.PocketShellType.title,
+        )
+        Banner(
+            text = "${RemotePath.nameOf(conflict.path)} has newer changes. Your edits have not overwritten the remote file.",
+            role = BannerRole.Warning,
+            maxLines = 5,
+        )
+        Text(
+            text = "Choose how to preserve your draft. Reloading discards it; saving a copy leaves the newer host file intact.",
+            color = PocketShellColors.TextSecondary,
+            style = com.pocketshell.uikit.theme.PocketShellType.body,
+        )
+        PocketShellButton(
+            text = if (state.saving) "Saving copy…" else "Save as a copy",
+            onClick = onSaveAsCopy,
+            variant = ButtonVariant.Primary,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_CONFLICT_COPY_TAG),
+        )
+        PocketShellButton(
+            text = "Reload remote version",
+            onClick = onReloadRemote,
+            variant = ButtonVariant.Secondary,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_CONFLICT_RELOAD_TAG),
+        )
+        PocketShellButton(
+            text = "Keep editing",
+            onClick = onKeepEditing,
+            variant = ButtonVariant.Text,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_CONFLICT_KEEP_TAG),
+        )
+    }
+}
+
+/** Three-way dirty-buffer confirmation from design-kit frame 59. */
+@Composable
+private fun UnsavedChangesSheet(
+    state: ViewerUiState,
+    onSave: () -> Unit,
+    onDiscard: () -> Unit,
+    onKeepEditing: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onKeepEditing,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag(VIEWER_UNSAVED_TAG),
+        containerColor = PocketShellColors.Surface,
+    ) {
+        UnsavedChangesSheetContent(
+            state = state,
+            onSave = onSave,
+            onDiscard = onDiscard,
+            onKeepEditing = onKeepEditing,
+        )
+    }
+}
+
+@Composable
+internal fun UnsavedChangesSheetContent(
+    state: ViewerUiState,
+    onSave: () -> Unit,
+    onDiscard: () -> Unit,
+    onKeepEditing: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = PocketShellSpacing.lg)
+            .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.lg)
+            .testTag(VIEWER_UNSAVED_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+    ) {
+        SheetHeader(title = "Keep your changes?")
+        Text(
+            text = "${state.name} has unsaved edits. Leaving now will not update the file on the host.",
+            color = PocketShellColors.TextSecondary,
+            style = com.pocketshell.uikit.theme.PocketShellType.body,
+        )
+        PocketShellButton(
+            text = if (state.saving) "Saving…" else "Save to host",
+            onClick = onSave,
+            variant = ButtonVariant.Primary,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_UNSAVED_SAVE_TAG),
+        )
+        PocketShellButton(
+            text = "Discard edits",
+            onClick = onDiscard,
+            variant = ButtonVariant.Destructive,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_UNSAVED_DISCARD_TAG),
+        )
+        PocketShellButton(
+            text = "Keep editing",
+            onClick = onKeepEditing,
+            variant = ButtonVariant.Text,
+            enabled = !state.saving,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(VIEWER_UNSAVED_KEEP_TAG),
+        )
     }
 }

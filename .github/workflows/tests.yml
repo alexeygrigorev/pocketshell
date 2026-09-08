@@ -231,6 +231,15 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # Issue #2561: the shipped session runtime is aplexer-only. Keep the
+      # product scan in the blocking static guard lane so a new tmux fallback
+      # cannot land while tmux remains available to operational runners.
+      - name: Aplexer-only product session guard (issue #2561)
+        run: |
+          chmod +x scripts/check-product-tmux-absent.sh
+          scripts/check-product-tmux-absent.sh --self-test
+          scripts/check-product-tmux-absent.sh
+
       # The #2094 Docker-integration forced-execution guard was DELETED with the
       # four-task graph it pinned (the old app, core-ssh, core-portfwd and
       # core-tmux integrationTest tasks — every one of those modules was removed
@@ -546,18 +555,13 @@ jobs:
           chmod +x scripts/test-network-fault-pool-isolation.sh
           scripts/test-network-fault-pool-isolation.sh
 
-      # Issue #2143 (rationale + case list in the script header). Fast, stubbed:
-      # no JVM, no Docker, no emulator.
-      - name: "Shared SSH/tmux fixture health guard (issue #2143)"
-        run: chmod +x scripts/test-ci-journey-fixture-health.sh && scripts/test-ci-journey-fixture-health.sh
-
       # Issue #2563 (slice 1 of #2561): the Docker `agents` fixture now runs the
       # REAL, pinned aplexer instead of a 61-line shell stub. The failure mode
       # this guards is not "aplexer broke" but "aplexer went missing and nothing
       # said so": `pocketshell.aplexer` resolves `a` next to `sys.executable`
       # and nowhere else (PATH is a D22 hard cut, #2543), so an `a` that is only
-      # on PATH makes `sessions list --json` report managers ["tmux"], zero
-      # aplexer rows and exit 0 — every downstream journey stays green while
+      # on PATH makes `sessions list --json` return an empty list and exit 0 —
+      # every downstream journey stays green while
       # proving nothing. Static half here (no Docker, < 1 s); the real-container
       # positive + negative cases run in `Integration tests (Docker)`.
       - name: "Agents-fixture real-aplexer guard, static half (issue #2563)"
@@ -596,15 +600,6 @@ jobs:
           scripts/test-gradle-output-lock.sh
 
       - run: scripts/test-full-jvm-gate-detached.sh
-
-      # Issue #1937 recurrence: ubuntu-latest does not guarantee ripgrep. Run
-      # the real guard under a minimal no-rg PATH and prove it still discovers
-      # both a valid consumer and a dynamically added broken fourth consumer.
-      - name: "Shared tmux-wrapper discovery self-test (issue #1937)"
-        run: |
-          chmod +x scripts/test-shared-tmux-wrapper-fixtures.sh \
-            scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
-          scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
 
       # Issue #2060: the #1876/#1458 guards and the #835 balance cap derive the
       # shard count from the matrix via this helper instead of pinning a literal,
@@ -882,12 +877,6 @@ jobs:
           version: "0.10.11"
           enable-cache: true
 
-      # test_send.py drives a real tmux and hard-fails (never skips) without it (#2122).
-      - name: Ensure tmux is available (issue #2122)
-        run: |
-          command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
-          tmux -V
-
       - name: Verify frozen-lock CI wiring
         run: |
           bash scripts/check-python-ci-lock.sh --self-test
@@ -964,11 +953,10 @@ jobs:
   # .github/workflows/app2.yml (`transport-integration`) with its own execution
   # guard; duplicating it here would run it twice per push for no signal.
   #
-  # What REMAINS is the part that never depended on the deleted modules: the two
-  # REAL-Docker fixture smokes (#1937 tmux-wrapper images, #2143 SSH/tmux fixture
-  # health). Their stubbed counterparts run per-push in `guards-ci-harness`; this
-  # is the only place they are exercised against actual containers, and app2.yml
-  # deliberately does not copy them. The job key and display name are kept
+  # What REMAINS is the real Docker aplexer fixture smoke. Its static counterpart
+  # runs per-push in `guards-ci-harness`; this is the place it is exercised
+  # against an actual container, and app2.yml deliberately does not copy it. The
+  # job key and display name are kept
   # verbatim because `Integration tests (Docker)` is a named contract outside this
   # file (scripts/watch-ci.py, scripts/ci-run-jobs.sh, scripts/ci-red-issue.sh,
   # full-suite-notify.yml, tools/pocketshell tests, process.md).
@@ -1006,29 +994,16 @@ jobs:
       - name: Verify Docker is available
         run: docker info
 
-      # Issue #1937: every image that copies the shared agent-bin/tmux shim
-      # must preserve Alpine's real tmux at /usr/bin/tmux.real and expose the
-      # shim at /usr/bin/tmux. Build and execute every discovered consumer so
-      # fixture drift fails before it can front-gate the emulator matrix.
-      - name: Smoke shared tmux-wrapper fixtures
-        run: scripts/test-shared-tmux-wrapper-fixtures.sh --docker
-
-      # Issue #2143: same guard with its REAL-Docker case on, so the fix rests on
-      # the fixture and not a model of it. The script brings the fixture up.
-      # Quoted: an unquoted ` #2143)` is a YAML comment and truncates the name.
-      - name: "Shared SSH/tmux fixture health on a REAL fixture (issue #2143)"
-        run: POCKETSHELL_FIXTURE_HEALTH_REAL_DOCKER=1 scripts/test-ci-journey-fixture-health.sh
-
       # Issue #2563: the `agents` fixture must run a REAL aplexer, and must fail
       # LOUDLY when it stops. Builds the image, publishes an EPHEMERAL SSH port,
       # and drives everything over that port — sshd's non-interactive `exec`
       # channel and a real PTY, i.e. the two channels the app itself uses, not
       # `docker exec`. Positive arms: the build-time self-check; the REAL
-      # `pocketshell` CLI through create -> list(manager=aplexer, phase=running)
+      # `pocketshell` CLI through create -> list(aplexer phase=running)
       # -> PTY attach with a typed marker confirmed by `a capture` on a THIRD
       # connection -> detach-does-not-kill -> kill(killed,reaped) -> gone; bare
       # `a start` seen by a second independent channel plus a bare `a attach`;
-      # and tmux still working. Negative arms: a worker-less bundle (#2553) and
+      # and no fake session fallback. Negative arms: a worker-less bundle (#2553) and
       # `a` reachable on PATH but NOT next to sys.executable, each required to
       # go red with a named [placement] diagnostic from the self-check AND from
       # a rebuild.

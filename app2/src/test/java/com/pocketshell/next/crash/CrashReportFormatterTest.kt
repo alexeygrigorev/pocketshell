@@ -20,7 +20,7 @@ class CrashReportFormatterTest {
                 device = "Google Pixel",
             ),
             context = CrashReportContext(
-                screen = "Tmux session",
+                screen = "Session",
                 hostName = "devbox",
                 hostname = "dev.example",
                 username = "alexey",
@@ -36,7 +36,7 @@ class CrashReportFormatterTest {
         assertTrue(report.contains("Device: Google Pixel"))
         assertTrue(report.contains("Thread: main"))
         assertTrue(report.contains("Context"))
-        assertTrue(report.contains("Screen: Tmux session"))
+        assertTrue(report.contains("Screen: Session"))
         assertTrue(report.contains("Host: devbox"))
         assertTrue(report.contains("Hostname: dev.example"))
         assertTrue(report.contains("User: alexey"))

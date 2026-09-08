@@ -1,84 +1,69 @@
-# Vision: Mobile-First SSH Client for Agents
+# PocketShell vision
 
-A modern Android SSH client designed specifically for mobile workflows, AI agents, and fast terminal navigation.
+PocketShell is a mobile-first Android SSH client for persistent host sessions,
+agent-aware workflows, and fast terminal navigation. It makes remote work
+comfortable on a phone through touch controls, voice input, and a small set of
+clear session actions.
 
-The application should make remote terminal usage feel natural on a phone by reducing typing, simplifying navigation, and making persistent tmux sessions first-class citizens.
+## Core principles
 
-Instead of behaving like a desktop terminal squeezed onto a small screen, the app should be designed around touch interaction, quick actions, and session-oriented workflows.
+### Host-managed sessions
 
----
+The host owns session identity and lifetime through the bundled aplexer runtime.
+PocketShell presents the live rows returned by `pocketshell sessions list`,
+creates a session with `pocketshell sessions create`, attaches with the host
+session identifier, and ends it explicitly with `pocketshell sessions kill`.
+The phone never chooses among session managers or invents a second session
+registry. A session remains available while the app disconnects and can be
+attached again after reconnecting.
 
-## Core Principles
+### Fast mobile navigation
 
-### 1. Tmux sessions are first-class citizens
+Workspace roots, recent paths, repositories, and session rows reduce typing.
+Breadcrumbs, touch targets, key-bar controls, snippets, and bounded host-side
+search keep common actions reachable without a desktop keyboard.
 
-The app should treat tmux sessions as the primary way users interact with remote machines. Users should be able to:
+### Agent-aware workflows
 
-- See all active tmux sessions immediately after connecting
-- Create, rename, attach, detach, and kill sessions easily
-- Switch sessions with swipe or tap gestures
-- Persist workflows across reconnects
-- Resume work instantly from mobile
+PocketShell helps supervise coding agents and other long-running CLI work from
+mobile. Live host metadata can show the agent kind and state, while the
+conversation view reads the current session's agent log over SSH. The usage
+panel fetches provider quotas through server-side tools, so provider secrets do
+not live on the phone. See [agent-awareness.md](agent-awareness.md) and
+[usage-panel.md](usage-panel.md).
 
-The app should feel like a "mobile tmux workspace manager," not just an SSH terminal.
+### Voice-first terminal interaction
 
-Instead of typing `tmux ls` then `tmux attach -t agent`, the user should see a visual list of sessions with previews, last-activity timestamps, favourites/pins, and one-tap attach.
+Voice is a first-class way to compose an agent prompt. The key bar supplies
+Esc, Tab, Ctrl, Alt, and arrows above the keyboard; command chips and snippets
+cover repeated actions; terminal selection makes paths and errors easy to copy.
+See [input-methods.md](input-methods.md).
 
-### 2. Fast mobile navigation
+### Session-centric home screen
 
-Directory navigation should minimize typing. Smart `cd` shortcuts (recent dirs, favourites, project roots, git repos, agent workspaces). Tappable breadcrumb path navigator. Swipe gestures between sessions and through directory history. Long-press for snippets. Edge swipe for quick actions.
+PocketShell opens on hosts, workspaces, and live session rows rather than a
+blank terminal. A user can inspect the current agent state, choose a workspace,
+start another session, or return to an existing aplexer session.
 
-### 3. Optimized for AI agent workflows
+### Clear connection behavior
 
-The app should assume users are running coding agents, automation agents, remote dev tools, and long-running CLI workflows — and optimize for *supervising* them from mobile.
-
-- Persistent monitoring: logs, running tasks, streaming output, build/deploy status — without re-typing commands
-- Session roles / tags: coding agent, deploy, monitoring, logs, shell, experiments
-- Quick actions: restart agent, send predefined commands, open logs, reconnect, copy output, share session snippets
-- Agent-aware conversation view: when Claude Code is safely detected from a tmux pane, surface a clean conversation read of *this session* by tailing the agent's JSONL log. Codex and OpenCode parsers are present, but runtime detection stays disabled until safe pane/session correlation exists. See [agent-awareness.md](agent-awareness.md).
-- Usage panel: per-provider quota tracking via server-side tools (e.g. `heru usage --json`) invoked over SSH. Zero credentials on the phone. See [usage-panel.md](usage-panel.md).
-
-### 4. Mobile-friendly terminal interaction (voice-first)
-
-Typing on phones is painful — reduce keyboard usage as much as possible. Voice is a first-class input method, not an afterthought: tap to navigate, voice to compose. See [input-methods.md](input-methods.md) for the full strategy.
-
-- Voice → text for agent prompts (Whisper API, tap-to-toggle, bottom-sheet prompt composer with live transcription)
-- Key bar above the keyboard for Esc / Tab / Ctrl / Alt / arrows (the keys phones don't have)
-- Chord palette for tmux/shell sequences (`Ctrl+B D`, `Ctrl+C`, `Ctrl+R`) — one tap instead of fighting the keyboard
-- Command chips above keyboard (ls, cd, git status, tmux ls, clear) — context-aware and customizable
-- Snippet library (SSH commands, tmux workflows, deploy commands, agent startup scripts)
-- Touch selection: smart text selection, block selection, code detection, tap-to-copy paths/errors
-
-### 5. Session-centric home screen
-
-Open into a dashboard, not a blank terminal.
-
-- Recent hosts
-- Active tmux sessions across all hosts
-- Running tasks (deploy / build / training status)
-
-### 6. Connection simplicity
-
-SSH config import, identity management, GitHub/GitLab key import, QR-based host sharing, biometric unlock, Mosh support, auto-reconnect.
-
-### 7. Modern mobile UX
-
-Minimal typing. Thumb-friendly controls. Smooth gestures. Fast transitions. Offline-aware reconnect. Dark-mode optimized. Large touch targets. Haptic feedback.
-
-### 8. Differentiation from existing SSH clients
-
-Most SSH apps are desktop terminal emulators squeezed onto mobile — keyboard-heavy, session-unaware, not optimized for agents. PocketShell instead focuses on tmux-native workflows, touch-first navigation, persistent remote workspaces, supervising AI agents from anywhere, reducing terminal friction on mobile.
-
----
+SSH transport, terminal attachment, and remote session lifetime are separate
+facts. The app reconnects the visible terminal within its bounded grace and
+retry policy, while the host session remains owned by aplexer. See
+[architecture.md](architecture.md) and [reconnect-policy.md](reconnect-policy.md).
 
 ## Positioning
 
-Short: A mobile-first SSH and tmux client designed for AI agent workflows.
+Short: a mobile-first SSH client for persistent host sessions and AI-agent
+workflows.
 
-Long: A modern Android SSH client that makes remote terminals usable on mobile through touch-first navigation, persistent tmux sessions, and optimized workflows for AI agents and remote development.
+Long: a modern Android SSH client that makes remote terminals usable on mobile
+through touch-first navigation, voice composition, live aplexer sessions, and
+agent-aware supervision.
 
-## Inspiration & inputs
+## Inspiration and inputs
 
-- tmuxctl — the existing CLI workflow (recency-sorted sessions, attach-by-index, `:current`, recurring jobs). PocketShell should incorporate these patterns directly.
-- ssh-auto-forward — port-forwarding semantics (sibling folder).
-- Termius — the bar for "premium" terminal UX on Android. PocketShell should match its polish.
+- [aplexer-integration.md](aplexer-integration.md) defines the shipped host
+  session contract.
+- `ssh-auto-forward` provides port-forwarding and reconnect references.
+- Termius sets a useful bar for a polished Android terminal experience.

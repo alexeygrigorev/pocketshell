@@ -16,12 +16,10 @@ import kotlinx.serialization.json.intOrNull
  * treats `created == false` as a failure re-breaks the reconnect story the
  * idempotency exists for.
  *
- * [id] is the aplexer session id, and is `null` for a tmux-managed session
- * (tmux has no id beyond the name).
+ * [id] is the aplexer session id when the host reports one.
  */
 data class CreatedSession(
     val name: String,
-    val manager: Backend,
     val id: String?,
     val created: Boolean,
 )
@@ -77,11 +75,53 @@ class HostCliClient(
 
     // --- verbs that run ---------------------------------------------------
 
-    /** `pocketshell sessions list --json` (schema 2). */
+    /** `pocketshell sessions list --json` (schema 3). */
     suspend fun listSessions(): Result<SessionsListing> {
         val command = "$binary sessions list --json"
         val stdout = captureJson(command, LIST_TIMEOUT_MS).getOrElse { return Result.failure(it) }
         return SessionsJson.parseSessionsList(stdout)
+    }
+
+    /**
+     * `pocketshell workspaces list --host HOST --json` (schema 1).
+     *
+     * [host] is the durable opaque identity stored in the local host row, not
+     * the editable display name or hostname. It is quoted as one shell word so
+     * the host registry remains safe if an older installation contains unusual
+     * identity text.
+     */
+    suspend fun listWorkspaces(host: String): Result<WorkspacesListing> {
+        val command = buildString {
+            append(binary).append(" workspaces list --host ")
+                .append(shellSingleQuote(host))
+                .append(" --json")
+        }
+        val stdout = captureJson(command, LIST_TIMEOUT_MS).getOrElse { return Result.failure(it) }
+        return WorkspacesJson.parseWorkspacesList(stdout)
+    }
+
+    /** `pocketshell workspaces add PATH --host HOST --json`. */
+    suspend fun addWorkspace(host: String, path: String): Result<WorkspacesListing> =
+        mutateWorkspace("add", host, path)
+
+    /** `pocketshell workspaces remove PATH --host HOST --json`. */
+    suspend fun removeWorkspace(host: String, path: String): Result<WorkspacesListing> =
+        mutateWorkspace("remove", host, path)
+
+    private suspend fun mutateWorkspace(
+        operation: String,
+        host: String,
+        path: String,
+    ): Result<WorkspacesListing> {
+        val command = buildString {
+            append(binary).append(" workspaces ").append(operation).append(' ')
+                .append(shellSingleQuote(path))
+                .append(" --host ").append(shellSingleQuote(host))
+                .append(" --json")
+        }
+        val stdout = captureJson(command, MUTATION_TIMEOUT_MS)
+            .getOrElse { return Result.failure(it) }
+        return WorkspacesJson.parseWorkspacesList(stdout)
     }
 
     /**
@@ -96,23 +136,20 @@ class HostCliClient(
      * [engine] additionally asks the HOST to start that agent in the new
      * session (server-side `send-keys`), so the phone never types a launch
      * line; [profile] selects a named host profile for it (see
-     * [listProfiles]). [backend] is `tmux` or `aplexer` and becomes
-     * `--backend`; omitting it leaves the host's `[backends]` config in
-     * charge (explicit flag beats that config).
+     * [listProfiles]). The host owns the session implementation and no
+     * backend selection is sent by the client.
      */
     suspend fun createSession(
         name: String,
         cwd: String? = null,
         engine: String? = null,
         profile: String? = null,
-        backend: String? = null,
     ): Result<CreatedSession> {
         val command = buildString {
             append(binary).append(" sessions create --json")
             if (cwd != null) append(" --cwd ").append(shellSingleQuote(cwd))
             if (engine != null) append(" --engine ").append(shellSingleQuote(engine))
             if (profile != null) append(" --profile ").append(shellSingleQuote(profile))
-            if (backend != null) append(" --backend ").append(shellSingleQuote(backend))
             append(" -- ").append(shellSingleQuote(name))
         }
         val outcome = capture(command, CREATE_TIMEOUT_MS).getOrElse { return Result.failure(it) }
@@ -124,8 +161,8 @@ class HostCliClient(
      *
      * [name] is forwarded after `--` and single-quoted, so a session literally
      * called `--help` or `it's a test` is still a name. The host CLI resolves
-     * it the same way attach does and kills with an exact `=` tmux target (or
-     * `a kill <id>`), so killing `api` cannot destroy `api-staging`.
+     * it the same way attach does, so killing `api` cannot destroy
+     * `api-staging`.
      *
      * Success is exit 0. The host's kill is quiet on stdout; a non-zero exit
      * is a [HostCliError.Failed] carrying the host's own stderr.
@@ -158,15 +195,11 @@ class HostCliClient(
     /**
      * The command that BECOMES the session [name], to run on a PTY channel.
      *
-     * `--hide-status` turns the tmux status bar off for that session before
-     * attaching (the app draws its own chrome); it is ignored by the host for
-     * aplexer sessions, which have no tmux status bar. Defaults to `true`
-     * because every in-app attach wants it — a caller that wants the host's
-     * own bar passes `false` explicitly.
+     * The host owns terminal presentation; the client only supplies the
+     * session name.
      */
-    fun attachCommand(name: String, hideStatus: Boolean = true): String = buildString {
+    fun attachCommand(name: String): String = buildString {
         append("exec ").append(binary).append(" sessions attach")
-        if (hideStatus) append(" --hide-status")
         append(" -- ").append(shellSingleQuote(name))
     }
 
@@ -220,9 +253,9 @@ class HostCliClient(
 
     /**
      * Reads the create envelope, which is the one verb whose FAILURE is also
-     * JSON: the host prints `{"schema":2,"error":"…"}` on stdout and exits
+     * JSON: the host prints `{"schema":3,"error":"…"}` on stdout and exits
      * non-zero. That message is the host's own explanation of what went wrong
-     * (missing `tmuxctl`, bad backend, agent launch failed), so it is
+     * (missing aplexer, invalid session options, agent launch failure), so it is
      * preferred over the generic "exited N" text whenever it is present.
      */
     private fun parseCreate(command: String, outcome: ExecOutcome): Result<CreatedSession> {
@@ -286,7 +319,6 @@ class HostCliClient(
         return Result.success(
             CreatedSession(
                 name = wire.name,
-                manager = Backend.fromWire(wire.manager),
                 id = wire.id,
                 created = wire.created,
             ),
@@ -335,10 +367,12 @@ class HostCliClient(
          */
         const val CREATE_TIMEOUT_MS: Long = 60_000
 
+        /** Workspace membership writes take one locked host-registry update. */
+        const val MUTATION_TIMEOUT_MS: Long = 20_000
+
         /**
          * Budget for `sessions kill`. The host enumerates then kills one
-         * session; that is a list-shaped sweep plus a short tmux/`a` call,
-         * not a create.
+         * session before returning.
          */
         const val KILL_TIMEOUT_MS: Long = 20_000
 
@@ -351,13 +385,12 @@ class HostCliClient(
 
     /**
      * `schema` is read by [parseCreate] before this decode and ignored here;
-     * `id` is null for tmux. `name`/`manager`/`created` are required: a create
-     * response missing any of them cannot tell the caller what it now has.
+     * `name`/`created` are required: a create response missing either cannot
+     * tell the caller what it now has.
      */
     @Serializable
     private data class CreatedSessionWire(
         val name: String,
-        val manager: String,
         val created: Boolean,
         val id: String? = null,
     )

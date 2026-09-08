@@ -55,6 +55,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 APP_PACKAGE="com.pocketshell.app"
 TEST_PACKAGE="$APP_PACKAGE.test"
+TEST_RUNNER="${TEST_RUNNER:-com.pocketshell.next.HiltNextTestRunner}"
 # JourneyScreenshots writes to getExternalFilesDir(null)/<journey>/<name>.png.
 DEVICE_OUTPUT_DIR="/sdcard/Android/data/$APP_PACKAGE/files"
 DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR"
@@ -223,7 +224,7 @@ wait_for_host_ssh_fixture() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "$SSH_USER@$SSH_HOST" \
-      "printf 'ssh fixture ready '; tmux -V"
+      "command -v a && command -v aplexer && pocketshell sessions list --json >/dev/null && printf 'ssh fixture ready aplexer'"
   } >> "$log_file" 2>&1 || {
     printf '\n[04-docker-ssh-readiness]\nLog: %s\n' "$log_file"
     tail -n 80 "$log_file" || true
@@ -253,7 +254,7 @@ wait_for_instrumentation() {
     } >> "$log_file" 2>&1
     if grep -qx "package:$APP_PACKAGE" "$log_file" &&
       grep -qx "package:$TEST_PACKAGE" "$log_file" &&
-      grep -q "^instrumentation:$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" "$log_file"; then
+      grep -q "^instrumentation:$TEST_PACKAGE/$TEST_RUNNER" "$log_file"; then
       printf '\n[%s-instrumentation-ready]\nLog: %s\nPASS: Android test instrumentation registered\n' "$step_name" "$log_file"
       return 0
     fi
@@ -321,7 +322,7 @@ run_instrumentation_suite() {
     instrumentation_status=0
     run_logged "$attempt_step" \
       "$ADB" shell am instrument -w -r \
-      "$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" ||
+      "$TEST_PACKAGE/$TEST_RUNNER" ||
       instrumentation_status=$?
     cp "$RUN_DIR/$attempt_step.log" "$RUN_DIR/$step_name.log"
     attempt_logcat="$RUN_DIR/$attempt_step-logcat.txt"
@@ -374,6 +375,39 @@ assert_journey_screenshots_exist() {
   fi
   printf 'All %s expected app2 journey directories rendered at least one screenshot.\n' \
     "${#EXPECTED_JOURNEY_DIRS[@]}"
+}
+
+# The session-tree journey also proves the terminal switch path. Keep its
+# device-side evidence explicit: a full-screen PNG alone can be a stale or
+# off-screen shell while the test assertions still pass.
+assert_terminal_evidence_exist() {
+  local step_name="$1"
+  local journey_dir="$RUN_DIR/screenshots/files/j02-session-tree"
+  local viewport_count timing_count transcript_count
+  [[ -d "$journey_dir" ]] ||
+    fail "missing terminal evidence directory for $step_name: $journey_dir"
+  viewport_count="$(find "$journey_dir" -maxdepth 1 -type f -name '*-viewport.png' -size +0 2>/dev/null | wc -l)"
+  timing_count="$(find "$journey_dir" -maxdepth 1 -type f -name '*-timing.txt' -size +0 2>/dev/null | wc -l)"
+  transcript_count="$(find "$journey_dir" -maxdepth 1 -type f -name '*-visible-terminal.txt' -size +0 2>/dev/null | wc -l)"
+  [[ "$viewport_count" -ge 4 ]] ||
+    fail "J02 produced fewer than four non-empty terminal viewport artifacts ($viewport_count)"
+  [[ "$timing_count" -ge "$viewport_count" ]] ||
+    fail "J02 is missing timing artifacts for captured viewports ($timing_count/$viewport_count)"
+  [[ "$transcript_count" -ge 4 ]] ||
+    fail "J02 produced fewer than four non-empty visible-terminal artifacts ($transcript_count)"
+  local transcript
+  for transcript in \
+    "$journey_dir/09-switch-A-visible-terminal.txt" \
+    "$journey_dir/10-switch-B-visible-terminal.txt" \
+    "$journey_dir/11-switch-C-visible-terminal.txt" \
+    "$journey_dir/12-switch-A-again-visible-terminal.txt"; do
+    [[ -s "$transcript" ]] ||
+      fail "J02 is missing the visible-terminal transcript for a switch step: $transcript"
+    grep -Eq 'J02_VISIBLE_[A-Z0-9_]+' "$transcript" ||
+      fail "J02 switch transcript does not contain a session marker: $transcript"
+  done
+  printf 'J02 terminal evidence: %s viewports, %s timing files, %s visible-terminal transcripts.\n' \
+    "$viewport_count" "$timing_count" "$transcript_count"
 }
 
 printf 'PocketShell walkthrough visual screenshot pass\n'
@@ -465,6 +499,7 @@ install_apks "11-install-walkthrough-visual-apks"
 run_instrumentation_suite "12-run-app2-instrumented-suite" "app2 instrumented set (unfiltered)"
 pull_device_screenshots "13-collect-app2-journey-screenshots"
 assert_journey_screenshots_exist "app2 journey visual pass"
+assert_terminal_evidence_exist "app2 terminal visual pass"
 
 printf '\nPASS: app2 journey screenshots captured\n'
 printf 'Screenshots: %s/screenshots/files\n' "$RUN_DIR"

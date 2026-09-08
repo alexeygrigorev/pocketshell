@@ -6,14 +6,15 @@
 #
 # BASE: debian:trixie-slim, NOT alpine (issue #2563, slice 1 of #2561).
 #
-# aplexer — which is on its way to becoming the only session backend — ships
+# aplexer is the only session backend shipped by the product. It
 # manylinux wheels/release binaries only (glibc >= 2.28) and no sdist, so a
 # musl image physically cannot run the pinned `a`. Until #2563 this image faked
 # aplexer with a 61-line shell stub that answered one dead verb (`a --json
 # sessions`) and hosted no attachable process, so no journey could ever
 # exercise a real aplexer session. That stub is deleted (D22 hard cut) and the
-# REAL pinned binaries are installed below. tmux stays exactly as it was: this
-# slice ADDS a working aplexer, it removes no tmux capability.
+# REAL pinned binaries are installed below. The fixture deliberately does not
+# install the retired session backend, so every session journey exercises the same
+# lifecycle as the product.
 #
 # Two things about the base are load-bearing and were each paid for once:
 #
@@ -21,34 +22,27 @@
 #     carries `PerSourcePenalties no` (issue #2150), a keyword OpenSSH 9.2
 #     (bookworm) does not know — and sshd REFUSES TO START on an unknown
 #     keyword, so the whole fixture dies at container start. Trixie ships
-#     OpenSSH 10.x. The in-tree glibc precedent, real-agent/Dockerfile's
-#     `node:24-bookworm-slim`, is therefore the wrong base to copy.
+#     OpenSSH 10.x. The older glibc fixture base is therefore the wrong base to
+#     copy for this image.
 #   * `ln -sfn /usr/lib/openssh /usr/lib/ssh` keeps the SHARED sshd_config's
 #     Alpine `Subsystem sftp /usr/lib/ssh/sftp-server` path resolving. That is
 #     what stops this base swap from fanning out into the other four
 #     Dockerfiles sharing that config file, and it keeps J10's SFTP channel
 #     working unchanged.
 #
-# THE BASE SWAP MOVES EVERY TOOL VERSION IN THIS IMAGE, and tmux moves DOWN.
-# Nothing currently depends on the difference (the whole `Integration tests
-# (Docker)` set is green on trixie, and an A/B of J03AttachAndTypeJourney over
-# three reps a side found 3.5a no worse than 3.7c — it flaked on the alpine
-# fixture and not on this one), but a journey debugged three weeks from now
-# should find this table here rather than rediscover it from a red run.
-# Measured `--no-cache` on both images, back to back:
+# THE BASE SWAP MOVES EVERY TOOL VERSION IN THIS IMAGE. Nothing currently
+# depends on the difference (the whole `Integration tests (Docker)` set is
+# green on trixie), but a journey debugged three weeks from now should find
+# this table here rather than rediscover it from a red run. Measured
+# `--no-cache` on both images, back to back:
 #
 #     tool      alpine:latest (was)   debian:trixie-slim (now)
-#     tmux      3.7c                  3.5a          <- a DOWNGRADE
 #     OpenSSH   10.3p1                10.0p2
 #     python3   3.14.7                3.13.5
 #     nano      9.2                   8.4
 #     sqlite3   3.53.4                3.46.1
 #     git       2.54.0                2.47.3
 #
-# tmux is the load-bearing one: every terminal journey drives it through
-# `agent-bin/tmux` -> `/usr/bin/tmux.real`. 3.5a is still comfortably past the
-# 3.4 quirks the real CLI documents (`sessions.py`'s `=name:` pane-target
-# note), which is the oldest behaviour anything here relies on.
 FROM debian:trixie-slim
 
 # Issue #1091: `nano` is the maintainer's real dogfood TUI (he was trapped in
@@ -73,11 +67,10 @@ FROM debian:trixie-slim
 # aplexer release binaries below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server openssh-client \
-        tmux procps bash sqlite3 git nano ca-certificates curl \
+        procps bash sqlite3 git nano ca-certificates curl \
         python3 python3-click python3-yaml \
     && find /var/lib/apt/lists -mindepth 1 -delete \
     && ln -sfn /usr/lib/openssh /usr/lib/ssh \
-    && mv /usr/bin/tmux /usr/bin/tmux.real \
     && mkdir -p /run/sshd \
     && ssh-keygen -A \
     && useradd -m -s /bin/sh testuser \
@@ -94,8 +87,8 @@ COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # WHERE the binaries land is load-bearing; being on PATH is NOT enough.
 # `pocketshell.aplexer::_bundled_bin_dirs` resolves `a` next to
 # `sys.executable` and nowhere else — the PATH lookup is a D22 hard cut
-# (#2543). With `a` only on PATH the real CLI reports `managers: ["tmux"]`,
-# ZERO aplexer rows and exit 0: a fixture that is silently green-and-empty,
+# (#2543). With `a` only on PATH the real CLI reports no aplexer rows and exit
+# 0: a fixture that is silently green-and-empty,
 # the exact vacuous-pass shape docs/ci-pitfalls.md catalogues. `/usr/bin/a`
 # sitting next to `/usr/bin/python3` is what makes the resolution succeed, and
 # the self-check further down fails the BUILD if that ever stops being true.
@@ -174,26 +167,21 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \
         /usr/local/bin/pocketshell \
-        /usr/local/bin/pocketshell-fixture-sessions \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \
-        /usr/local/bin/tmux \
-        /usr/local/bin/tmuxctl \
         /usr/local/bin/uv \
-        /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-altscreen-tui \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
         /usr/local/bin/pocketshell-fixture-aplexer-selfcheck \
-        /usr/local/bin/pocketshell-real-send \
-    && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
+        /usr/local/bin/pocketshell-real \
     && printf '%s\n' "0.0.0-dev" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 # Issue #2276: the engine-availability journey needs the state the maintainer
 # actually hit, which lives BETWEEN "on the PATH" and "absent everywhere": a
-# harness that is installed and launchable from the tmux pane's LOGIN shell but
+# harness that is installed and launchable from an interactive LOGIN shell but
 # invisible to the app's NON-interactive SSH `exec` channel. Two such rows are
 # installed here, one per resolution rung:
 #
@@ -220,7 +208,7 @@ RUN install -d -o testuser -g testuser \
     && printf '%s\n' \
         '# Login shells only (issue #2276 fixture): a non-interactive SSH' \
         '# `exec` channel never sources this file, so /opt/site-agents/bin is' \
-        '# reachable from a tmux pane but not from the manifest command.' \
+        '# reachable from an interactive login shell but not from the manifest command.' \
         'export PATH="/opt/site-agents/bin:$PATH"' \
         > /home/testuser/.profile \
     && printf '%s\n' \
@@ -255,9 +243,8 @@ RUN install -d -o testuser -g testuser \
 #
 # The image cannot be built hollow. This drives the REAL, unmodified
 # `pocketshell` CLI (`python3 -m pocketshell`, the same entry point
-# pocketshell-real-send uses) through a full aplexer lifecycle as `testuser`:
-# resolve the bundled `a` -> `sessions create --backend aplexer` ->
-# `sessions list --json` must contain that row with `manager: "aplexer"`,
+# pocketshell-real uses) through a full aplexer lifecycle as `testuser`:
+# resolve the bundled `a` -> `sessions create` -> `sessions list --json` must
 # `phase: "running"`, `alive: true` -> `sessions kill` must report
 # `killed: true, reaped: true` -> the row must be gone.
 #

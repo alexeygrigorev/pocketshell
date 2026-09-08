@@ -9,10 +9,10 @@ import org.junit.Test
  *
  * These strings are the contract with the host: they are handed to a remote
  * shell verbatim, so a stray space, a dropped `--`, or a re-ordered flag is a
- * production break that no type checks. Each expected string here was also run
- * against the real `pocketshell` CLI on the dev box (schema-2 build) — e.g.
+ * production break that no type checks. These strings pin the schema-3 CLI
+ * contract — e.g.
  *
- *     sh -c "exec pocketshell sessions attach --hide-status -- 'it'\''s a test'"
+ *     sh -c "exec pocketshell sessions attach -- 'it'\''s a test'"
  *     -> no session named "it's a test"   (exit 3)
  *
  * i.e. the CLI received the name back intact, including the apostrophe, and
@@ -26,25 +26,17 @@ class HostCliCommandStringTest {
     // --- attach -----------------------------------------------------------
 
     @Test
-    fun `attach hides the status bar by default and terminates the options`() {
-        assertEquals(
-            "exec pocketshell sessions attach --hide-status -- 'work'",
-            client().attachCommand("work"),
-        )
-    }
-
-    @Test
-    fun `attach without hideStatus drops only that flag`() {
+    fun `attach terminates the options`() {
         assertEquals(
             "exec pocketshell sessions attach -- 'work'",
-            client().attachCommand("work", hideStatus = false),
+            client().attachCommand("work"),
         )
     }
 
     @Test
     fun `attach quotes an apostrophe in the session name`() {
         assertEquals(
-            "exec pocketshell sessions attach --hide-status -- 'it'\\''s a test'",
+            "exec pocketshell sessions attach -- 'it'\\''s a test'",
             client().attachCommand("it's a test"),
         )
     }
@@ -52,7 +44,7 @@ class HostCliCommandStringTest {
     @Test
     fun `attach keeps a unicode session name intact`() {
         assertEquals(
-            "exec pocketshell sessions attach --hide-status -- 'ünïcødé пример'",
+            "exec pocketshell sessions attach -- 'ünïcødé пример'",
             client().attachCommand("ünïcødé пример"),
         )
     }
@@ -62,7 +54,7 @@ class HostCliCommandStringTest {
         // Without the `--` terminator this would be parsed as an option and
         // the user would get the CLI's help text instead of their session.
         assertEquals(
-            "exec pocketshell sessions attach --hide-status -- '--help'",
+            "exec pocketshell sessions attach -- '--help'",
             client().attachCommand("--help"),
         )
     }
@@ -70,7 +62,7 @@ class HostCliCommandStringTest {
     @Test
     fun `a custom binary path replaces the command word only`() {
         assertEquals(
-            "exec ~/.local/bin/pocketshell sessions attach --hide-status -- 'work'",
+            "exec ~/.local/bin/pocketshell sessions attach -- 'work'",
             client(binary = "~/.local/bin/pocketshell").attachCommand("work"),
         )
     }
@@ -84,6 +76,19 @@ class HostCliCommandStringTest {
         runSuspending { HostCliClient(exec).listSessions() }
 
         assertEquals("pocketshell sessions list --json", exec.command)
+        assertEquals(listOf(HostCliClient.LIST_TIMEOUT_MS), exec.timeouts)
+    }
+
+    @Test
+    fun `listWorkspaces uses the durable host identity and quotes it`() {
+        val exec = RecordingExec.ok("{\"schema\":1,\"workspaces\":[]}")
+
+        runSuspending { HostCliClient(exec).listWorkspaces("host's opaque id") }
+
+        assertEquals(
+            "pocketshell workspaces list --host 'host'\\''s opaque id' --json",
+            exec.command,
+        )
         assertEquals(listOf(HostCliClient.LIST_TIMEOUT_MS), exec.timeouts)
     }
 
@@ -109,7 +114,7 @@ class HostCliCommandStringTest {
 
     @Test
     fun `createSession with only a name omits every optional flag`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+        val exec = RecordingExec.ok(fixture("create-aplexer.json"))
 
         runSuspending { HostCliClient(exec).createSession(name = "work") }
 
@@ -119,7 +124,7 @@ class HostCliCommandStringTest {
 
     @Test
     fun `createSession quotes every argument it forwards`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+        val exec = RecordingExec.ok(fixture("create-aplexer.json"))
 
         runSuspending {
             HostCliClient(exec).createSession(
@@ -142,45 +147,13 @@ class HostCliCommandStringTest {
 
     @Test
     fun `createSession keeps cwd when engine and profile are absent`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
+        val exec = RecordingExec.ok(fixture("create-aplexer.json"))
 
         runSuspending {
             HostCliClient(exec).createSession(name = "work", cwd = "/tmp")
         }
 
         assertEquals("pocketshell sessions create --json --cwd '/tmp' -- 'work'", exec.command)
-    }
-
-    @Test
-    fun `createSession forwards backend when set`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
-
-        runSuspending {
-            HostCliClient(exec).createSession(name = "work", backend = "aplexer")
-        }
-
-        assertEquals(
-            "pocketshell sessions create --json --backend 'aplexer' -- 'work'",
-            exec.command,
-        )
-    }
-
-    @Test
-    fun `createSession forwards engine and backend together`() {
-        val exec = RecordingExec.ok(fixture("create-tmux-real.json"))
-
-        runSuspending {
-            HostCliClient(exec).createSession(
-                name = "work",
-                engine = "claude",
-                backend = "tmux",
-            )
-        }
-
-        assertEquals(
-            "pocketshell sessions create --json --engine 'claude' --backend 'tmux' -- 'work'",
-            exec.command,
-        )
     }
 
     @Test

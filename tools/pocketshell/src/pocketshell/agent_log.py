@@ -31,7 +31,7 @@ Why direct file read instead of a subprocess delegation:
 
 - There is no upstream CLI for these reads. The Android app reads them
   itself via ``ssh exec 'tail -n N <path>'``. There is no ``quse``- or
-  ``tmuxctl``-shaped binary on the host to wrap; reimplementing the
+  host-side session binary on the host to wrap; reimplementing the
   ``tail -n N`` step in Python is the smallest reasonable parity layer.
 - The JSONL files are append-only, plain text, one event per line. The
   default read path emits raw lines verbatim. The ``handoff`` path only

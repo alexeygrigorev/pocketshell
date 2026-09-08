@@ -21,6 +21,7 @@ class TrustPromptStateTest {
 
         assertEquals(hostId, prompt.hostId)
         assertEquals("SHA256:new", prompt.fingerprintSha256)
+        assertEquals("SHA-256", prompt.fingerprintAlgorithm)
         assertFalse(prompt.isMismatch)
         assertNull(prompt.previousFingerprintSha256)
     }
@@ -35,6 +36,7 @@ class TrustPromptStateTest {
         assertTrue(prompt.isMismatch)
         assertEquals("SHA256:new", prompt.fingerprintSha256)
         assertEquals("SHA256:old", prompt.previousFingerprintSha256)
+        assertEquals("SHA-256", prompt.previousFingerprintAlgorithm)
     }
 
     @Test

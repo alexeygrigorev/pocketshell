@@ -81,7 +81,7 @@ class TerminalGeometryTest {
     /**
      * The vendored floor. A viewport measured at a few pixels — mid-IME
      * animation, or the frame before a rotation settles — must not ask the
-     * remote for a 1x1 terminal, which tmux and readline both handle badly.
+     * remote for a 1x1 terminal, which readline handles badly.
      */
     @Test
     fun `a tiny viewport clamps to the four-cell floor`() {

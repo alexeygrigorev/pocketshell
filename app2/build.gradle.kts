@@ -262,6 +262,9 @@ android {
 dependencies {
     implementation(libs.core.ktx)
     implementation(libs.activity.compose)
+    // Native device-unlock handoff for SSH-key management and the encrypted-key
+    // detail flow. MainActivity extends FragmentActivity for BiometricPrompt.
+    implementation(libs.androidx.biometric)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
@@ -325,6 +328,9 @@ dependencies {
     // catalog entries, and the same versions that shipped.
     implementation(libs.zxing.core)
     implementation(libs.zxing.android.embedded)
+    // SshKeyMaterial derives the public half through sshj and registers the
+    // same full provider used by core-transport on real Android devices.
+    implementation(libs.bouncycastle.bcprov)
 
     // The nav graph is exercised as a real composition on the host JVM
     // (Robolectric + createComposeRule), the same way :shared:ui-kit tests its

@@ -37,13 +37,13 @@ sealed class HostCliError(
     )
 
     /**
-     * The payload was not a readable schema-2 document: not JSON at all, not an
+     * The payload was not a readable schema-3 document: not JSON at all, not an
      * object, missing `schema`, or a session row with a missing/mistyped
      * required field.
      *
      * A single bad row fails the WHOLE listing on purpose. Skipping it would
      * hand the UI a list that is silently short — the same class of lie as a
-     * dropped backend error.
+     * dropped host-side session error.
      */
     class Malformed(
         val detail: String,
@@ -56,7 +56,7 @@ sealed class HostCliError(
      * it at all.
      *
      * Kept distinct from [Malformed] on purpose. "exit 127: pocketshell: not
-     * found" and "that JSON is not schema 2" are different user problems with
+     * found" and "that JSON is not schema 3" are different user problems with
      * different fixes, and folding an exit code into a "could not read the
      * host's response" message reads as a phone-side parser bug when it is
      * really a host-side one.

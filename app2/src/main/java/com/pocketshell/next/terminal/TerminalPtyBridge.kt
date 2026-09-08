@@ -22,9 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * The pre-rewrite client's `SshTerminalBridge` was ~1,450 lines of seed gates,
  * frame-budgeted drain schedulers, seed-tail pumps and non-parking lock
- * acquisition — machinery that existed because tmux `-CC` control mode fed the
- * emulator from TWO sources at once (a `capture-pane` snapshot and a live
- * `%output` stream) and they raced. app2 has exactly ONE source: a plain PTY
+ * acquisition — machinery that existed because the old control-mode transport
+ * fed the emulator from TWO sources at once (a snapshot and a live output
+ * stream) and they raced. app2 has exactly ONE source: a plain PTY
  * channel running `pocketshell sessions attach`, which is what a terminal
  * emulator was designed to read in the first place. So this class is a pump,
  * not a reconciler, and it has no gate, no snapshot, no reseed and no epoch.

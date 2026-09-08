@@ -15,6 +15,7 @@ import com.pocketshell.next.connect.FakeHostConnectionFactory
 import com.pocketshell.next.connect.RoomTrustStore
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
+import com.pocketshell.next.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 
@@ -27,6 +28,8 @@ import kotlinx.coroutines.runBlocking
 class TestUsageStack {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
+
+    val settings = SettingsRepository(context)
 
     val db: AppDatabase = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
         .allowMainThreadQueries()

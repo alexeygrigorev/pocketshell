@@ -62,7 +62,7 @@ class SessionTreeRouteTest {
                 // The host answers with ITS OWN name for what it made.
                 ExecResult(
                     0,
-                    """{"schema":2,"name":"reviews","manager":"tmux","id":null,"created":true}""",
+                    """{"schema":3,"name":"reviews","id":null,"created":true}""",
                     "",
                     false,
                 ),
@@ -72,6 +72,7 @@ class SessionTreeRouteTest {
             savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
             registry = stack.registry,
             clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
+            hostDao = stack.db.hostDao(),
             projectRootDao = stack.db.projectRootDao(),
         )
         val opened = mutableListOf<String>()
@@ -104,6 +105,6 @@ class SessionTreeRouteTest {
 
     private companion object {
         const val EMPTY_LISTING =
-            """{"schema":2,"managers":["tmux"],"sessions":[],"errors":[]}"""
+            """{"schema":3,"sessions":[],"errors":[]}"""
     }
 }

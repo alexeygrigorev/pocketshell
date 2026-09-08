@@ -45,7 +45,15 @@ class TestConnectStack(presentedFingerprint: String? = null) {
         dispatcher = Dispatchers.Unconfined,
     )
 
-    val viewModel = ConnectViewModel(registry, db.hostDao())
+    val viewModel = ConnectViewModel(
+        registry = registry,
+        hostDao = db.hostDao(),
+        keyUnlocker = object : SshKeyUnlocker {
+            override fun rememberPassphrase(keyId: Long, value: CharArray) = Unit
+            override fun copyPassphrase(keyId: Long): CharArray? = null
+            override fun clearPassphrase(keyId: Long) = Unit
+        },
+    )
 
     /** Inserts an `ssh_keys` row + a `hosts` row, returning the host id. */
     fun seedHost(

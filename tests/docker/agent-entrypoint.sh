@@ -93,11 +93,31 @@ INSERT INTO part (id, message_id, data, time_created)
   VALUES ('opencode-assistant-part-1', 'opencode-assistant-1', '{"type":"output_text","text":"The deterministic fixture is ready."}', ${now_ms} + 1);
 SQL
 chown -R testuser:testuser /home/testuser/.claude /home/testuser/.codex /home/testuser/.local
+# Create the shared parent and every workspace used by the real session
+# journeys with the same ownership. The aplexer worker requires its `--cwd`
+# to exist before it starts; precreating these exact paths also keeps a fresh
+# container independent of which journey seeded it first.
+for workspace in \
+  /home/testuser/git/pocketshell \
+  /home/testuser/git/aplexer \
+  /home/testuser/git/j04-new \
+  /home/testuser/git/j04-twice \
+  /home/testuser/git/j04-idempotent
+do
+  install -d -o testuser -g testuser "$workspace"
+done
 touch \
   "/home/testuser/.claude/projects/${encoded_cwd}/pocketshell-claude.jsonl" \
   "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl" \
   "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl" \
   "/home/testuser/.local/share/opencode/opencode.db"
+
+# Seed one real aplexer shell so every tree journey has an independent row to
+# wait for. Each journey creates and cleans up its own additional records.
+su testuser -s /bin/sh -c \
+  'HOME=/home/testuser PYTHONPATH=/opt/pocketshell-real/src \
+   /usr/local/bin/pocketshell-real sessions create --cwd /home/testuser/git/pocketshell \
+   --mem none --json -- claude-main >/dev/null'
 
 sh -c 'while true; do sleep 3600; done' idle-agent-a &
 sh -c 'while true; do sleep 3600; done' idle-agent-b &

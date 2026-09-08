@@ -8,7 +8,7 @@ carries the operational mechanics of how to run these checks.
 
 ## Session-switch / reconnect / SSH journeys
 
-For any change touching session switching, tmux attach/reattach, SSH
+For any change touching session switching, aplexer attach/reattach, SSH
 lease/transport, reconnect, or foreground/background lifecycle, a single
 happy-path run is not sufficient (this shipped multiple regressions in the
 v0.3.30 wave precisely because it was treated as sufficient). On the
@@ -20,9 +20,8 @@ emulator + Docker, the reviewer must:
   re-seeded (not blank), no spurious reconnect, input routes correctly.
 - Background→foreground within the grace window and confirm it reattaches
   without a reconnect (and that beyond-grace still reconnects cleanly).
-- Base approval on connection-lifecycle logs (`PsTmuxReconnect`,
-  `PsTmuxLifecycle`, `ReconnectCauseTrail tmux_probe_result`) plus viewport
-  artifacts from the same run, never a passing assertion alone.
+- Base approval on connection-lifecycle logs, the host's aplexer session row,
+  and viewport artifacts from the same run, never a passing assertion alone.
 
 Code-read + one happy-path screenshot is grounds for `CHANGES REQUESTED`.
 
@@ -113,7 +112,7 @@ from an earlier filter run.
       instead, or CI asserts nothing.
 - [ ] `scripts/check-test-validity.sh` reports no new unjustified smell.
 
-## Terminal / SSH / tmux / agent artifact review
+## Terminal / SSH / session / agent artifact review
 
 Base approval on the artifact bundle, not the test result line. Authoritative
 evidence: `*-viewport.png` terminal screenshots, `*-visible-terminal.txt`,

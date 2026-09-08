@@ -1,15 +1,11 @@
-# Local convenience compose file for the SSH + tmux test targets.
+# Local convenience compose file for the SSH + aplexer test targets.
 #
 # Used for manual smoke testing per docs/testing.md:
 #   docker compose -f tests/docker/docker-compose.yml up -d sshd
 #   ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1
 #
-# Or to bring up the tmux-equipped variant on host port 2224:
-#   docker compose -f tests/docker/docker-compose.yml up -d --build tmux
-#   ssh -i tests/docker/test_key -p 2224 -o StrictHostKeyChecking=no testuser@127.0.0.1
-#
-# The Testcontainers-based integration tests in `shared/core-ssh` /
-# `shared/core-tmux` build their own images and pick ephemeral ports — they
+# The Testcontainers-based integration tests in `shared/core-ssh` build their
+# own images and pick ephemeral ports — they
 # don't use this compose file.
 #
 # Issue #150: every service ships an SSH-shaped healthcheck so callers can
@@ -46,7 +42,7 @@
 #
 # The assertion is deliberately version-shaped rather than value-shaped: it
 # fails only on an effective `persourcepenalties` whose value is not `no`. An
-# sshd predating the feature (real-agent's Debian OpenSSH 9.2) emits no such
+# sshd predating the feature (an older Debian OpenSSH) emits no such
 # line and passes, while the same fixture rebased onto an OpenSSH >= 9.8 base
 # image starts failing immediately instead of silently penalising lanes. A
 # non-parsing config also fails, via the `|| exit 1`.
@@ -117,28 +113,13 @@ services:
       - "2246:22"
     healthcheck: *ssh-healthcheck
 
-  # `pocketshell-test:tmux` extends the base SSH image with tmux +
-  # tmuxctl. Host port 2224 keeps it distinct from `sshd`'s 2222 so
-  # both can run in parallel for manual testing.
-  tmux:
-    build:
-      context: .
-      dockerfile: Dockerfile.tmux
-    image: pocketshell-test:tmux
-    container_name: pocketshell-test-tmux
-    depends_on:
-      - sshd
-    ports:
-      - "2224:22"
-    healthcheck: *ssh-healthcheck
-
   # Deterministic local target for emulator smoke tests. It exposes the
   # same SSH port as `sshd`; run one or the other, not both:
   #   docker compose -f tests/docker/docker-compose.yml up -d --build agents
   #
   # Issue #724 (agents-fixture pool): this service is bringable up as N
   # ISOLATED instances on distinct host ports so parallel emulator lanes each
-  # get their OWN SSH/tmux fixture and never share tmux state. Two knobs make
+  # get their OWN SSH/aplexer fixture and never share session state. Two knobs make
   # that work, BOTH defaulted so the single-lane path is byte-for-byte unchanged:
   #
   #   * AGENTS_HOST_PORT  — host port to publish (default 2222). A lane sets its
@@ -183,8 +164,8 @@ services:
   # Android client — it lacks the new-in-0.4.10 `tree` / `agents kind`
   # subcommands, reproducing the maintainer's 0.4.9-host scenario that made
   # v0.4.10 hang on "loading tree". Bound on host port 2238 (distinct from
-  # `agents`/2222, `tmux`/2224, `flaky-agent`/2226, bootstrap/2230-2236,
-  # `real-agent`/2240, agents-pool/2243-2245). A connected test against this
+  # `agents`/2222, bootstrap/2230-2236, `agents-daemon`/2239,
+  # agents-pool/2243-2245). A connected test against this
   # fixture asserts the client connects + renders the LIVE tree on a CLI
   # mismatch instead of hanging. NOT started by the default workflow; the
   # connected test that uses it is gated accordingly.
@@ -217,10 +198,10 @@ services:
   # KILLS + RELAUNCHES the app (a fresh FolderListViewModel + a NEW
   # TreeRemoteSource binding the same host over a NEW SSH session), and asserts
   # the cold-start hydrate reads the held order/collapse back INSTANTLY, then a
-  # reconcile diffs the registry against the LIVE `tmuxctl list` and returns
+  # reconcile diffs the registry against the LIVE aplexer list and returns
   # gone/added deltas. Bound on host port 2239 (distinct from `agents`/2222,
-  # `tmux`/2224, `flaky-agent`/2226, bootstrap/2230-2236, `agents-old-cli`/2238,
-  # `real-agent`/2240, agents-pool/2243-2245). NOT started by the default
+  # bootstrap/2230-2236, `agents-old-cli`/2238,
+  # agents-pool/2243-2245). NOT started by the default
   # workflow; the connected test that uses it is gated accordingly (Assume).
   agents-daemon:
     build:
@@ -320,12 +301,12 @@ services:
       - "2235:22"
     healthcheck: *ssh-healthcheck
 
-  # Issue #1236 (D26): a host with tmux + the pocketshell CLI ready but the
+  # Issue #1236 (D26): a host with the pocketshell CLI ready but the
   # agent stop/idle notification hooks NOT installed — a SILENT host under D21.
   # Seeds a pre-existing foreign Claude hook so the bootstrap `hooks install`
   # can be asserted to MERGE non-destructively. Bound on host port 2241
   # (distinct from the other bootstrap variants 2230-2236, old-cli 2238,
-  # daemon 2239, real-agent 2240).
+  # daemon 2239).
   bootstrap-notifications:
     build:
       context: .
@@ -335,35 +316,6 @@ services:
     image: pocketshell-test:bootstrap-notifications
     ports:
       - "2241:22"
-    healthcheck: *ssh-healthcheck
-
-  # Issue #145: deterministic mid-session disconnect fixture. Every
-  # accepted interactive SSH session (TmuxClient shell channel) is
-  # wrapped in a ForceCommand watcher that kills the SSH child after
-  # `FLAKY_DISCONNECT_AFTER_SEC` seconds (default 8 in the Dockerfile,
-  # overridden to 12 here so the PocketShell tmux attach handshake has
-  # room to land before the blip). Non-interactive `session.exec(cmd)`
-  # probes (used by the host picker's `tmuxctl list` / `tmux
-  # list-sessions` calls) skip the timer entirely so the picker probes
-  # stay fast. The container entrypoint seeds a long-lived `flaky-main`
-  # tmux session so the picker's first SSH probe lists it immediately.
-  # Bound on host port 2226 (distinct from `agents`/2222, `tmux`/2224,
-  # bootstrap variants/2230-2236).
-  flaky-agent:
-    build:
-      context: .
-      dockerfile: flaky-agent/Dockerfile
-    image: pocketshell-test:flaky-agent
-    container_name: pocketshell-test-flaky-agent
-    environment:
-      FLAKY_DISCONNECT_AFTER_SEC: "12"
-      FLAKY_SEEDED_SESSION_NAME: "flaky-main"
-    ports:
-      - "2226:22"
-    # The flaky-agent watcher kills *interactive* sessions after
-    # FLAKY_DISCONNECT_AFTER_SEC seconds; non-interactive `exec` probes
-    # (like the `true` healthcheck) skip the watcher entirely, so the
-    # standard SSH healthcheck still settles to `healthy` reliably.
     healthcheck: *ssh-healthcheck
 
   # Issue #342: opt-in network fault proxy for connected Android proof tests.

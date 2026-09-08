@@ -1,7 +1,7 @@
 """Host-local client for the ``a`` binary (aplexer Phase A).
 
 PocketShell and aplexer share a machine: the helper invokes ``a --json …``
-and overlays presentation/tmux concerns. Probe failures are silent and
+and overlays presentation concerns. Probe failures are silent and
 return ``None`` so every call site can fall back to the native path.
 
 Kill switches (any one is enough to skip):

@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -66,6 +67,9 @@ fun ScreenHeader(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    subtitleMaxLines: Int = 1,
+    titleMaxLines: Int = 1,
+    titleStyle: TextStyle = PocketShellType.screen,
     titleTestTag: String? = null,
     subtitleTestTag: String? = null,
     leading: (@Composable () -> Unit)? = null,
@@ -88,9 +92,9 @@ fun ScreenHeader(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                style = titleStyle,
+                fontWeight = FontWeight.Bold,
+                maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (titleTestTag != null) Modifier.testTag(titleTestTag) else Modifier,
             )
@@ -99,8 +103,8 @@ fun ScreenHeader(
                 Text(
                     text = subtitle,
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyDense,
-                    maxLines = 1,
+                    style = PocketShellType.metadata,
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                     modifier = if (subtitleTestTag != null) Modifier.testTag(subtitleTestTag) else Modifier,
                 )

@@ -94,12 +94,12 @@ internal fun TerminalHotkeysCtrlPageRender() {
 }
 
 @Composable
-internal fun TmuxConnectingStatesRender() {
+internal fun SessionConnectingStatesRender() {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        TerminalLoadingLabel("waiting for tmux panes… (#757 — connecting)")
+        TerminalLoadingLabel("waiting for session… (#757 — connecting)")
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -109,7 +109,7 @@ internal fun TmuxConnectingStatesRender() {
         ) {
             StaticLoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
-                label = "waiting for tmux panes…",
+                label = "waiting for session…",
             )
         }
 
@@ -140,7 +140,7 @@ internal fun TmuxConnectingStatesRender() {
  * A reviewer can eyeball that the Reconnect control reads as an obvious, tappable CTA.
  */
 @Composable
-internal fun TmuxDisconnectedStateRender() {
+internal fun SessionDisconnectedStateRender() {
     Column(modifier = Modifier.fillMaxWidth()) {
         // The disconnect band (reproduces FailedConnectionRow with the #1521 button).
         Row(
@@ -183,7 +183,7 @@ internal fun TmuxDisconnectedStateRender() {
 }
 
 @Composable
-internal fun TmuxSurfaceReconnectAffordanceRender() {
+internal fun SessionSurfaceReconnectAffordanceRender() {
     Box(
         modifier = Modifier
             .fillMaxWidth()

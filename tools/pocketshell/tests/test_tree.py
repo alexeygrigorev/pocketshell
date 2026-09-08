@@ -7,7 +7,7 @@ Coverage:
   optional foreign_kind); the empty-registry seed is valid.
 - `tree.upsert` atomically persists with mode 0600 and bumps the version; one
   malformed node is skipped, the rest persist.
-- `tree.reconcile` diffs the registry against live `tmuxctl list` and returns
+- `tree.reconcile` diffs the registry against live aplexer sessions and returns
   `{alive, gone, added}` DELTAS, pruning gone sessions — WITH the optimistic
   grace guard (a just-upserted node still inside grace is spared) — and never
   pruning when the live enumeration is unavailable.
@@ -113,7 +113,8 @@ def test_reconcile_envelope_carries_cli_version(tmp_path: Path, monkeypatch) -> 
         {"host": "h1"}, paths=paths, live_names={"a"}
     )
     assert result["cli_version"] == str(__version__)
-    # And on the no-enumeration branch (tmuxctl missing) it still stamps it.
+    # And on the no-enumeration branch (a live-session probe unavailable) it
+    # still stamps it.
     monkeypatch.setattr(tree_mod, "_live_session_names", lambda env=None: None)
     result_no_enum = tree_mod.reconcile_tree({"host": "h1"}, paths=paths)
     assert result_no_enum["cli_version"] == str(__version__)
@@ -145,7 +146,7 @@ def test_get_returns_persisted_nodes_after_upsert(tmp_path: Path) -> None:
     assert got["nodes"][1]["collapsed"] is False
 
 
-def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
+def test_get_preserves_exact_session_generation(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     _upsert_tree(
         {
@@ -153,7 +154,7 @@ def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
             "nodes": [
                 {
                     "session": "work",
-                    "tmux_session_id": "$9",
+                    "session_id": "session-9",
                     "session_created": 1720000000,
                 },
             ],
@@ -162,7 +163,7 @@ def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
     )
 
     node = tree_mod.get_tree({"host": "h1"}, paths=paths)["nodes"][0]
-    assert node["tmux_session_id"] == "$9"
+    assert node["session_id"] == "session-9"
     assert node["session_created"] == 1720000000
 
 
@@ -429,13 +430,13 @@ def test_reconcile_prunes_node_past_optimistic_grace(tmp_path: Path) -> None:
 def test_reconcile_does_not_prune_when_enumeration_unavailable(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A tmuxctl miss (`_live_session_names()` -> None) must NOT wipe the held
+    """An unavailable live-session probe must NOT wipe the held
     tree — report everything alive and prune nothing."""
     paths = _paths(tmp_path)
     _upsert_tree(
         {"host": "h1", "nodes": [{"session": "a"}, {"session": "b"}]}, paths=paths
     )
-    # Simulate `tmuxctl` missing / a non-zero exit: the live enumeration is
+    # Simulate the live-session probe being unavailable:
     # unavailable, so reconcile must not prune. (`live_names` defaults to None
     # here, which means "resolve from the host" — the stub makes that fail.)
     monkeypatch.setattr(tree_mod, "_live_session_names", lambda env=None: None)
@@ -457,40 +458,14 @@ def test_reconcile_empty_registry_yields_added_only(tmp_path: Path) -> None:
     assert sorted(result["added"]) == ["x", "y"]
 
 
-# ----- live-session enumeration parsing ------------------------------
+# ----- live-session enumeration --------------------------------------
 
 
-def test_parse_session_names_from_tmuxctl_table() -> None:
-    table = (
-        "IDX  SESSION               CREATED\n"
-        "1    git-tmuxcli           2026-05-27 17:32:30 \n"
-        "2    git-ai-engineering    2026-05-27 15:55:44 \n"
-        "8    git-raw-guard         2026-05-20 17:41:29 \n"
+def test_live_session_names_none_when_aplexer_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketshell.session_enum.enumerate_live_sessions",
+        lambda **_kwargs: ([], [{"message": "aplexer unavailable"}]),
     )
-    names = tree_mod._parse_session_names(table)
-    assert names == {"git-tmuxcli", "git-ai-engineering", "git-raw-guard"}
-
-
-def test_parse_session_names_keeps_overflowed_long_names() -> None:
-    table = (
-        "IDX  SESSION               CREATED\n"
-        "1    git-pocketshell-release 2026-08-27 09:22:55 \n"
-        "5    git-ai-shipping-labs-workshops-raw-guard 2026-05-20 17:41:29 \n"
-    )
-    names = tree_mod._parse_session_names(table)
-    assert names == {
-        "git-pocketshell-release",
-        "git-ai-shipping-labs-workshops-raw-guard",
-    }
-
-
-def test_parse_session_names_skips_header_and_blanks() -> None:
-    assert tree_mod._parse_session_names("") == set()
-    assert tree_mod._parse_session_names("IDX  SESSION  CREATED\n\n") == set()
-
-
-def test_live_session_names_none_when_tmuxctl_missing(monkeypatch) -> None:
-    monkeypatch.setattr(tree_mod, "_resolve_tmuxctl_binary", lambda: None)
     assert tree_mod._live_session_names() is None
 
 

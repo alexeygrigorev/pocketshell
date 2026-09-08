@@ -1,77 +1,58 @@
-# Issue #847: agents fixture whose `pocketshell` CLI is OLDER than the Android
-# client — it predates the new-in-0.4.10 `tree` and `agents kind` subcommands.
+# Deliberately old host CLI for the connect mismatch journey (#847).
 #
-# Identical to Dockerfile.agents in every other respect (same seeded tmux
-# sessions, same usage/sessions/jobs/agent-log/profiles fixtures), so the only
-# behavioural difference is the missing `tree` / `agents kind` commands — which
-# is exactly the maintainer's 0.4.9-host scenario that made v0.4.10 hang on
-# "loading tree". A connected test against this fixture proves the client now
-# connects + renders the LIVE tree on a CLI mismatch instead of hanging.
-FROM alpine:latest
+# The image has the same real aplexer session lifecycle as the current agents
+# fixture. Only the wrapper on PATH rejects the newer tree/agent probes, which
+# keeps this fixture useful without carrying a second session implementation.
+FROM debian:trixie-slim
 
-# Issue #847: this fixture deliberately reports an OLDER `pocketshell --version`
-# than the app (default 0.4.9) so the bootstrap "Host setup needed" sheet appears
-# on connect — the maintainer's 0.4.9-host scenario. Tapping Skip on that sheet
-# releases the warm `warm-host-connect` lease, the #847 timeout-inversion
-# trigger the connected journey test exercises. The version is read over SSH
-# from /opt/pocketshell-agent-fixture-version (env does not survive sshd exec).
 ARG OLD_CLI_FIXTURE_VERSION=0.4.9
-
-# Issue #849: the connect-path RPC failure MODE the old-CLI stub applies to
-# `tree` / `agents kind` / `profiles`. Baked to a file (sshd does not preserve a
-# container ENV) the stub reads at exec time. Default `unknown` keeps the #847
-# behaviour (Click rejects the unknown subcommand); a fixture built with
-# `--build-arg OLD_CLI_MODE=hang` or `=slow` reproduces the wedged / slow-
-# responding connect-path host instead — covering the WHOLE connect-break class.
 ARG OLD_CLI_MODE=unknown
 
-# Issue #2377: python3 backs the shared `pocketshell-fixture-sessions` helper
-# that both `tmuxctl list` and the delegated `pocketshell sessions list` use to
-# walk the real `tmuxctl-*` sockets. The `agents` and `agents-daemon` images
-# already carried it; this one did not, and the helper is not optional — a
-# fixture that silently fell back to the canned table would be exactly the
-# "looks green, proves nothing" shape.
-RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
-        python3 \
-    && mv /usr/bin/tmux /usr/bin/tmux.real \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-server openssh-client procps bash sqlite3 git nano \
+        ca-certificates curl python3 python3-click python3-yaml \
+    && find /var/lib/apt/lists -mindepth 1 -delete \
+    && ln -sfn /usr/lib/openssh /usr/lib/ssh \
+    && mkdir -p /run/sshd \
     && ssh-keygen -A \
-    && adduser -D -s /bin/sh testuser \
-    && passwd -u testuser \
+    && useradd -m -s /bin/sh testuser \
+    && usermod -p '*' testuser \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh
+
+COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
+RUN set -eu; \
+    ver="$(sed -n 's/^ *"aplexer==\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-real/pyproject.toml | head -1)"; \
+    test -n "$ver"; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) asset_arch=linux-amd64 ;; arm64) asset_arch=linux-arm64 ;; *) exit 1 ;; esac; \
+    base="https://github.com/alexeygrigorev/aplexer/releases/download/v${ver}"; \
+    curl -fsSL -o /usr/bin/a "$base/a-${asset_arch}"; \
+    curl -fsSL -o /usr/bin/aplexer "$base/aplexer-${asset_arch}"; \
+    chmod +x /usr/bin/a /usr/bin/aplexer
 
 COPY tests/docker/sshd_config /etc/ssh/sshd_config
 COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
 COPY tests/docker/test_key /root/test_key
-
-# Install the FULL real fixture set, but keep the real `pocketshell` stub at a
-# delegate path and drop the OLD-CLI wrapper in its place on the PATH. The
-# wrapper rejects `tree` / `agents kind` like an old Click CLI and delegates
-# everything else to the real stub.
 COPY tests/docker/agent-bin/ /usr/local/bin/
-COPY tests/docker/agent-bin/pocketshell /usr/local/lib/pocketshell-real-fixture
+COPY tests/docker/agent-bin/pocketshell-real /usr/local/bin/pocketshell-real
 COPY tests/docker/agent-bin-old-cli/pocketshell /usr/local/bin/pocketshell
-
+COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY tests/docker/agents-aplexer-selfcheck.py /usr/local/bin/pocketshell-fixture-aplexer-selfcheck
 
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
-    && chmod +x /usr/local/bin/claude \
-        /usr/local/bin/codex \
-        /usr/local/bin/opencode \
-        /usr/local/bin/pocketshell \
-        /usr/local/bin/pocketshell-fixture-sessions \
-        /usr/local/lib/pocketshell-real-fixture \
-        /usr/local/bin/quse \
-        /usr/local/bin/agent-log-explorer \
-        /usr/local/bin/tmux \
-        /usr/local/bin/tmuxctl \
+    && chmod +x /usr/local/bin/claude /usr/local/bin/codex \
+        /usr/local/bin/opencode /usr/local/bin/pocketshell \
+        /usr/local/bin/quse /usr/local/bin/agent-log-explorer \
         /usr/local/bin/uv \
-        /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-altscreen-tui \
+        /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
-    && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
+        /usr/local/bin/pocketshell-fixture-aplexer-selfcheck \
+        /usr/local/bin/pocketshell-real \
     && printf '%s\n' "$OLD_CLI_FIXTURE_VERSION" > /opt/pocketshell-agent-fixture-version \
     && printf '%s\n' "$OLD_CLI_MODE" > /opt/pocketshell-old-cli-mode \
     && chown -R testuser:testuser /home/testuser/.ssh

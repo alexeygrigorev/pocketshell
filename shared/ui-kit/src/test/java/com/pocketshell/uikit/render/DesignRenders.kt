@@ -401,22 +401,22 @@ class DesignRenders {
     }
 
     /**
-     * Issues #757 + #750: the two tmux connecting/attach states as the
-     * `TmuxSessionScreen` now renders them. Both are app-only composables
+     * Issues #757 + #750: the two session connecting/attach states as the
+     * session screen now renders them. Both are app-only composables
      * (`EmptyPanesPlaceholder` and `SwitchingLoadingPlaceholder`), so this
      * fixture reproduces their EXACT body — a full-surface [Box] with a centered
      * [LoadingIndicator.Spinner] (Medium) + label — so a reviewer can eyeball the
      * design parity without the emulator.
      *
-     *  - #757: the "waiting for tmux panes…" connecting state now shows the SAME
+     *  - #757: the "waiting for session…" connecting state now shows the SAME
      *    canonical animated spinner instead of static text.
      *  - #750: the "Attaching…" reattach state shows EXACTLY this one centered
      *    spinner — the previous thin under-header progress line is gone, so the
      *    reattach screen no longer shows two indicators at once.
      */
     @Test
-    fun tmuxConnectingStates() = render("tmux-connecting-states") {
-        TmuxConnectingStatesRender()
+    fun sessionConnectingStates() = render("session-connecting-states") {
+        SessionConnectingStatesRender()
     }
 
     /**
@@ -430,8 +430,8 @@ class DesignRenders {
      * and does not collide with the centered "Attaching…" hold.
      */
     @Test
-    fun tmuxSurfaceReconnectAffordance() = render("tmux-surface-reconnect-affordance") {
-        TmuxSurfaceReconnectAffordanceRender()
+    fun sessionSurfaceReconnectAffordance() = render("session-surface-reconnect-affordance") {
+        SessionSurfaceReconnectAffordanceRender()
     }
 
     /**
@@ -441,8 +441,8 @@ class DesignRenders {
      * the calm "Disconnected." status without the misleading "tap … above." pointer.
      */
     @Test
-    fun tmuxDisconnectedState() = render("tmux-disconnected-state") {
-        TmuxDisconnectedStateRender()
+    fun sessionDisconnectedState() = render("session-disconnected-state") {
+        SessionDisconnectedStateRender()
     }
 
     /**
@@ -867,7 +867,7 @@ class DesignRenders {
 
     /**
      * Issue #2522: New session sheet in the Agent state — engines, profile,
-     * and tmux vs aplexer. See [CreateSessionSheetAgentRender].
+     * and the selected agent engine/profile. See [CreateSessionSheetAgentRender].
      */
     @Test
     fun createSessionSheetAgent() = render("create-session-sheet-agent") {
@@ -955,10 +955,10 @@ class DesignRenders {
     }
 
     /**
-     * Issue #857: the session (tmux) overflow kebab, opened, now grouped into
+     * Issue #857: the session overflow kebab, opened, now grouped into
      * logical sections (header + divider per section) instead of one flat list.
      *
-     * Caveat (#555): the real `TmuxMoreMenu` lives in the `app` module, which the
+     * Caveat (#555): the real session overflow menu lives in the app module, which the
      * ui-kit render harness can't import, and a `DropdownMenu` paints into a popup
      * window that Roborazzi's single composition snapshot doesn't capture. This
      * fixture is a faithful static mirror of the live menu's grouping, item copy,
@@ -1103,7 +1103,7 @@ class DesignRenders {
      * reclaimed. This is the BEFORE/AFTER fast-render check the maintainer's
      * "this is taking too much space" feedback motivated.
      *
-     * Caveat (#555): the real `TmuxTerminalBottomControls` / `BottomChipControls`
+     * Caveat (#555): the real terminal bottom controls / `BottomChipControls`
      * live in `:app`, which this ui-kit harness cannot import, so this is a
      * STATIC visual mirror using the real ui-kit [CommandChip] primitive. The
      * full-device emulator screenshots (keyboard up + down) are the acceptance.
@@ -1119,7 +1119,7 @@ class DesignRenders {
      * transcript, a thin status row, and only the right-anchored launcher at the
      * bottom — no bordered chip bar, no toggle chip, no command chips.
      *
-     * Caveat (#555): the real `TmuxConversationPane` /
+     * Caveat (#555): the real conversation pane /
      * `ConversationComposerLauncherRow` live in `:app`, which this ui-kit harness
      * cannot import, so this is a STATIC visual mirror using ui-kit primitives.
      * The full-device emulator screenshot of the real Conversation screen is the
@@ -1742,7 +1742,7 @@ class DesignRenders {
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "hetzner · tmux and the pocketshell CLI are ready.",
+                    text = "hetzner · aplexer and the pocketshell CLI are ready.",
                     color = PocketShellColors.TextSecondary,
                     fontSize = 14.sp,
                 )

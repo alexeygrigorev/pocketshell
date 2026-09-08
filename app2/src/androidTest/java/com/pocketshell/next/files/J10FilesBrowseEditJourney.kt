@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
@@ -18,9 +19,9 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
@@ -31,6 +32,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.Description
 import org.junit.runner.RunWith
+import java.io.File
 
 /**
  * Journey J10 — browse a host's files, open one, edit it, save it, and see the
@@ -143,7 +145,18 @@ class J10FilesBrowseEditJourney {
     @Test
     fun browsingToATextFileEditingItAndSavingWritesTheHostFile() {
         openExplorerAt(DIR)
-        JourneyScreenshots.capture("01-explorer", JOURNEY)
+        capture("01-explorer")
+
+        // The redesigned file tools and durable transfer history are real
+        // destinations, so leave current emulator evidence for both states.
+        compose.onNodeWithTag(FILE_EXPLORER_ACTIONS_TAG).performClick()
+        awaitTag(FILE_EXPLORER_TOOLS_SHEET_TAG)
+        capture("01a-file-tools")
+        compose.onNodeWithTag(FILE_EXPLORER_TRANSFERS_TAG).performClick()
+        awaitTag(TRANSFERS_SCREEN_TAG)
+        capture("01b-transfers")
+        compose.onNodeWithText("Back").performClick()
+        awaitTag(FILE_EXPLORER_TAG)
 
         // Everything the host has in this directory has a row on screen. The
         // oracle is the host's own `ls`, read over a separate connection — a
@@ -172,16 +185,16 @@ class J10FilesBrowseEditJourney {
         // newline-terminated the way any editor would, so the rendered node
         // holds "the original line\n".
         compose.onNodeWithText(ORIGINAL_TEXT, substring = true).assertIsDisplayed()
-        JourneyScreenshots.capture("02-viewer", JOURNEY)
+        capture("02-viewer")
 
         // Edit and save.
         compose.onNodeWithTag(VIEWER_EDIT_TAG).performClick()
         awaitTag(VIEWER_EDITOR_TAG)
         compose.onNodeWithTag(VIEWER_EDITOR_TAG).performTextReplacement(EDITED_TEXT)
-        JourneyScreenshots.capture("03-editor", JOURNEY)
+        capture("03-editor")
         compose.onNodeWithTag(VIEWER_SAVE_TAG).performClick()
         awaitTag(VIEWER_SAVED_TAG)
-        JourneyScreenshots.capture("04-saved", JOURNEY)
+        capture("04-saved")
 
         // THE load-bearing assertion: the host's own copy of the file changed.
         assertEquals(
@@ -200,7 +213,7 @@ class J10FilesBrowseEditJourney {
         awaitText(EDITED_TEXT)
         compose.onNodeWithText(EDITED_TEXT).assertIsDisplayed()
         compose.onNodeWithText(ORIGINAL_TEXT, substring = true).assertDoesNotExist()
-        JourneyScreenshots.capture("05-reopened", JOURNEY)
+        capture("05-reopened")
     }
 
     /**
@@ -215,7 +228,7 @@ class J10FilesBrowseEditJourney {
         compose.onNodeWithTag(fileRowTag(MARKDOWN_FILE)).performClick()
 
         awaitTag(MARKDOWN_VIEW_TAG)
-        JourneyScreenshots.capture("06-markdown-rendered", JOURNEY)
+        capture("06-markdown-rendered")
         // The heading is on screen without its `#`, and the fence markers are
         // not painted at all.
         compose.onNodeWithText("Release notes").assertIsDisplayed()
@@ -227,7 +240,7 @@ class J10FilesBrowseEditJourney {
 
         awaitTag(VIEWER_TEXT_TAG)
         compose.onNodeWithTag(MARKDOWN_VIEW_TAG).assertDoesNotExist()
-        JourneyScreenshots.capture("07-markdown-source", JOURNEY)
+        capture("07-markdown-source")
     }
 
     /**
@@ -245,7 +258,7 @@ class J10FilesBrowseEditJourney {
         compose.onNodeWithTag(VIEWER_BINARY_NOTE_TAG).assertIsDisplayed()
         compose.onNodeWithTag(VIEWER_TEXT_TAG).assertDoesNotExist()
         compose.onNodeWithTag(VIEWER_ERROR_TAG).assertDoesNotExist()
-        JourneyScreenshots.capture("08-binary", JOURNEY)
+        capture("08-binary")
     }
 
     // --- helpers ----------------------------------------------------------
@@ -256,9 +269,10 @@ class J10FilesBrowseEditJourney {
      * home directory the HOST reported.
      */
     private fun openExplorerAt(path: String) {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG)
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
+        awaitTag(SESSION_TREE_FILES_TAG)
 
         compose.onNodeWithTag(SESSION_TREE_FILES_TAG).performClick()
         awaitTag(FILE_EXPLORER_TAG)
@@ -297,6 +311,26 @@ class J10FilesBrowseEditJourney {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
         }
+    }
+
+    /** Preserve real-window evidence after the connected-test app is removed. */
+    private fun capture(name: String): File {
+        val file = JourneyScreenshots.capture(name, JOURNEY)
+        val outputDir = InstrumentationRegistry.getArguments()
+            .getString("additionalTestOutputDir")
+            ?.takeIf { it.isNotBlank() }
+            ?: return file
+        runCatching {
+            val targetDir = File(outputDir, JOURNEY).apply { mkdirs() }
+            file.parentFile?.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("${file.nameWithoutExtension}") }
+                ?.forEach { artifact ->
+                    val target = File(targetDir, artifact.name)
+                    artifact.copyTo(target, overwrite = true)
+                    println("J10_SCREENSHOT ${target.absolutePath}")
+                }
+        }
+        return file
     }
 
     private companion object {

@@ -8,6 +8,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * `PRAGMA user_version = 1`, plus the exact data-free issue-261 marker
  * database. Classification is deliberately read-only and exact: an unknown v1
  * database fails closed before any DDL can mutate user data.
+ *
+ * The version-one host descriptors intentionally include the historical
+ * `tmuxInstalled` column where those old APKs stored it. These descriptors are
+ * migration classifiers only; the current Room entity has no such field and
+ * the 20->21 migration drops it after preserving all supported host data.
  */
 val MIGRATION_1_8: Migration = object : Migration(1, 8) {
     override fun migrate(db: SupportSQLiteDatabase) {

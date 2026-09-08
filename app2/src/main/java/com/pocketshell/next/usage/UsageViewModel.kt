@@ -2,10 +2,9 @@ package com.pocketshell.next.usage
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.hostapi.Backend
-import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.settings.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -32,6 +31,7 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class UsageViewModel @Inject constructor(
     private val fetcher: UsageFetcher,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(UsageScreenState())
@@ -40,17 +40,24 @@ class UsageViewModel @Inject constructor(
     /** Guards against a pull-to-refresh tap re-entering a fetch already in flight. */
     private var inFlight: Job? = null
 
-    fun refresh() {
+    fun refresh(selectedHostId: Long? = null) {
         if (inFlight?.isActive == true) return
         _state.value = _state.value.copy(isRefreshing = true)
         inFlight = viewModelScope.launch {
-            val result = fetcher.fetchAll()
+            val result = if (selectedHostId == null) {
+                fetcher.fetchAll()
+            } else {
+                fetcher.fetchHost(selectedHostId)
+            }
             _state.value = usageScreenState(
                 snapshots = result.snapshots.values,
                 connectedHostCount = result.connectedHostCount,
                 isRefreshing = false,
                 loaded = true,
                 resetBanner = usageResetBannerState(result.resetEvents),
+                selectedHostId = selectedHostId,
+                selectedHostName = result.selectedHostName,
+                warnPercent = settings.settings.value.usageWarnThresholdPercent.toDouble(),
             )
         }
     }
@@ -79,6 +86,7 @@ class UsageGlanceViewModel @Inject constructor(
     private val fetcher: UsageFetcher,
     private val connections: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<UsageGlancePillState?>(null)
@@ -109,7 +117,7 @@ class UsageGlanceViewModel @Inject constructor(
             }
             _state.value = usageGlancePillState(
                 snapshots = result.snapshots,
-                warnPercent = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+                warnPercent = settings.settings.value.usageWarnThresholdPercent.toDouble(),
                 focus = focus,
             )
         }
@@ -120,8 +128,7 @@ class UsageGlanceViewModel @Inject constructor(
      * "no focus, show the ordinary pill".
      *
      * Null on every unremarkable path, deliberately: no session named
-     * (the tree), no live connection (D21 — the pill never dials), a tmux row
-     * (aplexer is the only manager that can see inside a session), no agent
+     * (the tree), no live connection (D21 — the pill never dials), no agent
      * detected, or a host CLI too old to emit the field at all. The client
      * never inspects the session itself; the ONLY source is
      * `pocketshell sessions list --json`.
@@ -139,7 +146,6 @@ class UsageGlanceViewModel @Inject constructor(
             ?.getOrNull()
             ?: return null
         val row = listing.sessions.firstOrNull { it.name == sessionName } ?: return null
-        if (row.backend != Backend.APLEXER) return null
         val agent = row.agent?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         return GlanceFocus(hostId = hostId, provider = agent)
     }

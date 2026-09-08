@@ -69,7 +69,7 @@ fun SelectionOverlay(
         // Zero-content layout sized to the available space. The pointerInput
         // modifier requires non-zero bounds to receive events, so we take the
         // maximum constraints — but via the shared unbounded-safe guard. This
-        // overlay sits inside the pager (`TmuxTerminalPager`), whose lookahead
+        // overlay sits inside the terminal pager, whose lookahead
         // runs intermittent UNBOUNDED-dimension measure passes; the old
         // `coerceAtLeast(0)` left `Int.MAX_VALUE` intact, so `layout(W, MAX)`
         // would throw the v0.4.17 `Size(W x 2147483647)` crash (#958/#966/#967 —

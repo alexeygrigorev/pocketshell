@@ -21,9 +21,7 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.idleWedgeNote
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.connect.openQuietSession
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -78,20 +76,11 @@ import java.io.File
  * of that: it proves the injected drag really is delivered to the vendored
  * view, by taking the one branch that still has a remote effect.
  *
- * ## The two backends, and why both
+ * ## Fixture
  *
- * The reproducing state is "alternate buffer active, mouse tracking inactive",
- * and PocketShell reaches it two different ways, measured on the dev box
- * (2026-09-06):
- *
- *  - **tmux**, whose client terminal is on the alternate screen for the whole
- *    of an attach, and whose `mouse` option is **off** by default — so a stock
- *    host is in this state permanently;
- *  - **aplexer**, which forwards an alt-screen workload's `CSI ? 1049 h` and
- *    never enables mouse tracking of its own.
- *
- * A fix validated on only one of them would look green and change nothing on
- * the other, so both are here.
+ * The reproducing state is "alternate buffer active, mouse tracking inactive".
+ * The Docker fixture creates that state with a real aplexer session running the
+ * alternate-screen TUI, so the journey exercises the shipped session backend.
  *
  * ## Fixture
  *
@@ -113,11 +102,8 @@ class J15TerminalScrollJourney {
 
     private var hostId: Long = 0
 
-    /** Which session row this test taps — tmux-backed or aplexer-backed. */
-    private var sessionName: String = TMUX_SESSION
-
-    /** The REAL aplexer session id [seedAplexerSession] created, when it ran. */
-    private var aplexerId: String? = null
+    /** The real aplexer session row this test taps. */
+    private var sessionName: String = APLEXER_SESSION
 
     /**
      * Leaves no live aplexer session behind.
@@ -130,28 +116,10 @@ class J15TerminalScrollJourney {
      */
     @After
     fun stopTheAplexerSession() {
-        if (aplexerId != null) {
-            runCatching { killAplexerSession() }
-            aplexerId = null
-        }
+        runCatching { killAplexerSession() }
     }
 
-    // --- the reported defect, on both backends -------------------------------
-
-    @Test
-    fun aDragOnATmuxBackedSessionSendsNoArrowKeys() {
-        openSession()
-        awaitTui()
-        assertReproducingHostState()
-
-        shot("01-tmux-before-drag", JOURNEY)
-        dragUp()
-        dragDown()
-        shot("02-tmux-after-drag", JOURNEY)
-
-        assertNothingWasTyped()
-        assertARealArrowKeyStillArrives()
-    }
+    // --- the reported defect --------------------------------------------------
 
     @Test
     fun aDragOnAnAplexerBackedSessionSendsNoArrowKeys() {
@@ -159,74 +127,13 @@ class J15TerminalScrollJourney {
         awaitTui()
         assertReproducingHostState()
 
-        shot("03-aplexer-before-drag", JOURNEY)
+        shot("01-aplexer-before-drag", JOURNEY)
         dragUp()
         dragDown()
-        shot("04-aplexer-after-drag", JOURNEY)
+        shot("02-aplexer-after-drag", JOURNEY)
 
         assertNothingWasTyped()
         assertARealArrowKeyStillArrives()
-    }
-
-    // --- the path that must NOT change, and the delivery control -------------
-
-    /**
-     * A host that DOES track the mouse must still get wheel events — and the
-     * proof that the injected drag is a real drag.
-     *
-     * The seed turns `mouse on` on this session's tmux server, which is what
-     * the maintainer's own `~/.tmux.conf` does. tmux then enables SGR mouse
-     * reporting on the app's emulator, `doScroll` takes its FIRST branch, and
-     * the wheel event makes tmux enter copy mode — read here from the host's
-     * own `#{pane_in_mode}`, over an independent connection.
-     *
-     * If the injected gesture never reached the vendored view, this test fails,
-     * which is what stops the two tests above from passing vacuously.
-     */
-    @Test
-    fun aDragWithMouseTrackingOnStillReachesTheHostAsAWheelEvent() {
-        openSession()
-        awaitRendered(SHELL_BANNER)
-
-        val emulator = emulatorState()
-        // Both flags at once, which is the whole reason the deleted branch was
-        // reachable so often: a tmux attach is ALWAYS on the alternate screen,
-        // and only `mouse on` decides which branch that state takes.
-        assertTrue(
-            "a tmux attach must put the app's emulator on the alternate screen, got $emulator",
-            emulator.alternateBuffer,
-        )
-        assertTrue(
-            "the mouse-on fixture must put the app's emulator in mouse tracking, got $emulator",
-            emulator.mouseTracking,
-        )
-        assertEquals(
-            "the pane must not be in copy mode before the drag",
-            "0",
-            paneInMode(),
-        )
-
-        shot("05-mouse-on-before-drag", JOURNEY)
-        // Downward: dragging the content down is "show me what came before",
-        // which reaches the host as wheel-UP. Dragging the other way is
-        // wheel-DOWN, and a pane already at the bottom of its scrollback has
-        // nowhere to go — a green-looking no-op, not a wheel that failed.
-        dragDown()
-
-        val entered = awaitHost("tmux to enter copy mode") { paneInMode() == "1" }
-        shot("06-mouse-on-after-drag", JOURNEY)
-        assertTrue(
-            "the drag must have reached the host as a wheel event (pane_in_mode=${paneInMode()})",
-            entered,
-        )
-        // Copy mode alone would also be reached by a stray keystroke, so pin
-        // the thing only a wheel does: the pane scrolled back into its own
-        // scrollback.
-        val scrolled = scrollPosition()
-        assertTrue(
-            "the wheel must have scrolled the pane's scrollback, got scroll_position=$scrolled",
-            (scrolled.toIntOrNull() ?: 0) > 0,
-        )
     }
 
     // --- assertions ----------------------------------------------------------
@@ -380,18 +287,6 @@ class J15TerminalScrollJourney {
     private fun keyLog(): String =
         AgentsFixture.exec("cat $KEY_LOG 2>/dev/null || true").trim()
 
-    /** `1` while the tmux pane is in copy mode. Empty for a non-tmux session. */
-    private fun paneInMode(): String = paneFormat("#{pane_in_mode}")
-
-    /** How far back into its own scrollback the pane is scrolled. */
-    private fun scrollPosition(): String = paneFormat("#{scroll_position}")
-
-    private fun paneFormat(format: String): String =
-        AgentsFixture.exec(
-            "tmux -S $TMUX_SOCKET display-message -p -t '=$TMUX_SESSION:' " +
-                "'$format' 2>/dev/null || true",
-        ).trim()
-
     private fun awaitHost(what: String, predicate: () -> Boolean): Boolean {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -495,12 +390,7 @@ class J15TerminalScrollJourney {
     // --- navigation ----------------------------------------------------------
 
     private fun openSession() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(sessionName))
-        compose.onNodeWithTag(sessionRowTag(sessionName)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, sessionName, APLEXER_WORKSPACE, TIMEOUT_MS)
     }
 
     /** Waits until the fixture TUI has painted its banner into the live grid. */
@@ -547,20 +437,14 @@ class J15TerminalScrollJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J15_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        val aplexerBacked = description.methodName.contains("Aplexer", ignoreCase = true)
-        val mouseOn = description.methodName.contains("MouseTrackingOn", ignoreCase = true)
-        sessionName = if (aplexerBacked) APLEXER_SESSION else TMUX_SESSION
+        sessionName = APLEXER_SESSION
 
         // A stale key log from a previous run would fail the NEXT test for the
         // wrong reason; the TUI truncates it on start too, and both matter
         // because a session that never starts must not look like a clean one.
         AgentsFixture.exec("rm -f $KEY_LOG")
 
-        if (aplexerBacked) {
-            seedAplexerSession()
-        } else {
-            seedTmuxSession(mouseOn = mouseOn)
-        }
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j15_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -582,62 +466,6 @@ class J15TerminalScrollJourney {
     }
 
     /**
-     * A real tmux session on its own `tmuxctl-<name>` socket, running the
-     * alt-screen fixture TUI as its pane command.
-     *
-     * [mouseOn] is the difference between a stock host (tmux's own default,
-     * where the bug lived) and the maintainer's own `~/.tmux.conf`, which sets
-     * `mouse on` — the option that makes tmux enable SGR mouse reporting on the
-     * app's emulator and therefore selects `doScroll`'s wheel branch. Setting
-     * it AFTER the session exists is deliberate: the fixture image ships no
-     * `~/.tmux.conf`, so the default really is off unless a test asks.
-     */
-    private fun seedTmuxSession(mouseOn: Boolean) {
-        AgentsFixture.exec("tmux -S $TMUX_SOCKET kill-session -t '=$TMUX_SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $TMUX_SOCKET_DIR && chmod 700 $TMUX_SOCKET_DIR")
-        val marker: String
-        if (mouseOn) {
-            // A NORMAL-screen pane with scrollback, because that is what a
-            // wheel event has a defined meaning for: tmux 3.7 drops a wheel on
-            // an alternate-screen pane (it has no history to scroll), so an
-            // alt-screen pane here would make the wheel branch unobservable and
-            // the delivery control vacuous. Verified against the fixture image.
-            AgentsFixture.exec(
-                "tmux -S $TMUX_SOCKET new-session -d -s $TMUX_SESSION " +
-                    "-c /home/testuser -x 80 -y 24",
-            )
-            AgentsFixture.exec(
-                "tmux -S $TMUX_SOCKET send-keys -t '=$TMUX_SESSION:' 'PS1=\"$PROMPT \"' Enter",
-            )
-            AgentsFixture.exec(
-                "tmux -S $TMUX_SOCKET send-keys -t '=$TMUX_SESSION:' " +
-                    "'clear; seq 1 200; echo $SHELL_BANNER' Enter",
-            )
-            marker = SHELL_BANNER
-        } else {
-            AgentsFixture.exec(
-                "tmux -S $TMUX_SOCKET new-session -d -s $TMUX_SESSION -c /home/testuser " +
-                    "-x 80 -y 24 /usr/local/bin/pocketshell-altscreen-tui",
-            )
-            marker = TUI_BANNER
-        }
-        // Set explicitly either way: the fixture image ships no `~/.tmux.conf`,
-        // so `off` is tmux's own default AND the state the maintainer's stock
-        // hosts are in — writing it down is what stops a future image growing a
-        // config and silently retiring the reproduction.
-        AgentsFixture.exec(
-            "tmux -S $TMUX_SOCKET set-option -g mouse ${if (mouseOn) "on" else "off"}",
-        )
-        SystemClock.sleep(FIXTURE_SETTLE_MS)
-        val pane = AgentsFixture.exec(
-            "tmux -S $TMUX_SOCKET capture-pane -p -t '=$TMUX_SESSION:' 2>/dev/null || true",
-        )
-        check(pane.filterNot { it.isWhitespace() }.contains(marker)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
-        }
-    }
-
-    /**
      * A REAL aplexer session running the alt-screen fixture TUI, plus the
      * listing row that points the app at it.
      *
@@ -649,61 +477,21 @@ class J15TerminalScrollJourney {
      * rather than invented: the attach arm resolves the row's `id`, and a made
      * up one would attach to nothing.
      *
-     * The listing row still comes from `POCKETSHELL_FIXTURE_APLEXER_FILE`,
-     * which is where `pocketshell-fixture-sessions` reads aplexer rows from
-     * (#2563 moved that read out of the deleted `a` stub). Its `name` follows
-     * the real CLI's `<workspace-basename>:<tag>` convention
-     * (`session_enum.aplexer_display_name`) so the row is the shape the app
-     * would see from a real enumeration.
+     * The listing row comes from the real schema-3 aplexer enumeration. Its
+     * `name` follows the real CLI's `<workspace-basename>:<tag>` convention.
      */
     private fun seedAplexerSession() {
-        // $LIVE_MARKER: issue #2586. A journey that opted into the fixture's
-        // LIVE aplexer arm leaves that marker in the shared container (#2474
-        // runs the suite unfiltered, one process, one fixture), and marker +
-        // the seed written below is a deliberate rc-78 mode conflict — the app
-        // would receive no listing at all and this journey would fail as a bare
-        // 60-second Compose timeout. Cleared with the errors file it already
-        // clears, so the deterministic arm defends itself.
-        AgentsFixture.exec("rm -f $ERRORS_FILE $LIVE_MARKER")
-        // One live session per run: a leftover from a previous run would be a
-        // second `<workspace>:<tag>` and `a start` refuses the duplicate.
+        // One live session per run: a leftover from a previous run would make
+        // the strict workspace+tag create refuse the duplicate.
         killAplexerSession()
         AgentsFixture.exec("mkdir -p $APLEXER_WORKSPACE")
-        val started = AgentsFixture.exec(
-            "$APLEXER_BIN start --json --workspace $APLEXER_WORKSPACE " +
-                "--tag $APLEXER_TAG --cwd $APLEXER_WORKSPACE " +
-                "-- /usr/local/bin/pocketshell-altscreen-tui 2>&1",
+        AgentsFixture.exec(
+            "pocketshell sessions create --cwd '$APLEXER_WORKSPACE' --mem none " +
+                "--json -- '$APLEXER_TAG' >/dev/null",
         )
-        val id = APLEXER_ID_JSON.find(started)?.groupValues?.get(1)
-        checkNotNull(id) {
-            "`a start` did not report a session id — the fixture has no real " +
-                "aplexer session to attach to. It said:\n$started"
-        }
-        aplexerId = id
-        println("J15_APLEXER_SESSION id=$id workspace=$APLEXER_WORKSPACE tag=$APLEXER_TAG")
-
-        val now = System.currentTimeMillis() / 1000
-        AgentsFixture.writeFile(
-            APLEXER_FILE,
-            """
-            {
-              "sessions": [
-                {
-                  "name": "$APLEXER_SESSION",
-                  "id": "$id",
-                  "workspace": "$APLEXER_WORKSPACE",
-                  "tag": "$APLEXER_TAG",
-                  "engine": "shell",
-                  "profile": null,
-                  "agent_state": "waiting",
-                  "agent_state_source": "heuristic",
-                  "attached": false,
-                  "created_epoch": ${now - 60},
-                  "activity_epoch": ${now - 5}
-                }
-              ]
-            }
-            """.trimIndent(),
+        AgentsFixture.exec(
+            "a send --workspace '$APLEXER_WORKSPACE' --tag '$APLEXER_TAG' --enter " +
+                "'/usr/local/bin/pocketshell-altscreen-tui'",
         )
 
         // The session's own screen, straight from aplexer — the fixture must be
@@ -714,13 +502,8 @@ class J15TerminalScrollJourney {
             "the aplexer session did not come up: `a capture` says\n$screen"
         }
 
-        // ...and the HOST enumerates it. `pocketshell-fixture-sessions` swallows
-        // an unreadable or malformed seed and returns no aplexer rows at all, so
-        // a broken seed reads to the app as "aplexer has nothing" — exit 0,
-        // managers: ["tmux"], and a 60 s Compose timeout on a row that was never
-        // going to appear. Asserting the listing here turns that silence into a
-        // named seed failure. (It caught a real one: a Kotlin template escaped
-        // one `$` too many wrote the template text into the JSON verbatim.)
+        // ...and the HOST enumerates it. Asserting the listing here turns a
+        // broken aplexer lifecycle into a named seed failure.
         val listed = AgentsFixture.exec("pocketshell sessions list --json 2>&1")
         check(listed.contains("\"$APLEXER_SESSION\"")) {
             "the host does not enumerate the seeded aplexer row " +
@@ -746,8 +529,7 @@ class J15TerminalScrollJourney {
     /** Best effort: leave no live aplexer session behind for the next run. */
     private fun killAplexerSession() {
         AgentsFixture.exec(
-            "$APLEXER_BIN kill --workspace $APLEXER_WORKSPACE --tag $APLEXER_TAG " +
-                ">/dev/null 2>&1 || true",
+            "pocketshell sessions kill -- '$APLEXER_SESSION' >/dev/null 2>&1 || true",
         )
     }
 
@@ -773,8 +555,6 @@ class J15TerminalScrollJourney {
 
         const val JOURNEY = "j15-terminal-scroll"
 
-        const val TMUX_SESSION = "j15-scroll"
-
         /**
          * The real pinned `a`, spelled out for the reason `Dockerfile.agents`
          * gives: exactly ONE copy exists, next to `/usr/bin/python3`, because
@@ -794,32 +574,14 @@ class J15TerminalScrollJourney {
          */
         const val APLEXER_SESSION = "j15-aplexer:$APLEXER_TAG"
 
-        /** The `"id": "<uuid>"` `a start --json` reports. */
-        val APLEXER_ID_JSON = Regex("\"id\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"")
-
         const val TUI_BANNER = "POCKETSHELL-ALTSCREEN-TUI"
-
-        /** The mouse-on variant runs a plain shell; these pin its screen. */
-        const val PROMPT = "J15READY\$"
-        const val SHELL_BANNER = "J15-SCROLL-BANNER"
 
         /** Where `pocketshell-altscreen-tui` records the keys it is sent. */
         const val KEY_LOG = "\$HOME/.pocketshell-fixture-altscreen-keys.log"
 
-        const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
-        const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
-
-        /** The fixture's LIVE-aplexer opt-in marker (issue #2586); cleared, never set. */
-        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
-
-        const val TMUX_SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val TMUX_SOCKET =
-            "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$TMUX_SESSION\""
 
         val HOST_IDS: Map<String, Long> = mapOf(
-            "aDragOnATmuxBackedSessionSendsNoArrowKeys" to 9_501L,
-            "aDragOnAnAplexerBackedSessionSendsNoArrowKeys" to 9_502L,
-            "aDragWithMouseTrackingOnStillReachesTheHostAsAWheelEvent" to 9_503L,
+            "aDragOnAnAplexerBackedSessionSendsNoArrowKeys" to 9_501L,
         )
     }
 }

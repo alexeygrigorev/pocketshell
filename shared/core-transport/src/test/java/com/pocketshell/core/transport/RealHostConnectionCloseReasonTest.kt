@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * between "someone asked for this connection to end" and "the D21 background
  * window expired" survives is [TransportState.Closed]'s [CloseReason]. Those
  * two are opposite instructions to `app2`'s session screen: the first ends it,
- * the second reattaches on foreground return, because the tmux session on the
+ * the second reattaches on foreground return, because the host session on the
  * host is untouched. Reading `Closed` without the reason is what turned the
  * single most common daily journey — pocket the phone for more than 90 seconds,
  * take it back out — into a false "the connection was closed" error over a live

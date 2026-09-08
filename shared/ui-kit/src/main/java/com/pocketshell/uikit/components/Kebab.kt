@@ -134,7 +134,7 @@ fun Kebab(
                         Text(
                             text = item.label,
                             color = PocketShellColors.Text,
-                            style = PocketShellType.bodyDense,
+                            style = PocketShellType.button,
                         )
                     },
                     leadingIcon = item.icon?.let { icon ->

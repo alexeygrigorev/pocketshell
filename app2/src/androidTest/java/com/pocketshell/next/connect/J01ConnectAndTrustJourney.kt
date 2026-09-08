@@ -6,12 +6,17 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
 import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_EMPTY_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ERROR_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LOADING_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
@@ -25,9 +30,10 @@ import org.junit.runner.Description
 import org.junit.runner.RunWith
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import java.io.File
 
 /**
- * Journey J01 — tap a host, answer the host-key prompt, land on its tree
+ * Journey J01 — tap a host, answer the host-key prompt, land on its workspaces
  * (rewrite task U-2).
  *
  * This is the first instrumented test of the rewrite's app module, and its job
@@ -136,28 +142,29 @@ class J01ConnectAndTrustJourney {
     @Test
     fun trustingAnUnknownHostKeyConnectsAndLandsOnTheTree() {
         awaitTag(hostRowTag(hostId))
-        JourneyScreenshots.capture("01-host-list")
+        capture("01-host-list")
 
         compose.onNodeWithTag(hostRowTag(hostId)).performClick()
 
         // The dial reached a real server and came back "this key needs a
         // decision" — with the key that server actually presented.
         awaitTag(TRUST_SHEET_FINGERPRINT_TAG)
-        JourneyScreenshots.capture("02-trust-prompt-unknown")
+        capture("02-trust-prompt-unknown")
         compose.onNodeWithText(UNKNOWN_TITLE).assertIsDisplayed()
         compose.onNodeWithText(presentedFingerprint).assertIsDisplayed()
         compose.onNodeWithTag(TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG).assertDoesNotExist()
         // Raising the prompt is not consent.
         assertNull("prompt must not store a key", storedFingerprint())
         // And it must not have navigated.
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(TRUST_SHEET_TRUST_TAG).performClick()
 
-        // Trust -> record -> full re-dial -> authenticated -> tree.
-        awaitTag(SESSION_TREE_TAG)
-        JourneyScreenshots.capture("03-tree-after-trust")
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
+        // Trust -> record -> full re-dial -> authenticated -> loaded workspaces.
+        awaitWorkspacesSettled()
+        capture("03-tree-after-trust")
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HOST_WORKSPACES_ERROR_TAG).assertDoesNotExist()
         assertEquals(
             "the trusted key must be the one the server presented",
             presentedFingerprint,
@@ -176,13 +183,13 @@ class J01ConnectAndTrustJourney {
         compose.onNodeWithTag(TRUST_SHEET_REJECT_TAG).performClick()
 
         awaitGone(TRUST_SHEET_FINGERPRINT_TAG)
-        JourneyScreenshots.capture("04-after-reject")
+        capture("04-after-reject")
 
         // Room-level assertion: no key was stored.
         assertNull("reject must not store a host key", storedFingerprint())
         // Screen-level: still on the host list, never on the tree.
         compose.onNodeWithTag(hostRowTag(hostId)).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
     }
 
     /**
@@ -200,7 +207,7 @@ class J01ConnectAndTrustJourney {
         compose.onNodeWithTag(hostRowTag(hostId)).performClick()
 
         awaitTag(TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG)
-        JourneyScreenshots.capture("05-trust-prompt-mismatch")
+        capture("05-trust-prompt-mismatch")
 
         compose.onNodeWithText(MISMATCH_TITLE).assertIsDisplayed()
         compose.onNodeWithText(MISMATCH_TRUST_LABEL).assertIsDisplayed()
@@ -219,7 +226,7 @@ class J01ConnectAndTrustJourney {
             STALE_FINGERPRINT,
             storedFingerprint(),
         )
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertDoesNotExist()
     }
 
     private fun storedFingerprint(): String? =
@@ -234,6 +241,34 @@ class J01ConnectAndTrustJourney {
     private fun awaitGone(tag: String) {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()
+        }
+    }
+
+    private fun awaitWorkspacesSettled() {
+        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
+            val hasWorkspaceScreen = compose.onAllNodesWithTag(HOST_WORKSPACES_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+            val stillLoading = compose.onAllNodesWithTag(HOST_WORKSPACES_LOADING_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+            val hasContent = compose.onAllNodesWithTag(HOST_WORKSPACES_LIST_TAG)
+                .fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithTag(HOST_WORKSPACES_EMPTY_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+            hasWorkspaceScreen && !stillLoading && hasContent
+        }
+    }
+
+    /** Keep the real-device captures after AGP removes the test app. */
+    private fun capture(name: String) {
+        val file = JourneyScreenshots.capture(name)
+        val outputDir = InstrumentationRegistry.getArguments()
+            .getString("additionalTestOutputDir")
+            ?.takeIf { it.isNotBlank() }
+            ?: return
+        runCatching {
+            val target = File(File(outputDir, "j01-connect-trust").apply { mkdirs() }, file.name)
+            file.copyTo(target, overwrite = true)
+            println("J01_SCREENSHOT ${target.absolutePath}")
         }
     }
 

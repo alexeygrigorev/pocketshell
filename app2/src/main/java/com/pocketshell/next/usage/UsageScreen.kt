@@ -1,9 +1,7 @@
 package com.pocketshell.next.usage
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,9 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,7 +32,6 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageResetCredits
-import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import com.pocketshell.uikit.components.Banner
@@ -46,15 +41,12 @@ import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
-import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.components.ScreenHeader
-import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.Instant
@@ -73,31 +65,25 @@ import java.time.ZoneId
 @Composable
 fun UsageRoute(
     onBack: () -> Unit,
+    selectedHostId: Long? = null,
     modifier: Modifier = Modifier,
     viewModel: UsageViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
-    LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh(selectedHostId) }
     UsageScreen(
         state = state,
         onBack = onBack,
-        onRefresh = viewModel::refresh,
+        onRefresh = { viewModel.refresh(selectedHostId) },
         modifier = modifier,
     )
 }
 
 /**
- * The provider quota panel: compact strip first, full card on tap.
- *
- * Default paint is the cross-host summary (one line per provider) plus last-sync,
- * counts, and the reset banner. Tapping a compact row mounts that provider's
- * existing [UsageProviderCard]; tapping again collapses it. Other providers stay
- * collapsed unless tapped. [initiallyExpandedProviders] is the render/test seam
- * for a first-paint expanded card; production always starts collapsed.
- *
- * Ported from the pre-rewrite `usage/UsageScreen.kt`, minus the deleted
- * server-side capture cache and the surfaces that belonged to screens app2
- * does not have yet.
+ * The host-scoped provider quota panel. Each provider is a shared Quiet row;
+ * tapping it reveals the real windows, reset timing, credits, and provider
+ * messages inline. The screen contains no cross-host dashboard or nested card
+ * chrome, so the selected host remains the only data scope the user sees.
  */
 @Composable
 fun UsageScreen(
@@ -115,41 +101,11 @@ fun UsageScreen(
             .background(PocketShellColors.Background)
             .testTag(USAGE_SCREEN_TAG),
     ) {
-        UsageHeader(onBack = onBack, onRefresh = onRefresh)
-
-        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-            UsageMeta(state = state)
-
-            state.resetBanner?.let { banner -> UsageResetBanner(state = banner) }
-
-            // The cross-host summary is the primary list: one line per provider,
-            // worst window, soonest reset. Full cards stay unmounted until the
-            // matching compact row is tapped (#2534).
-            UsageDashboardStrip(
-                rows = state.dashboardRows(),
-                now = now,
-                onRowClick = { provider ->
-                    expandedProviders = if (provider in expandedProviders) {
-                        expandedProviders - provider
-                    } else {
-                        expandedProviders + provider
-                    }
-                },
-            )
-
-            state.hosts.forEach { host ->
-                host.records.forEach { record ->
-                    if (record.displayName in expandedProviders) {
-                        UsageProviderCard(record = record, now = now)
-                    }
-                }
-            }
-
-            state.missingToolHosts.forEach { host -> UsageEmptyHost(host = host) }
-            state.failedHosts.forEach { host -> UsageFailedHostPanel(host = host) }
-
-            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
-        }
+        UsageHeader(
+            hostName = state.selectedHostName,
+            onBack = onBack,
+            onRefresh = onRefresh,
+        )
 
         if (state.isEmptyWithNoConnectedHosts) {
             EmptyState(
@@ -157,7 +113,8 @@ fun UsageScreen(
                 description = "PocketShell reads quotas from a host you are connected to. " +
                     "Open a host from the list, then come back.",
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .testTag(USAGE_NO_HOSTS_TAG),
             )
         } else if (state.isEmptyWithConnectedHosts) {
@@ -166,21 +123,57 @@ fun UsageScreen(
                 description = "The host answered `pocketshell usage --json` with no provider " +
                     "records.",
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .testTag(USAGE_NO_PROVIDERS_TAG),
             )
+        } else {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .testTag(USAGE_PROVIDER_LIST_TAG),
+            ) {
+                UsageMeta(state = state)
+
+                state.resetBanner?.let { banner -> UsageResetBanner(state = banner) }
+
+                state.hosts.forEach { host ->
+                    host.records.forEach { record ->
+                        UsageProviderRow(
+                            record = record,
+                            expanded = record.displayName in expandedProviders,
+                            now = now,
+                            warnPercent = state.warnPercent,
+                            onToggle = {
+                                expandedProviders = if (record.displayName in expandedProviders) {
+                                    expandedProviders - record.displayName
+                                } else {
+                                    expandedProviders + record.displayName
+                                }
+                            },
+                        )
+                    }
+                }
+
+                state.missingToolHosts.forEach { host -> UsageEmptyHost(host = host) }
+                state.failedHosts.forEach { host -> UsageFailedHostPanel(host = host) }
+
+                Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
+            }
         }
     }
 }
 
 @Composable
 private fun UsageHeader(
+    hostName: String?,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     ScreenHeader(
         title = "Usage",
-        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        subtitle = hostName ?: "Connected hosts",
         leading = {
             PocketShellButton(
                 text = "Back",
@@ -224,7 +217,11 @@ private fun UsageMeta(state: UsageScreenState) {
             modifier = Modifier.testTag(USAGE_SYNC_TAG),
         )
         Text(
-            text = "${state.providerCount} providers · ${state.hostCount} hosts",
+            text = if (state.selectedHostId != null) {
+                "${state.providerCount} providers"
+            } else {
+                "${state.providerCount} providers · ${state.hostCount} hosts"
+            },
             color = PocketShellColors.TextMuted,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.testTag(USAGE_COUNTS_TAG),
@@ -232,107 +229,100 @@ private fun UsageMeta(state: UsageScreenState) {
     }
 }
 
-/**
- * The cross-host summary strip: one row per provider, tinted by its threshold
- * state, with the soonest reset on the right. Each row is tappable and toggles
- * that provider's full card below the strip.
- *
- * Ported from the pre-rewrite host-list strip. It lives INSIDE the panel here
- * rather than on the host list, because app2's host list is a pre-connection
- * screen and this data only exists for hosts that are already connected.
- */
+/** One real provider record rendered as a Quiet row with optional inline detail. */
 @Composable
-internal fun UsageDashboardStrip(
-    rows: List<UsageDashboardRow>,
-    onRowClick: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    now: Instant = Instant.now(),
+private fun UsageProviderRow(
+    record: UsageProviderRecord,
+    expanded: Boolean,
+    now: Instant,
+    warnPercent: Double,
+    onToggle: () -> Unit,
 ) {
-    if (rows.isEmpty()) return
-    val zone = ZoneId.systemDefault()
+    val constrained = record.mostConstrainedWindow
+    val summary = listOfNotNull(
+        constrained?.let { "${formatPercentUsed(it.percent)} · ${windowLabel(it.name)}" },
+        statusLabel(record, warnPercent).takeIf { constrained == null },
+    ).joinToString(" · ")
+    val hasDetails = record.windows.isNotEmpty() ||
+        record.resetCredits != null ||
+        record.blockReason != null ||
+        record.lastError != null
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = PocketShellSpacing.md)
-            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
-            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
-            .padding(horizontal = PocketShellSpacing.xs, vertical = PocketShellSpacing.xs)
-            .testTag(USAGE_SUMMARY_STRIP_TAG),
+            .testTag(usageProviderRowTag(record.provider)),
     ) {
-        rows.forEach { row ->
-            ListRow(
-                title = row.provider,
-                modifier = Modifier.testTag(usageSummaryRowTag(row.provider)),
-                leading = { ProviderDot(kind = dotKindForThreshold(row.thresholdState)) },
-                trailing = {
-                    row.soonestReset?.let { reset ->
-                        Text(
-                            text = formatResetRelative(now, reset, zone),
-                            color = PocketShellColors.TextMuted,
-                            style = PocketShellType.labelMono,
-                            modifier = Modifier.padding(end = PocketShellSpacing.sm),
-                        )
-                    }
+        ListRow(
+            title = record.displayName,
+            subtitle = summary,
+            modifier = Modifier.testTag(usageProviderToggleTag(record.provider)),
+            trailing = if (hasDetails) {
+                {
                     Text(
-                        text = row.percentLabel,
-                        color = thresholdTextColor(row.thresholdState),
-                        style = PocketShellType.labelMono,
+                        text = if (expanded) "Hide" else "Details",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.metadata,
                     )
-                },
-                onClick = { onRowClick(row.provider) },
+                }
+            } else {
+                null
+            },
+            onClick = onToggle.takeIf { hasDetails },
+        )
+        if (!expanded && constrained != null) {
+            ProgressBar(
+                progress = (constrained.percent / 100.0).toFloat(),
+                kind = progressKind(constrained.percent, record.isBlocked, warnPercent),
+                modifier = Modifier
+                    .padding(horizontal = PocketShellDensity.rowPadH)
+                    .padding(bottom = PocketShellSpacing.sm)
+                    .testTag("${usageProviderToggleTag(record.provider)}-summary"),
             )
+        }
+        if (expanded) {
+            UsageProviderDetails(record = record, now = now, warnPercent = warnPercent)
         }
     }
 }
 
 @Composable
-private fun UsageProviderCard(
+private fun UsageProviderDetails(
     record: UsageProviderRecord,
     now: Instant,
+    warnPercent: Double,
 ) {
+    val status = record.thresholdState(warnPercent = warnPercent)
+    val messages = listOfNotNull(
+        record.blockReason.takeIf { record.windows.isEmpty() },
+        usageTelemetryMessageForDisplay(record.lastError),
+    ).distinct()
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm)
-            .background(PocketShellColors.Surface, PocketShellShapes.extraSmall)
-            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.extraSmall)
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg)
-            .testTag(usageProviderCardTag(record.provider)),
+            .padding(
+                start = PocketShellDensity.rowPadH,
+                end = PocketShellDensity.rowPadH,
+                bottom = PocketShellSpacing.md,
+            )
+            .testTag(usageProviderDetailsTag(record.provider)),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
-        ListRow(
-            title = record.displayName,
-            leading = { ProviderDot(kind = dotKind(record)) },
-            trailing = { Pill(label = statusLabel(record), kind = pillKind(record)) },
+        Text(
+            text = "Status · ${statusLabel(record, warnPercent)}",
+            color = thresholdTextColor(status),
+            style = PocketShellType.metadata,
         )
-
-        Spacer(modifier = Modifier.height(PocketShellSpacing.md))
-
-        record.windows.forEachIndexed { index, window ->
-            UsageWindowRow(window = window, record = record, now = now)
-            if (index != record.windows.lastIndex) {
-                Spacer(modifier = Modifier.height(PocketShellSpacing.md))
-            }
+        record.windows.forEach { window ->
+            UsageWindowRow(window = window, record = record, now = now, warnPercent = warnPercent)
         }
-
         record.resetCredits?.let { resetCredits ->
-            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
             UsageResetCreditsSection(resetCredits = resetCredits, now = now)
         }
-
-        val messages = listOfNotNull(
-            record.blockReason.takeIf { record.windows.isEmpty() },
-            usageTelemetryMessageForDisplay(record.lastError),
-        ).distinct()
-        messages.forEachIndexed { index, message ->
-            Spacer(
-                modifier = Modifier.height(
-                    if (index == 0) PocketShellSpacing.sm else PocketShellSpacing.xs,
-                ),
-            )
+        messages.forEach { message ->
             Text(
                 text = message,
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
         }
     }
@@ -378,7 +368,7 @@ private fun UsageResetCreditsSection(
                 Text(
                     text = credit.title,
                     color = PocketShellColors.Text,
-                    style = PocketShellType.bodyDense,
+                    style = PocketShellType.body,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -388,14 +378,14 @@ private fun UsageResetCreditsSection(
                 Text(
                     text = expiry.primary,
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                     modifier = Modifier.testTag(usageResetCreditExpiryTag(index)),
                 )
                 expiry.absolute?.let { absolute ->
                     Text(
                         text = absolute,
                         color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.labelMono,
+                        style = PocketShellType.metadata,
                     )
                 }
             }
@@ -408,6 +398,7 @@ private fun UsageWindowRow(
     window: UsageWindow,
     record: UsageProviderRecord,
     now: Instant,
+    warnPercent: Double,
 ) {
     Column(modifier = Modifier.testTag(usageWindowRowTag(record.provider, window.name))) {
         Row(
@@ -427,14 +418,14 @@ private fun UsageWindowRow(
             Text(
                 text = formatPercentUsed(window.percent),
                 color = PocketShellColors.Text,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 fontWeight = FontWeight.Medium,
             )
         }
         Spacer(modifier = Modifier.height(PocketShellSpacing.xs + 2.dp))
         ProgressBar(
             progress = (window.percent / 100.0).toFloat(),
-            kind = progressKind(window.percent, record.isBlocked),
+            kind = progressKind(window.percent, record.isBlocked, warnPercent),
         )
         UsageResetFoot(
             window = window,
@@ -465,14 +456,14 @@ private fun UsageResetFoot(
             Text(
                 text = primary,
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
         }
         if (absolute != null) {
             Text(
                 text = absolute,
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
@@ -499,14 +490,14 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
         Text(
             text = "${host.hostName}: ${host.toolName} not installed",
             color = PocketShellColors.TextMuted,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.body,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = "server-side usage tracking unavailable",
             color = PocketShellColors.TextSecondary,
-            style = PocketShellType.labelMono,
+            style = PocketShellType.metadata,
             modifier = Modifier.padding(top = PocketShellSpacing.sm),
         )
         Text(
@@ -531,50 +522,13 @@ private fun UsageFailedHostPanel(host: UsageFailedHost) {
             Text(
                 text = usageTelemetryMessageForDisplay(host.reason) ?: USAGE_DATA_UNAVAILABLE,
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag(usageFailedHostReasonTag(host.hostId)),
             )
         },
     )
-}
-
-@Composable
-internal fun ProviderDot(kind: DotKind) {
-    val color = when (kind) {
-        DotKind.Ok -> PocketShellColors.Green
-        DotKind.Warn -> PocketShellColors.Amber
-        DotKind.Blocked -> PocketShellColors.Red
-        DotKind.Neutral -> PocketShellColors.TextMuted
-    }
-    Box(
-        modifier = Modifier
-            .size(PocketShellSpacing.sm)
-            .background(color = color, shape = RoundedCornerShape(PocketShellSpacing.xs)),
-    )
-}
-
-internal enum class DotKind {
-    Ok,
-    Warn,
-    Blocked,
-    Neutral,
-}
-
-private fun dotKind(record: UsageProviderRecord): DotKind = when {
-    usageProviderStatusUi(record).needsAuthSetup -> DotKind.Neutral
-    record.isBlocked -> DotKind.Blocked
-    record.isNearLimit || record.status == UsageStatus.Warn -> DotKind.Warn
-    record.status == UsageStatus.Ok -> DotKind.Ok
-    else -> DotKind.Neutral
-}
-
-internal fun dotKindForThreshold(state: UsageThresholdState): DotKind = when (state) {
-    UsageThresholdState.Ok -> DotKind.Ok
-    UsageThresholdState.Approaching -> DotKind.Warn
-    UsageThresholdState.Critical -> DotKind.Blocked
-    UsageThresholdState.Exceeded -> DotKind.Blocked
 }
 
 @Composable
@@ -592,17 +546,13 @@ internal fun thresholdRowDescription(state: UsageThresholdState): String = when 
     UsageThresholdState.Exceeded -> exceededUsageDescription()
 }
 
-private fun pillKind(record: UsageProviderRecord): PillKind = when {
-    usageProviderStatusUi(record).needsAuthSetup -> PillKind.Error
-    record.isBlocked -> PillKind.Blocked
-    record.isNearLimit || record.status == UsageStatus.Warn -> PillKind.Warn
-    record.status == UsageStatus.Ok -> PillKind.Ok
-    else -> PillKind.Error
-}
-
-private fun progressKind(percent: Double, blocked: Boolean): ProgressKind = when {
+private fun progressKind(
+    percent: Double,
+    blocked: Boolean,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+): ProgressKind = when {
     blocked || percent >= 100.0 -> ProgressKind.Danger
-    percent >= UsageProviderRecord.WARN_PERCENT -> ProgressKind.Warn
+    percent >= warnPercent -> ProgressKind.Warn
     else -> ProgressKind.Default
 }
 
@@ -632,8 +582,11 @@ const val USAGE_COUNTS_TAG: String = "usage:counts"
 const val USAGE_NO_HOSTS_TAG: String = "usage:no-connected-hosts"
 const val USAGE_NO_PROVIDERS_TAG: String = "usage:no-providers"
 
-const val USAGE_SUMMARY_STRIP_TAG: String = "usage:summary"
-fun usageSummaryRowTag(provider: String): String = "usage:summary:" + provider.lowercase()
+const val USAGE_PROVIDER_LIST_TAG: String = "usage:providers"
+fun usageProviderRowTag(provider: String): String = "usage:provider-row:" + provider.lowercase()
+fun usageProviderToggleTag(provider: String): String = "usage:provider-toggle:" + provider.lowercase()
+fun usageProviderDetailsTag(provider: String): String =
+    "usage:provider-details:" + provider.lowercase()
 
 const val USAGE_OVERFLOW_TAG: String = "usage:overflow"
 const val USAGE_REFRESH_ACTION_TAG: String = "usage:overflow:refresh"
@@ -644,9 +597,6 @@ const val USAGE_RESET_CREDITS_UNAVAILABLE_TAG: String = "usage:reset-credits:una
 
 fun usageResetCreditTitleTag(index: Int): String = "usage:reset-credits:$index:title"
 fun usageResetCreditExpiryTag(index: Int): String = "usage:reset-credits:$index:expiry"
-
-/** Per-provider card tag. Lowercased so a probe stays stable across casings. */
-fun usageProviderCardTag(provider: String): String = "usage:provider:" + provider.lowercase()
 
 fun usageWindowRowTag(provider: String, window: String): String =
     "usage:provider:" + provider.lowercase() + ":window:" + window.lowercase()

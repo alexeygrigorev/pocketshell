@@ -118,6 +118,42 @@ class AddEditHostViewModelTest {
         assertEquals("root", row.username)
     }
 
+    @Test
+    fun `usage command is optional and round trips through edit`() = runTest {
+        val vm = viewModel()
+        bindAndAwait(vm, null)
+        fill(vm, name = "hetzner", hostname = "10.0.0.7", port = "22", username = "alexey")
+        vm.update { it.copy(usageCommand = "  pocketshell host usage  ") }
+        saveAndAwait(vm)
+
+        val id = db.hostDao().getAll().first().single().id
+        assertEquals("pocketshell host usage", db.hostDao().getById(id)?.usageCommandOverride)
+
+        vm.consumeSaved()
+        val editVm = viewModel()
+        bindAndAwait(editVm, id)
+        assertEquals("pocketshell host usage", editVm.state.value.usageCommand)
+    }
+
+    @Test
+    fun `test connection persists the current form and emits its real host id`() = runTest {
+        val vm = viewModel()
+        bindAndAwait(vm, null)
+        fill(vm, name = "builder", hostname = "10.0.0.8", port = "2222", username = "root")
+
+        vm.testConnection()
+        val hostId = vm.state.first { it.testConnectionHostId != null }.testConnectionHostId!!
+        val row = db.hostDao().getById(hostId)
+
+        assertEquals("builder", row?.name)
+        assertEquals(2222, row?.port)
+        assertTrue(vm.state.value.editing)
+        assertFalse(vm.state.value.testingConnection)
+
+        vm.consumeTestConnection()
+        assertNull(vm.state.value.testConnectionHostId)
+    }
+
     // --------------------------------------------------------------- edit ---
 
     @Test
@@ -172,7 +208,6 @@ class AddEditHostViewModelTest {
                 port = 22,
                 username = "alexey",
                 keyId = keyId,
-                tmuxInstalled = true,
                 pocketshellInstalled = true,
                 pocketshellCliVersion = "1.2.3",
                 lastConnectedAt = 1234L,
@@ -187,7 +222,6 @@ class AddEditHostViewModelTest {
 
         val row = db.hostDao().getById(id)!!
         assertEquals("renamed", row.name)
-        assertEquals(true, row.tmuxInstalled)
         assertEquals(true, row.pocketshellInstalled)
         assertEquals("1.2.3", row.pocketshellCliVersion)
         assertEquals(1234L, row.lastConnectedAt)

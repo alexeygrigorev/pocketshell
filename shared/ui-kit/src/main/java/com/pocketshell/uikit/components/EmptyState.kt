@@ -99,7 +99,7 @@ fun EmptyState(
                 Text(
                     text = description,
                     color = semantic.statusIdle,
-                    style = PocketShellType.bodyDense,
+                    style = PocketShellType.body,
                     fontWeight = FontWeight.Normal,
                     textAlign = TextAlign.Center,
                 )

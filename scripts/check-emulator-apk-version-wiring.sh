@@ -170,9 +170,6 @@ check_fixture_version_wiring() {
 # guard's own docs/self-test). Anything else that brings `agents` up is a real
 # caller and must stamp the fixture.
 AGENTS_UP_TEXT_ONLY_ALLOWLIST=(
-  # Asserts the text of the CI journey fixture-retry wrapper; the compose line
-  # lives inside a quoted expectation string, not an invocation.
-  "test-ci-journey-fixture-health.sh"
   # This guard: the pattern appears in the header docs and in the self-test.
   "check-emulator-apk-version-wiring.sh"
 )

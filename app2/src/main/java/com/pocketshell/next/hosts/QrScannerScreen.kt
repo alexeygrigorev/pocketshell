@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,14 +43,25 @@ import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /** Stable test tags. */
 const val QR_SCANNER_PREVIEW_TAG: String = "qr-scanner-preview"
 const val QR_SCANNER_PROGRESS_TAG: String = "qr-scanner-progress"
+const val QR_SCANNER_INSTRUCTION_TAG: String = "qr-scanner-instruction"
+const val QR_SCANNER_WAITING_TAG: String = "qr-scanner-waiting"
+const val QR_SCANNER_REVIEW_TAG: String = "qr-scanner-review"
+const val QR_SCANNER_REVIEW_IMPORT_TAG: String = "qr-scanner-review-import"
+const val QR_SCANNER_REVIEW_CANCEL_TAG: String = "qr-scanner-review-cancel"
+const val QR_SCANNER_REVIEW_REPLACE_TAG: String = "qr-scanner-review-replace"
+const val QR_SCANNER_REVIEW_SKIP_TAG: String = "qr-scanner-review-skip"
+const val QR_SCANNER_REVIEW_ADD_NEW_TAG: String = "qr-scanner-review-add-new"
 
 /**
  * The QR import screen (rewrite task P-6): point the camera at a host QR, get a
@@ -62,7 +77,7 @@ const val QR_SCANNER_PROGRESS_TAG: String = "qr-scanner-progress"
  */
 @Composable
 fun QrScannerRoute(
-    onFinished: (String) -> Unit,
+    onFinished: (Long) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: QrScannerViewModel = hiltViewModel(),
@@ -114,7 +129,7 @@ fun QrScannerRoute(
 
     LaunchedEffect(state) {
         val imported = state as? QrScannerViewModel.State.Imported ?: return@LaunchedEffect
-        currentOnFinished(imported.message)
+        currentOnFinished(imported.hostId)
     }
 
     QrScannerScreen(
@@ -123,6 +138,8 @@ fun QrScannerRoute(
         onRetryPermission = { permissionLauncher.launch(Manifest.permission.CAMERA) },
         onPickImage = { imagePicker.launch("image/*") },
         onRetry = viewModel::retry,
+        onConfirmImport = viewModel::confirmImport,
+        onCancelReview = viewModel::cancelReview,
         onClose = onClose,
         modifier = modifier,
     )
@@ -136,6 +153,8 @@ fun QrScannerScreen(
     onRetryPermission: () -> Unit,
     onPickImage: () -> Unit,
     onRetry: () -> Unit,
+    onConfirmImport: (DuplicateAction?) -> Unit = {},
+    onCancelReview: () -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -180,16 +199,7 @@ fun QrScannerScreen(
             }
 
             is QrScannerViewModel.State.Scanning -> Column(modifier = Modifier.fillMaxSize()) {
-                if (state.total > 0) {
-                    Text(
-                        text = "Scanned ${state.scanned} of ${state.total}",
-                        color = PocketShellColors.Text,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .padding(PocketShellSpacing.md)
-                            .testTag(QR_SCANNER_PROGRESS_TAG),
-                    )
-                }
+                QrScannerInstructions(scanned = state.scanned, total = state.total)
                 CameraPreview(
                     onScanned = onScanned,
                     modifier = Modifier
@@ -200,9 +210,17 @@ fun QrScannerScreen(
                 )
             }
 
+            is QrScannerViewModel.State.Review -> QrImportReview(
+                config = state.config,
+                existingHost = state.existingHost,
+                duplicateChecked = state.duplicateChecked,
+                onConfirm = onConfirmImport,
+                onCancel = onCancelReview,
+            )
+
             is QrScannerViewModel.State.Importing -> Centered("Importing…")
 
-            is QrScannerViewModel.State.Imported -> Centered(state.message)
+            is QrScannerViewModel.State.Imported -> Centered(state.message, showSpinner = false)
 
             is QrScannerViewModel.State.Failed -> Column(
                 modifier = Modifier
@@ -225,19 +243,148 @@ fun QrScannerScreen(
     }
 }
 
+/** The camera-independent status copy above the live preview. */
 @Composable
-private fun Centered(message: String) {
+internal fun QrScannerInstructions(scanned: Int, total: Int) {
+    Text(
+        text = "Point your camera at the PocketShell QR code on your computer.",
+        color = PocketShellColors.TextSecondary,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
+            .testTag(QR_SCANNER_INSTRUCTION_TAG),
+    )
+    if (total > 0) {
+        Text(
+            text = "Scanned $scanned of $total",
+            color = PocketShellColors.Text,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .padding(PocketShellSpacing.md)
+                .testTag(QR_SCANNER_PROGRESS_TAG),
+        )
+    } else {
+        Text(
+            text = "Waiting for a QR code…",
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .padding(horizontal = PocketShellSpacing.md)
+                .testTag(QR_SCANNER_WAITING_TAG),
+        )
+    }
+}
+
+@Composable
+private fun QrImportReview(
+    config: SshImportConfig,
+    existingHost: ExistingHost?,
+    duplicateChecked: Boolean,
+    onConfirm: (DuplicateAction?) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val authentication = when (val auth = config.auth) {
+        is SshImportAuth.KeyReference -> "SSH key · ${auth.name}"
+        is SshImportAuth.PrivateKey -> "Private key included"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(PocketShellSpacing.lg)
+            .testTag(QR_SCANNER_REVIEW_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        Text(
+            text = "Review import",
+            color = PocketShellColors.Text,
+            style = MaterialTheme.typography.titleLarge,
+        )
+        SectionHeader(label = "Connection")
+        ListRow(
+            title = config.name,
+            subtitle = "${config.username}@${config.host}:${config.port}",
+        )
+        SectionHeader(label = "Authentication")
+        ListRow(title = authentication, subtitle = "Key material stays on this device")
+        if (config.auth is SshImportAuth.PrivateKey) {
+            Banner(
+                text = "This QR includes a private key. Import it only from a source you trust.",
+                role = BannerRole.Warning,
+            )
+        }
+        if (!duplicateChecked) {
+            LoadingIndicator.Spinner(label = "Checking for an existing host…")
+        } else if (existingHost != null) {
+            Banner(
+                text = "${existingHost.name} already uses this account and endpoint. Choose what to do.",
+                role = BannerRole.Warning,
+            )
+            PocketShellButton(
+                text = "Replace existing host",
+                onClick = { onConfirm(DuplicateAction.Replace) },
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(QR_SCANNER_REVIEW_REPLACE_TAG),
+            )
+            PocketShellButton(
+                text = "Skip import",
+                onClick = { onConfirm(DuplicateAction.Skip) },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(QR_SCANNER_REVIEW_SKIP_TAG),
+            )
+            PocketShellButton(
+                text = "Add as new host",
+                onClick = { onConfirm(DuplicateAction.AddNew) },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(QR_SCANNER_REVIEW_ADD_NEW_TAG),
+            )
+        } else {
+            PocketShellButton(
+                text = "Import and connect",
+                onClick = { onConfirm(DuplicateAction.AddNew) },
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(QR_SCANNER_REVIEW_IMPORT_TAG),
+            )
+        }
+        PocketShellButton(
+            text = "Cancel",
+            onClick = onCancel,
+            variant = ButtonVariant.Text,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(QR_SCANNER_REVIEW_CANCEL_TAG),
+        )
+    }
+}
+
+@Composable
+private fun Centered(message: String, showSpinner: Boolean = true) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(PocketShellSpacing.lg),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = message,
-            color = PocketShellColors.TextSecondary,
-            style = MaterialTheme.typography.titleMedium,
-        )
+        if (showSpinner) {
+            LoadingIndicator.Spinner(label = message)
+        } else {
+            Text(
+                text = message,
+                color = PocketShellColors.Text,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
     }
 }
 

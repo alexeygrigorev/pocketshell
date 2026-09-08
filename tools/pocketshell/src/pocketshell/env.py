@@ -36,7 +36,7 @@ Subcommands
 Why stdin for ``set`` (D24)
 ---------------------------
 
-Secret values never appear in argv: ``ps``, shell history, and tmux
+Secret values never appear in argv: ``ps`` or shell history.
 scrollback would otherwise leak them. The caller pipes a JSON object on
 stdin instead. ``export`` shell-quotes values so the emitted block is
 safe to ``eval`` in the launch hook (#263).

@@ -1,7 +1,10 @@
 package com.pocketshell.next.terminal
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -25,12 +28,13 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
+import com.pocketshell.next.connect.openQuietSession
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.idleWedgeNote
 import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
@@ -39,6 +43,8 @@ import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
+import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -70,18 +76,18 @@ import org.junit.runner.RunWith
  * `TerminalView` in the running Activity — the exact text the renderer paints —
  * never ViewModel state (the D29 lesson: internal state green while the screen
  * is broken is the failure this project has already paid for). Each assertion
- * is then cross-checked against `tmux capture-pane -p` run over an INDEPENDENT
+ * is then cross-checked against `a capture --screen --plain` run over an INDEPENDENT
  * SSH connection, so "the phone shows it" and "the host has it" have to agree:
  * a device-only assertion could pass on locally echoed bytes that never left,
  * and a host-only assertion could pass with a black screen.
  *
  * ## Fixture
  *
- * The Docker `agents` fixture (see [AgentsFixture]). [seed] creates a REAL tmux
- * session on a real `tmuxctl-<name>` socket — the shape `pocketshell sessions
- * list` enumerates and `pocketshell sessions attach` resolves — with a pinned
- * `PS1` so "the shell prompt is on screen" is an assertable string rather than
- * a guess about Alpine's ash defaults.
+ * The Docker `agents` fixture (see [AgentsFixture]). [seed] creates a REAL
+ * aplexer session — the shape `pocketshell sessions list` enumerates and
+ * `pocketshell sessions attach` resolves — with a pinned `PS1` so "the shell
+ * prompt is on screen" is an assertable string rather than a shell-default
+ * guess.
  *
  * Bring the fixture up before running:
  * `docker compose -f tests/docker/docker-compose.yml up -d --build agents`
@@ -143,7 +149,7 @@ class J03AttachAndTypeJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J03_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j03_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -164,31 +170,20 @@ class J03AttachAndTypeJourney {
         )
     }
 
-    /**
-     * Creates the session on its own `tmuxctl-<name>` socket — the per-session
-     * socket convention `sessions attach` resolves against — and paints a known
-     * prompt plus a marker line into it.
-     *
-     * Recreated per test rather than reused, so a test that types into the pane
-     * cannot leave text behind that would make the NEXT test's assertion pass
-     * for the wrong reason.
-     */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        // `tmux -S <path>` binds the path as given and does NOT create its
-        // parent, unlike `-L`. The enumerator scans this exact directory.
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    /** Creates a real aplexer shell and paints a known prompt plus marker. */
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        // A pinned prompt: Alpine's ash default PS1 is not something a test
-        // should be guessing at, and this is still the shell's real prompt.
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; echo $BANNER'",
+        )
         SystemClock.sleep(500)
-        val pane = capturePane()
-        check(squashed(pane).contains(BANNER)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
+        val screen = capturePane()
+        check(squashed(screen).contains(BANNER)) {
+            "the fixture aplexer session did not come up: a capture says\n$screen"
         }
     }
 
@@ -203,7 +198,7 @@ class J03AttachAndTypeJourney {
         // 1. The pane the host has is the pane the phone draws. Both sides are
         //    read fresh; neither is a constant this file made up.
         val rendered = awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
-        JourneyScreenshots.capture("01-attached", JOURNEY)
+        capture("01-attached")
         assertTrue(
             "the live shell prompt must be on screen, got:\n$rendered",
             squashed(rendered).contains(PROMPT),
@@ -224,7 +219,7 @@ class J03AttachAndTypeJourney {
             // merely rendered the keystrokes locally would show.
             squashed(it).split(MARKER).size >= 3
         }
-        JourneyScreenshots.capture("02-typed", JOURNEY)
+        capture("02-typed")
         assertTrue(
             "the rendered viewport must show the command's output, got:\n$afterTyping",
             squashed(afterTyping).contains(MARKER),
@@ -235,6 +230,18 @@ class J03AttachAndTypeJourney {
             "the host's pane must show the typed command, got:\n$pane",
             squashed(pane).contains("echo$MARKER"),
         )
+
+        // 4. Exercise the vendored native selection controller and the
+        // production SessionScreen copy action against the real Android
+        // clipboard. The unit seam can cover stored selection text, but only
+        // this device path proves rendered cell geometry and selection state.
+        // Put the marker on its own rendered row. The native controller expands
+        // a tap to the contiguous non-empty row, so selecting an `echo marker`
+        // command would also include the shell's `echo ` prefix.
+        typeLine("printf '\\n%s\\n' '$COPY_MARKER'")
+        awaitTranscript("the copy-selection marker") { it.contains(COPY_MARKER) }
+        copyNativeSelection(COPY_MARKER)
+        capture("03-copy-selection")
     }
 
     /**
@@ -253,15 +260,15 @@ class J03AttachAndTypeJourney {
         // `seed()` is what produces that ordering; killing it earlier just
         // removes the row and tests nothing.
         openTree()
-        awaitTag(sessionRowTag(SESSION))
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
+        awaitTag(workspaceSessionRowTag(SESSION))
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
+        compose.onNodeWithTag(workspaceSessionRowTag(SESSION)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
 
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(SESSION_ERROR_BANNER_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        JourneyScreenshots.capture("03-vanished-session", JOURNEY)
+        capture("03-vanished-session")
         compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
         // WHY it failed has to survive to the screen, not just THAT it failed:
         // exit 3 is `pocketshell sessions attach`'s "no session named ...", and
@@ -274,9 +281,9 @@ class J03AttachAndTypeJourney {
         // Back is the way out, and it works.
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(SESSION_TREE_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(SESSION_TREE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertIsDisplayed()
     }
 
     /**
@@ -308,11 +315,11 @@ class J03AttachAndTypeJourney {
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
         val closed = remoteSize("keyboard down", keyboardUp = false)
-        JourneyScreenshots.capture("04-keyboard-down", JOURNEY)
+        capture("04-keyboard-down")
 
         showKeyboard()
         val opened = remoteSize("keyboard up", keyboardUp = true)
-        JourneyScreenshots.capture("05-keyboard-up", JOURNEY)
+        capture("05-keyboard-up")
         assertEquals(
             "the keyboard must not change the remote size (#887/#2533): " +
                 "closed=$closed opened=$opened",
@@ -331,7 +338,7 @@ class J03AttachAndTypeJourney {
 
         rotate(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
         val landscape = remoteSize("landscape", keyboardUp = false)
-        JourneyScreenshots.capture("06-landscape", JOURNEY)
+        capture("06-landscape")
         assertTrue(
             "landscape must widen the remote terminal: portrait=$closed landscape=$landscape",
             landscape.cols > closed.cols,
@@ -382,7 +389,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-        JourneyScreenshots.capture("06-compact-launcher", JOURNEY)
+        capture("06-compact-launcher")
     }
 
     /**
@@ -406,7 +413,7 @@ class J03AttachAndTypeJourney {
 
         typeLine("sleep $SLEEP_SECONDS")
         awaitHostSleep(running = true)
-        JourneyScreenshots.capture("07-sleeping", JOURNEY)
+        capture("07-sleeping")
 
         openHotkeys()
         // Two ordinary taps are the documented accessible fallback for a
@@ -418,7 +425,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitHostSleep(running = false)
-        JourneyScreenshots.capture("08-interrupted", JOURNEY)
+        capture("08-interrupted")
 
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG).performClick()
         compose.awaitIdle("after closing the hotkeys panel")
@@ -461,7 +468,7 @@ class J03AttachAndTypeJourney {
         compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertIsDisplayed()
 
         awaitTranscript("the marker echoed and run") { it.split(ENTER_MARKER).size >= 3 }
-        JourneyScreenshots.capture("09-hotkeys-enter", JOURNEY)
+        capture("09-hotkeys-enter")
         assertTrue(
             "the host must show the command the hotkeys panel's Enter submitted",
             squashed(capturePane()).contains(ENTER_MARKER),
@@ -472,16 +479,12 @@ class J03AttachAndTypeJourney {
 
     /** Host tap → the session tree for that host. */
     private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
     }
 
     /** ...and on into the fixture session's terminal. */
     private fun openSession() {
-        openTree()
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
         awaitTag(SESSION_SCREEN_TAG)
     }
 
@@ -529,12 +532,12 @@ class J03AttachAndTypeJourney {
             if (predicate(last)) return last
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
+        val shot = capture("failure-${what.replace(' ', '-')}")
         throw AssertionError(
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
                 "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n$last\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}" + compose.idleWedgeNote(),
         )
     }
@@ -678,6 +681,62 @@ class J03AttachAndTypeJourney {
         instrumentation.waitForIdleSync()
     }
 
+    /** Selects a known rendered word through TerminalView's native controller. */
+    private fun copyNativeSelection(expected: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val selected = AtomicReference<String?>()
+        val copied = AtomicReference(false)
+        instrumentation.runOnMainSync {
+            val view = checkNotNull(terminalView()) { "no TerminalView on screen" }
+            val emulator = checkNotNull(view.mEmulator) { "terminal emulator is not ready" }
+            val row = (0 until emulator.mRows).firstOrNull { candidate ->
+                emulator.screen.getSelectedText(0, candidate, emulator.mColumns, candidate)
+                    .trim() == expected
+            } ?: error(
+                "copy marker is absent from the rendered rows; " +
+                    "cursor=${emulator.getCursorRow()} transcript=${emulator.screen.transcriptText}",
+            )
+            val renderer = checkNotNull(view.mRenderer) { "terminal renderer is not ready" }
+            val event = MotionEvent.obtain(
+                SystemClock.uptimeMillis(),
+                SystemClock.uptimeMillis(),
+                MotionEvent.ACTION_DOWN,
+                (expected.length / 2) * renderer.getFontWidth(),
+                renderer.getFontLineSpacingAndAscent() +
+                    (row - view.getTopRow() + 0.5f) * renderer.getFontLineSpacing(),
+                0,
+            )
+            try {
+                view.startTextSelectionMode(event)
+                selected.set(view.getSelectedText())
+            } finally {
+                event.recycle()
+            }
+        }
+        assertEquals(
+            "native selection must isolate the rendered word; transcript=${renderedTranscript()}",
+            expected,
+            selected.get(),
+        )
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(400)
+        instrumentation.runOnMainSync {
+            copied.set(checkNotNull(terminalView()).copySelectionToClipboard())
+        }
+        assertTrue("the production copy action must accept native selection", copied.get())
+        assertEquals(expected, clipboardText())
+    }
+
+    private fun clipboardText(): String? {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        return clipboard.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+    }
+
     // --- U-5: size, keyboard, rotation ------------------------------------
 
     /** A terminal size as both ends of the wire report it. */
@@ -692,8 +751,8 @@ class J03AttachAndTypeJourney {
      * INDEPENDENT SSH connection, and polled until it stops moving — a resize
      * crosses the wire asynchronously and asserting mid-flight would be a
      * flake generator. Then `stty size` is typed INTO the session and required
-     * to report that exact size: the pane geometry proves the resize reached
-     * tmux, and `stty` proves it reached the process that actually wraps text.
+     * to report that exact size: the aplexer screen geometry proves the resize reached
+     * the aplexer PTY, and `stty` proves it reached the process that actually wraps text.
      *
      * ## Why the whole thing is a RETRY loop, and why it pins the keyboard
      *
@@ -753,13 +812,13 @@ class J03AttachAndTypeJourney {
                 return current
             }
         }
-        val shot = JourneyScreenshots.capture("failure-${what.replace(' ', '-')}", JOURNEY)
+        val shot = capture("failure-${what.replace(' ', '-')}")
         throw AssertionError(
             "$what: the phone and the host never agreed on a terminal size within " +
                 "${TIMEOUT_MS}ms (last host pane=$host).\n" +
                 "Screen state: ${safeScreenDiagnosis()}\n" +
                 "Rendered viewport was:\n" + renderedTranscript() + "\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -806,7 +865,7 @@ class J03AttachAndTypeJourney {
     /**
      * The host's pane size once two consecutive reads agree.
      *
-     * A `SIGWINCH` and tmux's own redraw are not instantaneous, and the phone's
+     * A `SIGWINCH` and aplexer's redraw are not instantaneous, and the phone's
      * inset animation produces several intermediate sizes on the way, so a
      * single read right after a viewport change can catch any of them.
      */
@@ -826,16 +885,18 @@ class J03AttachAndTypeJourney {
         )
     }
 
-    /** `tmux display-message`, over the fixture's own connection, never the app's. */
+    /** Reads the live aplexer PTY size over an independent SSH connection. */
     private fun hostPaneSize(): RemoteSize? {
-        val raw = AgentsFixture.exec(
-            "tmux -S $SOCKET display-message -p -t '=$SESSION:' " +
-                "'#{pane_width} #{pane_height}' 2>/dev/null || true",
-        ).trim()
-        val match = Regex("""^(\d+) (\d+)$""").find(raw) ?: return null
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "\"printf 'J03HOSTSIZE '; stty size\" >/dev/null 2>&1 || true",
+        )
+        val raw = capturePane()
+        val match = Regex("""J03HOSTSIZE (\d+) (\d+)""").findAll(raw).lastOrNull()
+            ?: return null
         return RemoteSize(
-            cols = match.groupValues[1].toInt(),
-            rows = match.groupValues[2].toInt(),
+            cols = match.groupValues[2].toInt(),
+            rows = match.groupValues[1].toInt(),
         )
     }
 
@@ -903,7 +964,7 @@ class J03AttachAndTypeJourney {
             }
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-ime-${visible}", JOURNEY)
+        val shot = capture("failure-ime-${visible}")
         throw AssertionError(
             "the keyboard never became ${if (visible) "visible" else "hidden"} " +
                 "(ime inset bottom=$bottom). Screenshot: ${shot.absolutePath}" +
@@ -963,7 +1024,7 @@ class J03AttachAndTypeJourney {
             }
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-rotate-$want", JOURNEY)
+        val shot = capture("failure-rotate-$want")
         throw AssertionError(
             "the terminal never laid out $want within ${TIMEOUT_MS}ms " +
                 "(last seen $seen).\n" +
@@ -997,7 +1058,7 @@ class J03AttachAndTypeJourney {
             if ((count > 0) == running) return
             SystemClock.sleep(POLL_MS)
         }
-        val shot = JourneyScreenshots.capture("failure-sleep-$running", JOURNEY)
+        val shot = capture("failure-sleep-$running")
         throw AssertionError(
             "the host never reported `sleep $SLEEP_SECONDS` as " +
                 "${if (running) "running" else "gone"} (count=$count).\n" +
@@ -1012,14 +1073,37 @@ class J03AttachAndTypeJourney {
      * turn a broken app connection into a broken-looking fixture.
      */
     private fun capturePane(): String =
-        AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:' 2>/dev/null || true")
+        AgentsFixture.exec(
+            "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain " +
+                "2>/dev/null || true",
+        )
+
+    /** Keep current real-device captures after the connected-test app is removed. */
+    private fun capture(name: String): File {
+        val file = JourneyScreenshots.capture(name, JOURNEY)
+        val outputDir = InstrumentationRegistry.getArguments()
+            .getString("additionalTestOutputDir")
+            ?.takeIf { it.isNotBlank() }
+            ?: return file
+        runCatching {
+            val targetDir = File(outputDir, JOURNEY).apply { mkdirs() }
+            file.parentFile?.listFiles()
+                ?.filter { it.isFile && it.name.startsWith("${file.nameWithoutExtension}") }
+                ?.forEach { artifact ->
+                    val target = File(targetDir, artifact.name)
+                    artifact.copyTo(target, overwrite = true)
+                    println("J03_SCREENSHOT ${target.absolutePath}")
+                }
+        }
+        return file
+    }
 
     /**
      * Whitespace-free view of terminal text, for wrap-proof matching.
      *
      * A terminal hard-wraps at its column count, and the phone's column count
-     * is whatever the device's font metrics produced — so `capture-pane` and
-     * the rendered transcript can each split a marker across two rows at
+     * is whatever the device's font metrics produced — so the independent
+     * aplexer capture and the rendered transcript can each split a marker across two rows at
      * different points. Every string matched here is whitespace-free by
      * construction, so dropping whitespace makes the assertion independent of
      * the viewport width without weakening it.
@@ -1067,7 +1151,9 @@ class J03AttachAndTypeJourney {
 
         const val JOURNEY = "j03-attach-type"
 
-        const val SESSION = "j03-shell"
+        const val TAG = "j03-shell"
+        const val WORKSPACE = "/home/testuser"
+        const val SESSION = "testuser:j03-shell"
 
         /** `stty size`'s output: `rows cols`, on a line of its own. */
         val STTY_SIZE_LINE = Regex("""\d{1,4} \d{1,4}""")
@@ -1080,17 +1166,10 @@ class J03AttachAndTypeJourney {
          */
         const val SLEEP_SECONDS = 987
 
-        /**
-         * The per-session socket convention `sessions attach` resolves against
-         * (and `pocketshell sessions list` enumerates). Written as a shell
-         * expression because only the host can expand `$(id -u)`.
-         */
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
-
         const val PROMPT = "J03READY\$"
         const val BANNER = "J03-FIXTURE-PANE"
         const val MARKER = "pocketshell-u4-ok"
+        const val COPY_MARKER = "pocketshell-copy-selection-ok"
         const val CTRL_MARKER = "pocketshell-u5-interrupted"
         const val ENTER_MARKER = "pocketshell-u5-submitted"
 

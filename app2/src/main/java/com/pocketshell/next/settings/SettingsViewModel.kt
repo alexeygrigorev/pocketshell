@@ -64,6 +64,8 @@ class SettingsViewModel @Inject constructor(
 
     fun setAgentSubmitEnterDelayMs(delayMs: Int) = repository.setAgentSubmitEnterDelayMs(delayMs)
 
+    fun resetAdvancedDefaults() = repository.resetAdvancedDefaults()
+
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L
 

@@ -2077,7 +2077,7 @@
         {
           "type": "row",
           "title": "More options",
-          "subtitle": "Name, profile and backend",
+          "subtitle": "Name and profile",
           "route": "session-options",
           "icon": "sliders",
           "trailing": ""
@@ -2132,14 +2132,6 @@
           "trailing": ""
         },
         {
-          "type": "row",
-          "title": "Backend",
-          "subtitle": "Host default",
-          "route": "toast:Backend picker: host default, tmux, aplexer",
-          "icon": "",
-          "trailing": ""
-        },
-        {
           "type": "text",
           "text": "These options only affect the session you are about to start.",
           "tone": "secondary"
@@ -2159,7 +2151,7 @@
       "job": "Override launch defaults deliberately.",
       "notes": [
         "Display names are not raw command strings.",
-        "Do not expose unsupported engines or backends as working options."
+        "The host aplexer runtime is fixed; do not expose a runtime picker."
       ],
       "source": "CreateSessionSheet: advanced",
       "headerAction": "",

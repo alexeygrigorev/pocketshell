@@ -4,7 +4,6 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.AgentStateSource
-import com.pocketshell.core.hostapi.Backend
 import com.pocketshell.core.hostapi.ExecOutcome
 import com.pocketshell.core.hostapi.HostCliClient
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -34,7 +33,7 @@ import org.junit.runner.RunWith
 /**
  * [SessionTreeViewModel] over the REAL connect stack — a real Room database, the
  * real [com.pocketshell.next.connect.ConnectionsRegistry], the real
- * [HostCliClient] and the real schema-2 parser — with only the sshj dial swapped
+ * [HostCliClient] and the real schema-3 parser — with only the sshj dial swapped
  * for `core-transport`'s scripted [FakeHostConnection].
  *
  * Nothing between the ViewModel and the bytes on the wire is stubbed, which is
@@ -78,7 +77,7 @@ class SessionTreeViewModelTest {
         val state = viewModel.state.value
         assertTrue("a successful listing must mark the screen loaded", state.loaded)
         assertNull(state.failure)
-        assertEquals(emptyList<String>(), state.errors.map { it.manager })
+        assertEquals(emptyList<String>(), state.errors.map { it.message })
         assertFalse(state.loading)
         assertFalse(state.refreshing)
 
@@ -94,13 +93,11 @@ class SessionTreeViewModelTest {
 
         // The parsed detail the screen renders actually survived the round trip.
         val claude = state.roots[0].folders[1].rows.single { it.name == "claude-main" }
-        assertEquals(Backend.TMUX, claude.backend)
-        assertEquals(AgentState.WORKING, claude.agentState)
+                assertEquals(AgentState.WORKING, claude.agentState)
         assertEquals(AgentStateSource.REPORTED, claude.agentStateSource)
         assertTrue(claude.attached)
         val aplexer = state.roots[0].folders[0].rows.single()
-        assertEquals(Backend.APLEXER, aplexer.backend)
-        assertEquals("codex", aplexer.engine)
+                assertEquals("codex", aplexer.engine)
         assertEquals("yolo", aplexer.tag)
 
         // And the command it ran is the host CLI's, verbatim.
@@ -137,25 +134,7 @@ class SessionTreeViewModelTest {
         }
 
     @Test
-    fun `an UNKNOWN manager row is still rendered rather than dropped`() = runTest(dispatcher) {
-        val hostId = stack.seedHost()
-        answerSessions(UNKNOWN_MANAGER_LISTING)
-        val viewModel = viewModel(hostId)
-
-        viewModel.refresh()
-        advanceUntilIdle()
-
-        val state = viewModel.state.value
-        assertNull(state.failure)
-        assertEquals(2, state.sessionCount)
-        assertTrue(
-            "a manager this build does not know must survive as UNKNOWN",
-            state.roots.flatMap { it.folders }.flatMap { it.rows }.any { it.backend == Backend.UNKNOWN },
-        )
-    }
-
-    @Test
-    fun `a backend that failed to enumerate surfaces as a partial listing, not an empty one`() =
+    fun `an aplexer probe that failed to enumerate surfaces as a partial listing, not an empty one`() =
         runTest(dispatcher) {
             val hostId = stack.seedHost()
             answerSessions(PARTIAL_LISTING)
@@ -167,7 +146,10 @@ class SessionTreeViewModelTest {
             val state = viewModel.state.value
             // This is the #2426 contract: the rows that DID arrive are shown,
             // AND the screen knows the list is short.
-            assertEquals(listOf("aplexer"), state.errors.map { it.manager })
+            assertEquals(
+                listOf("`a --json snapshot` failed: exit 127 (command not found)"),
+                state.errors.map { it.message },
+            )
             assertTrue(state.errors.single().message.contains("exit 127"))
             assertEquals(1, state.sessionCount)
             assertTrue(state.loaded)
@@ -181,7 +163,7 @@ class SessionTreeViewModelTest {
     @Test
     fun `an empty healthy listing is distinguishable from a broken one`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
-        answerSessions("""{"schema":2,"managers":["tmux"],"sessions":[],"errors":[]}""")
+        answerSessions("""{"schema":3,"sessions":[],"errors":[]}""")
         val viewModel = viewModel(hostId)
 
         viewModel.refresh()
@@ -223,9 +205,9 @@ class SessionTreeViewModelTest {
         }
 
     @Test
-    fun `a host CLI too old to answer schema 2 asks the user to update it`() = runTest(dispatcher) {
+    fun `a host CLI too old to answer schema 3 asks the user to update it`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
-        answerSessions("""{"schema":1,"managers":["tmux"],"sessions":[]}""")
+        answerSessions("""{"schema":1,"sessions":[]}""")
         val viewModel = viewModel(hostId)
 
         viewModel.refresh()
@@ -284,7 +266,7 @@ class SessionTreeViewModelTest {
                 )
                 connection.onExecPrefix(
                     "pocketshell sessions list",
-                    ExecResult(1, "", "tmux: server exited", false),
+                    ExecResult(1, "", "aplexer: session listing unavailable", false),
                 )
             }
             val viewModel = viewModel(hostId)
@@ -409,8 +391,8 @@ class SessionTreeViewModelTest {
             assertEquals("demo", create.openRequest)
 
             // The command is the host CLI's own, with --cwd quoted and the name
-            // after `--`. A Shell create with the host-default backend omits
-            // --engine / --profile / --backend.
+            // after `--`. A Shell create with the host default omits
+            // --engine / --profile.
             val createCommand = connection().executedCommands.single { "create" in it }
             assertEquals(
                 "pocketshell sessions create --json --cwd '/home/testuser/git/pocketshell' -- 'demo'",
@@ -427,12 +409,12 @@ class SessionTreeViewModelTest {
 
     /**
      * The idempotency contract (`CreatedSession.created == false`): the session
-     * already existed, which is a SUCCESS. It must still open, with a notice
-     * rather than an error — treating "already there" as a failure is exactly
-     * the bug the host CLI's idempotent create exists to prevent.
+     * already existed, which is a SUCCESS. The tree keeps it visible with a
+     * notice rather than silently resuming it — treating "already there" as a
+     * failure is exactly the bug the host CLI's idempotent create exists to prevent.
      */
     @Test
-    fun `creating a name that already exists opens it instead of failing`() = runTest(dispatcher) {
+    fun `creating a name that already exists stays on the tree`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         answerListAndCreate(HEALTHY_LISTING, createdJson("claude-main", created = false))
         val viewModel = viewModel(hostId)
@@ -443,10 +425,10 @@ class SessionTreeViewModelTest {
 
         val create = viewModel.state.value.create
         assertNull("an existing session must NOT read as a failure", create.failure)
-        assertEquals("claude-main", create.openRequest)
+        assertNull(create.openRequest)
         assertFalse(create.visible)
         val notice = requireNotNull(create.notice) { "the user should be told it already existed" }
-        assertTrue(notice, notice.contains("already existed"))
+        assertTrue(notice, notice.contains("already exists"))
         assertTrue(notice, notice.contains("claude-main"))
         // And the tree itself is not in an error state over it.
         assertNull(viewModel.state.value.failure)
@@ -466,7 +448,7 @@ class SessionTreeViewModelTest {
                 // envelope on stdout and exits non-zero.
                 ExecResult(
                     exitCode = 1,
-                    stdout = """{"schema":2,"error":"pocketshell: `tmuxctl create-detached demo` exited 2."}""",
+                    stdout = """{"schema":3,"error":"pocketshell: `aplexer start demo` exited 2."}""",
                     stderr = "",
                     timedOut = false,
                 ),
@@ -482,7 +464,7 @@ class SessionTreeViewModelTest {
 
         val create = viewModel.state.value.create
         val failure = requireNotNull(create.failure) { "a failed create must be reported" }
-        assertTrue(failure, failure.contains("tmuxctl create-detached demo"))
+        assertTrue(failure, failure.contains("aplexer start demo"))
         assertTrue("the sheet must stay open so the user can retry", create.visible)
         assertFalse(create.submitting)
         assertNull("a failed create must never navigate", create.openRequest)
@@ -597,7 +579,7 @@ class SessionTreeViewModelTest {
         }
 
     @Test
-    fun `an agent create forwards engine profile and backend on the argv`() = runTest(dispatcher) {
+    fun `an agent create forwards engine and profile on the argv`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         answerListAndCreate(HEALTHY_LISTING, createdJson("demo", created = true))
         val viewModel = viewModel(hostId)
@@ -608,7 +590,6 @@ class SessionTreeViewModelTest {
                 cwd = "/home/testuser/git/pocketshell",
                 engine = "claude",
                 profile = "Claude (Z.AI)",
-                backend = "aplexer",
             ),
         )
         advanceUntilIdle()
@@ -618,7 +599,6 @@ class SessionTreeViewModelTest {
                 "--cwd '/home/testuser/git/pocketshell' " +
                 "--engine 'claude' " +
                 "--profile 'Claude (Z.AI)' " +
-                "--backend 'aplexer' " +
                 "-- 'demo'",
             connection().executedCommands.single { "create" in it },
         )
@@ -678,8 +658,8 @@ class SessionTreeViewModelTest {
             val hostId = stack.seedHost()
             answerSessions(
                 """
-                {"schema":2,"managers":["tmux"],"sessions":[
-                  {"name":"homeless","manager":"tmux","id":null,"workspace":null,"tag":null,
+                {"schema":3,"sessions":[
+                  {"name":"homeless","id":null,"workspace":null,"tag":null,
                    "engine":null,"profile":null,"agent_state":null,"agent_state_source":null,
                    "attached":false,"created_epoch":null,"activity_epoch":10}
                 ],"errors":[]}
@@ -883,7 +863,7 @@ class SessionTreeViewModelTest {
                 before = LISTING_WITHOUT_CLAUDE,
                 after = HEALTHY_LISTING,
                 mutationPrefix = "pocketshell sessions create",
-                mutationStdout = """{"schema": 2, "name": "claude-main", "manager": "tmux", "id": null, "created": true}""",
+                mutationStdout = """{"schema": 3, "name": "claude-main",  "id": null, "created": true}""",
             )
             answerGatedListAndKill(listing)
             val viewModel = viewModel(hostId)
@@ -1002,6 +982,7 @@ class SessionTreeViewModelTest {
         registry = stack.registry,
         // The production binding, verbatim (see AppModule.provideHostCliClientFactory).
         clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
+        hostDao = stack.db.hostDao(),
         projectRootDao = stack.db.projectRootDao(),
     )
 
@@ -1060,9 +1041,9 @@ class SessionTreeViewModelTest {
         }
     }
 
-    /** The host CLI's schema-2 create envelope, verbatim in shape. */
+    /** The host CLI's schema-3 create envelope, verbatim in shape. */
     private fun createdJson(name: String, created: Boolean): String = """
-        {"schema": 2, "name": "$name", "manager": "tmux", "id": null, "created": $created}
+        {"schema": 3, "name": "$name",  "id": null, "created": $created}
     """.trimIndent()
 
     private fun connection(): FakeHostConnection = stack.factory.connections.single()
@@ -1075,18 +1056,17 @@ class SessionTreeViewModelTest {
          */
         val LISTING_WITHOUT_CLAUDE = """
             {
-              "schema": 2,
-              "managers": ["tmux", "aplexer"],
+              "schema": 3,
               "sessions": [
-                {"name":"codex","manager":"tmux","id":null,
+                {"name":"codex","id":null,
                  "workspace":"/home/testuser/git/pocketshell","tag":null,"engine":null,
                  "profile":null,"agent_state":null,"agent_state_source":null,
                  "attached":false,"created_epoch":1788370000,"activity_epoch":1788409100},
-                {"name":"opencode-lab","manager":"tmux","id":null,
+                {"name":"opencode-lab","id":null,
                  "workspace":null,"tag":null,"engine":null,
                  "profile":null,"agent_state":null,"agent_state_source":null,
                  "attached":false,"created_epoch":1788360000,"activity_epoch":1788400000},
-                {"name":"aplexer-follow:yolo","manager":"aplexer","id":"52a2508e",
+                {"name":"aplexer-follow:yolo","id":"52a2508e",
                  "workspace":"/home/testuser/git/aplexer","tag":"yolo","engine":"codex",
                  "profile":null,"agent_state":"waiting","agent_state_source":"heuristic",
                  "attached":false,"created_epoch":1788350000,"activity_epoch":1788409200}
@@ -1097,22 +1077,21 @@ class SessionTreeViewModelTest {
 
         val HEALTHY_LISTING = """
             {
-              "schema": 2,
-              "managers": ["tmux", "aplexer"],
+              "schema": 3,
               "sessions": [
-                {"name":"claude-main","manager":"tmux","id":null,
+                {"name":"claude-main","id":null,
                  "workspace":"/home/testuser/git/pocketshell","tag":null,"engine":"claude",
                  "profile":null,"agent_state":"working","agent_state_source":"reported",
                  "attached":true,"created_epoch":1788380000,"activity_epoch":1788409253},
-                {"name":"codex","manager":"tmux","id":null,
+                {"name":"codex","id":null,
                  "workspace":"/home/testuser/git/pocketshell","tag":null,"engine":null,
                  "profile":null,"agent_state":null,"agent_state_source":null,
                  "attached":false,"created_epoch":1788370000,"activity_epoch":1788409100},
-                {"name":"opencode-lab","manager":"tmux","id":null,
+                {"name":"opencode-lab","id":null,
                  "workspace":null,"tag":null,"engine":null,
                  "profile":null,"agent_state":null,"agent_state_source":null,
                  "attached":false,"created_epoch":1788360000,"activity_epoch":1788400000},
-                {"name":"aplexer-follow:yolo","manager":"aplexer","id":"52a2508e",
+                {"name":"aplexer-follow:yolo","id":"52a2508e",
                  "workspace":"/home/testuser/git/aplexer","tag":"yolo","engine":"codex",
                  "profile":null,"agent_state":"waiting","agent_state_source":"heuristic",
                  "attached":false,"created_epoch":1788350000,"activity_epoch":1788409200}
@@ -1121,22 +1100,7 @@ class SessionTreeViewModelTest {
             }
         """.trimIndent()
 
-        val UNKNOWN_MANAGER_LISTING = """
-            {
-              "schema": 2,
-              "managers": ["tmux", "warpdrive"],
-              "sessions": [
-                {"name":"tmux-one","manager":"tmux","id":null,"workspace":"/w","tag":null,
-                 "engine":null,"profile":null,"agent_state":null,"agent_state_source":null,
-                 "attached":false,"created_epoch":null,"activity_epoch":10},
-                {"name":"from-the-future","manager":"warpdrive","id":null,"workspace":"/w",
-                 "tag":null,"engine":null,"profile":null,"agent_state":null,
-                 "agent_state_source":null,"attached":false,"created_epoch":null,
-                 "activity_epoch":20}
-              ],
-              "errors": []
-            }
-        """.trimIndent()
+
 
         val ENGINES_LISTING = """
             {"engines":[
@@ -1163,15 +1127,14 @@ class SessionTreeViewModelTest {
 
         val PARTIAL_LISTING = """
             {
-              "schema": 2,
-              "managers": ["tmux"],
+              "schema": 3,
               "sessions": [
-                {"name":"claude-main","manager":"tmux","id":null,"workspace":"/w","tag":null,
+                {"name":"claude-main","id":null,"workspace":"/w","tag":null,
                  "engine":null,"profile":null,"agent_state":null,"agent_state_source":null,
                  "attached":false,"created_epoch":null,"activity_epoch":10}
               ],
               "errors": [
-                {"manager":"aplexer",
+                {
                  "message":"`a --json snapshot` failed: exit 127 (command not found)"}
               ]
             }

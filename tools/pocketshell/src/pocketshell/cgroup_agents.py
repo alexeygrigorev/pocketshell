@@ -5,10 +5,9 @@ Replaces the fragile client-side ``ps -eo … | grep`` agent scan (issue #809 /
 
 1. **pane → scope** — read ``/proc/<pane_pid>/cgroup``. On a cgroup-v2 host the
    sole ``0::`` line carries the cgroup-relative path of the leaf, which for a
-   PocketShell session is ``…/robust.slice/tmuxctl-<session>.scope`` (the
-   deterministic name `tmuxctl` assigns at ``robust.scope_unit_name``). Sessions
-   started outside tmuxctl resolve to ``tmux-spawn-<uuid>.scope`` or a login
-   scope; "no scope" is detectable, never a crash.
+   PocketShell session is ``…/aplexer-workload-<session>.scope``. Sessions
+   without a dedicated workload scope resolve to a login scope; "no scope" is
+   detectable, never a crash.
 2. **scope → procs** — read that cgroup's ``cgroup.procs`` then each
    ``/proc/<pid>/comm`` + ``/proc/<pid>/cmdline``. No ``systemctl status``
    shell-out (it forks, pretty-prints ~100 ms, and truncates the proc list);
@@ -77,10 +76,8 @@ _COMPILED_TOKENS: Sequence[tuple[str, "re.Pattern[str]"]] = tuple(
     for kind, pattern in _AGENT_TOKEN_PATTERNS
 )
 
-# Extract the scope unit basename from a cgroup-v2 relative path. Matches both
-# the tmuxctl session scope and the non-tmuxctl spawn scope so "which scope"
-# is reported even when no agent is detected.
-_SCOPE_BASENAME_RE = re.compile(r"(?P<scope>(?:tmuxctl|tmux-spawn)-[^/]+\.scope)")
+# Extract the aplexer workload scope basename from a cgroup-v2 relative path.
+_SCOPE_BASENAME_RE = re.compile(r"(?P<scope>aplexer-workload-[^/]+\.scope)")
 
 
 @dataclass(frozen=True)
@@ -88,8 +85,8 @@ class PaneAgentResult:
     """One pane's classification result.
 
     ``scope`` is the cgroup scope basename the pane resolved to (e.g.
-    ``tmuxctl-git-pocketshell.scope``) or ``None`` if the pane had no
-    tmuxctl/spawn scope (login shell, no systemd scopes). ``evidence_pid`` is
+    ``aplexer-workload-git-pocketshell.scope``) or ``None`` if the pane had no
+    workload scope (login shell, no systemd scopes). ``evidence_pid`` is
     the pid of the process whose comm/cmdline named the agent, for debugging.
     """
 
@@ -159,7 +156,7 @@ def scope_relpath_for_pid(
 
     Returns the cgroup-relative path of the leaf cgroup (the part after the
     ``0::``), e.g.
-    ``/user.slice/…/robust.slice/tmuxctl-git-pocketshell.scope``. Returns
+    ``/user.slice/…/aplexer-workload-git-pocketshell.scope``. Returns
     ``None`` when the pid is gone, unreadable, or the cgroup file is not
     cgroup-v2 unified (no ``0::`` line).
     """
@@ -175,7 +172,7 @@ def scope_relpath_for_pid(
 
 
 def scope_basename(relpath: str) -> Optional[str]:
-    """Return the ``tmuxctl-*.scope`` / ``tmux-spawn-*.scope`` basename, if any."""
+    """Return the ``aplexer-workload-*.scope`` basename, if any."""
     match = _SCOPE_BASENAME_RE.search(relpath)
     if match:
         return match.group("scope")

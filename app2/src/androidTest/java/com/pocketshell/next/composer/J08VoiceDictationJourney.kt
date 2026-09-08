@@ -23,11 +23,9 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
+import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.di.VoiceModule
-import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.next.voice.ConnectivityProbe
@@ -64,8 +62,8 @@ import org.junit.runner.RunWith
  * directly. Everything downstream of that seam — [AndroidSpeechRecognitionDelegate],
  * [ComposerViewModel]'s draft-merge rules, the mic button's own state machine —
  * is 100% production code; only the recognizer itself is a double, exactly the
- * same shape J01-J07 use for the parts a device cannot exercise (there is no
- * fake tmux, sshd or SFTP anywhere in this suite either).
+ * same shape J01-J07 use for the parts a device cannot exercise (the SSH
+ * fixture and SFTP path remain real).
  *
  * ## The offline half: a REAL queued row, not a flag
  *
@@ -102,7 +100,7 @@ class J08VoiceDictationJourney {
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j08_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -131,14 +129,15 @@ class J08VoiceDictationJourney {
         graph.pendingTranscriptionStore().clearAll()
     }
 
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+        )
         SystemClock.sleep(500)
     }
 
@@ -288,12 +287,7 @@ class J08VoiceDictationJourney {
     // --- helpers ----------------------------------------------------------
 
     private fun openSession() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
     }
 
     private fun openComposer() {
@@ -330,7 +324,9 @@ class J08VoiceDictationJourney {
         val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
         var pane = ""
         while (SystemClock.elapsedRealtime() < deadline) {
-            pane = AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:'")
+            pane = AgentsFixture.exec(
+                "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain",
+            )
             if (pane.contains(text)) return
             SystemClock.sleep(POLL_MS)
         }
@@ -353,9 +349,9 @@ class J08VoiceDictationJourney {
         const val POLL_MS = 250L
         const val JOURNEY = "j08-voice-dictation"
 
-        const val SESSION = "j08-shell"
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
+        const val TAG = "j08-shell"
+        const val SESSION = "testuser:j08-shell"
+        const val WORKSPACE = "/home/testuser"
         const val PROMPT = "J08READY\$"
         const val BANNER = "J08-FIXTURE-PANE"
 

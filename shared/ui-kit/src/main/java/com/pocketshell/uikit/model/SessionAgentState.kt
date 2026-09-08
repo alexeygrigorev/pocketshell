@@ -13,12 +13,12 @@ import java.time.OffsetDateTime
  * ## Source of truth — the stop/idle hook bus, NOT a poll
  *
  * The host-side generated Claude / Codex / OpenCode hook handlers best-effort
- * write two session-scoped tmux user options when running inside tmux (landed
+ * write a session-scoped state record on the host (landed
  * host-side in PR #1373):
  *
- *  - `@ps_agent_state` — `FINISHED` → `idle`, `WAITING_FOR_INPUT` →
+ *  - `state` — `FINISHED` → `idle`, `WAITING_FOR_INPUT` →
  *    `waiting_for_input`.
- *  - `@ps_agent_state_updated_at` — epoch-seconds timestamp of that write, for
+ *  - `updated_at` — epoch-seconds timestamp of that write, for
  *    the staleness rule below.
  *
  * The hooks fire ONLY on stop / waiting, so `working` is NOT authoritative from
@@ -69,8 +69,8 @@ enum class SessionAgentState {
 }
 
 /**
- * Map a raw host-side `@ps_agent_state` tmux user-option value to a
- * [SessionAgentState]. An unset option expands to empty in tmux's `-F` output
+ * Map a raw host-side agent-state value to a
+ * [SessionAgentState]. A missing value maps to an empty state
  * (NOT a missing column), which maps to [SessionAgentState.Unknown] so a
  * foreign / never-hooked session shows no chip rather than a wrong one.
  *
@@ -93,7 +93,7 @@ fun sessionAgentStateFromOption(raw: String?): SessionAgentState =
 const val AGENT_STATE_STALE_GRACE_SEC: Long = 3L
 
 /**
- * Parse a raw `@ps_agent_state_updated_at` option value into epoch **seconds**.
+ * Parse a raw agent-state update timestamp into epoch **seconds**.
  *
  * Issue #1570: the generated host stop/idle hook records this option as
  * `datetime.now(timezone.utc).isoformat()` — an **ISO-8601 string** (e.g.
@@ -144,13 +144,13 @@ fun parseAgentStateUpdatedAtEpochSec(raw: String?): Long? {
  * inherently producing output, so activity newer than its timestamp is expected
  * and must NOT flip it.
  *
- * @param rawState the raw `@ps_agent_state` option value (may be null/blank).
- * @param stateUpdatedAtEpochSec `@ps_agent_state_updated_at` epoch seconds
- *   (parse the raw option with [parseAgentStateUpdatedAtEpochSec] — it accepts
+ * @param rawState the raw agent-state value (may be null/blank).
+ * @param stateUpdatedAtEpochSec the state update epoch seconds
+ *   (parse the raw value with [parseAgentStateUpdatedAtEpochSec] — it accepts
  *   both epoch ints and the ISO-8601 the host actually writes), or null when the
  *   host recorded no/unparseable timestamp. With no timestamp the staleness rule
  *   cannot run, so the recorded state is taken at face value (best-effort).
- * @param sessionActivityEpochSec tmux `#{session_activity}` epoch seconds for the
+ * @param sessionActivityEpochSec session activity epoch seconds for the
  *   session, or null when unknown.
  * @param isAgentSession true when this session runs a live agent
  *   (Claude/Codex/OpenCode) whose fresh post-resting output means "working".

@@ -20,6 +20,7 @@ import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.connect.RoomAuthSecretResolver
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.connect.SshKeyUnlocker
 import com.pocketshell.next.diagnostics.DiagnosticRecorder
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
@@ -199,10 +200,22 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideAuthSecretResolver(
+    fun provideRoomAuthSecretResolver(
         sshKeyDao: SshKeyDao,
         @IoDispatcher dispatcher: CoroutineDispatcher,
-    ): AuthSecretResolver = RoomAuthSecretResolver(sshKeyDao, dispatcher)
+    ): RoomAuthSecretResolver = RoomAuthSecretResolver(sshKeyDao, dispatcher)
+
+    @Provides
+    @Singleton
+    fun provideAuthSecretResolver(
+        resolver: RoomAuthSecretResolver,
+    ): AuthSecretResolver = resolver
+
+    @Provides
+    @Singleton
+    fun provideSshKeyUnlocker(
+        resolver: RoomAuthSecretResolver,
+    ): SshKeyUnlocker = resolver
 
     @Provides
     @Singleton

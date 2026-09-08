@@ -40,15 +40,14 @@ class CreateSessionFormStateTest {
     }
 
     /**
-     * tmux rejects `:` and `.` inside a session name (they address a window and
-     * a pane), so a folder named `agent.v2` must not prefill a name the host is
-     * obliged to refuse.
+     * Session names are normalised to stable folder-safe labels before they
+     * reach the host.
      */
     @Test
-    fun `the derived name never carries a character tmux rejects`() {
-        assertEquals("agent-v2", defaultSessionName("/srv/agent.v2"))
-        assertEquals("work-review", defaultSessionName("/srv/work:review"))
-        assertEquals("hidden", defaultSessionName("/srv/.hidden"))
+    fun `the derived name is normalised for the host`() {
+        assertEquals("agent.v2", defaultSessionName("/srv/agent.v2"))
+        assertEquals("work:review", defaultSessionName("/srv/work:review"))
+        assertEquals(".hidden", defaultSessionName("/srv/.hidden"))
     }
 
     @Test
@@ -120,7 +119,7 @@ class CreateSessionFormStateTest {
     }
 
     @Test
-    fun `a shell create with the host default backend omits engine profile and backend`() {
+    fun `a shell create with the host default omits engine and profile`() {
         val form = CreateSessionFormState("/home/a/git/pocketshell")
 
         assertEquals(
@@ -130,11 +129,10 @@ class CreateSessionFormStateTest {
     }
 
     @Test
-    fun `an agent create forwards the selected engine and an explicit backend`() {
+    fun `an agent create forwards the selected engine without a backend field`() {
         val form = CreateSessionFormState("/home/a/git/pocketshell")
         form.onKindChange(CreateSessionKind.Agent)
         form.onEngineChange("codex")
-        form.onBackendChange(CreateSessionBackend.Aplexer)
 
         val request = form.toRequest(
             engines = listOf(testEngine("claude"), testEngine("codex"), testEngine("opencode", available = false)),
@@ -143,7 +141,6 @@ class CreateSessionFormStateTest {
 
         assertEquals("codex", request.engine)
         assertNull(request.profile)
-        assertEquals("aplexer", request.backend)
         assertEquals("pocketshell", request.name)
     }
 

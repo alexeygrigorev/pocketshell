@@ -156,7 +156,7 @@ def card_to_data(
     Keys (mirrors the app's ``AgentCardPushPayload`` contract):
 
     - ``type`` = ``agent_card``
-    - ``session`` = the tmux session the card belongs to (deep-link target)
+    - ``session`` = the session the card belongs to (deep-link target)
     - ``host`` = best-effort host hostname for host resolution (may be empty)
     - ``card_id`` = the card id
     - ``card_type`` = e.g. ``checklist``

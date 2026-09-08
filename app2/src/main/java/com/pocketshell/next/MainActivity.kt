@@ -2,9 +2,10 @@ package com.pocketshell.next
 
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBars
@@ -15,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -22,29 +24,50 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.navArgument
 import com.pocketshell.next.connect.ConnectGate
+import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.connect.ConnectViewModel
-import com.pocketshell.next.crash.CrashReportsScreen
+import com.pocketshell.next.crash.DiagnosticReportScreen
+import com.pocketshell.next.crash.DiagnosticsScreen
 import com.pocketshell.next.files.FileExplorerRoute
 import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
+import com.pocketshell.next.hosts.HOST_FORM_SELECTED_KEY_RESULT
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.ports.AddTunnelRoute
 import com.pocketshell.next.ports.PortForwardRoute
+import com.pocketshell.next.ports.ServicesRoute
+import com.pocketshell.next.ports.TunnelDetailRoute
 import com.pocketshell.next.settings.LocalAppSettings
+import com.pocketshell.next.settings.AboutRoute
+import com.pocketshell.next.settings.AdvancedSettingsRoute
+import com.pocketshell.next.settings.ConnectionSettingsRoute
+import com.pocketshell.next.settings.GraceSettingsRoute
+import com.pocketshell.next.settings.LanguageSettingsRoute
+import com.pocketshell.next.settings.SettingsNavigation
 import com.pocketshell.next.settings.SettingsRoute
 import com.pocketshell.next.settings.SettingsViewModel
+import com.pocketshell.next.settings.TerminalSettingsRoute
+import com.pocketshell.next.settings.UpdateRoute
+import com.pocketshell.next.settings.VoiceSettingsRoute
 import com.pocketshell.next.settings.WorkspaceRootsRoute
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.next.usage.UsageRoute
+import com.pocketshell.next.workspaces.HostWorkspacesRoute
+import com.pocketshell.next.workspaces.ReorderWorkspacesRoute
+import com.pocketshell.next.workspaces.WorkspaceRoute
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 
 /**
  * The single Activity of app2 (plan §A.1). Everything is Compose; there are no
@@ -59,7 +82,7 @@ import javax.inject.Inject
  * dead composable is exactly what lets an oracle like that look alive (#2478).
  */
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     /**
      * Task U-8. The background-grace policy has no other consumer, so something
@@ -71,6 +94,9 @@ class MainActivity : ComponentActivity() {
      */
     @Inject
     lateinit var grace: GraceCoordinator
+
+    @Inject
+    lateinit var connections: ConnectionsRegistry
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,6 +141,7 @@ class MainActivity : ComponentActivity() {
                     CompositionLocalProvider(LocalAppSettings provides appSettings) {
                         AppNavHost(
                             modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
+                            connections = connections,
                         )
                     }
                 }
@@ -135,14 +162,41 @@ data class HostListActions(
     val onEditHost: (Long) -> Unit,
     val onScanQr: () -> Unit,
     val onOpenSettings: () -> Unit,
+    val onOpenSshKeys: () -> Unit,
 )
+
+/**
+ * Session switcher navigation reuses the existing concrete route when it is
+ * already on the back stack. That keeps one terminal/ViewModel per
+ * host-session-workspace identity and makes switching back return to the
+ * existing terminal instead of stacking another copy of it.
+ */
+private fun NavHostController.openSession(
+    hostId: Long,
+    sessionName: String,
+    workspacePath: String? = null,
+) {
+    val route = Destination.Session.route(hostId, sessionName, workspacePath)
+    val existing = runCatching { getBackStackEntry(route) }.getOrNull()
+    if (existing == null) {
+        navigate(route)
+        return
+    }
+    while (currentBackStackEntry !== existing) {
+        if (!popBackStack()) {
+            navigate(route) { launchSingleTop = true }
+            return
+        }
+    }
+}
 
 /**
  * The app2 navigation graph. Routes come from [Destination] — no literal route
  * strings live here.
  *
  * The `*Screen` / `connectViewModel` parameters are seams, not feature flags:
- * the real screens (host list, connect gate, session tree, terminal,
+ * the real screens (host list, connect gate, host workspaces, workspace,
+ * terminal,
  * port-forward panel, file explorer, file viewer, host add/edit form, SSH
  * keys, QR scan, crash reports) resolve their ViewModels through
  * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
@@ -156,6 +210,7 @@ data class HostListActions(
 fun AppNavHost(
     navController: NavHostController = rememberNavController(),
     modifier: Modifier = Modifier,
+    connections: ConnectionsRegistry? = null,
     hostsScreen: @Composable (HostListActions) -> Unit = { actions ->
         HostListRoute(
             onOpenHost = actions.onOpenHost,
@@ -163,25 +218,60 @@ fun AppNavHost(
             onEditHost = actions.onEditHost,
             onScanQr = actions.onScanQr,
             onOpenSettings = actions.onOpenSettings,
+            onOpenSshKeys = actions.onOpenSshKeys,
             updateCheckViewModel = hiltViewModel(),
         )
     },
     connectViewModel: @Composable () -> ConnectViewModel = { hiltViewModel() },
-    treeScreen: @Composable (
+    workspacesScreen: @Composable (
         hostId: Long,
+        onOpenWorkspace: (String) -> Unit,
+        onOpenSession: (SessionRow) -> Unit,
+        onOpenFiles: () -> Unit,
+        onOpenFilesAtPath: (String) -> Unit,
+        onOpenPorts: () -> Unit,
+        onBack: () -> Unit,
+        onOpenUsage: () -> Unit,
+    ) -> Unit = { hostId, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenFilesAtPath, onOpenPorts, onBack, onOpenUsage ->
+        val scope = rememberCoroutineScope()
+        HostWorkspacesRoute(
+            onOpenWorkspace = onOpenWorkspace,
+            onOpenSession = onOpenSession,
+            onOpenFiles = onOpenFiles,
+            onOpenFilesAtPath = onOpenFilesAtPath,
+            onOpenPorts = onOpenPorts,
+            onBack = onBack,
+            onOpenUsage = onOpenUsage,
+            onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
+            onOpenProjectRoots = { navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
+            onOpenConnectionDetails = { navController.navigate(Destination.HostForm.route(hostId)) },
+            onDisconnect = {
+                scope.launch {
+                    connections?.close(hostId)
+                    navController.popBackStack()
+                }
+            },
+            onStartSessionAtPath = { path ->
+                navController.navigate(Destination.WorkspaceStart.route(hostId, path))
+            },
+        )
+    },
+    workspaceScreen: @Composable (
+        hostId: Long,
+        workspacePath: String,
         onOpenSession: (String) -> Unit,
         onOpenFiles: () -> Unit,
         onOpenPorts: () -> Unit,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
-        SessionTreeRoute(
+    ) -> Unit = { hostId, _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
+        WorkspaceRoute(
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
-            usageGlanceViewModel = hiltViewModel(),
+            onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
         )
     },
     sessionScreen: @Composable (
@@ -189,17 +279,38 @@ fun AppNavHost(
         sessionName: String,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { hostId, sessionName, onBack, onOpenUsage ->
+        onOpenFiles: () -> Unit,
+        onOpenSession: (SessionRow) -> Unit,
+        onOpenNewSession: () -> Unit,
+    ) -> Unit = { hostId, sessionName, onBack, onOpenUsage, onOpenFiles, onOpenSession, onOpenNewSession ->
         SessionRoute(
             hostId = hostId,
             sessionName = sessionName,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
+            onOpenFiles = onOpenFiles,
+            onOpenSession = onOpenSession,
+            onOpenNewSession = onOpenNewSession,
         )
     },
     portsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         PortForwardRoute(onBack = onBack)
     },
+    servicesScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenTunnel: (Int) -> Unit,
+        onAddTunnel: (Int?) -> Unit,
+    ) -> Unit = { onBack, onOpenTunnel, onAddTunnel ->
+        ServicesRoute(
+            onBack = onBack,
+            onOpenTunnel = onOpenTunnel,
+            onAddTunnel = onAddTunnel,
+        )
+    },
+    tunnelDetailScreen: @Composable (remotePort: Int, onBack: () -> Unit) -> Unit =
+        { remotePort, onBack -> TunnelDetailRoute(remotePort = remotePort, onBack = onBack) },
+    addTunnelScreen: @Composable (remotePort: Int?, onDone: () -> Unit) -> Unit =
+        { remotePort, onDone -> AddTunnelRoute(initialRemotePort = remotePort, onDone = onDone) },
     filesScreen: @Composable (
         hostId: Long,
         path: String?,
@@ -210,47 +321,105 @@ fun AppNavHost(
     },
     viewerScreen: @Composable (hostId: Long, path: String?, onBack: () -> Unit) -> Unit =
         { _, _, onBack -> ViewerRoute(onBack = onBack) },
-    hostFormScreen: @Composable (hostId: Long?, onDone: () -> Unit, onAddKey: () -> Unit) -> Unit =
-        { hostId, onDone, onAddKey ->
-            AddEditHostRoute(hostId = hostId, onDone = onDone, onAddKey = onAddKey)
+    hostFormScreen: @Composable (
+        hostId: Long?,
+        onDone: () -> Unit,
+        onAddKey: () -> Unit,
+        onTestConnection: (Long) -> Unit,
+    ) -> Unit =
+        { hostId, onDone, onAddKey, onTestConnection ->
+            AddEditHostRoute(
+                hostId = hostId,
+                onDone = onDone,
+                onAddKey = onAddKey,
+                onTestConnection = onTestConnection,
+            )
         },
-    sshKeysScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
-        SshKeysRoute(onBack = onBack)
-    },
-    qrScanScreen: @Composable (onFinished: (String) -> Unit, onClose: () -> Unit) -> Unit =
-        { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
-    settingsScreen: @Composable (
+    sshKeysScreen: @Composable (
         onBack: () -> Unit,
+        onUseKey: ((Long) -> Unit)?,
+    ) -> Unit = { onBack, onUseKey ->
+        SshKeysRoute(onBack = onBack, onUseKey = onUseKey)
+    },
+    qrScanScreen: @Composable (onFinished: (Long) -> Unit, onClose: () -> Unit) -> Unit =
+        { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
+    settingsScreen: @Composable (SettingsNavigation) -> Unit = { navigation ->
+        SettingsRoute(navigation = navigation)
+    },
+    terminalSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        TerminalSettingsRoute(onBack = onBack)
+    },
+    voiceSettingsScreen: @Composable (onBack: () -> Unit, onOpenLanguage: () -> Unit) -> Unit =
+        { onBack, onOpenLanguage ->
+            VoiceSettingsRoute(onBack = onBack, onOpenLanguage = onOpenLanguage)
+        },
+    languageSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        LanguageSettingsRoute(onBack = onBack)
+    },
+    connectionSettingsScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenGrace: () -> Unit,
         onOpenWorkspaceRoots: (Long) -> Unit,
-        onOpenCrashReports: () -> Unit,
-    ) -> Unit = { onBack, onOpenWorkspaceRoots, onOpenCrashReports ->
-        SettingsRoute(
+    ) -> Unit = { onBack, onOpenGrace, onOpenWorkspaceRoots ->
+        ConnectionSettingsRoute(
             onBack = onBack,
+            onOpenGrace = onOpenGrace,
             onOpenWorkspaceRoots = onOpenWorkspaceRoots,
-            onOpenCrashReports = onOpenCrashReports,
-            updateCheckViewModel = hiltViewModel(),
         )
+    },
+    graceSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        GraceSettingsRoute(onBack = onBack)
+    },
+    advancedSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        AdvancedSettingsRoute(onBack = onBack)
+    },
+    diagnosticsScreen: @Composable (
+        onBack: () -> Unit,
+        onOpenReport: (String) -> Unit,
+    ) -> Unit = { onBack, onOpenReport ->
+        DiagnosticsScreen(onBack = onBack, onOpenReport = onOpenReport)
+    },
+    diagnosticReportScreen: @Composable (reportId: String, onBack: () -> Unit) -> Unit =
+        { reportId, onBack ->
+            DiagnosticReportScreen(reportId = reportId, onBack = onBack)
+        },
+    aboutScreen: @Composable (onBack: () -> Unit, onOpenUpdate: () -> Unit) -> Unit =
+        { onBack, onOpenUpdate ->
+            AboutRoute(onBack = onBack, onOpenUpdate = onOpenUpdate)
+        },
+    updateScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        UpdateRoute(onBack = onBack)
     },
     workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =
         { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
     usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         UsageRoute(onBack = onBack)
     },
-    crashReportsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
-        CrashReportsScreen(onBack = onBack)
+    hostUsageScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit = { hostId, onBack ->
+        UsageRoute(onBack = onBack, selectedHostId = hostId)
     },
 ) {
     NavHost(
         navController = navController,
         startDestination = Destination.start.pattern,
         modifier = modifier,
+        // Navigation Compose 2.9 fades destinations for 700 ms by default.
+        // That leaves the outgoing Hosts layer visibly on top after the tree
+        // destination has already composed, which makes a successful trust
+        // handoff look stuck on "Connecting…". Hosts and the tree are full
+        // screens, so an atomic handoff is both clearer and the settled state
+        // the connection gate promises to the user.
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None },
     ) {
         composable(Destination.Hosts.pattern) {
             // Task U-2: a host tap DIALS. Only a connected host reaches the
             // tree; an unknown/changed host key raises the trust sheet first
             // and a failed dial keeps the user on the list with a retry.
             ConnectGate(
-                onConnected = { hostId -> navController.navigate(Destination.Tree.route(hostId)) },
+                onConnected = { hostId -> navController.navigate(Destination.Workspaces.route(hostId)) },
                 viewModel = connectViewModel(),
             ) { onOpenHost ->
                 hostsScreen(
@@ -266,6 +435,7 @@ fun AppNavHost(
                             navController.navigate(Destination.HostForm.route(hostId))
                         },
                         onScanQr = { navController.navigate(Destination.QrScan.route()) },
+                        onOpenSshKeys = { navController.navigate(Destination.SshKeys.route()) },
                         // Task P-6 fast-follow: the only UI entry point into
                         // Settings, deliberately on the landing screen rather
                         // than a mid-session terminal action.
@@ -287,52 +457,140 @@ fun AppNavHost(
             // form's "am I editing?" question has a single answer derived from
             // the route rather than a `-1` leaking into the ViewModel.
             val raw = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: Destination.NO_HOST_ID
-            hostFormScreen(
-                raw.takeIf { it > 0L },
-                { navController.popBackStack() },
-                { navController.navigate(Destination.SshKeys.route()) },
-            )
+            ConnectGate(
+                onConnected = { connectedHostId ->
+                    navController.navigate(Destination.Workspaces.route(connectedHostId)) {
+                        // A successful form test is the access boundary. Keep
+                        // Hosts below the new tree, but do not leave a stale
+                        // form on the Back stack.
+                        popUpTo(Destination.Hosts.pattern)
+                    }
+                },
+                viewModel = connectViewModel(),
+            ) { onOpenHost ->
+                hostFormScreen(
+                    raw.takeIf { it > 0L },
+                    { navController.popBackStack() },
+                    { navController.navigate(Destination.SshKeys.route()) },
+                    onOpenHost,
+                )
+            }
         }
         composable(Destination.SshKeys.pattern) {
-            sshKeysScreen { navController.popBackStack() }
+            val previous = navController.previousBackStackEntry
+            val canSelectForHostForm = previous?.destination?.route == Destination.HostForm.pattern
+            sshKeysScreen(
+                { navController.popBackStack() },
+                if (canSelectForHostForm) {
+                    { keyId ->
+                        previous?.savedStateHandle?.set(HOST_FORM_SELECTED_KEY_RESULT, keyId)
+                        navController.popBackStack()
+                    }
+                } else {
+                    null
+                },
+            )
         }
         composable(Destination.QrScan.pattern) {
-            qrScanScreen({ navController.popBackStack() }, { navController.popBackStack() })
+            ConnectGate(
+                onConnected = { connectedHostId ->
+                    navController.navigate(Destination.Workspaces.route(connectedHostId)) {
+                        popUpTo(Destination.Hosts.pattern)
+                    }
+                },
+                viewModel = connectViewModel(),
+            ) { onOpenHost ->
+                qrScanScreen(onOpenHost) { navController.popBackStack() }
+            }
         }
         composable(
-            route = Destination.Tree.pattern,
+            route = Destination.Workspaces.pattern,
             arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
         ) { entry ->
-            // Task U-3: the real session tree. The hostId is read from the
+            // Quiet redesign: the host workspaces screen. The hostId is read from the
             // route here only to hand it to the seam; the ViewModel resolves it
             // from its own SavedStateHandle, so the screen keeps working under
             // process death without the navigation layer re-supplying it.
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
-            treeScreen(
+            val onOpenSession: (SessionRow) -> Unit = { session ->
+                navController.openSession(hostId, session.name, session.workspace)
+            }
+            val onOpenFiles: () -> Unit = { navController.navigate(Destination.Files.route(hostId)) }
+            val onOpenPorts: () -> Unit = { navController.navigate(Destination.Ports.route(hostId)) }
+            val onBack: () -> Unit = { navController.popBackStack() }
+            val onOpenUsage: () -> Unit = { navController.navigate(Destination.HostUsage.route(hostId)) }
+            workspacesScreen(
                 hostId,
+                { path -> navController.navigate(Destination.Workspace.route(hostId, path)) },
+                onOpenSession,
+                onOpenFiles,
+                { path -> navController.navigate(Destination.Files.route(hostId, path)) },
+                onOpenPorts,
+                onBack,
+                onOpenUsage,
+            )
+        }
+        composable(
+            route = Destination.Workspace.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_WORKSPACE_PATH) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val path = entry.arguments?.getString(Destination.ARG_WORKSPACE_PATH).orEmpty()
+            workspaceScreen(
+                hostId,
+                path,
                 { sessionName ->
-                    navController.navigate(Destination.Session.route(hostId, sessionName))
+                    navController.openSession(hostId, sessionName, path)
                 },
-                // Task P-3a: the host's file browser. Opened with no path, so
-                // the explorer resolves the account's home directory itself.
-                // The plan's terminal kebab will later navigate to this same
-                // route WITH the session's workspace path.
-                { navController.navigate(Destination.Files.route(hostId)) },
-                // Task P-4: the host's port-forward panel. Same host-scoped
-                // rationale as Files — forwarding is not a per-session action.
+                { navController.navigate(Destination.Files.route(hostId, path)) },
                 { navController.navigate(Destination.Ports.route(hostId)) },
                 { navController.popBackStack() },
                 // Issue #2532: Usage is a host-scoped panel, same as Files/Ports,
                 // so the tree header is an entry point — not only the session
                 // glance pill.
-                { navController.navigate(Destination.Usage.route()) },
+                { navController.navigate(Destination.HostUsage.route(hostId)) },
             )
+        }
+        composable(
+            route = Destination.WorkspaceStart.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_WORKSPACE_PATH) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val path = entry.arguments?.getString(Destination.ARG_WORKSPACE_PATH).orEmpty()
+            WorkspaceRoute(
+                onOpenSession = { sessionName ->
+                    navController.openSession(hostId, sessionName, path)
+                },
+                onOpenFiles = { navController.navigate(Destination.Files.route(hostId, path)) },
+                onOpenPorts = { navController.navigate(Destination.Ports.route(hostId)) },
+                onBack = { navController.popBackStack() },
+                onOpenUsage = { navController.navigate(Destination.HostUsage.route(hostId)) },
+                onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
+                startSessionOnEntry = true,
+            )
+        }
+        composable(
+            route = Destination.ReorderWorkspaces.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) {
+            ReorderWorkspacesRoute(onBack = { navController.popBackStack() })
         }
         composable(
             route = Destination.Session.pattern,
             arguments = listOf(
                 navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
                 navArgument(Destination.ARG_SESSION_NAME) { type = NavType.StringType },
+                navArgument(Destination.ARG_WORKSPACE_PATH) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
             ),
         ) { entry ->
             // Task U-4: the real terminal. The session name arrives already
@@ -342,12 +600,24 @@ fun AppNavHost(
             // resolves against (plan §B.0).
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
             val name = entry.arguments?.getString(Destination.ARG_SESSION_NAME).orEmpty()
+            val workspacePath = entry.arguments?.getString(Destination.ARG_WORKSPACE_PATH)
             sessionScreen(
                 hostId,
                 name,
                 { navController.popBackStack() },
                 // Task P-5: the top bar's usage glance pill navigates here.
-                { navController.navigate(Destination.Usage.route()) },
+                { navController.navigate(Destination.HostUsage.route(hostId)) },
+                { navController.navigate(Destination.Files.route(hostId, workspacePath)) },
+                { session ->
+                    navController.openSession(hostId, session.name, session.workspace)
+                },
+                {
+                    if (workspacePath.isNullOrBlank()) {
+                        navController.navigate(Destination.Workspaces.route(hostId))
+                    } else {
+                        navController.navigate(Destination.WorkspaceStart.route(hostId, workspacePath))
+                    }
+                },
             )
         }
         composable(
@@ -389,26 +659,98 @@ fun AppNavHost(
         composable(
             route = Destination.Ports.pattern,
             arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
-        ) {
-            // Task P-4: the real port-forward panel. Like the tree, the ViewModel
-            // reads the hostId from its own SavedStateHandle, so the screen keeps
-            // working under process death without navigation re-supplying it.
-            portsScreen { navController.popBackStack() }
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            servicesScreen(
+                { navController.popBackStack() },
+                { remotePort -> navController.navigate(Destination.TunnelDetail.route(hostId, remotePort)) },
+                { remotePort -> navController.navigate(Destination.AddTunnel.route(hostId, remotePort)) },
+            )
+        }
+        composable(
+            route = Destination.TunnelDetail.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_REMOTE_PORT) { type = NavType.IntType },
+            ),
+        ) { entry ->
+            val remotePort = entry.arguments?.getInt(Destination.ARG_REMOTE_PORT)
+                ?: Destination.NO_REMOTE_PORT
+            tunnelDetailScreen(remotePort) { navController.popBackStack() }
+        }
+        composable(
+            route = Destination.AddTunnel.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_REMOTE_PORT) {
+                    type = NavType.IntType
+                    defaultValue = Destination.NO_REMOTE_PORT
+                },
+            ),
+        ) { entry ->
+            val rawRemotePort = entry.arguments?.getInt(Destination.ARG_REMOTE_PORT)
+                ?: Destination.NO_REMOTE_PORT
+            addTunnelScreen(rawRemotePort.takeIf { it > 0 }) { navController.popBackStack() }
         }
         composable(Destination.Settings.pattern) {
-            // Task P-6: the real settings screen. Workspace roots is a
-            // per-host sub-screen rather than an inline expando, because its
-            // own add/delete actions and list need the vertical room a
-            // Settings row cannot spare.
             settingsScreen(
-                { navController.popBackStack() },
-                { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
-                // Issue #2476: the only entry point into the crash-report
-                // browser. Capture (`CrashReporter.install()` from
-                // `App.onCreate`) never depended on this route; what was
-                // missing was any way for a human to read what it recorded.
-                { navController.navigate(Destination.CrashReports.route()) },
+                SettingsNavigation(
+                    onBack = { navController.popBackStack() },
+                    onOpenTerminal = { navController.navigate(Destination.TerminalSettings.route()) },
+                    onOpenVoice = { navController.navigate(Destination.VoiceSettings.route()) },
+                    onOpenConnections = { navController.navigate(Destination.ConnectionSettings.route()) },
+                    onOpenAdvanced = { navController.navigate(Destination.AdvancedSettings.route()) },
+                    onOpenDiagnostics = { navController.navigate(Destination.Diagnostics.route()) },
+                    onOpenAbout = { navController.navigate(Destination.About.route()) },
+                ),
             )
+        }
+        composable(Destination.TerminalSettings.pattern) {
+            terminalSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.VoiceSettings.pattern) {
+            voiceSettingsScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.VoiceLanguage.route()) },
+            )
+        }
+        composable(Destination.VoiceLanguage.pattern) {
+            languageSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.ConnectionSettings.pattern) {
+            connectionSettingsScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.GraceSettings.route()) },
+                { hostId -> navController.navigate(Destination.WorkspaceRoots.route(hostId)) },
+            )
+        }
+        composable(Destination.GraceSettings.pattern) {
+            graceSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.AdvancedSettings.pattern) {
+            advancedSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.Diagnostics.pattern) {
+            diagnosticsScreen(
+                { navController.popBackStack() },
+                { reportId -> navController.navigate(Destination.DiagnosticReport.route(reportId)) },
+            )
+        }
+        composable(
+            route = Destination.DiagnosticReport.pattern,
+            arguments = listOf(navArgument(Destination.ARG_REPORT_ID) { type = NavType.StringType }),
+        ) { entry ->
+            val reportId = entry.arguments?.getString(Destination.ARG_REPORT_ID).orEmpty()
+            diagnosticReportScreen(reportId) { navController.popBackStack() }
+        }
+        composable(Destination.About.pattern) {
+            aboutScreen(
+                { navController.popBackStack() },
+                { navController.navigate(Destination.Update.route()) },
+            )
+        }
+        composable(Destination.Update.pattern) {
+            updateScreen { navController.popBackStack() }
         }
         composable(
             route = Destination.WorkspaceRoots.pattern,
@@ -421,11 +763,12 @@ fun AppNavHost(
             // Task P-5: the real usage/quota panel.
             usageScreen { navController.popBackStack() }
         }
-        composable(Destination.CrashReports.pattern) {
-            // Task P-10 / issue #2476: the local crash-report browser. Reached
-            // from Settings → Diagnostics; argument-free, because the reports
-            // are the installation's, not a host's.
-            crashReportsScreen { navController.popBackStack() }
+        composable(
+            route = Destination.HostUsage.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            hostUsageScreen(hostId) { navController.popBackStack() }
         }
     }
 }

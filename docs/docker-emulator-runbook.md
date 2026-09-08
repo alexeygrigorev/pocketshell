@@ -1,675 +1,128 @@
-# Docker + Emulator Runbook
+# Docker and emulator runbook
 
-This is the evaluator runbook for Android emulator + Docker checks. Use it
-before claiming a mobile, SSH, tmux, agent, setup, or release-gate workflow is
-blocked.
+Use the Docker SSH fixtures and the local Android emulator together for
+session, terminal, agent, setup, and release-gate work. The fixture is part of
+the product contract: session journeys must reach a real bundled aplexer
+binary, not a canned session table.
 
-## Local Android Tools
+## Targets and ports
 
-The SDK tools may not be on `PATH`. In this workspace use explicit paths:
+The compose file is `tests/docker/docker-compose.yml`.
 
-```bash
-export ANDROID_SDK=/home/alexey/Android/Sdk
-export ADB="$ANDROID_SDK/platform-tools/adb"
-export EMULATOR="$ANDROID_SDK/emulator/emulator"
+| Target | Port | Use |
+|---|---:|---|
+| `sshd` | 2222 | Minimal OpenSSH transport host |
+| `agents` | 2222 | Main app2 fixture with real aplexer and deterministic agent tools |
+| `bootstrap-*` | 2230–2236 | Host-install and setup-state scenarios |
+| `agents-old-cli` | 2238 | Host helper/version mismatch behavior |
+| `agents-daemon` | 2239 | Durable host-side tree registry |
+| `sshd-rekeyed` | 2246 | Host-key rotation behavior |
 
-"$ADB" devices
-"$EMULATOR" -list-avds
-```
-
-Known local AVD:
-
-```text
-test
-```
-
-Start the emulator:
+Run one target at a time when they share a port. The `agents` target can use a
+pool port and a separate compose project for parallel emulator lanes:
 
 ```bash
-scripts/start-local-avd.sh
-```
-
-The helper uses the shared AVD lock, starts the local `test` AVD with the
-review-safe headless flags, waits for `sys.boot_completed=1`, and writes
-diagnostics under `build/local-avd-start/<run-id>/` if the emulator exits before
-adb device discovery. A newly started emulator runs in a memory-capped cgroup by
-default via `scripts/lib/scope-run.sh`, so an emulator OOM stops that scope
-instead of the interactive session. The default cap is `POCKETSHELL_TEST_MEM=8G`;
-if local user systemd is unavailable, the helper fails closed instead of
-starting the emulator raw. Override memory only for a specific reproduction:
-
-```bash
-POCKETSHELL_TEST_MEM=6G scripts/start-local-avd.sh
-```
-
-For connected-test review evidence, keep it open in a dedicated terminal:
-
-```bash
-AVD_HOLD=1 scripts/start-local-avd.sh
-```
-
-Then run `:app2:connectedDebugAndroidTest` from another terminal through the
-scoped connected-test wrapper. It already runs Gradle in a sibling cgroup and
-serializes AVD access:
-
-```bash
-scripts/connected-test.sh --suffix i123 \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney
-```
-
-If the emulator exits after boot, the held helper records the failure in the
-same run directory.
-
-For other heavy local reproduction commands, use the explicit cgroup wrapper:
-
-```bash
-scripts/cgroup-run.sh -- ./gradlew --no-daemon :app2:compileDebugKotlin
-POCKETSHELL_TEST_MEM=6G scripts/cgroup-run.sh --unit local-repro -- bash -lc '...'
-```
-
-Only set `AVD_SCOPE=0` or bypass `scripts/cgroup-run.sh` together with
-`POCKETSHELL_SCOPE_ALLOW_BARE=1` when debugging cgroup setup itself.
-
-To run the same command manually:
-
-```bash
-scripts/cgroup-run.sh -- "$EMULATOR" -avd test \
-  -no-window \
-  -no-audio \
-  -no-boot-anim \
-  -gpu swiftshader_indirect \
-  -no-snapshot-load \
-  -no-snapshot-save
-```
-
-Wait for boot if you start it manually:
-
-```bash
-for i in {1..90}; do
-  state=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-  [ "$state" = "1" ] && break
-  sleep 2
-done
-"$ADB" devices
-```
-
-## Docker Profiles
-
-All reusable Docker targets live under `tests/docker/` and are driven by:
-
-```bash
-docker compose -f tests/docker/docker-compose.yml ...
-```
-
-Reusable compose services:
-
-- `sshd`: builds `pocketshell-test:ssh`, maps host port `2222`, and contains
-  Alpine, OpenSSH, `testuser`, and `tests/docker/test_key.pub` in
-  `authorized_keys`. Use it for manual base SSH checks. `Dockerfile.ssh` is
-  also built directly by the `shared/core-ssh`, `shared/core-portfwd`, and
-  `ProofPipelineTest` Testcontainers suites on ephemeral host ports.
-- `tmux`: builds `pocketshell-test:tmux`, maps host port `2224`, and adds
-  `tmux`, Python, and real `tmuxctl` installed with `pip` on top of the base
-  SSH image. Use it for manual tmux checks. `Dockerfile.tmux` is also built
-  directly by the `shared/core-tmux` Testcontainers suite on ephemeral host
-  ports.
-- `agents`: builds `pocketshell-test:agents`, maps host port `2222`, and
-  contains OpenSSH, tmux, `procps`, deterministic `claude`, `codex`,
-  `opencode`, `heru`, `agent-log-explorer`, `tmuxctl`, `uv`, and `systemctl`
-  shims plus seeded agent fixtures. Use it for normal connected Android smoke,
-  walkthrough journeys, usage/jobs/agent fixture checks, and the APK pre-release gate.
-- `network-fault-proxy`: runs Toxiproxy in front of `agents:22`, maps data
-  port `2228` and control port `8474`, and is used by the opt-in
-  `pocketshellNetworkFaultProofs=true` resilience proofs for latency,
-  half-open starvation, and clean on/off link cuts.
-- `packet-loss-proxy`: builds the Linux `tc netem` proxy, maps host port
-  `2229`, and is used by the opt-in packet-loss proof. Netem runs inside this
-  container rather than on the host or emulator network.
-- `bootstrap-ready`: builds `pocketshell-test:bootstrap-ready`, maps host port
-  `2230`, and contains the shared bootstrap base plus `pocketshell` and
-  `systemctl` shims in `/usr/local/bin`; the
-  `systemctl` shim reports `pocketshell-jobs.service` as active and enabled. This
-  represents a host where server tools and the user daemon are already ready.
-  Used by `HostBootstrapScenarioSuiteTest#ready`.
-- `bootstrap-uv-install`: builds `pocketshell-test:bootstrap-uv-install`, maps
-  host port `2231`, and contains the shared bootstrap base plus `uv` and
-  `systemctl` shims in `/usr/local/bin`; `pocketshell` starts absent and can be copied into
-  `/home/testuser/.local/bin` by the
-  `uv tool install --exclude-newer-package <package=date> <package>` shim.
-  The `systemctl` shim reports `pocketshell-jobs.service` as active and
-  enabled. Used by `HostBootstrapScenarioSuiteTest#uvInstall`.
-- `bootstrap-uv-upgrade`: builds `pocketshell-test:bootstrap-uv-upgrade`, maps
-  host port `2236`, and contains a stale `pocketshell` fixture plus `uv` and
-  `systemctl` shims in `/usr/local/bin`;
-  `uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell`
-  refreshes the fixture version under `/home/testuser/.local/bin`. Used by
-  `HostBootstrapScenarioSuiteTest#uvUpgrade`.
-- `bootstrap-unsupported`: builds `pocketshell-test:bootstrap-unsupported`,
-  maps host port `2232`, and contains only the shared bootstrap base. No
-  `pocketshell`, `uv`, or `systemctl` shim is
-  installed on `PATH`; the fixture daemon state is inactive and disabled. This
-  represents a host with missing tools and no supported installer. Used by
-  `HostBootstrapScenarioSuiteTest#unsupported`.
-- `bootstrap-daemon-disabled`: builds
-  `pocketshell-test:bootstrap-daemon-disabled`, maps host port `2233`, and
-  contains the shared bootstrap base plus `pocketshell` and `systemctl` shims in
-  `/usr/local/bin`; the `systemctl` shim reports `pocketshell-jobs.service` as active but disabled. This
-  represents a host where tools are present but `pocketshell-jobs.service` is
-  disabled. Used by `HostBootstrapScenarioSuiteTest#daemonDisabled`.
-- `bootstrap-user-local-path`: builds
-  `pocketshell-test:bootstrap-user-local-path`, maps host port `2234`, and
-  contains the shared bootstrap base plus a `pocketshell` shim in
-  `/home/testuser/.local/bin` and a `systemctl`
-  shim in `/usr/local/bin`; the `systemctl` shim reports
-  `pocketshell-jobs.service` as active and enabled. This represents a host where
-  tools live under user-local paths that must be found by login/PATH handling.
-  Used by
-  `HostBootstrapScenarioSuiteTest#userLocalPath`.
-- `bootstrap-fish-user-local-path`: builds
-  `pocketshell-test:bootstrap-fish-user-local-path`, maps host port `2235`,
-  and mirrors `bootstrap-user-local-path` with `fish` installed and
-  `/usr/bin/fish` configured as `testuser`'s login shell. This represents a
-  user-local tool installation that must be discovered when SSH starts a fish
-  login environment. Used by `HostBootstrapScenarioSuiteTest#fishUserLocalPath`.
-
-All `bootstrap-*` profiles share `Dockerfile.bootstrap`: Alpine with
-`openssh-server`, real `tmux`, `procps`, `testuser`, `tests/docker/test_key.pub`
-authorized for SSH, and fixture binaries copied to
-`/opt/pocketshell-bootstrap-bin` for scenario-specific installation by
-`bootstrap-entrypoint.sh`.
-
-`sshd` and `agents` both bind host port `2222`; run one at a time unless you
-change ports intentionally.
-
-Testcontainers-based JVM integration tests build the Dockerfiles directly and
-publish container port `22` on ephemeral host ports. They do not consume the
-compose host ports above, except that `Dockerfile.tmux` requires a local
-`pocketshell-test:ssh` base tag while building.
-
-## Port Conflicts
-
-Check before starting Docker profiles:
-
-```bash
-docker ps --format '{{.ID}} {{.Names}} {{.Ports}}'
-ss -ltnp 'sport = :2222' || true
-for port in 2224 2230 2231 2232 2233 2234 2235 2236; do
-  ss -ltnp "sport = :$port" || true
-done
-```
-
-If port `2222` is occupied by a stale local test container, stop only that
-container:
-
-```bash
-docker stop <container-name-or-id>
-```
-
-If the owner is not obvious, do not kill random processes. Report the conflict
-with the `docker ps` / `ss` output.
-
-For parallel testing, prefer existing non-overlapping ports:
-
-- `agents` on `2222` for the normal connected Android smoke.
-- `tmux` on `2224` for manual tmux checks.
-- bootstrap profiles on `2230` through `2236`.
-
-Do not run `sshd` and `agents` together without changing one of their host
-ports because both claim `2222`. The standard safe parallel sets are:
-
-- Android connected smoke plus manual tmux: `agents` + `tmux`.
-- Bootstrap setup suite: all seven `bootstrap-*` services.
-- JVM Testcontainers suites plus any compose service: safe by default because
-  Testcontainers uses ephemeral host ports.
-
-If a new compose profile must run in parallel, add a new explicit host port in
-`tests/docker/docker-compose.yml`; do not reuse `2222`, `2224`, or `2230`
-through `2236`. Update the service list above, any Android fixture constants,
-and the host-side sanity command in this runbook in the same change.
-
-## Standard Commands
-
-Start the Docker agent target used by normal connected Android smoke:
-
-```bash
+COMPOSE_PROJECT_NAME=psagents2243 \
+AGENTS_HOST_PORT=2243 \
+AGENTS_CONTAINER_NAME=pocketshell-test-agents-2243 \
 docker compose -f tests/docker/docker-compose.yml up -d --build agents
 ```
 
-### Container readiness via compose health checks (issue #150)
-
-Every service in `tests/docker/docker-compose.yml` and
-`tests/docker/real-agent/compose.yml` declares a `healthcheck:` block
-that runs `ssh -o ConnectTimeout=2 -i /root/test_key testuser@localhost
-true` inside the container. Reaching `healthy` proves SSH and key
-authentication are working end-to-end, so callers should wait on
-`docker inspect --format='{{.State.Health.Status}}'` instead of
-polling SSH from the host with a retry-sleep loop.
-
-Inline check:
+The pool helper owns the standard candidate ports and their locks:
 
 ```bash
-docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \
-  $(docker compose -f tests/docker/docker-compose.yml ps -q)
+scripts/agents-pool.sh up 2243 2244
+scripts/agents-pool.sh status
+scripts/agents-pool.sh down 2243 2244
 ```
 
-Reusable shell helper (used by every harness script under `scripts/`):
+Do not assign port 2222 to a pool lane. It is the legacy single-lane identity
+used by the default connected-test path.
+
+## Build and inspect the real agents fixture
+
+The `agents`, `agents-old-cli`, and `agents-daemon` images are glibc-based
+because the pinned aplexer release publishes glibc binaries. Their Dockerfiles
+derive the exact version from `tools/pocketshell/pyproject.toml`, install the
+matching `/usr/bin/a` and sibling `/usr/bin/aplexer`, copy the current Python
+helper, and run the fixture self-check. The self-check performs create, list,
+attach-shape, kill, and gone checks against a real session registry.
 
 ```bash
-source tests/docker/lib/wait-for-healthy.sh
-wait_for_container_healthy tests/docker/docker-compose.yml agents \
-  /tmp/agent-health.log 60
-```
-
-Healthcheck shape (identical for every service):
-
-```yaml
-healthcheck:
-  test: ["CMD-SHELL", "ssh -o BatchMode=yes -o ConnectTimeout=2 ..."]
-  interval: 2s
-  timeout: 5s
-  retries: 10
-  start_period: 5s
-```
-
-A warm image usually settles to `healthy` within 1–6 s of `compose up`.
-Existing host-side SSH retry loops in `scripts/*.sh` and the CI
-workflow have been migrated to consume health status first and then
-run a single follow-up SSH probe only to record the same
-tool-availability evidence reviewers look for (`tmux -V`,
-`command -v tmuxctl heru …`).
-
-Host-side SSH sanity check (now optional — health status already
-proves SSH + auth work):
-
-```bash
-chmod 600 tests/docker/test_key
+scripts/test-agents-fixture-aplexer.sh
+scripts/test-agents-fixture-aplexer.sh --docker
+docker compose -f tests/docker/docker-compose.yml build agents agents-old-cli agents-daemon
+docker compose -f tests/docker/docker-compose.yml up -d agents
 ssh -i tests/docker/test_key -p 2222 \
-  -o BatchMode=yes \
-  -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null \
-  testuser@127.0.0.1 \
-  'for tool in heru agent-log-explorer tmuxctl uv; do command -v "$tool"; done'
+  -o StrictHostKeyChecking=no testuser@127.0.0.1 \
+  'command -v pocketshell && command -v a && command -v aplexer && pocketshell sessions list --json'
 ```
 
-Run the full connected Android suite:
+The fixture entrypoint seeds one idle aplexer shell. Journey tests create their
+own records, verify them through the host listing or PTY, and clean them up.
+The deterministic `/usr/local/bin/pocketshell` wrapper remains only for
+non-session probes; its session, tree, and engine paths delegate to the real
+Python helper at `/usr/local/bin/pocketshell-real`.
+
+## Emulator setup
+
+The maintained AVD is named `test`. Use the explicit SDK paths when they are
+not on `PATH`:
 
 ```bash
-scripts/connected-test.sh
+export ANDROID_HOME=/home/alexey/Android/Sdk
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+AVD_HOLD=1 scripts/start-local-avd.sh
+adb devices
 ```
 
-Run focused connected checks:
+Never kill an emulator owned by another lane. If `/dev/kvm` is unavailable,
+`AVD_HOLD=1` lets the local starter retain the booted device for the connected
+run. Install the debug APK with `scripts/assemble-debug.sh --install`.
+
+## Connected journeys
+
+Start the default fixture and run the unfiltered app2 suite:
 
 ```bash
-scripts/connected-test.sh --module shared:core-terminal --suffix terminal
-# app2's whole instrumented set, unfiltered in one process (the CI shape,
-# issue #2474) — this is what a bare invocation now runs:
-scripts/connected-test.sh --suffix smoke
-
-# ...or one journey, for an ad-hoc reproduction:
-CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.connect.J01ConnectAndTrustJourney"
-scripts/connected-test.sh --suffix smoke \
-  "$CLASS_ARG"
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+scripts/connected-test.sh --suffix i2561
 ```
 
-Run the local visual pass (app2's journey screenshots) on an already-booted
-emulator:
+The load-bearing journeys are J02 session tree, J03 attach and type, J04
+create session, J05 reconnect after a drop, J06 background grace return, J07
+composer send, J08 voice dictation, J12 usage refresh, J14 stop session, and
+J15 terminal scroll. J02, J03, J04, and J14 use independent real aplexer
+records; J05 and J06 use the same PTY and reconnect path; J15 uses the real
+alternate-screen fixture. A journey must fail when the fixture capability is
+missing rather than silently falling back to a canned row.
+
+For a pool lane, pass `--pool` and use its allocated port through
+`connected-test.sh`; the wrapper records the port and compose identity in the
+run artifacts. Inspect the resulting screenshots and instrumentation output
+when reviewing a user-facing change.
+
+## Health and cleanup
+
+Compose health checks validate sshd's effective configuration and authenticate
+as `testuser` using the same key path as the app. A local probe that succeeds
+inside a container is not enough evidence for the host-published port.
 
 ```bash
-scripts/capture-walkthrough-screenshots.sh
-```
-
-It starts/verifies the Docker `agents` target and the `network-fault-proxy`,
-checks emulator boot state with the explicit `adb` path, installs app2's
-debug + androidTest APKs, runs the whole instrumented set unfiltered, and pulls
-the journey screenshots under
-`build/walkthrough-visual-pass/<run-id>/screenshots/files/<journey>/`. It fails
-unless every expected journey directory rendered at least one frame.
-
-**Issue #2481 deleted the harnesses this section used to document**, because
-every androidTest class behind them went with the `app` module in the rewrite's
-hard cut:
-
-| Deleted | Drove |
-|---|---|
-| `scripts/phone-walkthrough.sh` (`terminal-lab`, `tmux-existing-session`, `visual-audit`, `setup-detection[:<profile>]`) | `TerminalLabDockerTest`, `EmulatorDockerSshSmokeTest`, the three Walkthrough*ScreenshotTest classes, `HostBootstrapScenarioSuiteTest` |
-| `scripts/parallel-setup-detection.sh` | the same bootstrap matrix, sharded |
-| `scripts/terminal-workbench.sh`, `scripts/release-terminal-gate.sh`, `docs/release-terminal-gate.md` | `TerminalLabDockerTest`, `TmuxAttachPrefillDockerTest`, `TmuxExternalUpdateDockerTest`, `EmulatorDockerSshSmokeTest` |
-| `scripts/capture-terminal-lab.sh`, `scripts/tmux-attach-prefill.sh`, `scripts/tmux-issue303-toolbar-proof.sh`, `scripts/keyboard-stress.sh`, `scripts/reconnect-app-switch.sh`, `scripts/issue271-startup-connect-timing.sh` | one deleted per-issue androidTest class each |
-| `TERMINAL_RELEASE_GATE=1` / `LONG_RUNNING_TEST=1` release stages, and the `terminal_release_gate` workflow input | `RealAgentReleaseGateTest`, `LongRunningSessionStabilityTest` |
-
-Terminal, attach, reconnect and background-grace evidence comes from app2's own
-journeys now (`J03AttachAndTypeJourney`, `J05ReconnectAfterDropJourney`,
-`J06BackgroundGraceReturnJourney`), which run unfiltered in the `app2-journey`
-CI lane and inside the pre-release confidence gate. Real-agent CLI evidence has
-no successor: agent awareness is a cut feature
-(`docs/rewrite-implementation-plan.md`, "Scope amendment").
-
-For release tagging, use the guarded emulator-only wrapper from clean pushed
-`main`:
-
-```bash
-scripts/release-emulator-validation.sh
-scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md
-```
-
-The wrapper runs the nightly-fault guard and the pre-release confidence gate,
-which is now the whole emulator chain (build the one validated APK pair, install
-it, run app2's whole instrumented set against those exact bytes, pull the
-journey screenshots). Attach or link every artifact directory listed in
-`build/release-emulator-validation/<run-id>/summary.md` in the release issue
-and tag notes. Pass `--visual-audit-inspected` only after inspecting the
-visual-audit screenshots.
-
-When local emulator capacity is unavailable, run the same validation manually
-from GitHub Actions: Actions -> Release Emulator Validation -> Run workflow.
-Choose the release branch or `main`; optionally provide a `run_id`. Read the
-job summary first, then download the
-`release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
-release summary. The tested debug APK is included inside that artifact at
-`release-emulator-validation/<run-id>/app2-debug.apk`; locally, the same file is
-written under `build/release-emulator-validation/<run-id>/app2-debug.apk`.
-Inspect the visual-audit screenshots before using the artifact as release
-evidence. The manual workflow does not push the tag and does not relax the
-stable-main tag rule. A GitHub Actions summary is taggable only when its
-`Commit SHA` equals the reviewed `origin/main` commit being tagged.
-
-## APK Pre-Release Gate
-
-Before pushing a version tag, run the local confidence gate from
-the repository root:
-
-```bash
-scripts/pre-release-confidence-gate.sh
-```
-
-The gate uses the explicit SDK paths documented in [AGENTS.md](../AGENTS.md):
-
-- `adb`: `/home/alexey/Android/Sdk/platform-tools/adb`
-- `emulator`: `/home/alexey/Android/Sdk/emulator/emulator`
-- AVD: `test`
-
-Before it takes the AVD lock or creates the isolated copy, the release path
-requires **24 GiB free** on the filesystem holding the checkout (issue #2055).
-Below that floor it exits 76 without starting Gradle and prints the bounded
-cleanup commands. Use `scripts/disk-cleanup.sh` first to inspect the exact
-safe-listed targets, then `scripts/disk-cleanup.sh --apply` to remove generated
-release copies/caches while preserving run summaries and logs. The ordinary
-10 GiB JVM/connected-gate floor remains unchanged; a full release needs the
-larger budget.
-
-The manual `ubuntu-latest` workflow establishes the same budget before it
-creates the AVD: it reclaims only unused hosted-image toolchains (preserving the
-active `setup-java` JDK), then runs
-`scripts/release-emulator-validation.sh --check-storage`. The storage-only mode
-executes the real 24 GiB check and exits before the AVD lock or any build/device
-work. The reclaim recipe is shared with the emulator journey workflow shape
-that measured 110134 MiB free in Tests run 31040932815; there is no smaller
-hosted floor or skip.
-
-Destructive retention is authenticated separately from the free-space number.
-Only the current checkout's exact
-`build/pre-release-confidence-gate` may receive the release-owned provenance
-marker. `LOG_ROOT` / `PRE_RELEASE_GATE_LOG_ROOT` substitutions to the source
-root, `/var`, arbitrary paths, symlinks, or unmarked lookalikes fail before any
-generated output is removed. Cleanup-control names (including `gradle-home`) are
-reserved and cannot be selected as run IDs by either standalone entry scripts or
-the manual workflow. The parent checks the 24 GiB admission floor once before
-copying; the isolated child re-authenticates its location without imposing a
-second post-copy floor. Its cleanup/diagnostic trap is restored after the real
-AVD lock is taken, so an interrupted partial copy releases that lock, retains a
-failure summary, and removes its generated worktree plus owner marker.
-
-It writes timestamped output under
-`build/pre-release-confidence-gate/<run-id>/`. Each step gets its own log file
-and the script exits at the first failed step with the log directory printed.
-Each pass or fail also persists
-`build/pre-release-confidence-gate/<run-id>/summary.txt` with the commit SHA,
-run directory, APK path, emulator serial when available, Docker target,
-step statuses/log paths, focused selector statuses, final install status, and
-the final result. On failure, use the summary first because it records the
-failing step and focused instrumentation diagnostics/logcat paths when present.
-Unless `GRADLE_USER_HOME` is already set, the gate uses
-`build/pre-release-confidence-gate/gradle-home` for its Gradle cache and daemon
-registry. This isolates the release gate from unrelated local Gradle daemon
-stops and generated-output churn in other worktrees. Gate Gradle invocations
-also run through `scripts/cgroup-run.sh` and pass the shared release-chain
-execution profile from `scripts/lib/gradle-profile.sh` — `--no-build-cache`,
-`--no-parallel`, `--max-workers=1`, `-Dorg.gradle.jvmargs=-Xmx3072m`, and
-`-Pkotlin.daemon.jvmargs=-Xmx3072m` — to avoid cache-packing races,
-generated-source ordering races, and resource oversubscription when other local
-Gradle jobs are active.
-
-The two heap flags and the single worker are load-bearing, not cosmetic (issue
-#2054). Without them the Kotlin daemon inherits `gradle.properties`' 2048 MiB
-and two compile workers overlap inside it, which killed three consecutive
-v0.4.42 release validations in the BUILD before any emulator assertion ran. The
-gate also raises its `scripts/cgroup-run.sh` build scope to
-`POCKETSHELL_TEST_MEM=24G` (floor 20G locally; hosted CI keeps its pinned 8G with
-the same single-worker/split-heap profile). Both are asserted before Gradle
-starts, so a bad profile fails in milliseconds:
-
-```bash
-scripts/pre-release-confidence-gate.sh --check-profile
-```
-
-An outer `systemd-run --user -p MemoryMax=...` around the gate does NOT bound the
-compile — each heavy step creates its own sibling scope under `robust.slice`, so
-only `POCKETSHELL_TEST_MEM` binds.
-
-There are exactly two supported profiles, and each one's heap half is only valid
-next to its own scope half — both move together or neither does:
-
-| profile | Gradle launcher | Kotlin daemon | workers | build scope |
-| --- | --- | --- | --- | --- |
-| local (dev box) | `-Xmx3072m` | `-Xmx3072m` | 1 | `POCKETSHELL_TEST_MEM=24G` |
-| hosted (16 GiB runner) | `-Xmx1536m` | `-Xmx3072m` | 1 | `POCKETSHELL_TEST_MEM=8G` |
-
-`scripts/lib/gradle-profile.sh` picks between them with one rule for both halves:
-an explicit `GRADLE_FLAGS` / `POCKETSHELL_TEST_MEM` wins (the hosted release
-workflow sets both), otherwise local off CI and hosted on CI. The hosted numbers
-mirror what `scripts/check-release-emulator-memory-budget.sh` requires (#1724),
-and `scripts/check-release-gate-execution-profile.sh` reads the hosted workflow
-and fails if the two guards ever disagree.
-
-If you add a Gradle build to the release chain, put the script that runs it in
-`RELEASE_CHAIN_SCRIPTS` (top of
-`scripts/check-release-gate-execution-profile.sh`) and wire it to the profile
-lib. The guard walks the scripts the chain actually invokes, so a build moved
-into a helper outside that list is a hard failure at PR time rather than a
-silent regression: a child process inherits the `POCKETSHELL_TEST_MEM` export
-but NOT the heap flags, which puts the Kotlin daemon straight back on the
-inherited 2048 MiB.
-
-By default, the script copies the current working tree to
-`build/pre-release-confidence-gate/<run-id>/worktree` and re-execs from that
-copy, excluding `.git`, `.gradle`, and `build` directories. This protects the
-gate from unrelated local work mutating shared `app/build` or module build
-outputs while still validating the current source files. Set
-`GATE_ISOLATED_WORKTREE=0` only when the checkout is idle and direct in-place
-execution is intentional.
-
-The fast pre-release gate does all of the following:
-
-1. Runs normal compile/unit checks. In a fresh isolated Gradle home, the gate
-   first runs focused app KSP/Hilt generated-source tasks for debug, release,
-   androidTest, and unit-test variants so lint has deterministic generated
-   source inputs, then runs
-   `scripts/cgroup-run.sh -- ./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.daemon.jvmargs=-Xmx3072m assembleDebug check -x lint -x lintDebug --stacktrace`.
-   Lint is intentionally excluded from this local pre-release gate so unrelated
-   dirty-worktree lint findings do not block the install and focused
-   instrumentation checks; run lint separately from a clean checkout before
-   release.
-2. Starts or verifies the deterministic Docker `agents` target:
-   `docker compose -f tests/docker/docker-compose.yml up -d --build agents`.
-3. SSHes into the Docker target on `127.0.0.1:2222` and verifies the expected
-   shims: `claude`, `codex`, `opencode`, `heru`, `agent-log-explorer`,
-   `tmuxctl`, and `uv`.
-4. Verifies emulator readiness with the explicit `adb` path and
-   `sys.boot_completed`.
-5. Runs focused connected walkthrough journeys:
-   - `:shared:core-terminal:connectedDebugAndroidTest` for keyboard/input.
-   - Builds the app and Android test APKs, runs an explicit cold-reset setup
-     for deterministic walkthrough tests, clears existing app/test package data
-     once, replace-installs both APKs once with explicit-path `adb install -r`,
-     stops any restored app/test process before each focused selector, then runs direct
-     `adb shell am instrument -e class <selector>` invocations covering both
-     `PromptComposerSmokeTest` methods,
-     `SnippetTerminalE2eTest`, both `InlineDictationUiTest` methods,
-     `VoiceCommandPlannerE2eTest`, and both `EmulatorDockerSshSmokeTest`
-     methods.
-6. Rebuilds `app2/build/outputs/apk/debug/app2-debug.apk`.
-7. Runs the separate data-preserving update gate via
-   `scripts/install-update-apk.sh app2/build/outputs/apk/debug/app2-debug.apk`.
-   That helper runs only `adb install -r` and never clears app data or
-   uninstalls the package.
-
-Before the app2 instrumentation phase, the gate force-stops
-`com.pocketshell.app.test` and `com.pocketshell.app`, clears existing package
-data if either package is already installed, and waits for the package-manager
-handler queues to go idle. This is the cold-reset walkthrough path, not the user
-update path. It then replace-installs the app/test APKs once and waits for
-package-manager idle plus a stable package path check before starting
-instrumentation. During that stability window it also watches logcat for delayed
-PocketShell package removal broadcasts left over from earlier emulator work; if
-one appears, it waits for package-manager idle, reinstalls both APKs, and repeats
-the stability check before instrumentation. Uninstall is only used as a logged
-fallback when replace install reports an incompatible existing package in this
-cold-reset path, and that fallback also waits for package-manager idle before
-retrying install. Before
-each focused selector, the gate force-stops the app/test packages, waits until
-no PocketShell process is visible, verifies both packages report `stopped=true`,
-and holds that state through a short settle window. If prior instrumentation
-teardown starts the app/test package again during that settle window, the gate
-repeats the force-stop/idle/settle cycle up to three times. The focused tests
-run as direct instrumentation invocations without deleting or reinstalling packages between selectors, which
-keeps delayed `deletePackageX`, package replacement force-stops, restored
-tasks, the quiesce force-stop itself, and previous-run instrumentation teardown
-out of the running selector window.
-
-Each focused app instrumentation invocation clears logcat immediately before
-running. If Android reports `Process crashed` with no app exception and logcat
-shows the app was externally force-stopped while instrumentation was running,
-the selector is retried once after another package-manager idle wait. If the
-runner exits non-zero, does not report `INSTRUMENTATION_CODE: -1`, or the retry
-also fails, the step log prints the instrumentation output, filtered crash
-context from logcat, recent app-crash dropbox entries, and the tombstone
-listing. The run directory also keeps a bounded full logcat artifact for the
-failed focused invocation.
-
-By default, the script expects an already booted emulator. For local
-release-gate evidence, start the shared `test` AVD with the helper in hold mode
-from a dedicated terminal before running the gate:
-
-```bash
-AVD_HOLD=1 RUN_ID=pre-release-hold scripts/start-local-avd.sh
-```
-
-Leave that terminal open while `scripts/pre-release-confidence-gate.sh` or any
-focused `scripts/connected-test.sh` command runs in another terminal. Hold mode
-keeps the startup helper attached to the emulator and records diagnostics under
-`build/local-avd-start/pre-release-hold/` if the AVD exits while Gradle is still
-collecting connected-test evidence.
-
-If you need to start the AVD manually instead of using the helper, still use the
-cgroup wrapper with the same flag set:
-
-```bash
-scripts/cgroup-run.sh -- "$EMULATOR" -avd test \
-  -no-window \
-  -no-audio \
-  -no-boot-anim \
-  -gpu swiftshader_indirect \
-  -no-snapshot-load \
-  -no-snapshot-save
-```
-
-The script accepts these environment overrides when a local machine differs:
-
-```bash
-ANDROID_SDK=/path/to/sdk
-ADB=/path/to/adb
-EMULATOR=/path/to/emulator
-AVD_NAME=test
-LOG_ROOT=build/pre-release-confidence-gate
-GRADLE_USER_HOME=/tmp/pocketshell-gate-gradle-home
-# Leave GRADLE_FLAGS and POCKETSHELL_TEST_MEM unset to inherit the asserted
-# defaults from scripts/lib/gradle-profile.sh. Overriding either is allowed, but
-# the gate rejects a profile missing a heap bound or below the 20G scope floor.
-GATE_ISOLATED_WORKTREE=1
-TEST_APK_DIR=app/build/outputs/apk/androidTest/debug
-TEST_APK_PATH="$TEST_APK_DIR/app-debug-androidTest.apk"
-export ANDROID_SDK ADB EMULATOR AVD_NAME LOG_ROOT GRADLE_USER_HOME GATE_ISOLATED_WORKTREE TEST_APK_PATH
-scripts/pre-release-confidence-gate.sh
-```
-
-Slower opt-in suites are not part of the fast APK pre-release gate:
-
-- Full connected Android sweep:
-  `scripts/connected-test.sh`. Run this
-  before a public release candidate or when shared instrumentation fixtures
-  change.
-- Bootstrap/setup scenarios:
-  `HostBootstrapScenarioSuiteTest` with
-  `pocketshellBootstrapScenarios=true`. Run this before a release that changes
-  host setup, tool detection, daemon enablement, `uv` install behavior, or
-  SSH environment/PATH handling.
-- Manual visual audit and screenshots. Run this for visual or navigation
-  changes, and store screenshots beside the issue/release evidence.
-
-Start all bootstrap profiles:
-
-```bash
-docker compose -f tests/docker/docker-compose.yml up -d --build \
-  bootstrap-ready \
-  bootstrap-uv-install \
-  bootstrap-uv-upgrade \
-  bootstrap-unsupported \
-  bootstrap-daemon-disabled \
-  bootstrap-user-local-path \
-  bootstrap-fish-user-local-path
-```
-
-**No client-side suite drives these seven services any more (issue #2481).**
-`com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest` was deleted with
-the `app` module, and app2 has no guided host-setup sheet to exercise: the
-bootstrap scope is trimmed to the actionable "update the host CLI" error
-(`docs/rewrite-implementation-plan.md`, "Scope amendment"). The services are kept
-because they are cheap, deterministic, and the obvious fixtures for whoever
-builds an app2 setup-detection surface; the version-mismatch half is still
-asserted today, on the `agents-old-cli` fixture (port 2238), by the pre-release
-confidence gate and `scripts/ci-verify-agents-old-cli-mismatch.sh`.
-
-Cleanup:
-
-```bash
+docker compose -f tests/docker/docker-compose.yml ps
+docker inspect --format='{{.State.Health.Status}}' pocketshell-test-agents
+docker compose -f tests/docker/docker-compose.yml logs --tail=100 agents
 docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
 ```
 
-## Adding a New Docker Fixture
+The release workflow uses the same compose file and removes its targets in an
+`always` cleanup step. Do not use a broad Docker prune while another lane is
+running; it can delete a fixture or image that the lane still owns.
 
-Use this checklist for new profiles:
+## Product grep boundary
 
-- Add a deterministic Dockerfile or extend an existing one under
-  `tests/docker/`. Pin behavior in fixture scripts and checked-in data, not in
-  live network calls.
-- Add shims/fixtures under `tests/docker/*-bin/` or
-  `tests/docker/*-fixtures/`. Prefer simple executable scripts and static JSON,
-  JSONL, or text rows that parsers can assert exactly.
-- Do not use real provider credentials, private hosts, or private keys. The
-  reusable SSH identity is the public test keypair in `tests/docker/test_key`
-  and `tests/docker/test_key.pub`.
-- Add a compose service with a unique host port. Keep ports explicit so
-  emulator tests can target `10.0.2.2:<port>` and parallel runs are predictable.
-- Add or update an Android fixture constant when a connected test needs the new
-  port. Use `10.0.2.2` from emulator tests, not `127.0.0.1`.
-- Add a host-side sanity command to this runbook that checks SSH auth and the
-  expected tools or files.
-- Add a fast contract test that proves the fixture shape before using it in an
-  emulator scenario. For command shims, follow
-  `DockerAgentFixtureContractTest`: execute the checked-in shim directly and
-  assert parser-compatible output.
-- Keep cleanup/reset commands idempotent so scenarios can run repeatedly
-  against warm containers.
-- Update `docs/testing.md` when the new fixture changes the testing matrix, and
-  update this runbook whenever images, ports, commands, or connected test
-  selectors change.
+The product has no session-runtime dependency on the operational tmux tooling.
+The runner still needs isolated tmux sockets for agent processes; preserve the
+rules in `AGENTS.md`, `process.md`, and
+[`tmux-socket-recovery.md`](tmux-socket-recovery.md). Those operational paths
+are excluded from the product grep described in [testing.md](testing.md).

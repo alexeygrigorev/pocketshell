@@ -1239,10 +1239,26 @@ def self_test() -> None:
         if not pid_path.is_file():
             fail(f"global runtime {phase} self-test never started the proof's child process")
         child_pid = int(pid_path.read_text(encoding="utf-8"))
+
+        def process_is_running(pid: int) -> bool:
+            # A killed process can remain as an unreaped zombie in a container
+            # whose PID 1 does not reap orphaned children. Such a process no
+            # longer executes the proof, so /proc/<pid> alone is not an alive
+            # check and makes this self-test fail spuriously on CI runners.
+            status = Path(f"/proc/{pid}/status")
+            try:
+                state_line = next(
+                    line for line in status.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("State:")
+                )
+            except (FileNotFoundError, StopIteration):
+                return False
+            return "\tZ" not in state_line
+
         reap_deadline = time.monotonic() + 1
-        while Path(f"/proc/{child_pid}").exists() and time.monotonic() < reap_deadline:
+        while process_is_running(child_pid) and time.monotonic() < reap_deadline:
             time.sleep(0.02)
-        if Path(f"/proc/{child_pid}").exists():
+        if process_is_running(child_pid):
             try:
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:

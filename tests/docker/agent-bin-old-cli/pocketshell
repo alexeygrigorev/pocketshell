@@ -39,11 +39,11 @@ set -eu
 #                too-tight client timeout would falsely surface a connect
 #                failure.
 #
-# Every OTHER subcommand (usage / sessions / jobs / agent-log / agent, and
+# Every OTHER subcommand (usage / sessions / agent-log / agent, and
 # `profiles` in `unknown` mode) delegates byte-for-byte to the REAL fixture stub
 # so the rest of the connect / probe path behaves identically to a current host.
 
-real_fixture="${POCKETSHELL_REAL_FIXTURE:-/usr/local/lib/pocketshell-real-fixture}"
+real_fixture="${POCKETSHELL_REAL_FIXTURE:-/usr/local/bin/pocketshell-real}"
 mode_file="/opt/pocketshell-old-cli-mode"
 
 # Resolve the connect-path failure mode: explicit env override (local probes)

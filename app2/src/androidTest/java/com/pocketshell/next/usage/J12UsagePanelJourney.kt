@@ -20,11 +20,10 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
+import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import kotlinx.coroutines.flow.first
@@ -33,7 +32,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -53,7 +51,7 @@ import org.junit.runner.RunWith
  * `usage` route, [com.pocketshell.next.MainActivity]'s Hilt-managed
  * `hiltViewModel()` graph failing to resolve [UsageFetcher]'s dependencies,
  * or the panel reading a DIFFERENT connection than the one the pill's own
- * fetch used. Everything from the pill tap to the rendered provider cards is
+ * fetch used. Everything from the pill tap to the rendered provider rows is
  * production code against a real sshd here.
  *
  * ## The canned response is the host's own answer, not a Kotlin fixture
@@ -93,7 +91,7 @@ class J12UsagePanelJourney {
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j12_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -114,32 +112,29 @@ class J12UsagePanelJourney {
         )
     }
 
-    /** Same per-session `tmuxctl-<name>` socket convention `sessions attach` resolves. */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    /** Create the real aplexer session whose usage pill this journey opens. */
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
+        )
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'clear; echo $BANNER'",
         )
     }
 
     /**
      * Opening a session shows a live glance pill, and tapping it opens a panel
-     * whose first paint is the compact strip only (issue #2534). Tapping a
-     * compact row mounts that provider's existing card — windows, reset credits,
-     * severity pill — and tapping again collapses it. Other providers stay
-     * collapsed unless tapped. Severity is still DERIVED from the fixture's
+     * whose first paint is quiet provider rows. Tapping a row reveals that
+     * provider's windows, reset credits, and status details inline; tapping again
+     * collapses it. Severity is still DERIVED from the fixture's
      * numbers (task P-5 accept: "J12 green; glance pill renders in session
      * screen").
-     */
+    */
     @Test
     fun theGlancePillOpensThePanelAndExpandsACardOnCompactRowTap() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
 
         // The pill runs its OWN foreground fetch on session open (task P-5: no
         // scheduler, no cache) — waiting for it here is the assertion that the
@@ -150,66 +145,66 @@ class J12UsagePanelJourney {
 
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel")
-        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
-        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
-        awaitTag(usageSummaryRowTag("Claude Code"), "the Claude compact row")
-        awaitTag(usageSummaryRowTag("GitHub Copilot"), "the Copilot compact row")
+        awaitTag(USAGE_PROVIDER_LIST_TAG, "the usage provider list")
+        awaitTag(usageProviderRowTag("Codex"), "the Codex provider row")
+        awaitTag(usageProviderRowTag("claude"), "the Claude provider row")
+        awaitTag(usageProviderRowTag("copilot"), "the Copilot provider row")
         JourneyScreenshots.capture("02-panel-collapsed", JOURNEY)
 
-        // First paint is the compact list. Full cards stay unmounted until the
-        // matching row is tapped — the screenshot that filed #2534.
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        // First paint is the compact list. Provider details stay unmounted until
+        // the matching row is tapped.
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("copilot")).assertDoesNotExist()
 
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
-        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performClick()
+        awaitTag(usageProviderDetailsTag("codex"), "the Codex provider details")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).performScrollTo().assertIsDisplayed()
-        assertCardHasDescendant(usageProviderCardTag("codex"), "OK")
-        compose.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
-        compose.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        assertDetailsHasText(usageProviderDetailsTag("codex"), "OK")
+        compose.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("copilot")).assertDoesNotExist()
         JourneyScreenshots.capture("03-codex-expanded", JOURNEY)
 
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performScrollTo().performClick()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performScrollTo().performClick()
         compose.awaitIdle("after collapsing Codex")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
         compose.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).assertDoesNotExist()
 
         // Expand the other two to keep the P-5 severity proof: claude is
         // hard-blocked, copilot is approaching. Each tap is independent — Codex
         // stays collapsed unless tapped again.
-        compose.onNodeWithTag(usageSummaryRowTag("Claude Code")).performScrollTo().performClick()
-        awaitTag(usageProviderCardTag("claude"), "the Claude provider card")
-        assertCardHasDescendant(usageProviderCardTag("claude"), "EXCEEDED")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderToggleTag("claude")).performScrollTo().performClick()
+        awaitTag(usageProviderDetailsTag("claude"), "the Claude provider details")
+        assertDetailsHasText(usageProviderDetailsTag("claude"), "EXCEEDED")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
 
-        compose.onNodeWithTag(usageSummaryRowTag("GitHub Copilot")).performScrollTo().performClick()
-        awaitTag(usageProviderCardTag("copilot"), "the Copilot provider card")
-        assertCardHasDescendant(usageProviderCardTag("copilot"), "WARN")
+        compose.onNodeWithTag(usageProviderToggleTag("copilot")).performScrollTo().performClick()
+        awaitTag(usageProviderDetailsTag("copilot"), "the Copilot provider details")
+        assertDetailsHasText(usageProviderDetailsTag("copilot"), "WARN")
     }
 
     /**
      * Issue #2532: Usage is a host-scoped action on the session tree, not only
      * a glance pill inside a session. Tapping Usage on the tree must open the
-     * same panel. First paint is the compact strip (#2534) — the expanded
-     * provider card is unmounted until the matching row is tapped.
+     * same panel. First paint is the quiet provider list — details are unmounted
+     * until the matching row is tapped.
      */
     @Test
     fun tappingUsageOnTheTreeOpensThePanel() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(HOST_WORKSPACES_ACTIONS_TAG, "the host actions menu")
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
         awaitTag(SESSION_TREE_USAGE_TAG, "the tree Usage header action")
         JourneyScreenshots.capture("03-tree-usage", JOURNEY)
 
         compose.onNodeWithTag(SESSION_TREE_USAGE_TAG).performClick()
         awaitTag(USAGE_SCREEN_TAG, "the usage panel from the tree")
-        awaitTag(USAGE_SUMMARY_STRIP_TAG, "the compact usage strip")
-        awaitTag(usageSummaryRowTag("Codex"), "the Codex compact row")
-        compose.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
-        compose.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
-        awaitTag(usageProviderCardTag("codex"), "the Codex provider card")
+        awaitTag(USAGE_PROVIDER_LIST_TAG, "the usage provider list")
+        awaitTag(usageProviderRowTag("Codex"), "the Codex provider row")
+        compose.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
+        compose.onNodeWithTag(usageProviderToggleTag("codex")).performClick()
+        awaitTag(usageProviderDetailsTag("codex"), "the Codex provider details")
         JourneyScreenshots.capture("04-panel-from-tree", JOURNEY)
     }
 
@@ -228,7 +223,7 @@ class J12UsagePanelJourney {
      *
      * [startRealAplexerSessionRunningClaude] does, over the same SSH the app
      * uses, exactly what the maintainer's box does: it starts an aplexer
-     * session (through the host CLI, `--backend aplexer`, which is a plain
+     * session through the host CLI, which is a plain
      * shell workload — `engine` is NOT the answer to "which agent"), then
      * launches an agent INSIDE it. The agent is a `claude`-named executable
      * that stays alive, so the workload has a live descendant whose `comm` and
@@ -239,46 +234,16 @@ class J12UsagePanelJourney {
      * The image's own `/usr/local/bin/claude` is deliberately NOT used: it
      * prints one line and exits, so it leaves no descendant to detect.
      *
-     * ## This journey is expected RED until #2581 + #2586 land
-     *
-     * Two things must ship before it can pass, and it fails on the FIRST of
-     * them by name rather than degrading into a silent fallback:
-     *
-     *  1. `a` must report the detected agent (aplexer 0.1.4, issue #2580) and
-     *     the host CLI must pass it through as `agent` on the schema-2 row
-     *     (issue #2581, which also bumps `tools/pocketshell/pyproject.toml`'s
-     *     `aplexer==` pin — the same line `Dockerfile.agents` derives the
-     *     fixture's binary download from, so the pin bump is what re-points
-     *     this fixture at a detecting `a`). Today the row carries no `agent`
-     *     key at all.
-     *  2. The fixture's `sessions list --json` arm must ENUMERATE live aplexer
-     *     sessions instead of reading `~/.pocketshell-fixture-aplexer.json`
-     *     (issue #2586; the shim says so itself). Until then the app
-     *     cannot see this session, so the UI half below cannot run either —
-     *     which is why the host-contract assertion comes first and is the one
-     *     that fails.
-     *
-     * Nothing here is stubbed to route around either gap: a journey that
-     * seeded the `agent` value itself would prove only that the client can
-     * read a value the journey wrote, which is what the JVM suite already
-     * proves without an emulator.
+     * The host-contract assertions below keep this journey tied to the real
+     * aplexer process-tree signal and to the exact app-facing schema-3 listing.
      */
     @Test
-    // Red by design today; the KDoc above names both blockers and what turns
-    // each green. Quarantined per D36(4) so it cannot freeze `main`'s journey
-    // lane while it waits — one line, because the reconciler parses it.
-    @Ignore("quarantined: #2586, expires 2026-09-20 — fixture lists no live aplexer row")
     fun theSessionPillFocusesTheSessionsDetectedAgentAndDropsTheWindowToken() {
         val sessionName = startRealAplexerSessionRunningClaude()
         try {
             assertHostReportsTheDetectedAgent(sessionName)
 
-            awaitTag(hostRowTag(hostId))
-            compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-            awaitTag(SESSION_TREE_TAG)
-            awaitTag(sessionRowTag(sessionName), "the live aplexer session's row")
-            compose.onNodeWithTag(sessionRowTag(sessionName)).performClick()
-            awaitTag(SESSION_SCREEN_TAG)
+            compose.openQuietSession(hostId, sessionName, AGENT_WORKSPACE, TIMEOUT_MS)
 
             awaitTag(USAGE_GLANCE_PILL_TAG, "the usage glance pill")
             JourneyScreenshots.capture("05-focused-pill", JOURNEY)
@@ -326,14 +291,14 @@ class J12UsagePanelJourney {
         killAgentSession(aplexerSessionName())
 
         val created = AgentsFixture.exec(
-            "pocketshell sessions create $AGENT_TAG --backend aplexer " +
+            "pocketshell sessions create $AGENT_TAG " +
                 "--cwd $AGENT_WORKSPACE --json",
         )
         val envelope = JSONObject(created)
         assertEquals(
-            "the fixture must create this session on aplexer, not tmux: $created",
-            "aplexer",
-            envelope.optString("manager"),
+            "the fixture must create an aplexer session: $created",
+            3,
+            envelope.optInt("schema"),
         )
         val name = envelope.optString("name")
         assertTrue("the create envelope carried no name: $created", name.isNotEmpty())
@@ -392,18 +357,14 @@ class J12UsagePanelJourney {
             realRow.optString("agent", ""),
         )
 
-        // 2. The APP-FACING listing: the exact command the client runs. On the
-        //    fixture this is the deterministic shim, whose list arm still reads
-        //    aplexer rows from a seed file rather than enumerating live ones.
+        // 2. The APP-FACING listing: the exact command the client runs. The
+        //    fixture delegates this to the real schema-3 aplexer enumerator.
         val appListing = AgentsFixture.exec("pocketshell sessions list --json")
         val appRow = aplexerRow(appListing, sessionName)
         assertNotNull(
             "`pocketshell sessions list --json` — the command the app runs — " +
-                "did not list the live aplexer session $sessionName. The " +
-                "fixture's list arm still reads aplexer rows from " +
-                "~/.pocketshell-fixture-aplexer.json instead of enumerating " +
-                "them (issue #2586), so the app cannot see a real " +
-                "aplexer session yet.\nHost listing:\n$appListing",
+            "did not list the live aplexer session $sessionName.\n" +
+                "Host listing:\n$appListing",
             appRow,
         )
         assertEquals(
@@ -460,8 +421,16 @@ class J12UsagePanelJourney {
         throw AssertionError("$what never happened within ${TIMEOUT_MS}ms")
     }
 
-    private fun assertCardHasDescendant(cardTag: String, text: String) {
-        compose.onNode(hasTestTag(cardTag) and hasAnyDescendant(hasText(text)))
+    private fun assertDetailsHasText(detailsTag: String, text: String) {
+        // Quiet details expose a single status line such as "Status · OK";
+        // the contract is the status token, not a legacy standalone card
+        // label. Match that token within the real line and keep the check
+        // usable with the merged semantics exposed on device.
+        compose.onNode(
+            hasTestTag(detailsTag) and
+                hasAnyDescendant(hasText(text, substring = true, ignoreCase = true)),
+            useUnmergedTree = true,
+        )
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -495,7 +464,10 @@ class J12UsagePanelJourney {
         const val REAL_CLI_SRC = "/opt/pocketshell-real/src"
         const val JOURNEY = "j12-usage-panel"
 
-        const val SESSION = "j12-shell"
+        const val TAG = "j12-shell"
+        const val SESSION = "testuser:j12-shell"
+        const val WORKSPACE = "/home/testuser"
+        const val BANNER = "J12-FIXTURE-SESSION"
         const val HOST_ID = 9_801L
 
         /**
@@ -521,7 +493,5 @@ class J12UsagePanelJourney {
          */
         const val CLAUDE_LONGEST_WINDOW_PERCENT = 60
 
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
     }
 }

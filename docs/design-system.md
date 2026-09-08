@@ -4,6 +4,12 @@ This is the authoritative design-system audit and foundation for issue #461.
 It is a docs/spec slice: runtime Kotlin and Compose code must not change as part
 of #461 implementation work.
 
+The screen inventory below began before the app2 rewrite. Rows and examples that
+name the retired session route are historical audit input; current product
+session UI is `SessionTreeScreen` plus `SessionScreen`, backed by aplexer. New
+design work must use those current surfaces and the current paths in `app2/` and
+`shared/`.
+
 PocketShell is a Material 3 Compose app with a dark, compact dev-tool dialect.
 The foundation combines Material 3 structure with terminal/productivity cues
 from Warp, VS Code, Termius, and Linear: dark-first surfaces, dense rows,
@@ -80,12 +86,12 @@ The audit found these repeated drift patterns:
   repeated row, chip, card, sheet, and timeline values should move into shared
   components or named geometry constants.
 - Some screens have local versions of shared ideas: status dots in
-  `PortForwardPanelScreen` and `FolderListScreen`, section headers in tmux menus,
+  `PortForwardPanelScreen` and `FolderListScreen`, section headers in session menus,
   rows in file/share/repo/settings surfaces, and tab/segmented controls around
   terminal chrome.
 - Motion is not centralized. Until a runtime token is added, new motion must
   cite this spec and stay local to state comprehension.
-- Dialog and sheet styling is repeated across host import, snippets, tmux
+- Dialog and sheet styling is repeated across host import, snippets, session
   lifecycle, env copy, bootstrap, and composer flows. Standardize the outer
   container and action row before polishing individual content.
 
@@ -449,7 +455,7 @@ things:
 | Affordance | When | API |
 |------------|------|-----|
 | `LoadingIndicator.Bar()` | Indeterminate, **in-flight strip** — first-connect, reconnecting, refresh. The standard top/inline progress bar. | One height + accent fill on a muted track. No height knob. |
-| `LoadingIndicator.Spinner(size, label?, onAccent?)` | Indeterminate, **"something is happening"** — full-screen/section loaders, inline row reveals, pending items, in-button submit progress. | Diameter + stroke come from the enumerated `SpinnerSize` (`Small` inline, `Medium` centered). Optional `label` ("Attaching…", "waiting for tmux panes…") renders below. Set `onAccent = true` for a spinner shown ON an accent-filled surface (e.g. a primary CTA mid-submit) so the arc inverts to the on-accent content colour and stays visible. **Never** a raw spinner `dp`. |
+| `LoadingIndicator.Spinner(size, label?, onAccent?)` | Indeterminate, **"something is happening"** — full-screen/section loaders, inline row reveals, pending items, in-button submit progress. | Diameter + stroke come from the enumerated `SpinnerSize` (`Small` inline, `Medium` centered). Optional `label` ("Attaching…", "waiting for session data…") renders below. Set `onAccent = true` for a spinner shown ON an accent-filled surface (e.g. a primary CTA mid-submit) so the arc inverts to the on-accent content colour and stays visible. **Never** a raw spinner `dp`. |
 | `ProgressBar(progress, kind)` | **Determinate** — percentage is known (usage quota, download). | The existing `Float` API; the percentage-known sibling. |
 
 Rules:
@@ -467,8 +473,8 @@ Rules:
   cancel/retry lives in a button or row beside it.
 
 Migrating the ~21 existing raw indicators onto this component is tracked as
-follow-up slices (non-tmux spinners/bars first; the tmux loading bars are gated
-behind the Connection Manager work).
+follow-up slices (shared spinners/bars first; terminal loading bars are gated by
+the current connection work).
 
 ## Screen And Sheet Inventory
 
@@ -495,8 +501,8 @@ and the `when` dispatch in [`MainActivity.kt`](../app/src/main/java/com/pocketsh
 | File viewer [`FileViewerScreen.kt`](../app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt) | `ScreenHeader`, text/image/binary viewer states, share/copy actions. | File chrome is local; action placement can diverge from file explorer. | Shared file header/action row, mono text body, empty/error file state. |
 | File explorer [`FileExplorerScreen.kt`](../app/src/main/java/com/pocketshell/app/fileexplorer/FileExplorerScreen.kt) | `ListRow`, alert dialog, folder/file listing. | Header mirrors file viewer but does not use `ScreenHeader`; file rows need one shared file grammar. | Shared file browser scaffold, `ListRow` file/folder row, path breadcrumb. |
 | Recurring jobs [`RecurringJobsScreen.kt`](../app/src/main/java/com/pocketshell/app/jobs/RecurringJobsScreen.kt) | `Breadcrumb`, `ListRow`, `StatusDot`, `Kebab`, add/edit dialog. | Dialog form and breadcrumb/header pattern differ from other non-terminal screens. | Shared job row, shared form dialog, header decision: `ScreenHeader` or terminal breadcrumb. |
-| Raw SSH session [`SessionScreen.kt`](../app/src/main/java/com/pocketshell/app/session/SessionScreen.kt) | `Breadcrumb`, `Tabs`, `KeyBar`, `DropdownMenu`, `ModalBottomSheet`, conversation feed, terminal viewport. | Legacy route has local terminal/conversation chrome and bottom controls. | Terminal shell pattern: tabs, breadcrumb, keybar, composer, overflow menu. |
-| Tmux session [`TmuxSessionScreen.kt`](../app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt) | Terminal viewport, compact tabs, `KeyBar`, usage badge, `StatusDot`, drawer, menus, lifecycle dialogs, conversation feed. | Largest drift surface: many local rows, menus, status sections, tabs, conversation turns, and lifecycle dialogs. | Extract terminal chrome, session drawer rows, lifecycle dialog, conversation row/tool-call row, and overflow menu patterns. |
+| Session tree [`SessionTreeScreen.kt`](../app2/src/main/java/com/pocketshell/next/tree/SessionTreeScreen.kt) | Host workspaces, live session rows, agent/shell badges, create-session sheet. | Tree rows and create/error states must keep host truth visible. | Shared tree row, status/agent badge, session-create sheet, and explicit error state. |
+| Session [`SessionScreen.kt`](../app2/src/main/java/com/pocketshell/next/terminal/SessionScreen.kt) | Terminal viewport, tabs, `KeyBar`, usage badge, status, conversation feed, lifecycle controls. | Terminal chrome and reconnect states must remain consistent with the tree's host session identity. | Terminal shell pattern: breadcrumb, tabs, keybar, composer, overflow menu, and connection status. |
 
 ### Hosted Sheets, Dialogs, And Secondary Surfaces
 
@@ -512,7 +518,7 @@ and the `when` dispatch in [`MainActivity.kt`](../app/src/main/java/com/pocketsh
 | Session type picker [`SessionTypePickerSheet.kt`](../app/src/main/java/com/pocketshell/app/projects/SessionTypePickerSheet.kt) | `ModalBottomSheet`, shell/agent choices. | Choice rows are local. | Shared session-create picker with agent/shell badges. |
 | Share host picker [`ShareActivity.kt`](../app/src/main/java/com/pocketshell/app/share/ShareActivity.kt), [`HostPickerScreen.kt`](../app/src/main/java/com/pocketshell/app/share/HostPickerScreen.kt) | Share-specific host/target lists, `ListRow`, dialogs. | Header and picker flow are separate from app host chooser. | Shared chooser row and target picker sheet. |
 | SSH keys [`SshKeysScreen.kt`](../app/src/main/java/com/pocketshell/app/hosts/SshKeysScreen.kt) | `ListRow`, `Kebab`, key rows, unlock dialog. | Not a nav destination but important form-management surface; needs `ScreenHeader` when standalone. | Shared key row, secret/unlock dialog. |
-| Voice session surface [`VoiceSessionSurface.kt`](../app/src/main/java/com/pocketshell/app/voice/VoiceSessionSurface.kt) | Dictation UI shared by raw SSH and tmux routes. | Must not drift from composer and mic tokens. | `MicButton`, shared recording states, shared transcript controls. |
+| Voice session surface [`VoiceSessionSurface.kt`](../app2/src/main/java/com/pocketshell/next/voice/VoiceSessionSurface.kt) | Dictation UI shared by terminal routes. | Must not drift from composer and mic tokens. | `MicButton`, shared recording states, shared transcript controls. |
 | Terminal lab [`TerminalLabActivity.kt`](../app/src/main/java/com/pocketshell/app/terminal/TerminalLabActivity.kt) | Dev/test terminal activity. | Not production nav, but can mislead future agents. | Keep as lab-only; do not source product components from it without review. |
 
 ## Migration Slices
@@ -559,7 +565,7 @@ Migrate by family, not by random file:
 1. Host/settings/list-management family: Host list, Settings, SSH keys, Watched
    folders, Crash reports, AI costs.
 2. Workspace family: Folder list, Repo browser, Env files.
-3. Terminal family: Session, Tmux session, Recurring jobs, Usage in-session
+3. Terminal family: Session, recurring jobs, usage in-session chip, port forwarding.
    chip, port forwarding.
 4. File/share family: File explorer, File viewer, Share host picker.
 5. Modal family: Composer, snippets, agent commands, bootstrap, folder context,
@@ -624,8 +630,8 @@ cheap inner loop. Run it for migration PRs that affect app screens or sheets.
 Run targeted connected tests when a slice touches a covered surface:
 
 ```bash
-scripts/connected-test.sh --suffix design-tmux \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest
+scripts/connected-test.sh --suffix design-session \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.next.tree.J04CreateSessionJourney
 
 scripts/connected-test.sh --suffix design-composer \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.composer.PromptComposerVisualScreenshotTest

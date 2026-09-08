@@ -1,6 +1,6 @@
 # Usage Panel
 
-Provider quota tracking for Claude Code, Codex, GitHub Copilot, Grok Build, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. The pinned backend currently reports five providers; a separate canonical producer contract can add providers such as OpenCode Go.
+Provider quota tracking for Claude Code, Codex, GitHub Copilot, Grok Build, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. The pinned producer currently reports five providers; a separate canonical producer contract can add providers such as OpenCode Go.
 
 ## Key principle: zero credentials on the phone
 
@@ -173,7 +173,7 @@ schema.
 
 ## Expected JSON Schema
 
-The pinned PyPI `quse==0.0.15` backend is the source for the published usage
+The pinned PyPI `quse==0.0.15` producer is the source for the published usage
 values (issues #1318, #2293). Its `--json` output is a **provider-keyed object**
 with six providers, each record already carrying the canonical top-level
 `windows` map keyed `5h` / `7d` / `monthly`. The host helper flattens that

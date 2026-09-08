@@ -82,62 +82,62 @@ class _FakeHost:
 
 def _seed_claude(host: _FakeHost) -> None:
     host.add_proc(
-        1001, scope="tmuxctl-claude-main.scope", comm="bash", cmdline="-bash"
+        1001, scope="aplexer-workload-claude-main.scope", comm="bash", cmdline="-bash"
     )
     host.add_proc(
         1002,
-        scope="tmuxctl-claude-main.scope",
+        scope="aplexer-workload-claude-main.scope",
         comm="claude",
         cmdline="claude",
     )
-    host.add_scope("tmuxctl-claude-main.scope", [1001, 1002])
+    host.add_scope("aplexer-workload-claude-main.scope", [1001, 1002])
 
 
 def _seed_codex(host: _FakeHost) -> None:
     host.add_proc(
-        2001, scope="tmuxctl-codex.scope", comm="bash", cmdline="-bash"
+        2001, scope="aplexer-workload-codex.scope", comm="bash", cmdline="-bash"
     )
     host.add_proc(
         2002,
-        scope="tmuxctl-codex.scope",
+        scope="aplexer-workload-codex.scope",
         comm="MainThread",
         cmdline="node /usr/lib/node_modules/codex/bin/codex.js",
     )
-    host.add_scope("tmuxctl-codex.scope", [2001, 2002])
+    host.add_scope("aplexer-workload-codex.scope", [2001, 2002])
 
 
 def _seed_opencode(host: _FakeHost) -> None:
     host.add_proc(
-        3001, scope="tmuxctl-opencode-lab.scope", comm="bash", cmdline="-bash"
+        3001, scope="aplexer-workload-opencode-lab.scope", comm="bash", cmdline="-bash"
     )
     host.add_proc(
         3002,
-        scope="tmuxctl-opencode-lab.scope",
+        scope="aplexer-workload-opencode-lab.scope",
         comm="opencode",
         cmdline="opencode",
     )
-    host.add_scope("tmuxctl-opencode-lab.scope", [3001, 3002])
+    host.add_scope("aplexer-workload-opencode-lab.scope", [3001, 3002])
 
 
 def _seed_grok(host: _FakeHost) -> None:
     host.add_proc(
-        3501, scope="tmuxctl-grok.scope", comm="bash", cmdline="-bash"
+        3501, scope="aplexer-workload-grok.scope", comm="bash", cmdline="-bash"
     )
     host.add_proc(
         3502,
-        scope="tmuxctl-grok.scope",
+        scope="aplexer-workload-grok.scope",
         comm="grok",
         cmdline="grok --always-approve",
     )
-    host.add_scope("tmuxctl-grok.scope", [3501, 3502])
+    host.add_scope("aplexer-workload-grok.scope", [3501, 3502])
 
 
 def _seed_plain_shell(host: _FakeHost) -> None:
     """A pane that resolves to a scope but runs no agent -> ``none``."""
     host.add_proc(
-        4001, scope="tmuxctl-shell.scope", comm="bash", cmdline="-bash"
+        4001, scope="aplexer-workload-shell.scope", comm="bash", cmdline="-bash"
     )
-    host.add_scope("tmuxctl-shell.scope", [4001])
+    host.add_scope("aplexer-workload-shell.scope", [4001])
 
 
 def _invoke(panes: list[dict], host: _FakeHost) -> dict:
@@ -173,7 +173,7 @@ def test_classifies_claude(tmp_path: Path) -> None:
     assert len(results) == 1
     assert results[0]["pane_id"] == "%1"
     assert results[0]["agent_kind"] == "claude"
-    assert results[0]["scope"] == "tmuxctl-claude-main.scope"
+    assert results[0]["scope"] == "aplexer-workload-claude-main.scope"
     assert results[0]["evidence_pid"] == 1002
 
 
@@ -182,7 +182,7 @@ def test_classifies_codex_node_wrapped(tmp_path: Path) -> None:
     _seed_codex(host)
     out = _invoke([{"pane_id": "%2", "pane_pid": 2001}], host)
     assert out["results"][0]["agent_kind"] == "codex"
-    assert out["results"][0]["scope"] == "tmuxctl-codex.scope"
+    assert out["results"][0]["scope"] == "aplexer-workload-codex.scope"
 
 
 def test_classifies_opencode(tmp_path: Path) -> None:
@@ -205,7 +205,7 @@ def test_plain_shell_resolves_to_none(tmp_path: Path) -> None:
     _seed_plain_shell(host)
     out = _invoke([{"pane_id": "%4", "pane_pid": 4001}], host)
     assert out["results"][0]["agent_kind"] == "none"
-    assert out["results"][0]["scope"] == "tmuxctl-shell.scope"
+    assert out["results"][0]["scope"] == "aplexer-workload-shell.scope"
 
 
 def test_unreadable_pane_resolves_to_unknown(tmp_path: Path) -> None:

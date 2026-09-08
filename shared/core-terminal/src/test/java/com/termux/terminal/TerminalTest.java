@@ -370,7 +370,7 @@ public class TerminalTest extends TerminalTestCase {
 	public void testQueryResponsesAreAnswered() {
 		// PocketShell: the emulator is the REAL terminal a remote program talks to
 		// (app2 attaches over a PTY), so every query it asks must be answered on
-		// the wire. The pre-0.5.0 client had a suppression flag for tmux control
+		// the wire. The pre-0.5.0 client had a suppression flag for control-mode
 		// mode; with one PTY source there is nothing to suppress.
 		withTerminalSized(5, 5);
 		assertEnteringStringGivesResponse("\033[14t", "\033[4;75;65t");

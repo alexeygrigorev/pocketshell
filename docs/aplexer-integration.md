@@ -10,23 +10,23 @@ commit — treat this file as authoritative for *what PocketShell will do*,
 and the aplexer CLI/`--json` shapes as authoritative for *what exists
 today*).
 
-**Current slice: Phase A complete; listing both session managers.** (#2341)
+**Current slice: #2561 is implemented.** The shipped PocketShell product has
+one session runtime: aplexer. The host CLI and Android client use the schema-3
+session contract, and a missing bundled aplexer is a visible command failure.
 
 ```text
 Phase 0   aplexer registry surface          DONE (in aplexer)
-Phase A   engines / profiles / launch       DONE
-  A1      prefer `a profiles --json` siblings   DONE
-  A2      engine listing via `a engines`        DONE
-  A3      launch via `a launch-spec`            DONE
-  A4      Electron presentation follow-through  inherited
-Phase B   aplexer PTY attach quality        NOT READY (list both managers anyway)
-Phase C   aplexer default; tmux demoted     blocked on B
+Phase A   engines / profiles / launch       DONE (historical)
+Phase B   host-side PTY attach              DONE (superseded by the hard cut)
+Phase C   dual-runtime transition           RETIRED by #2561
+Phase D   aplexer-only PocketShell product  DONE (#2561)
 ```
 
-The integration seam is the **host CLI** (`tools/pocketshell/`), not the
-Android app and not pocketshell-electron. Both clients already drive
-engines / profiles / launch through remote `pocketshell …` calls. Electron
-inherits Phase A the same day the helper does.
+The integration seam remains the **host CLI** (`tools/pocketshell/`): the phone
+runs `pocketshell sessions list|create|attach|kill`, while `a` owns the remote
+session lifecycle. There is no second session manager to merge or select. The
+old planning references below are historical and are not implementation
+instructions.
 
 ---
 
@@ -101,7 +101,7 @@ The pin is enforced by the exact `==` specifier, the committed
 `tools/pocketshell/uv.lock`, and `tools/pocketshell/tests/test_aplexer_contract.py`.
 It deliberately does **not** get a release-time guard:
 `scripts/check-pypi-version.sh` couples pocketshell's own package version to
-the release tag and says nothing about `quse` or `tmuxctl` either.
+the release tag and says nothing about the host session runtime either.
 
 The version string alone is **not** sufficient, and #2543 is the proof. The
 first attempt pinned `aplexer==0.1.1`, the newest published wheel at the time.
@@ -113,7 +113,7 @@ downgraded every host past two fixes the real create-agent path depends on:
 
 | aplexer commit | What 0.1.1 does instead |
 | --- | --- |
-| `ee4b957` — profile `executable` override (argv[0]) | Accepts the key, ignores it. `[profiles.zcodex] engine="codex", executable="zcodex"` resolves argv[0] to `codex`, so `sessions create --backend aplexer --engine codex --profile zcodex` dies with `a: command is not executable or was not found in PATH: codex`. |
+| `ee4b957` — profile `executable` override (argv[0]) | Accepts the key, ignores it. `[profiles.zcodex] engine="codex", executable="zcodex"` resolves argv[0] to `codex`, so `sessions create --engine codex --profile zcodex` dies with `a: command is not executable or was not found in PATH: codex`. |
 | `d13ecb2` — preserve provider env for `shell` launches | Unsets 71 provider vars for every plain shell session. |
 
 Hence `test_aplexer_contract.py`: it drives the **bundled** binary (never a
@@ -177,7 +177,7 @@ lost **every** aplexer row.
 A record-less directory that outlives the window — a killed or crashed
 `a start` — is worse: it bricks a 0.1.2 registry permanently, including
 `a start` itself (the same scan runs under the lock), so
-`sessions create --backend aplexer` stops working until someone manually
+`sessions create` stops working until someone manually
 `rmdir`s the directory.
 
 Pinned behaviour, in `test_aplexer_contract.py`: with that exact on-disk shape
@@ -213,8 +213,8 @@ properties matter to this CLI:
   dead process and a recycled pid must not resurrect an agent.
 
 Host side, `session_enum._aplexer_rows` reads it onto `LiveSession.agent` and
-schema 2 emits it on every row (`null` for tmux rows, which have no workload
-pid to walk). An older `a` simply omits the key, which reads as `null`, never
+schema 3 emits it on every row; every row is an aplexer record and therefore
+may carry a workload pid for host-side agent detection. An older `a` simply omits the key, which reads as `null`, never
 a `KeyError` — the pin is a floor, not a promise about the binary a given host
 happens to be running.
 
@@ -256,22 +256,19 @@ new pin and nothing else.
 
 ---
 
-## Readiness (fair assessment, 2026-08-26)
+## Current readiness
 
-| Phase | Ready? | Meaning |
+| Surface | Status | Contract |
 | --- | --- | --- |
-| **A** — aplexer owns engines/profiles/launch; tmux still hosts terminals | **Done** | Host-CLI swap. Attach stays tmux `-CC`. |
-| **B** — aplexer PTY hosts selected sessions; both backends live | **Not shippable** | Runtime exists, but reattach, agent-state badges, and identity mapping are not. |
-| **C** — aplexer default; tmux demoted | Blocked on B | Plus leftover helper features (`jobs`, cards, usage) aplexer will not own. |
+| Host session lifecycle | Shipped | `sessions list/create/attach/kill` resolve the bundled `a` only. |
+| Android wire contract | Shipped | Schema 3 has no backend discriminator or create backend option. |
+| Room storage | Shipped | Schema 21 migrates old hosts and drops the obsolete runtime flag. |
+| Docker and journeys | Shipped | The glibc agents image runs real pinned `a`/`aplexer` binaries and lifecycle checks. |
+| Missing aplexer | Fail loud | List, create, attach, and kill surface an error with a nonzero exit. |
 
-Verified against aplexer HEAD (`87a4b89`): `a profiles --json`,
-`a engines --json`, `a launch-spec` / `a launch-exec`, forced
-`env_unset`, `opencode`, `a watch --jsonl`, and `a transcript` all exist.
-Host CLI probes `a` for profiles, engines, launch-spec, and session listing.
-Kill switches: `POCKETSHELL_APLEXER=0` plus per-feature `*_PROFILES` /
-`*_ENGINES` / `*_LAUNCH` / `*_SESSIONS`.
-
----
+The old dual-runtime design below is retained only as historical context for the
+integration sequence. It is not an implementation option or compatibility
+promise.
 
 ## Phase 0 — aplexer prerequisites (aplexer repo)
 
@@ -295,175 +292,28 @@ Aplexer polish that helps A3 but must not gate A1:
 
 ---
 
-## Phase A — aplexer owns engines/profiles/launch; tmux still hosts terminals
+## Historical transition phases
 
-**Goal:** one authoritative registry. The phone still types
-`pocketshell agent <kind> …` into a tmux pane. Attach, `-CC`, session
-names, `@ps_*` options stay.
+The original Phase A/B/C plan explored running two session runtimes while
+aplexer attach quality was being developed. #2561 closed that experiment with
+a hard cut: those branches, socket enumeration rules, backend flags, and
+migration-by-restart language no longer describe the product. Live records from
+the retired runtime are intentionally not migrated; users recreate them in
+the aplexer session registry.
 
-### A1 — prefer aplexer profile listing
+## Session memory caps
 
-Issue: #2341.
+Every session PocketShell creates resolves its memory cap in
+`tools/pocketshell/src/pocketshell/memcap.py`. The order is: explicit `--mem`,
+project `cgroups.toml`, project `pyproject.toml` `[tool.pocketshell]` data,
+the repository root equivalents, then the 12 GiB default. Malformed or unsafe
+values fail closed; the explicit `--mem none` flag is the fixture escape hatch
+when the host cannot delegate a user cgroup.
 
-In `profiles.py`, probe `a profiles --json` when `a` resolves (the bundled
-copy shipped with the CLI, or `$APLEXER_BIN` — never PATH, see "Shipping"
-above). Map entries onto `Profile` objects. Log divergence
-against native discovery. **Prefer mapped siblings**; keep native
-`Claude`/`Codex` defaults. Native discovery is the fallback. Kill
-switches: `POCKETSHELL_APLEXER=0` / `POCKETSHELL_APLEXER_PROFILES=0`.
-
-Adapter (aplexer shape → PocketShell shape):
-
-| aplexer `a profiles --json` | PocketShell `Profile` / `profiles list --json` |
-| --- | --- |
-| object keyed by dir stem (`zlaude`) | `name` via alias overlay (`Claude (Z.AI)`) |
-| `engine` | `engine` (skip if not in `PROFILE_ENGINES`) |
-| `env.CLAUDE_CONFIG_DIR` / `env.CODEX_HOME` | `config_dir` |
-| no default-dir entries | synthesize `Claude` / `Codex` with `config_dir=None`, `default=True` |
-| full `env` map | **omit** — listings never emit env |
-
-Phone, daemon TTL cache, and Electron
-`PocketshellClient.listProfiles()` inherit this with no client changes,
-because the wire envelope stays `{profiles: [{name, engine, config_dir, default}]}`.
-
-Follow-up (not this issue): after clean shadow logs, prefer aplexer when
-present, native fallback, same kill switch. That flip is what #2340 is
-waiting on.
-
-### A2 — engine listing
-
-`engines.py` takes `{name, command, available, env_unset}` from
-`a engines --json` as the core; overlays PocketShell presentation
-(`label`, `family`, `provider_mark`, `usage_provider`, `enabled`). Keep
-`~/.config/pocketshell/engines.yaml` as an overlay during the transition.
-
-Do not show aplexer's `shell` engine in the agent picker. `gemini` only if
-we want it as a first-class PocketShell engine (needs badge metadata).
-
-### A3 — launch delegation
-
-`agents.py::launch_agent` must **not** `exec a launch-exec` drop-in.
-`a launch-exec` does not merge folder `.env`/`.envrc`, does not seed
-Claude trust, and does not write `@ps_agent_kind` / `@ps_agent_profile`.
-
-Instead: `a launch-spec --engine --profile --cwd --json` (plus
-`--no-skip-permissions` when the phone asked) is authoritative for argv /
-profile env / `env_unset` / skip-permissions. Then apply folder exports,
-trust seed (until aplexer owns it), write `@ps_*`, `execvpe`.
-
-Keep `pocketshell agent <kind> …` as the string the phone types into tmux.
-
-### A4 — Electron follow-through
-
-No launch-path work. After A2, capture `--help` fixtures if a new engine
-appears in `pocketshell agent --help`; add badge/slash-command metadata
-only then.
-
----
-
-## Phase B — aplexer PTY hosts selected sessions; both backends supported
-
-**Attach quality is not shippable.** Listing both managers is required:
-`pocketshell sessions list --json` unions `tmuxctl list` names with
-`a snapshot` / `a list --json` rows tagged `manager=tmux|aplexer`. Tmux
-rows still attach over `-CC`. Aplexer rows carry `a attach <id>` for when
-reattach is ready. Do not feed `a attach` into a tmux control stream.
-
-| Blocker | Why it matters here |
-| --- | --- |
-| Terminal-state reattach (`aplexer/docs/terminal-state-design.md`) | Detach/reattach of a full-screen Codex TUI corrupts the screen. PocketShell reattaches constantly (app background, network drops). |
-| Agent-state push (`a state-report` or equivalent) | Session-tree badges today come from hooks writing `@ps_agent_state`. `a watch` only has a PTY-silence heuristic. |
-| Session identity mapping | Clients key on tmux **session names**. Aplexer keys on UUID + `workspace:tag`. Live processes cannot be transplanted; migration is restart-with-`--resume`. |
-| Framed attach / `--lean` | Cellular reconnect UX. SSH compression can land on the client any time without waiting. |
-
-When unblocked: `FolderListGateway` / `PocketshellClient.listSessions`
-merge `a snapshot --json`; attach is an SSH PTY running `a attach`
-instead of `tmux -CC` / `tmuxctl`; live updates from `a watch --jsonl`
-(polling `snapshot` is an interim). Conversation pane can later use
-`a transcript` for aplexer-hosted sessions (Claude/Codex/Grok today;
-OpenCode stays on `agent_log.py` until aplexer parses it).
-
----
-
-## Phase C — aplexer default; tmux demoted
-
-Blocked on B. Default new sessions to aplexer; tmux read-only or
-migrate-by-restart. Retire `tmuxctl` invocations, `@ps_*` options,
-name-derivation, and `agents_kind.py` inference.
-
-Out of aplexer scope (need other homes): `jobs.py` recurring pings, cards
-push feed, `usage` / `quse`.
-
----
-
-## Session memory caps: `cgroups.toml` is the source of truth, `memcap.py` reads it (#2562)
-
-Every session PocketShell creates is memory-capped, on both backends. Until
-#2562 only the tmux arm was: `tmuxctl create-detached` resolved the per-project
-cap itself and wrapped the session shell in a capped cgroup-v2 systemd `--user`
-scope, while `a start` was invoked with no memory parameter at all — every
-aplexer-backed session on the dev box recorded `"limits": {}`. That protection
-exists because a runaway session can OOM-kill the whole box, which is the
-maintainer's only dev machine and is usually reached from a phone.
-
-**The decision #2562 asks to record — where cap resolution lives once tmux is
-gone:** in PocketShell, as `tools/pocketshell/src/pocketshell/memcap.py`, reading
-the same per-project files tmuxctl reads. Not `from tmuxctl.robust import
-resolve_mem`, because #2561 deletes that dependency and the aplexer arm has to
-outlive it; importing it would make the cap disappear again exactly when tmux is
-removed, which is the failure #2562 exists to close. The contract is the FILE,
-not tmuxctl's code: `cgroups.toml` keeps its location and format (an explicit
-non-goal of #2562 to change either), and `memcap.py` becomes its only reader
-when the tmux arm goes. `tests/test_sessions_mem_cap.py` pins the two readers'
-agreement against the real tmuxctl while both exist, and asserts the resolved
-BYTE value against the committed file so the number is never copied into code.
-
-Resolution order for a session created in workspace `W`:
-
-1. an explicit `--mem`;
-2. `W/cgroups.toml` → `mem`;
-3. `W/pyproject.toml` → `[tool.tmuxctl] mem`;
-4. the same two files at `W`'s git root;
-5. `memcap.DEFAULT_MEM` (12G — the same fallback tmuxctl uses).
-
-Deliberately NOT carried over: tmuxctl's `ROBUST_TMUX_MEM` env layer and its
-`~/.config/tmuxctl/cgroups.toml` user-config layer. Both are tmuxctl-namespaced
-knobs that die with it, and an inherited environment variable should not be able
-to change a session's containment.
-
-Two fail-loud rules keep "uncapped" from ever happening by accident:
-
-- an unresolvable cap (malformed `cgroups.toml`, an unparseable size, a value
-  below the sanity floor) refuses the create — it does not fall back;
-- `mem = "none"` in a project file is an error. The single escape hatch is
-  `--mem none` typed at the call site, and it is aplexer-only.
-
-`--mem none` exists because aplexer's limits **fail closed**: with no delegated
-cgroup-v2 user scope, `a start --memory` errors rather than running uncapped.
-That is correct on a real host and impossible to satisfy in an unprivileged
-container, so the Docker `agents` fixture
-(`tests/docker/agents-aplexer-selfcheck.py`,
-`scripts/test-agents-fixture-aplexer.sh`) passes `--mem none` explicitly. The
-fixture therefore cannot prove capping; the real-transport proof lives in
-`tests/test_sessions_mem_cap.py`, which creates a session through the production
-CLI against an isolated aplexer instance and reads `memory.max` back out of the
-kernel.
-
-GitHub's hosted runners fail the same way for a different reason (PR #2590): the
-scope is created, but the runner's process tree lives outside
-`user@<uid>.service`, so cgroup-v2's common-ancestor rule denies moving the
-workload into it — `a start --memory` exits with `spawn workload: Permission
-denied`. The kernel proof therefore probes that exact capability first and skips
-naming it when it is absent, CI keeps an environment-independent proof that the
-resolved cap reaches `a start`'s argv, and `scripts/check-cgroup-cap-proof.sh`
-re-imposes the kernel proof on a host that can delegate — asserting the reported
-test counts rather than pytest's exit code, which is 0 for a skip. That script
-is a step in `scripts/pre-release-confidence-gate.sh`, so a release cut from
-this box re-proves the cap against the kernel every time; a bumped aplexer pin
-that stopped honouring `--memory` would be caught there rather than by whoever
-remembered to run a script (see `docs/testing.md`, "Session memory-cap proof").
-
----
+The `agents` Docker fixture uses `--mem none` because an unprivileged container
+cannot prove a delegated cgroup limit. Host-capable validation reads the
+resulting `memory.max`; the static and Docker guards still prove that the
+production create path passes the resolved value to `a start`.
 
 ## Product defaults (unless the maintainer says otherwise)
 
@@ -475,10 +325,9 @@ remembered to run a script (see `docs/testing.md`, "Session memory-cap proof").
 
 ---
 
-## What "ready" does not mean
+## Integration boundary
 
-Aplexer is a real local multiplexer. PocketShell is a remote tmux client
-with an agent-aware host CLI. Phase A closes registry/launch duplication
-without asking the phone to attach to a different PTY owner. Treating the
-runtime as done enough for PocketShell attach would ship a reproduced
-reattach bug and drop the hook-driven state badges.
+Aplexer is the local session multiplexer shipped with the PocketShell helper.
+PocketShell owns the Android wire contract, host command quoting, schema
+validation, memory policy, and user-facing failure messages. The client does
+not carry a runtime discriminator or probe a second session implementation.

@@ -150,6 +150,24 @@ class PortForwardViewModelTest {
     }
 
     @Test
+    fun `manual mapping is exposed to detail and removal clears durable state`() = vmTest { stack ->
+        stack.listenOn(22 to "sshd")
+        val hostId = stack.seedHost()
+        val viewModel = viewModel(stack, hostId)
+
+        viewModel.addManualTunnel(remotePort = 22, localPort = 7_432, name = "Fixture SSH")
+        runCurrent()
+        assertTrue(viewModel.state.value.manualRemotePorts.contains(22))
+        assertEquals("Fixture SSH", viewModel.state.value.manualTunnelNames[22])
+
+        viewModel.removeManualTunnel(remotePort = 22)
+        runCurrent()
+
+        assertFalse(viewModel.state.value.manualRemotePorts.contains(22))
+        assertEquals(null, stack.db.portRemappingDao().getByRemotePort(hostId, 22))
+    }
+
+    @Test
     fun `a second screen for the same host sees the forwards the first one opened`() = vmTest { stack ->
         // A forward outlives the ViewModel that started it — that is the whole
         // reason the state lives in the controller.
@@ -223,6 +241,7 @@ class PortForwardViewModelTest {
     ): PortForwardViewModel = PortForwardViewModel(
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
         hostDao = stack.db.hostDao(),
+        remappingDao = stack.db.portRemappingDao(),
         controller = stack.controller,
         showAllPortsStore = stack.showAllPortsStore,
     ).also { runCurrent() }

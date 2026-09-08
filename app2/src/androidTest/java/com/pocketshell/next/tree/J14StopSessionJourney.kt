@@ -17,10 +17,12 @@ import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.terminal.SESSION_TITLE_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
+import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -34,7 +36,7 @@ import org.junit.runner.RunWith
 import kotlinx.coroutines.flow.first
 
 /**
- * Journey J14 — stop a throwaway session from the tree (and from the session
+ * Journey J14 — stop a throwaway session from a workspace (and from the session
  * screen) and prove the HOST no longer lists it (issue #2535).
  *
  * ## Why this has to be a device journey
@@ -47,7 +49,7 @@ import kotlinx.coroutines.flow.first
  *
  * ## Do not kill fixture sessions you did not create
  *
- * `claude-main` is the canned session every tree journey lands on. This
+ * `claude-main` is the canned session every workspace journey lands on. This
  * class creates a throwaway name, stops THAT, and asserts `claude-main` is
  * still on the host.
  *
@@ -99,21 +101,24 @@ class J14StopSessionJourney {
     }
 
     private fun seedHostState(description: Description) {
-        // $LIVE_MARKER: issue #2586. A journey that opted into the fixture's
-        // LIVE aplexer arm leaves that marker in the shared container, and
-        // marker + a seed file is a deliberate rc-78 mode conflict — the app
-        // gets no listing at all and this journey would fail as a bare
-        // 60-second Compose timeout. Cleared here with the seeds it already
-        // clears, so the deterministic arm defends itself.
-        AgentsFixture.exec("rm -f $ERRORS_FILE $APLEXER_FILE $DETAIL_FILE $LIVE_MARKER")
-        val name = THROWAWAY_BY_TEST.getValue(description.methodName)
+        AgentsFixture.exec("rm -f $ERRORS_FILE")
+        val tag = THROWAWAY_BY_TEST.getValue(description.methodName)
+        val name = displayName(tag)
         cleanupThrowaway(name)
-        AgentsFixture.exec("pocketshell sessions create --json -- '$name'")
+        AgentsFixture.exec(
+            "pocketshell sessions create --cwd /home/testuser/git/pocketshell " +
+                "--mem none --json -- '$tag'",
+        )
+        AgentsFixture.exec("pocketshell sessions kill -- '$CANNED_SESSION' >/dev/null 2>&1 || true")
+        AgentsFixture.exec(
+            "pocketshell sessions create --cwd /home/testuser/git/pocketshell " +
+                "--mem none --json -- claude-main >/dev/null",
+        )
     }
 
     @Test
-    fun stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost() {
-        openTree()
+    fun stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost() {
+        openWorkspace()
         assertTrue(
             "the throwaway must exist before Stop",
             SESSION_TREE in hostSessionNames(),
@@ -144,7 +149,7 @@ class J14StopSessionJourney {
 
     @Test
     fun cancellingStopLeavesTheSessionAlive() {
-        openTree()
+        openWorkspace()
         awaitTag(sessionRowTag(SESSION_CANCEL))
 
         compose.onNodeWithTag(sessionRowMenuTag(SESSION_CANCEL)).performClick()
@@ -163,8 +168,8 @@ class J14StopSessionJourney {
     }
 
     @Test
-    fun stoppingTheAttachedSessionReturnsToTheTree() {
-        openTree()
+    fun stoppingTheAttachedSessionReturnsToTheWorkspace() {
+        openWorkspace()
         awaitTag(sessionRowTag(SESSION_ATTACHED))
         compose.onNodeWithTag(sessionRowTag(SESSION_ATTACHED)).performClick()
         awaitSessionScreen(SESSION_ATTACHED)
@@ -174,7 +179,7 @@ class J14StopSessionJourney {
         compose.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        awaitTag(SESSION_TREE_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitGone(SESSION_SCREEN_TAG)
         awaitGone(sessionRowTag(SESSION_ATTACHED))
         compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
@@ -185,15 +190,17 @@ class J14StopSessionJourney {
         assertTrue(CANNED_SESSION in names)
     }
 
-    private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+    private fun openWorkspace() {
+        compose.openQuietHost(hostId, TIMEOUT_MS)
+        awaitTag(workspaceRowTag(WORKSPACE_MAIN))
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitTag(sessionRowTag(CANNED_SESSION))
     }
 
     private fun hostSessionNames(): List<String> {
         val payload = JSONObject(AgentsFixture.exec("pocketshell sessions list --json"))
+        assertTrue(payload.getInt("schema") >= 3)
         val sessions = payload.getJSONArray("sessions")
         return (0 until sessions.length()).map { index ->
             sessions.getJSONObject(index).getString("name")
@@ -201,12 +208,10 @@ class J14StopSessionJourney {
     }
 
     private fun cleanupThrowaway(name: String) {
-        AgentsFixture.exec(
-            "socket=\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$name\"; " +
-                "tmux -S \"\$socket\" kill-session -t \"=$name\" >/dev/null 2>&1; " +
-                "rm -f \"\$socket\"; true",
-        )
+        AgentsFixture.exec("pocketshell sessions kill -- '$name' >/dev/null 2>&1 || true")
     }
+
+    private fun displayName(tag: String): String = "pocketshell:$tag"
 
     private fun awaitSessionScreen(name: String) {
         awaitTag(SESSION_SCREEN_TAG)
@@ -238,28 +243,24 @@ class J14StopSessionJourney {
         const val TIMEOUT_MS = 60_000L
         const val JOURNEY = "j14-stop-session"
 
-        const val CANNED_SESSION = "claude-main"
-        const val SESSION_TREE = "j14-stop-tree"
-        const val SESSION_CANCEL = "j14-stop-cancel"
-        const val SESSION_ATTACHED = "j14-stop-attached"
+        const val CANNED_SESSION = "pocketshell:claude-main"
+        const val SESSION_TREE = "pocketshell:j14-stop-tree"
+        const val SESSION_CANCEL = "pocketshell:j14-stop-cancel"
+        const val SESSION_ATTACHED = "pocketshell:j14-stop-attached"
+        const val WORKSPACE_MAIN = "/home/testuser/git/pocketshell"
 
-        const val DETAIL_FILE = "\$HOME/.pocketshell-fixture-session-detail.json"
-        const val APLEXER_FILE = "\$HOME/.pocketshell-fixture-aplexer.json"
         const val ERRORS_FILE = "\$HOME/.pocketshell-fixture-session-errors.json"
 
-        /** The fixture's LIVE-aplexer opt-in marker (issue #2586); cleared, never set. */
-        const val LIVE_MARKER = "\$HOME/.pocketshell-fixture-aplexer-live"
-
         val HOST_IDS: Map<String, Long> = mapOf(
-            "stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost" to 9_141L,
+            "stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost" to 9_141L,
             "cancellingStopLeavesTheSessionAlive" to 9_142L,
-            "stoppingTheAttachedSessionReturnsToTheTree" to 9_143L,
+            "stoppingTheAttachedSessionReturnsToTheWorkspace" to 9_143L,
         )
 
         val THROWAWAY_BY_TEST: Map<String, String> = mapOf(
-            "stoppingAThrowawaySessionFromTheTreeRemovesItFromTheHost" to SESSION_TREE,
-            "cancellingStopLeavesTheSessionAlive" to SESSION_CANCEL,
-            "stoppingTheAttachedSessionReturnsToTheTree" to SESSION_ATTACHED,
+            "stoppingAThrowawaySessionFromTheWorkspaceRemovesItFromTheHost" to "j14-stop-tree",
+            "cancellingStopLeavesTheSessionAlive" to "j14-stop-cancel",
+            "stoppingTheAttachedSessionReturnsToTheWorkspace" to "j14-stop-attached",
         )
     }
 }

@@ -29,7 +29,11 @@ public object DefaultLocalPortAvailability : LocalPortAvailability {
         if (port !in 1..65_535) return false
         return runCatching {
             ServerSocket().use { socket ->
-                socket.reuseAddress = false
+                // A process death can leave a just-served forwarding listener
+                // in TIME_WAIT. Reuse is safe here: an actively listening
+                // socket still prevents the bind, while a recently closed
+                // forward can resume on its durable local port.
+                socket.reuseAddress = true
                 socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
             }
         }.isSuccess

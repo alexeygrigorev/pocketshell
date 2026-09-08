@@ -45,12 +45,12 @@ class EmptyStateTest {
             PocketShellTheme {
                 EmptyState(
                     title = "No panes yet",
-                    description = "Start a tmux window to see panes here.",
+                    description = "Create a session to see it here.",
                 )
             }
         }
         composeRule.onNodeWithText("No panes yet").assertIsDisplayed()
-        composeRule.onNodeWithText("Start a tmux window to see panes here.")
+        composeRule.onNodeWithText("Create a session to see it here.")
             .assertIsDisplayed()
     }
 

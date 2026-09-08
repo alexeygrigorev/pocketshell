@@ -14,18 +14,14 @@ import java.util.UUID
  * now; if PocketShell ends up with a different port-forwarding model they
  * can migrate out, but keeping them avoids a schema split today.
  *
- * Issue #49 added [tmuxInstalled] and [lastBootstrapAt]: the host-bootstrap
- * flow probes for `tmux` on first connect and caches the outcome here so we
- * only re-check after 24h or on explicit user trigger. Both columns are
- * nullable; `null` means "never checked", `true` / `false` mean
- * "verified at [lastBootstrapAt]". Stored as epoch-millis `Long?` to match
- * the existing `createdAt` / `lastConnectedAt` convention — the issue body
- * mentioned `Instant?` but the codebase has no `kotlinx-datetime` dependency
- * and the brief forbids adding new catalog entries.
+ * Issue #49 added [lastBootstrapAt], which remains the timestamp of the most
+ * recent host helper probe. It is nullable; `null` means "never checked".
+ * Stored as epoch-millis `Long?` to match the existing `createdAt` /
+ * `lastConnectedAt` convention.
  *
  * Issue #117 (usage-panel Fix C) added the usage-tool cache columns +
  * the optional per-host command override. The same bootstrap probe that
- * fills [tmuxInstalled] also reports whether the unified
+ * The same probe reports whether the unified
  * [pocketshell](https://github.com/alexeygrigorev/pocketshell) CLI is
  * present on the host. The detected result is cached in
  * [pocketshellInstalled] / [pocketshellLastDetectedAt] so the periodic
@@ -38,7 +34,7 @@ import java.util.UUID
  *
  * Issue #231 (parity swap, #170 follow-up) renamed these detection columns
  * from the legacy `quse*` naming to `pocketshell*` as the Android side cut
- * over from the separate `quse` / `tmuxctl` utilities to the unified
+ * over from the separate `quse` utility to the unified
  * `pocketshell` CLI. Those pre-#386 hard cuts happened before Room-backed
  * data preservation became required for normal APK updates.
  *
@@ -52,8 +48,8 @@ import java.util.UUID
  * into the generic "needs setup" state.
  *
  * Issue #328 adds [pocketshellDaemonRunning] and
- * [pocketshellDaemonEnabled] so optional jobs-daemon capability can be shown
- * separately from the required tmux + compatible CLI setup cache.
+ * [pocketshellDaemonEnabled] so optional host-helper capability can be shown
+ * separately from the required compatible CLI setup cache.
  *
  * Issue #718 (slice 2, hard-cut per D22) REMOVED the client-stored
  * `claudeProfilesJson` / `codexProfilesJson` columns (added by #627/#631).
@@ -87,7 +83,6 @@ data class HostEntity(
     val enabled: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val lastConnectedAt: Long? = null,
-    val tmuxInstalled: Boolean? = null,
     val lastBootstrapAt: Long? = null,
     val pocketshellInstalled: Boolean? = null,
     val pocketshellLastDetectedAt: Long? = null,

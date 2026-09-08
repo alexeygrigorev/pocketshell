@@ -23,7 +23,7 @@ class DesignRenderStaticLoadingPolicyTest {
         val source = locateTestSource("DesignRenders.kt")
         val body = source.substringBetween(
             start = "fun loadingIndicators()",
-            end = "fun tmuxConnectingStates()",
+            end = "fun sessionConnectingStates()",
         )
 
         assertTrue(body.contains("StaticLoadingIndicator.Bar()"))
@@ -33,11 +33,11 @@ class DesignRenderStaticLoadingPolicyTest {
     }
 
     @Test
-    fun tmuxConnectingShowcaseUsesOnlyStaticFixtureFrames() {
+    fun sessionConnectingShowcaseUsesOnlyStaticFixtureFrames() {
         val source = locateTestSource("TerminalRenderFixtures.kt")
         val body = source.substringBetween(
-            start = "internal fun TmuxConnectingStatesRender()",
-            end = "internal fun TmuxDisconnectedStateRender()",
+            start = "internal fun SessionConnectingStatesRender()",
+            end = "internal fun SessionDisconnectedStateRender()",
         )
 
         assertEquals(2, body.countOccurrences("StaticLoadingIndicator.Spinner("))

@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+/** SavedStateHandle key used when the key manager returns a selected row. */
+const val HOST_FORM_SELECTED_KEY_RESULT: String = "host-form-selected-key"
+
 /** Which form field a failed submit should point at. */
 enum class HostFormField { Name, Hostname, Port, Username, Key }
 
@@ -60,6 +63,8 @@ data class HostFormState(
     val hostname: String = "",
     val port: String = "22",
     val username: String = "",
+    /** Optional host-side usage command override; blank means use the default. */
+    val usageCommand: String = "",
     val selectedKeyId: Long? = null,
     val errors: HostFormErrors = HostFormErrors(),
     /** True while an existing host is being read; false for Add, which has nothing to read. */
@@ -68,6 +73,10 @@ data class HostFormState(
     val editing: Boolean = false,
     /** One-shot: the row was written and the screen should navigate away. */
     val saved: Boolean = false,
+    /** True while the current details are being persisted for a connection test. */
+    val testingConnection: Boolean = false,
+    /** One-shot host id for the real connection gate to dial. */
+    val testConnectionHostId: Long? = null,
 )
 
 /**
@@ -109,6 +118,12 @@ class AddEditHostViewModel @Inject constructor(
     sshKeyDao: SshKeyDao,
     private val savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
+
+    /** A key chosen in SSH keys, delivered through the host form back stack entry. */
+    val selectedKeyResult: StateFlow<Long?> = savedStateHandle.getStateFlow(
+        HOST_FORM_SELECTED_KEY_RESULT,
+        null,
+    )
 
     /** Live key list for the picker; empty means the form cannot be submitted yet. */
     val sshKeys: StateFlow<List<SshKeyEntity>> = sshKeyDao.getAll()
@@ -171,6 +186,7 @@ class AddEditHostViewModel @Inject constructor(
                     hostname = host.hostname,
                     port = host.port.toString(),
                     username = host.username,
+                    usageCommand = host.usageCommandOverride.orEmpty(),
                     selectedKeyId = host.keyId,
                     editing = true,
                 )
@@ -189,6 +205,18 @@ class AddEditHostViewModel @Inject constructor(
         _state.value = next.copy(errors = clearTouchedErrors(previous, next))
     }
 
+    /** Apply a key returned from the key manager without replacing other edits. */
+    fun selectKey(keyId: Long) {
+        update { it.copy(selectedKeyId = keyId) }
+    }
+
+    /** Clear the one-shot key-manager result after [selectKey] has consumed it. */
+    fun consumeSelectedKeyResult() {
+        if (savedStateHandle.get<Long>(HOST_FORM_SELECTED_KEY_RESULT) != null) {
+            savedStateHandle[HOST_FORM_SELECTED_KEY_RESULT] = null
+        }
+    }
+
     /**
      * Validate and persist.
      *
@@ -205,62 +233,46 @@ class AddEditHostViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            val port = current.port.trim().toInt()
-            val keyId = requireNotNull(current.selectedKeyId)
-            val editingId = editingHostId
+            persist(current)
+            _state.value = _state.value.copy(
+                saved = true,
+                errors = HostFormErrors(),
+                testingConnection = false,
+                testConnectionHostId = null,
+            )
+        }
+    }
 
-            if (editingId == null) {
-                hostDao.insert(
-                    HostEntity(
-                        name = current.name.trim(),
-                        hostname = current.hostname.trim(),
-                        port = port,
-                        username = current.username.trim(),
-                        keyId = keyId,
-                    ),
-                )
-            } else {
-                // Merge onto the stored row instead of building a new entity, so
-                // the columns this form does not own — bootstrap/CLI detection
-                // cache, forwarding defaults, treeIdentity, lastConnectedAt —
-                // survive an edit. A fresh HostEntity would reset all of them.
-                val existing = hostDao.getById(editingId)
-                if (existing == null) {
-                    // Deleted underneath us mid-edit. Writing an Update for a
-                    // row that no longer exists is a silent no-op, so insert.
-                    hostDao.insert(
-                        HostEntity(
-                            name = current.name.trim(),
-                            hostname = current.hostname.trim(),
-                            port = port,
-                            username = current.username.trim(),
-                            keyId = keyId,
-                        ),
-                    )
-                } else {
-                    val endpointUnchanged =
-                        existing.hostname.equals(current.hostname.trim(), ignoreCase = true) &&
-                            existing.port == port
-                    hostDao.update(
-                        existing.copy(
-                            name = current.name.trim(),
-                            hostname = current.hostname.trim(),
-                            port = port,
-                            username = current.username.trim(),
-                            keyId = keyId,
-                            // Trust is pinned to an exact endpoint. Repointing
-                            // the row at a different host:port must not carry
-                            // the old server's accepted key forward, or the
-                            // next dial silently trusts the wrong machine.
-                            trustedHostKeyAlgorithm =
-                                existing.trustedHostKeyAlgorithm.takeIf { endpointUnchanged },
-                            trustedHostKeySha256 =
-                                existing.trustedHostKeySha256.takeIf { endpointUnchanged },
-                        ),
-                    )
-                }
-            }
-            _state.value = _state.value.copy(saved = true, errors = HostFormErrors())
+    /**
+     * Persist the current details and hand the real row id to the connection
+     * gate. A failed dial therefore leaves exactly the values the user tested
+     * in the form, while the registry still receives a normal stored host id.
+     */
+    fun testConnection() {
+        val current = _state.value
+        val errors = validate(current)
+        if (!errors.isClean) {
+            _state.value = current.copy(errors = errors)
+            return
+        }
+        if (current.testingConnection || current.testConnectionHostId != null) return
+
+        _state.value = current.copy(testingConnection = true)
+        viewModelScope.launch {
+            val hostId = persist(current)
+            _state.value = _state.value.copy(
+                editing = true,
+                testingConnection = false,
+                testConnectionHostId = hostId,
+                errors = HostFormErrors(),
+            )
+        }
+    }
+
+    /** Acknowledge the one-shot signal after the route starts the real dial. */
+    fun consumeTestConnection() {
+        if (_state.value.testConnectionHostId != null) {
+            _state.value = _state.value.copy(testConnectionHostId = null)
         }
     }
 
@@ -268,6 +280,72 @@ class AddEditHostViewModel @Inject constructor(
     fun consumeSaved() {
         val current = _state.value
         if (current.saved) _state.value = current.copy(saved = false)
+    }
+
+    /** Write the fields owned by this form and preserve all host-owned caches. */
+    private suspend fun persist(current: HostFormState): Long {
+        val port = current.port.trim().toInt()
+        val keyId = requireNotNull(current.selectedKeyId)
+        val usageCommand = current.usageCommand.trim().ifBlank { null }
+        val editingId = editingHostId
+
+        if (editingId == null) {
+            val id = hostDao.insert(
+                HostEntity(
+                    name = current.name.trim(),
+                    hostname = current.hostname.trim(),
+                    port = port,
+                    username = current.username.trim(),
+                    keyId = keyId,
+                    usageCommandOverride = usageCommand,
+                ),
+            )
+            // Once a new form has been tested, later edits and Save must update
+            // the same row instead of creating a duplicate.
+            editingHostId = id
+            return id
+        }
+
+        // Merge onto the stored row instead of building a new entity, so the
+        // columns this form does not own — bootstrap/CLI detection cache,
+        // forwarding defaults, treeIdentity, lastConnectedAt — survive an edit.
+        val existing = hostDao.getById(editingId)
+        if (existing == null) {
+            val id = hostDao.insert(
+                HostEntity(
+                    name = current.name.trim(),
+                    hostname = current.hostname.trim(),
+                    port = port,
+                    username = current.username.trim(),
+                    keyId = keyId,
+                    usageCommandOverride = usageCommand,
+                ),
+            )
+            editingHostId = id
+            return id
+        }
+
+        val endpointUnchanged =
+            existing.hostname.equals(current.hostname.trim(), ignoreCase = true) &&
+                existing.port == port
+        hostDao.update(
+            existing.copy(
+                name = current.name.trim(),
+                hostname = current.hostname.trim(),
+                port = port,
+                username = current.username.trim(),
+                keyId = keyId,
+                usageCommandOverride = usageCommand,
+                // Trust is pinned to an exact endpoint. Repointing the row at a
+                // different host:port must not carry the old server's accepted
+                // key forward.
+                trustedHostKeyAlgorithm =
+                    existing.trustedHostKeyAlgorithm.takeIf { endpointUnchanged },
+                trustedHostKeySha256 =
+                    existing.trustedHostKeySha256.takeIf { endpointUnchanged },
+            ),
+        )
+        return editingId
     }
 
     private fun clearTouchedErrors(previous: HostFormState, next: HostFormState): HostFormErrors {

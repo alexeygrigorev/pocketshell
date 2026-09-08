@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
@@ -66,8 +67,16 @@ internal class PortForwardImpl(
     private val ioDispatcher: CoroutineDispatcher,
 ) : PortForward {
 
-    private val serverSocket: ServerSocket =
-        ServerSocket(localPort, /* backlog = */ 50, InetAddress.getByName("127.0.0.1"))
+    private val serverSocket: ServerSocket = ServerSocket().also { socket ->
+        // A process death or a quick reconnect can leave a just-served local
+        // listener in TIME_WAIT. Reuse lets the durable manual mapping reclaim
+        // that port immediately; an active listener still makes bind fail.
+        socket.reuseAddress = true
+        socket.bind(
+            InetSocketAddress(InetAddress.getByName("127.0.0.1"), localPort),
+            /* backlog = */ 50,
+        )
+    }
 
     private val running = AtomicBoolean(true)
     private val forwardedBytes = AtomicLong(0)

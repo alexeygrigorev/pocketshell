@@ -22,14 +22,14 @@ package com.pocketshell.uikit.model
  *   small progress spinner. No textual label is emitted because we have
  *   no verified state to surface yet.
  * - [NoActiveSessions] — the host is reachable AND `list-sessions`
- *   reports zero tmux sessions. Label: `"No active sessions"`.
+ *   reports zero aplexer sessions. Label: `"No active sessions"`.
  * - [ActiveSessions] with `count = N` — the host is reachable AND has
- *   `N >= 1` tmux sessions, none of which this app is currently
+ *   `N >= 1` aplexer sessions, none of which this app is currently
  *   attached to. Label: `"1 session"` / `"N sessions"`.
- * - [Attached] — the app holds a live `tmux -CC` client against the
+ * - [Attached] — the app holds a live `aplexer -CC` client against the
  *   host AND the registered client is registered as the attached
  *   session. Label: `"Attached"`.
- * - [NeedsSetup] — the most recent bootstrap probe reported `tmux` or
+ * - [NeedsSetup] — the most recent bootstrap probe reported `aplexer` or
  *   `pocketshell` missing. Takes precedence over any session-count display
  *   because installing the tools is the only useful action until they
  *   exist. The trailing chip is hidden in this state — the inline
@@ -55,21 +55,21 @@ sealed interface HostStatus {
     /** Probe / first-load state — no verified info to display. */
     data object Unknown : HostStatus
 
-    /** Host reachable, zero tmux sessions reported. */
+    /** Host reachable, zero aplexer sessions reported. */
     data object NoActiveSessions : HostStatus
 
     /**
-     * Host reachable, [count] tmux sessions reported, none attached
+     * Host reachable, [count] aplexer sessions reported, none attached
      * by this app. `count >= 1` is enforced at call sites; zero must
      * be expressed via [NoActiveSessions] so the trigger condition
      * stays unambiguous.
      */
     data class ActiveSessions(val count: Int) : HostStatus
 
-    /** App is attached to a tmux session on this host. */
+    /** App is attached to a aplexer session on this host. */
     data object Attached : HostStatus
 
-    /** Bootstrap probe reports `tmux` / `pocketshell` missing. */
+    /** Bootstrap probe reports `aplexer` / `pocketshell` missing. */
     data object NeedsSetup : HostStatus
 
     /** Last SSH attempt failed (transport, auth, unreachable). */

@@ -1310,7 +1310,7 @@ public final class TerminalEmulator {
                 // terminal type. This is not used anymore, but the second version level field has been changed by xterm
                 // to mean it's release number ("patch numbers" listed at http://invisible-island.net/xterm/xterm.log.html),
                 // and some applications use it as a feature check:
-                // * tmux used to have a "xterm won't reach version 500 for a while so set that as the upper limit" check,
+                // * older terminal servers used to have a "xterm won't reach version 500 for a while so set that as the upper limit" check,
                 // and then check "xterm_version > 270" if rectangular area operations such as DECCRA could be used.
                 // * vim checks xterm version number >140 for "Request termcap/terminfo string" functionality >276 for SGR
                 // mouse report.
@@ -1734,7 +1734,7 @@ public final class TerminalEmulator {
                 for (int i = 0; i < numRepeat; i++) emitCodePoint(mLastEmittedCodePoint);
                 break;
             case 'c': // Primary Device Attributes (http://www.vt100.net/docs/vt510-rm/DA1) if argument is missing or zero.
-                // The important part that may still be used by some (tmux stores this value but does not currently use it)
+                // The important part that may still be used by some terminal servers (the host stores this value but does not currently use it)
                 // is the first response parameter identifying the terminal service class, where we send 64 for "vt420".
                 // This is followed by a list of attributes which is probably unused by applications. Send like xterm.
                 if (getArg0(0) == 0) mSession.write("\033[?64;1;2;6;9;15;18;21;22c");

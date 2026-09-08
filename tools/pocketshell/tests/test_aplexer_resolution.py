@@ -203,7 +203,7 @@ def test_half_installed_bundle_fails_create_with_the_candidate_naming_message(
 ) -> None:
     """End of the chain: a worker-less bundle must produce #2543's message.
 
-    Without the check, `sessions create --backend aplexer` would EXEC the
+    Without the check, `sessions create` would EXEC the
     worker-less `a`, which starts a bare `aplexer` off PATH (unpinned worker)
     or dies with a low-level worker-startup error. The user must instead get
     the packaging-integrity message that names every candidate, so "reinstall
@@ -219,12 +219,12 @@ def test_half_installed_bundle_fails_create_with_the_candidate_naming_message(
 
     with patch.object(sys, "executable", str(bin_dir / "python")):
         result = CliRunner().invoke(
-            sessions_group, ["create", "work", "--backend", "aplexer", "--json"]
+            sessions_group, ["create", "work", "--json"]
         )
 
     assert result.exit_code == 127, result.output
     message = json.loads(result.output)["error"]
-    assert "could not resolve the `a` (aplexer) binary" in message
+    assert "could not resolve the bundled `a` (aplexer) binary" in message
     assert "uv tool install --force pocketshell" in message
     assert str(bin_dir / "a") in message, "the message must name the broken candidate"
     assert "worker" in message, f"and say what was wrong with it: {message}"

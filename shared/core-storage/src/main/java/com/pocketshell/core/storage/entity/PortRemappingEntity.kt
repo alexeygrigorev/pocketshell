@@ -31,4 +31,6 @@ data class PortRemappingEntity(
     val hostId: Long,
     val remotePort: Int,
     val localPort: Int,
+    /** User-facing label from the Quiet Add tunnel form. */
+    val name: String = "",
 )

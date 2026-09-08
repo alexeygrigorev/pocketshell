@@ -1,152 +1,48 @@
-# Agent Awareness
+# Agent awareness
 
-PocketShell detects when Claude Code, Codex, OpenCode, or Grok Build is running in
-the active tmux pane and surfaces a clean conversation view of *that
-session* — solving the "I can't see what the agent just asked me"
-scrollback problem.
+PocketShell reports the coding workload associated with the active aplexer
+session. It does not inspect a separate terminal manager or infer an agent from
+a display name.
 
-## What this is, and what it isn't
+## What is reported
 
-| | This (PocketShell conversation view) | `agent-log-explorer` |
-|---|---|---|
-| Scope | One session, current pane, right now | All sessions, all projects, all time |
-| Use case | "What did the agent just ask?" / "what did it propose?" | "Find that conversation last month where I debugged auth" |
-| Transport | Direct JSONL tail over SSH | Server with SQLite + FTS5 |
-| Lifecycle | Auto-detected per pane | User opens it explicitly |
-| Dependency | None — no extra service on host | Runs as a daemon |
+The host CLI may report Claude Code, Codex, OpenCode, or Grok Build. The
+normalised session row carries the agent kind, source, recent state, workspace,
+and timestamps. A missing or ambiguous signal remains `null`; the host never
+guesses from a session label.
 
-We may link from one to the other later ("search this conversation across all history" → deep-link into agent-log-explorer). Not in v1.
+The source is the live aplexer workload and its descendant process tree,
+combined with the server-side hook/log records where available. This gives the
+host the process identity that the Android app cannot safely observe through a
+non-interactive SSH command.
 
-## Detection
+## Session surface
 
-Runtime detection is currently limited to tmux panes because PocketShell needs tmux's `#{pane_current_path}` for the live pane cwd. Non-tmux SSH exec channels cannot reliably observe the interactive shell's current directory after the user has changed directories.
+The terminal screen always remains available. Agent metadata can decorate the
+session tree or terminal chrome when the app surface supports it, but it is not
+required for attach and it cannot change the session identity. A shell session
+with no detected agent is a valid session.
 
-Detection combines log candidates with pane/process evidence:
+Conversation history is a separate host-file concern. The existing parsers and
+`agent-log-explorer` support history/search workflows, while the session list
+uses only the small live-state contract needed to render the current host.
 
-1. Cwd + recent activity. From the active pane's cwd, derive or filter
-   candidate logs for the supported agents. Claude Code is cwd-encoded
-   under `~/.claude/projects/`; Codex candidates are filtered by
-   rollout `session_meta.cwd`; OpenCode candidates are filtered by
-   SQLite session directory / project worktree; Grok Build candidates
-   live under `$GROK_HOME/sessions/<urlencoded-cwd>/` (default `~/.grok`).
-2. Pane-scoped process scan. For tmux panes, PocketShell scopes `ps`
-   output to the pane TTY and requires the matching agent command to be
-   present before showing the Conversation tab.
+## Host data sources
 
-If both miss → no Conversation tab. Silent.
+| Agent | Source |
+|---|---|
+| Claude Code | `~/.claude/projects/<encoded-cwd>/*.jsonl` |
+| Codex | `~/.codex/sessions/**/*.jsonl` filtered by rollout cwd |
+| OpenCode | `~/.local/share/opencode/opencode.db` filtered by session directory |
+| Grok Build | `$GROK_HOME/sessions/<encoded-cwd>/*/updates.jsonl` |
 
-### Agent sources
+The host applies cwd and freshness filters before associating a record with the
+live aplexer workload. If those filters or the process evidence do not agree,
+the result is silent absence rather than a false Conversation affordance.
 
-| Agent | Source | Live? |
-|---|---|---|
-| Claude Code | `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | Yes (append-only) |
-| Codex (OpenAI) | `~/.codex/sessions/**/*.jsonl` | Yes after the rollout JSONL flushes |
-| OpenCode | `~/.local/share/opencode/opencode.db` | Yes, polled from SQLite |
-| Grok Build | `$GROK_HOME/sessions/<urlencoded-cwd>/<session-id>/updates.jsonl` | Yes (ACP JSONL) |
+## Testing
 
-Codex and OpenCode use wider freshness windows than Claude Code. Codex
-flushes its rollout JSONL on turn completion, and OpenCode persists to a
-global SQLite database; PocketShell keeps candidates for up to 2 hours
-but still requires cwd/session filtering and pane process evidence before
-attributing them to the visible pane.
-
-Encoded-cwd format for Claude Code: `/home/alexey/git/pocketshell` → `-home-alexey-git-pocketshell`.
-
-Encoded-cwd format for Grok Build: `/home/alexey/git/pocketshell` → `%2Fhome%2Falexey%2Fgit%2Fpocketshell` (percent-encoding, honouring `GROK_HOME`).
-
-## UI
-
-### Tab on the session view
-
-```
-┌─────────────────────────────────────────┐
-│ <  agent-main · main pane         ...   │
-├─────────────────────────────────────────┤
-│ [ Terminal ]   [ Conversation • ]       │  tab only
-├─────────────────────────────────────────┤  visible when
-│  USER · 2m ago                          │  agent detected
-│  check the deploy log and tell me       │
-│  what failed in the last run            │
-│                                         │
-│  ASSISTANT · 1m ago                     │
-│  I'll check the deploy logs.            │
-│                                         │
-│  > Tool: Bash                           │  collapsed
-│    kubectl logs -n prod deploy-...      │  tap to expand
-│                                         │
-│  The deploy failed because the database │
-│  migration timed out at step 4...       │
-│                                         │
-│  USER · 30s ago                         │
-│  show me the migration                  │
-│                                         │
-│  ASSISTANT · streaming...               │
-│  Here's the migration: _                │  tails live
-├─────────────────────────────────────────┤
-│  [ Message Claude Code...        ][Send]│
-│  [ Search in conversation ]   [ Top ]   │
-└─────────────────────────────────────────┘
-```
-
-Behaviours:
-- **Default tab on open: Conversation (#818).** An agent session OPENS on the
-  parsed Conversation view by default — the readable surface and the permanent
-  cure for the recurring "black screen" reports (a raw agent TUI uses the
-  alternate-screen buffer and renders mostly black when idle, whereas the parsed
-  Conversation is always legible). This is safe only because the Conversation
-  view now opens fast (#828: 264–280ms @ 80ms RTT) on the correct source (#825).
-  - **Open-time only — never a mid-session yank.** The default selects the
-    INITIAL tab when an agent session opens. A user already viewing a live
-    session's Terminal is NOT switched to Conversation on a later
-    detection/refresh; doing so was the #815 regression (reverted in 207d33e5)
-    and stays forbidden.
-  - **Configurable.** Settings → Terminal → "Open agent sessions in" lets the
-    user choose Conversation (default) or Terminal.
-  - **Per-session choice wins.** A remembered/explicit per-session tab choice
-    (seed-from-memory precedence) overrides the global default.
-  - Shell (non-agent) sessions have no Conversation tab and are unaffected.
-- Markdown rendering — no ANSI noise
-- Tool calls collapsible (default collapsed); tap to expand command + output + diff
-- Auto-tails the file/db as the agent writes new messages
-- Reply-in-place composer sends to the current agent pane
-- Search bar = full-text within this session
-- Long-press any message → copy / quote-reply into prompt composer
-
-### Hint chip (one-time discoverability)
-
-```
-┌───────────────────────────────────┐
-│ Claude Code session detected      │
-│ Tap to see full conversation  >   │
-└───────────────────────────────────┘
-```
-
-- Appears once per detected session, inline in the terminal view
-- Dismissible (X). Once dismissed, stays dismissed for that session.
-- Tab stays available regardless.
-
-## Transport & implementation
-
-- SSH `tail -f <path>` for JSONL files, stream parsed in Kotlin
-- Parsers live in a new shared module `core-agents` so they're unit-testable without an SSH connection
-- Each parser produces a normalized `ConversationEvent` stream (user message, assistant message, tool call, tool result)
-- Conversation view consumes that stream — agnostic to which agent produced it
-
-### `core-agents` module
-
-```
-core-agents/
-├── ClaudeCodeParser.kt     # JSONL -> ConversationEvent
-├── CodexParser.kt          # JSONL -> ConversationEvent
-├── OpenCodeReader.kt       # SQLite/JSON rows -> ConversationEvent
-├── GrokBuildParser.kt      # ACP updates.jsonl -> ConversationEvent
-├── AgentDetector.kt        # path hints + freshness + process confirmation
-└── ConversationEvent.kt    # normalized model
-```
-
-## What's explicitly out of v1
-
-- Cross-session / cross-project search (that's agent-log-explorer's job)
-- Editing / replaying past tool calls
-- Agent-specific UI (e.g. Claude Code's todo list as a structured widget) — generic message rendering for now
-- Auto-installing or managing agent-log-explorer on the host
+The Docker agents fixture seeds representative logs and starts a real aplexer
+session. Journey and Python tests verify the host-side row and the Android
+rendered result independently. See [testing.md](testing.md) for the fixture
+contract and [usage-panel.md](usage-panel.md) for the separate quota surface.

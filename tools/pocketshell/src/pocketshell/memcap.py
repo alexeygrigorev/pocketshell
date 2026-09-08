@@ -22,31 +22,13 @@ Resolution order for a session whose workspace is ``W`` (first match wins):
 1. an explicit ``--mem`` on the command line (``--mem none`` = uncapped, see
    below);
 2. ``W/cgroups.toml``'s top-level ``mem``;
-3. ``W/pyproject.toml``'s ``[tool.tmuxctl] mem`` (Python projects state it
+3. ``W/pyproject.toml``'s ``[tool.pocketshell] mem`` (Python projects state it
    there instead of a dedicated file);
 4. the same two files at ``W``'s git root;
 5. :data:`DEFAULT_MEM` — the documented fallback, never "no cap".
 
-That is deliberately the same shape ``tmuxctl.robust.read_project_value`` /
-``resolve_mem`` use for the tmux arm, so a workspace resolves to the SAME
-ceiling whichever backend a session lands on. ``tests/test_sessions_mem_cap``
-pins that agreement against the real tmuxctl.
-
-Why a pocketshell-owned reader instead of ``from tmuxctl.robust import
-resolve_mem`` (the decision #2562 asks to record)
--------------------------------------------------------------------------
-
-tmuxctl is being removed (#2561). Importing its resolver would make the
-aplexer arm — the arm that OUTLIVES tmux — depend on the dependency that
-removal deletes, so the cap would silently vanish again at deletion time,
-which is exactly the failure this issue exists to close. The per-project
-CONFIG FILE, not tmuxctl's code, is the contract: `cgroups.toml` stays where
-it is and keeps its format (an explicit non-goal of #2562), and this module
-becomes its sole reader once the tmux arm goes. tmuxctl's env layer
-(``ROBUST_TMUX_MEM``) and its ``~/.config/tmuxctl/cgroups.toml`` user-config
-layer are deliberately NOT reproduced: both are tmuxctl-namespaced knobs that
-die with it, and a session cap is not something an inherited environment
-variable should be able to change.
+The per-project files are the contract: ``cgroups.toml`` remains the primary
+form, and this module is the sole reader for the aplexer session path.
 
 Failing loud
 ------------
@@ -77,12 +59,11 @@ from typing import Optional
 #: Filename holding a project's cap for non-Python projects (PocketShell's own).
 PROJECT_CONFIG_NAME = "cgroups.toml"
 
-#: Python projects state the same value under ``[tool.tmuxctl] mem``.
+#: Python projects state the same value under ``[tool.pocketshell] mem``.
 PYPROJECT_NAME = "pyproject.toml"
 
 #: The documented fallback for a workspace whose project declares no cap.
-#: Same value tmuxctl falls back to (``robust.DEFAULT_MEM``), so the two arms
-#: agree on a capless workspace. A cap that is merely a default is still a cap.
+#: A cap that is merely a default is still a cap.
 DEFAULT_MEM = "12G"
 
 #: The one spelling that means "run this session uncapped". Accepted ONLY from
@@ -124,12 +105,9 @@ class MemCapError(RuntimeError):
 def parse_size(value: str, *, source: str) -> int:
     """Parse a human size (``30G``, ``512M``, ``1.5G``, ``1048576``) to bytes.
 
-    Accepts exactly what ``tmuxctl.robust.parse_size`` accepts, so the same
-    project file resolves identically on both arms — and is a strict superset
-    of what aplexer's ``parse_byte_size`` takes (it has no fractional form).
-    That is why callers hand aplexer the resulting BYTE COUNT rather than the
-    raw string: a value tmuxctl honours can then never be rejected, or worse
-    reinterpreted, one layer down.
+    Accepts the human sizes PocketShell documents and normalises them before
+    handing the resulting byte count to aplexer. This keeps fractional sizes
+    and common unit spellings consistent at the CLI boundary.
 
     ``source`` names where the value came from, for the error message.
     """
@@ -174,10 +152,10 @@ def _read_project_config(path: Path) -> Optional[str]:
 
 
 def _read_pyproject(path: Path) -> Optional[str]:
-    """``[tool.tmuxctl] mem`` from a ``pyproject.toml``.
+    """``[tool.pocketshell] mem`` from a ``pyproject.toml``.
 
     Unlike ``cgroups.toml`` this file is NOT primarily a cap declaration, so a
-    malformed one is skipped rather than fatal (tmuxctl does the same): the
+    malformed one is skipped rather than fatal: the
     resolution simply continues, and the fallback still caps the session.
     """
     if not path.is_file():
@@ -187,7 +165,7 @@ def _read_pyproject(path: Path) -> Optional[str]:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
     tool = document.get("tool")
-    section = tool.get("tmuxctl") if isinstance(tool, dict) else None
+    section = tool.get("pocketshell") if isinstance(tool, dict) else None
     value = section.get("mem") if isinstance(section, dict) else None
     return None if value is None else str(value)
 
@@ -212,9 +190,8 @@ def _git_root(start: Path) -> Optional[Path]:
 def read_project_mem(workspace: Path) -> Optional[tuple[str, Path]]:
     """The project cap for ``workspace`` as ``(raw value, file it came from)``.
 
-    Checks the workspace directory first, then its git root — the same order
-    (and the same two file shapes) tmuxctl uses, so a session started deep in
-    a repo still gets the repo's committed cap.
+    Checks the workspace directory first, then its git root, so a session
+    started deep in a repo still gets the repo's committed cap.
     """
     try:
         base = workspace.resolve()

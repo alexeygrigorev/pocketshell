@@ -43,6 +43,9 @@ class FakeHostConnectionFactory(
     /** When non-null, every dial suspends until it completes. */
     var gate: CompletableDeferred<Unit>? = null
 
+    /** Optional second-dial gate used to prove Trust waits for the real retry. */
+    var retryGate: CompletableDeferred<Unit>? = null
+
     /** When non-null, the next dial returns [ConnectResult.Failed] with this message. */
     var failWith: String? = null
 
@@ -68,14 +71,15 @@ class FakeHostConnectionFactory(
     val peakConcurrentDials: Int get() = synchronized(lock) { peak }
 
     override suspend fun connect(target: HostTarget, trust: TrustStore): ConnectResult {
-        synchronized(lock) {
+        val attempt = synchronized(lock) {
             dialedTargets += target
             inFlight += 1
             peak = maxOf(peak, inFlight)
+            dialedTargets.size
         }
         dialStarts.trySend(target)
         try {
-            gate?.await()
+            (if (attempt > 1) retryGate else gate)?.await()
 
             if (presentedFingerprint != null) {
                 val decision = trust.evaluate(target, presentedFingerprint)

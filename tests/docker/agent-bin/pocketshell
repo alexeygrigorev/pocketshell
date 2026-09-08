@@ -3,38 +3,16 @@ set -eu
 
 # Deterministic fixture for the unified `pocketshell` CLI.
 #
-# Issue #231 swapped the Android app from the legacy `quse` / `tmuxctl`
-# probes to the unified `pocketshell usage|sessions|jobs ...` CLI (D22
-# hard-cut). On a real host `pocketshell` is a thin wrapper that proxies
-# its output byte-for-byte from the underlying `quse` / `tmuxctl`
-# binaries (see tools/pocketshell/src/pocketshell/{usage,sessions,jobs}.py),
-# so this fixture reuses the same canned payloads the app's parsers were
-# written against:
+# Issue #231 moved the Android app to the unified `pocketshell` CLI (D22
+# hard-cut). The fixture keeps deterministic payloads for the non-session
+# probes and delegates session lifecycle commands to the repository's real
+# aplexer-only implementation:
 #   - `pocketshell usage --json`            -> PocketshellUsageJsonParser
-#   - `pocketshell sessions list [--by ..]` -> HostTmuxSessionListParser
-#   - `pocketshell jobs list [--session N]` -> RecurringJobsParser
+#   - `pocketshell sessions list [--json]`  -> schema-3 session parser
 #   - `pocketshell agent-log --json ...`    -> AgentConversationRepository
 
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
 version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
-
-# Issue #2377: resolve the shared session enumerator NEXT TO THIS SCRIPT first.
-# This shim runs both from `/usr/local/bin` inside the image and straight out of
-# `tests/docker/agent-bin` under DockerAgentFixtureContractTest (and from
-# `/usr/local/lib/pocketshell-real-fixture` in the agents-old-cli image, where
-# the sibling is not next to it — hence the `/usr/local/bin` fallback).
-fixture_sessions_bin() {
-  if [ -n "${POCKETSHELL_FIXTURE_SESSIONS_BIN:-}" ]; then
-    printf '%s\n' "$POCKETSHELL_FIXTURE_SESSIONS_BIN"
-    return 0
-  fi
-  _fsb_dir="$(dirname "$0")"
-  if [ -x "$_fsb_dir/pocketshell-fixture-sessions" ]; then
-    printf '%s\n' "$_fsb_dir/pocketshell-fixture-sessions"
-    return 0
-  fi
-  printf '%s\n' "/usr/local/bin/pocketshell-fixture-sessions"
-}
 
 fixture_version() {
   if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
@@ -85,96 +63,6 @@ case "${1:-}" in
     printf 'pocketshell fixture %s\n' "$(fixture_version)"
     exit 0
     ;;
-  send)
-    # Issue #2122/#2124: the ACKNOWLEDGED delivery primitive. This fixture
-    # mirrors the real CLI's observable contract — durable token journal,
-    # binary-safe stdin payload, `load-buffer`/`paste-buffer -d -r`, optional
-    # `send-keys Enter`, and the STABLE exit codes the client branches on:
-    #
-    #   0 delivered | already-delivered   2 bad-usage
-    #   3 pane-not-found                  4 tmux-failed
-    #   5 send-interrupted               6 timeout
-    #   7 journal-failed                 8 send-in-progress
-    #
-    # Issue #2240 closes the old fixture gap: use the repository's real host
-    # implementation for this verb. The deterministic wrapper still owns every
-    # other probe below, while this arm exercises the actual two-phase journal,
-    # owner liveness, and --resend-interrupted contract on the Docker wire.
-    exec /usr/local/bin/pocketshell-real-send "$@"
-    shift
-    send_pane=""
-    send_token=""
-    send_enter=0
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --pane) send_pane="${2:-}"; shift 2 || true ;;
-        --token) send_token="${2:-}"; shift 2 || true ;;
-        --enter) send_enter=1; shift ;;
-        --timeout) shift 2 || true ;;
-        --socket-name) shift 2 || true ;;
-        --resend-interrupted) shift ;;
-        *) shift ;;
-      esac
-    done
-    # ALWAYS read the payload first, even on the short-circuit paths: exiting
-    # without draining stdin gives the writer SIGPIPE, so a successful ack
-    # surfaces to the caller as a failed write (real CLI, #2122 finding F3).
-    send_payload_file="$(mktemp)"
-    cat > "$send_payload_file" || true
-    if [ -z "$send_pane" ] || [ -z "$send_token" ]; then
-      rm -f "$send_payload_file"
-      printf 'bad-usage\n'
-      printf -- '--pane and --token are required\n' >&2
-      exit 2
-    fi
-    send_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pocketshell/sends"
-    mkdir -p "$send_state_dir"
-    send_hash="$(printf %s "$send_token" | sha256sum | cut -d' ' -f1)"
-    send_record="$send_state_dir/$send_hash.json"
-    if [ -f "$send_record" ]; then
-      rm -f "$send_payload_file"
-      printf 'already-delivered %s\n' "$(cat "$send_record")"
-      exit 0
-    fi
-    # An EXACT pane-id match against the server's live list. `display-message
-    # -t` is NOT a usable existence check here: tmux 3.6b resolves an unknown
-    # `%999` to the current pane and exits 0, so the fixture would report
-    # `tmux-failed` for a missing pane instead of the documented
-    # `pane-not-found` (verified in-container while building this fixture).
-    if ! tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$send_pane"; then
-      rm -f "$send_payload_file"
-      printf 'pane-not-found\n'
-      printf 'no such pane: %s\n' "$send_pane" >&2
-      exit 3
-    fi
-    send_buffer="pssend$(printf %s "$send_hash" | cut -c1-16)"
-    if ! tmux load-buffer -b "$send_buffer" "$send_payload_file" 2>/dev/null; then
-      rm -f "$send_payload_file"
-      printf 'tmux-failed\n'
-      printf 'load-buffer failed\n' >&2
-      exit 4
-    fi
-    rm -f "$send_payload_file"
-    # `-r` is load-bearing: without it tmux rewrites every \n into \r, which an
-    # agent input box reads as SUBMIT and tears a multi-line prompt into one
-    # prompt per line (issue #1636).
-    if ! tmux paste-buffer -d -r -b "$send_buffer" -t "$send_pane" 2>/dev/null; then
-      printf 'tmux-failed\n'
-      printf 'paste-buffer failed\n' >&2
-      exit 4
-    fi
-    if [ "$send_enter" = "1" ]; then
-      tmux send-keys -t "$send_pane" Enter 2>/dev/null || true
-    fi
-    # Journal AFTER the injection succeeded — never record a delivery that did
-    # not happen. Written temp-then-rename so a killed process cannot leave a
-    # half-written entry.
-    printf '{"schema":1,"token":"%s","state":"delivered","at":%s}\n' \
-      "$send_token" "$(date +%s)" > "$send_record.tmp"
-    mv "$send_record.tmp" "$send_record"
-    printf 'delivered\n'
-    exit 0
-    ;;
   agent)
     # Issue #703: the app now launches agents via the short server-side
     # wrapper `pocketshell agent <kind> --dir <dir> [--no-skip-permissions]
@@ -217,22 +105,6 @@ case "${1:-}" in
     fi
     # Issue #821 / #858 / #889: mirror the REAL wrapper's record_agent_kind
     # (tools/pocketshell/src/pocketshell/agents.py) so an end-to-end Docker
-    # journey exercises the SAME tmux user-option write/clear the device hits,
-    # not a happy fake that never records. Inside tmux ($TMUX set, e.g. a
-    # send-keys-launched pane) the kind is ALWAYS written, and the profile is
-    # RECONCILED to this launch: a non-default --profile sets the label, a
-    # default / no-profile launch UNSETS the option (`set-option -uq`) so a
-    # stale z.ai @ps_agent_profile cannot survive a default relaunch in the same
-    # tmux session (the #889 reported false-label root cause). Best-effort: a
-    # tmux failure never blocks the agent launch.
-    if [ -n "${TMUX:-}" ] && [ -n "$agent_kind" ]; then
-      tmux set-option @ps_agent_kind "$agent_kind" 2>/dev/null || true
-      if [ -n "$agent_profile" ]; then
-        tmux set-option @ps_agent_profile "$agent_profile" 2>/dev/null || true
-      else
-        tmux set-option -uq @ps_agent_profile 2>/dev/null || true
-      fi
-    fi
     case "$agent_kind" in
       codex|claude|opencode)
         exec "$agent_kind"
@@ -254,16 +126,15 @@ case "${1:-}" in
     # can't run the live classifier. Instead it answers DETERMINISTICALLY for
     # SYNTHETIC (non-existent) pane pids, so a connected test can assert a
     # foreign session's guessed kind without seeding a cgroup tree:
-    #   pid 1000-1999 -> claude (scope tmuxctl-claude-main.scope)
-    #   pid 2000-2999 -> codex  (scope tmuxctl-codex.scope)
-    #   pid 3000-3999 -> opencode (scope tmuxctl-opencode-lab.scope)
-    #   pid 4000-4999 -> none   (scope tmuxctl-shell.scope; readable, no agent)
+    #   pid 1000-1999 -> claude (scope fixture-claude-main.scope)
+    #   pid 2000-2999 -> codex  (scope fixture-codex.scope)
+    #   pid 3000-3999 -> opencode (scope fixture-opencode-lab.scope)
+    #   pid 4000-4999 -> none   (scope fixture-shell.scope; readable, no agent)
     #   missing / non-integer / any other pid -> unknown (scope null)
     # These ranges line up with the seeded fixture sessions claude-main / codex
-    # / opencode-lab (see pocketshell-sessions-list.txt) so the guess matches
-    # the synthetic session the test joins.
+    # / opencode-lab so the guess matches the synthetic session the test joins.
     #
-    # Issue #1973: a REAL live tmux pane pid must never enter this synthetic
+    # Issue #1973: a REAL live session pid must never enter this synthetic
     # table. The nightly suite advances the container PID allocator through
     # these ranges; the old fixture then called an ordinary `sh` pane Claude /
     # Codex / OpenCode solely from its numeric pid. That contaminated later
@@ -347,10 +218,10 @@ case "${1:-}" in
         n = pid + 0
         if (system("test -f /tmp/pocketshell-agents-kind-unknown-pids/" n) == 0) return "unknown\tnull"
         if (system("test -d /proc/" n) == 0) return "none\tpocketshell-fixture-live.scope"
-        if (n >= 1000 && n < 2000) return "claude\ttmuxctl-claude-main.scope"
-        if (n >= 2000 && n < 3000) return "codex\ttmuxctl-codex.scope"
-        if (n >= 3000 && n < 4000) return "opencode\ttmuxctl-opencode-lab.scope"
-        if (n >= 4000 && n < 5000) return "none\ttmuxctl-shell.scope"
+        if (n >= 1000 && n < 2000) return "claude\tfixture-claude-main.scope"
+        if (n >= 2000 && n < 3000) return "codex\tfixture-codex.scope"
+        if (n >= 3000 && n < 4000) return "opencode\tfixture-opencode-lab.scope"
+        if (n >= 4000 && n < 5000) return "none\tfixture-shell.scope"
         return "unknown\tnull"
       }
       function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
@@ -509,7 +380,7 @@ case "${1:-}" in
       printf 'pocketshell engines fixture needs /opt/pocketshell-real/src\n' >&2
       exit 64
     fi
-    exec /usr/local/bin/pocketshell-real-send "$@"
+    exec /usr/local/bin/pocketshell-real "$@"
     ;;
   usage)
     shift
@@ -520,178 +391,250 @@ case "${1:-}" in
     printf 'pocketshell usage fixture supports: --json\n' >&2
     exit 64
     ;;
-  sessions)
+  workspaces)
     shift
-    if [ "${1:-}" = "create" ] || [ "${1:-}" = "kill" ]; then
-      # Rewrite task U-6 (journey J04) and issue #2535: `sessions create` and
-      # `sessions kill` are the verbs whose contract the phone cannot fake —
-      # exact `=` tmux match, aplexer `a kill <id>`, and the JSON error
-      # envelope all live in the real implementation. So this arm delegates
-      # to the repository's real host CLI (same idiom as the `send` arm,
-      # issue #2240, and the `engines` arm, issue #2276) instead of
-      # re-implementing them in shell, where the fixture could agree with a
-      # broken client.
-      #
-      # Create makes a REAL detached tmux session through the fixture
-      # `tmuxctl` (on that session's own `tmuxctl-<name>` socket). Kill
-      # destroys that same session with `tmux -S <socket> kill-session -t
-      # '=NAME'`, so the journey's follow-up `sessions list --json` no
-      # longer contains it.
-      if [ ! -d /opt/pocketshell-real/src ]; then
-        printf 'pocketshell sessions %s fixture needs /opt/pocketshell-real/src\n' "${1:-}" >&2
-        exit 64
-      fi
-      exec /usr/local/bin/pocketshell-real-send sessions "$@"
-    fi
-    if [ "${1:-}" = "list" ]; then
-      shift
-      # Issue #2377: `--json` is the enumerator the phone's folder list rides
-      # (`pocketshell sessions list --json`), and it must report the union of
-      # EVERY `tmuxctl-*` socket plus the aplexer manager — not just whatever
-      # the default socket (or a live `-CC` client, attached to one server)
-      # happens to hold. The helper below enumerates the seeded sockets and the
-      # `a` fixture for real; with nothing seeded it emits exactly the canned
-      # rows, so every pre-existing journey is byte-for-byte unchanged.
-      sessions_json=0
-      for sessions_arg in "$@"; do
-        case "$sessions_arg" in
-          --json) sessions_json=1 ;;
-        esac
-      done
-      if [ "$sessions_json" = "1" ]; then
-        exec "$(fixture_sessions_bin)" json \
-          "${fixture_dir}/pocketshell-sessions-list.txt"
-      fi
-      # The app emits `pocketshell sessions list --by activity`; the
-      # fixture ignores the sort flag and returns the canonical listing
-      # so the trailing-timestamp parser sees a stable shape.
-      exec "$(fixture_sessions_bin)" list \
-        "${fixture_dir}/pocketshell-sessions-list.txt"
-    fi
-    if [ "${1:-}" = "attach" ]; then
-      shift
-      # Rewrite task U-4 (journey J03). The Android client attaches with
-      # `exec pocketshell sessions attach --hide-status -- '<name>'`, and this
-      # arm mirrors the REAL command's tmux path (tools/pocketshell/.../
-      # sessions.py `sessions_attach`, playbook §B.2): find the tmux socket
-      # serving NAME — name-derived `tmuxctl-<name>` first, then a sweep with
-      # `has-session` — optionally turn that session's status bar off, then
-      # `execvp` into `tmux attach-session -t '=NAME'`.
-      #
-      # Deliberately NOT delegating to the real Python CLI: the image ships the
-      # deterministic shims, and the enumeration half of this fixture already
-      # reimplements §B.1 the same way.
-      #
-      # TWO arms, matching the real CLI. Issue #2563 gave this image the REAL
-      # pinned aplexer (`a` + its worker next to /usr/bin/python3), so an
-      # aplexer name is no longer "nothing to attach to" — #2555 adds the arm
-      # that reaches it: resolve the row's aplexer id from the same seed file
-      # `pocketshell-fixture-sessions` enumerates, then `execvp` into the real
-      # `/usr/bin/a attach <id>`, exactly as `sessions.py::sessions_attach`
-      # does. Nothing here fakes an attach; the PTY on the other side is a real
-      # aplexer session's. Before #2555 every aplexer row was a clean exit 3,
-      # so no connected journey could ever be on an aplexer PTY — which is why
-      # the alt-screen-without-mouse-tracking scroll bug had no device
-      # reproduction on that backend.
-      #
-      # `/usr/bin/a` is spelled out rather than looked up on PATH for the
-      # reason the Dockerfile gives: exactly one copy exists, next to the
-      # interpreter, and a PATH-facing `a` is the shape that made this fixture
-      # green-and-empty before.
-      attach_hide_status=0
-      attach_name=""
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          --hide-status) attach_hide_status=1 ;;
-          --) shift; attach_name="${1:-}"; break ;;
-          -*) ;;
-          *) if [ -z "$attach_name" ]; then attach_name="$1"; fi ;;
-        esac
-        shift
-      done
-      if [ -z "$attach_name" ]; then
-        printf 'pocketshell: attach needs a session name\n' >&2
-        exit 64
-      fi
-      # The aplexer arm first, for the reason the real CLI resolves managers in
-      # one pass: a name that belongs to `a` has no tmux socket to find, and
-      # falling through to the sweep would report it as a vanished session.
-      attach_aplexer_snapshot="${POCKETSHELL_FIXTURE_APLEXER_FILE:-$HOME/.pocketshell-fixture-aplexer.json}"
-      if [ -r "$attach_aplexer_snapshot" ]; then
-        attach_aplexer_id="$(
-          POCKETSHELL_ATTACH_NAME="$attach_name" python3 - "$attach_aplexer_snapshot" <<'PYEOF' || true
-import json, os, sys
-
-want = os.environ["POCKETSHELL_ATTACH_NAME"]
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        payload = json.load(handle)
-except (OSError, ValueError):
-    raise SystemExit(0)
-for row in (payload or {}).get("sessions", []):
-    if row.get("name") == want and row.get("id"):
-        print(row["id"])
-        break
-PYEOF
-        )"
-        if [ -n "$attach_aplexer_id" ]; then
-          exec /usr/bin/a attach "$attach_aplexer_id"
-        fi
-      fi
-      attach_socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
-      attach_socket=""
-      attach_derived="${attach_socket_dir}/tmuxctl-${attach_name}"
-      if [ -S "$attach_derived" ] &&
-        /usr/bin/tmux.real -S "$attach_derived" has-session -t "=${attach_name}" 2>/dev/null; then
-        attach_socket="$attach_derived"
-      else
-        for attach_candidate in "$attach_socket_dir"/*; do
-          [ -S "$attach_candidate" ] || continue
-          if /usr/bin/tmux.real -S "$attach_candidate" \
-            has-session -t "=${attach_name}" 2>/dev/null; then
-            attach_socket="$attach_candidate"
-            break
-          fi
-        done
-      fi
-      if [ -z "$attach_socket" ]; then
-        printf "no session named '%s'\n" "$attach_name" >&2
-        exit 3
-      fi
-      if [ "$attach_hide_status" = "1" ]; then
-        # `set-option -t` takes a PANE target, so the trailing colon is load
-        # bearing — the real CLI documents the same tmux 3.4 quirk.
-        /usr/bin/tmux.real -S "$attach_socket" \
-          set-option -t "=${attach_name}:" status off >/dev/null 2>&1 || true
-      fi
-      exec /usr/bin/tmux.real -S "$attach_socket" \
-        attach-session -t "=${attach_name}"
-    fi
-    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json], attach NAME [--hide-status], create NAME, kill NAME\n' >&2
-    exit 64
-    ;;
-  jobs)
-    shift
-    case "${1:-}" in
+    workspace_operation="${1:-}"
+    [ "$#" -gt 0 ] && shift
+    workspace_host=""
+    workspace_path=""
+    workspace_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --host)
+          [ "$#" -ge 2 ] || {
+            printf 'pocketshell workspaces: --host needs a value\n' >&2
+            exit 64
+          }
+          workspace_host="$2"
+          shift 2
+          ;;
+        --host=*)
+          workspace_host="${1#--host=}"
+          shift
+          ;;
+        --json)
+          workspace_json=1
+          shift
+          ;;
+        --)
+          shift
+          [ "$#" -gt 0 ] || {
+            printf 'pocketshell workspaces: path is required\n' >&2
+            exit 64
+          }
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+        -*)
+          printf 'pocketshell workspaces: unknown argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+        *)
+          [ -z "$workspace_path" ] || {
+            printf 'pocketshell workspaces: unexpected extra path\n' >&2
+            exit 64
+          }
+          workspace_path="$1"
+          shift
+          ;;
+      esac
+    done
+    [ -n "$workspace_host" ] || {
+      printf 'pocketshell workspaces: --host is required\n' >&2
+      exit 64
+    }
+    case "$workspace_operation" in
       list)
-        cat "${fixture_dir}/pocketshell-jobs-list.txt"
-        exit 0
+        [ -z "$workspace_path" ] || {
+          printf 'pocketshell workspaces list: unexpected path\n' >&2
+          exit 64
+        }
         ;;
-      add)
-        printf 'Created job 4\n'
-        exit 0
+      add|remove)
+        [ -n "$workspace_path" ] || {
+          printf 'pocketshell workspaces %s: path is required\n' "$workspace_operation" >&2
+          exit 64
+        }
         ;;
-      edit)
-        printf 'Updated job %s\n' "${2:-}"
-        exit 0
-        ;;
-      remove)
-        printf 'Removed job %s\n' "${2:-}"
-        exit 0
+      *)
+        printf 'pocketshell workspaces fixture supports: list/add/remove\n' >&2
+        exit 64
         ;;
     esac
-    printf 'pocketshell jobs fixture supports: list/add/edit/remove\n' >&2
-    exit 64
+    workspace_state_file="${POCKETSHELL_WORKSPACES_STATE_FILE:-${HOME}/.pocketshell-workspaces.json}"
+    # Keep this fixture's state contract equivalent to the real host CLI. The
+    # app only needs an empty listing for J01, but add/remove are implemented
+    # here as well so the connected workspace flow can exercise durable
+    # membership instead of a canned response.
+    python3 - "$workspace_operation" "$workspace_host" "$workspace_path" "$workspace_state_file" <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+
+operation, host, raw_path, state_name = sys.argv[1:]
+state_path = Path(state_name).expanduser()
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(64)
+
+
+def canonical_path(raw: str) -> str:
+    if not raw or not raw.strip():
+        fail("pocketshell workspaces: `path` must be a non-empty path")
+    expanded = os.path.expanduser(raw.strip())
+    if not os.path.isabs(expanded):
+        fail("pocketshell workspaces: `path` must be absolute or use the `~/` form")
+    return str(Path(expanded).resolve(strict=False))
+
+
+def read_state() -> dict:
+    try:
+        with state_path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"workspaces": {}}
+    return value if isinstance(value, dict) else {"workspaces": {}}
+
+
+def entries(state: dict) -> list[dict[str, str]]:
+    all_workspaces = state.get("workspaces")
+    raw_entries = all_workspaces.get(host) if isinstance(all_workspaces, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+    by_path: dict[str, dict[str, str]] = {}
+    for value in raw_entries:
+        if not isinstance(value, dict):
+            continue
+        try:
+            path = canonical_path(str(value.get("path", "")))
+        except SystemExit:
+            continue
+        display = value.get("display_path")
+        by_path.setdefault(
+            path,
+            {
+                "path": path,
+                "display_path": display.strip() if isinstance(display, str) and display.strip() else path,
+            },
+        )
+    return [by_path[path] for path in sorted(by_path)]
+
+
+def write_state(state: dict) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = state_path.with_name(state_path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(state_path)
+
+
+state = read_state()
+items = entries(state)
+created = None
+removed = None
+canonical = None
+if operation == "add":
+    canonical = canonical_path(raw_path)
+    existing = next((item for item in items if item["path"] == canonical), None)
+    if existing is None:
+        existing = {"path": canonical, "display_path": raw_path.strip()}
+        items.append(existing)
+        items.sort(key=lambda item: item["path"])
+        created = True
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+    else:
+        created = False
+elif operation == "remove":
+    canonical = canonical_path(raw_path)
+    kept = [item for item in items if item["path"] != canonical]
+    removed = len(kept) != len(items)
+    if removed:
+        items = kept
+        state.setdefault("workspaces", {})[host] = items
+        write_state(state)
+
+result = {"schema": 1, "host": host, "workspaces": items}
+if created is not None:
+    result["created"] = created
+    result["workspace"] = next(item for item in items if item["path"] == canonical)
+if removed is not None:
+    result["path"] = canonical
+    result["removed"] = removed
+print(json.dumps(result, sort_keys=True))
+PYEOF
+    exit 0
+    ;;
+  sessions)
+    shift
+    # The Docker fixture has no delegated systemd --user scope, so the real
+    # CLI's host default memory cap cannot be enforced here. Android creates a
+    # plain session without a memory option; supply the fixture-only explicit
+    # uncapped choice before delegating to the REAL CLI. Calls that choose a
+    # cap explicitly keep their original arguments and therefore still test
+    # the production memory-policy path.
+    if [ "${1:-}" = "create" ]; then
+      shift
+      has_mem=0
+      for session_arg in "$@"; do
+        case "$session_arg" in
+          --mem|--mem=*) has_mem=1; break ;;
+        esac
+      done
+      if [ "$has_mem" -eq 0 ]; then
+        set -- create --mem none "$@"
+      else
+        set -- create "$@"
+      fi
+    fi
+    # Session lifecycle is the product contract. Run the real package against
+    # the real bundled aplexer; this fixture must not maintain a second session
+    # protocol or silently turn an unavailable aplexer into canned rows.
+    if [ ! -d /opt/pocketshell-real/src ]; then
+      printf 'pocketshell sessions fixture needs /opt/pocketshell-real/src\n' >&2
+      exit 64
+    fi
+    if [ "${1:-}" = "list" ] && [ -r "${POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE:-$HOME/.pocketshell-fixture-session-errors.json}" ]; then
+      errors_file="${POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE:-$HOME/.pocketshell-fixture-session-errors.json}"
+      list_output="$(mktemp)"
+      list_error="$(mktemp)"
+      if /usr/local/bin/pocketshell-real sessions "$@" >"$list_output" 2>"$list_error"; then
+        case " $* " in
+          *" --json "*)
+            ERRORS_FILE="$errors_file" python3 - "$list_output" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+payload["errors"] = json.loads(Path(os.environ["ERRORS_FILE"]).read_text())
+print(json.dumps(payload, indent=2))
+PYEOF
+            rm -f "$list_output" "$list_error"
+            exit 0
+            ;;
+        esac
+        cat "$list_output"
+        rm -f "$list_output" "$list_error"
+        exit 0
+      else
+        status=$?
+      fi
+      cat "$list_output"
+      cat "$list_error" >&2
+      rm -f "$list_output" "$list_error"
+      exit "$status"
+    fi
+    exec /usr/local/bin/pocketshell-real sessions "$@"
+
     ;;
   agent-log)
     shift
@@ -806,16 +749,12 @@ PYEOF
     push_cards_dir="${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}"
     push_now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null || printf '1970-01-01T00:00:00+00:00')"
 
-    # `tmux display-message -p '#S'` auto-detection when --session is omitted and
-    # $TMUX is set, mirroring cards.py detect_session. The journey always passes
-    # --session, but the agent-CLI happy path relies on auto-detect.
+    # Session cards are always addressed explicitly. The product no longer
+    # infers a current session from a terminal multiplexer environment.
     push_detect_session() {
       if [ -n "${1:-}" ]; then
         printf '%s' "$1"
         return 0
-      fi
-      if [ -n "${TMUX:-}" ]; then
-        tmux display-message -p '#S' 2>/dev/null && return 0
       fi
       return 1
     }
@@ -868,7 +807,7 @@ PYEOF
           esac
         done
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         # Build the items JSON array. The store JSON IS the app contract object.
@@ -990,7 +929,7 @@ PYEOF
           esac
         done
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         push_file="$(push_session_file "$push_session")"
@@ -1022,7 +961,7 @@ PYEOF
           esac
         done
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         push_file="$(push_session_file "$push_session")"
@@ -1113,7 +1052,7 @@ PYEOF
           esac
         done
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         if [ -z "$push_card_id" ] || [ -z "$push_item_id" ]; then
@@ -1249,7 +1188,7 @@ PYEOF
         fi
         push_text="$(printf '%s' "$push_text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         if [ -z "$push_text" ]; then
@@ -1333,7 +1272,7 @@ PYEOF
           esac
         done
         push_session="$(push_detect_session "$push_session_arg")" || {
-          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          printf 'could not determine the session: pass --session.\n' >&2
           exit 64
         }
         if [ -z "$push_card_id" ]; then
@@ -1439,6 +1378,9 @@ PYEOF
         exit 64
         ;;
       get|upsert|reconcile)
+        if [ "${POCKETSHELL_FIXTURE_REAL_TREE:-0}" = "1" ]; then
+          exec /usr/local/bin/pocketshell-real tree "$@"
+        fi
         # Tree durability lives on the agents-daemon fixture. A no-op empty
         # envelope keeps a stray `tree get` on this image from hanging.
         printf '{"nodes":[],"version":0,"alive":[],"gone":[],"added":[]}\n'
@@ -1452,5 +1394,5 @@ PYEOF
     ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, engines list --json, agents kind, tree get|upsert|reconcile\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list/create/attach/kill, agent-log, profiles list, engines list --json, agents kind, tree get|upsert|reconcile\n' >&2
 exit 64

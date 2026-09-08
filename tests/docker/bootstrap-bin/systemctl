@@ -17,16 +17,15 @@ write_state() {
 }
 
 # Issue #231 (D22 hard-cut): the bootstrapper installs/enables the unified
-# `pocketshell-jobs.service` user unit (see HostBootstrapper) rather than the
-# legacy `tmuxctl-jobs.service`.
-if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-active" ] && [ "${3:-}" = "pocketshell-jobs.service" ]; then
+# `pocketshell.service` user unit (see the bootstrap fixture).
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-active" ] && [ "${3:-}" = "pocketshell.service" ]; then
   read_state
   printf '%s\n' "$active_state"
   [ "$active_state" = "active" ]
   exit $?
 fi
 
-if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-enabled" ] && [ "${3:-}" = "pocketshell-jobs.service" ]; then
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-enabled" ] && [ "${3:-}" = "pocketshell.service" ]; then
   read_state
   printf '%s\n' "$enabled_state"
   [ "$enabled_state" = "enabled" ]
@@ -37,11 +36,11 @@ if [ "${1:-}" = "--user" ] && [ "${2:-}" = "daemon-reload" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] && [ "${3:-}" = "--now" ] && [ "${4:-}" = "pocketshell-jobs.service" ]; then
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "enable" ] && [ "${3:-}" = "--now" ] && [ "${4:-}" = "pocketshell.service" ]; then
   write_state active enabled
-  printf 'enabled pocketshell-jobs.service\n'
+  printf 'enabled pocketshell.service\n'
   exit 0
 fi
 
-printf 'systemctl bootstrap fixture supports pocketshell-jobs.service user-service commands\n' >&2
+printf 'systemctl bootstrap fixture supports pocketshell.service user-service commands\n' >&2
 exit 3

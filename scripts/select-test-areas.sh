@@ -1151,10 +1151,10 @@ if want_inv I8; then
     # for this to be audited rather than assumed; it resolves through the
     # consumer end (core.storage.entity), not by hand.
     "com.pocketshell.core.storage.AppDatabaseTest|host-cli"
-    # ui-kit: the models that mirror what the CLI writes — HostSetupState
-    # (CLI missing / incompatible) and SessionAgentKind (the `pocketshell agent`
-    # strings), both in com.pocketshell.uikit.model.
-    "com.pocketshell.uikit.model.SessionAgentKindOptionTest|host-cli"
+    # app2: the session-tree navigation test consumes the CLI's session rows
+    # and agent state, so a host-CLI producer change must run this unit-level
+    # reader even though the old ui-kit model pin was removed by the rewrite.
+    "com.pocketshell.next.tree.SessionTreeNavigationTest|host-cli"
   )
   # RE-PINNED for app2 (the rewrite's hard cut deleted every class the old pin
   # set named). The PROPERTIES pinned are unchanged — a host-CLI change must

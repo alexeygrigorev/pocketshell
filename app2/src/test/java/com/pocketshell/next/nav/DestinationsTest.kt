@@ -19,7 +19,8 @@ class DestinationsTest {
         assertEquals("hosts", Destination.Hosts.route())
         assertEquals("settings", Destination.Settings.route())
         assertEquals("usage", Destination.Usage.route())
-        assertEquals("crash-reports", Destination.CrashReports.route())
+        assertEquals("diagnostics", Destination.Diagnostics.route())
+        assertEquals(Destination.Diagnostics.route(), Destination.CrashReports.route())
     }
 
     @Test
@@ -38,21 +39,38 @@ class DestinationsTest {
         Destination.Files.route(hostId = 1)
 
         val patterns = Destination.all.map { it.pattern }
-        // 13 = the plan's fixed six, plus Ports (task P-4), FileViewer (P-3b),
-        // the four remaining P-6 routes (HostForm, SshKeys, QrScan,
-        // WorkspaceRoots; HostQr share was removed in issue #2523), and
-        // CrashReports (issue #2476).
-        assertEquals(13, patterns.size)
+        // The fixed routes include the categorized Settings/support routes,
+        // host-scoped Usage, and the Quiet Services & tunnels screens.
+        // The aggregate includes both Quiet workspace routes and the
+        // categorized Settings/support plus Services routes. Deprecated aliases
+        // (Tree and CrashReports) intentionally do not add duplicate patterns.
+        assertEquals(28, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
 
     @Test
     fun `built routes match their patterns`() {
-        assertMatchesPattern(Destination.Tree.pattern, Destination.Tree.route(hostId = 7))
+        assertMatchesPattern(Destination.Workspaces.pattern, Destination.Workspaces.route(hostId = 7))
+        assertMatchesPattern(
+            Destination.Workspace.pattern,
+            Destination.Workspace.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
+        )
+        assertMatchesPattern(
+            Destination.WorkspaceStart.pattern,
+            Destination.WorkspaceStart.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
+        )
+        assertMatchesPattern(
+            Destination.ReorderWorkspaces.pattern,
+            Destination.ReorderWorkspaces.route(hostId = 7),
+        )
         assertMatchesPattern(
             Destination.Session.pattern,
-            Destination.Session.route(hostId = 7, sessionName = "git-pocketshell"),
+            Destination.Session.route(
+                hostId = 7,
+                sessionName = "git-pocketshell",
+                workspacePath = "/home/alexey/git/pocketshell",
+            ),
         )
         assertMatchesPattern(
             Destination.Files.pattern,
@@ -63,6 +81,28 @@ class DestinationsTest {
             Destination.FileViewer.route(hostId = 7, path = "/home/alexey/notes.md"),
         )
         assertMatchesPattern(Destination.Ports.pattern, Destination.Ports.route(hostId = 7))
+        assertMatchesPattern(Destination.HostUsage.pattern, Destination.HostUsage.route(hostId = 7))
+        assertMatchesPattern(
+            Destination.TunnelDetail.pattern,
+            Destination.TunnelDetail.route(hostId = 7, remotePort = 5173),
+        )
+        assertMatchesPattern(
+            Destination.AddTunnel.pattern,
+            Destination.AddTunnel.route(hostId = 7, remotePort = 5173),
+        )
+        assertMatchesPattern(Destination.TerminalSettings.pattern, Destination.TerminalSettings.route())
+        assertMatchesPattern(Destination.VoiceSettings.pattern, Destination.VoiceSettings.route())
+        assertMatchesPattern(Destination.VoiceLanguage.pattern, Destination.VoiceLanguage.route())
+        assertMatchesPattern(Destination.ConnectionSettings.pattern, Destination.ConnectionSettings.route())
+        assertMatchesPattern(Destination.GraceSettings.pattern, Destination.GraceSettings.route())
+        assertMatchesPattern(Destination.AdvancedSettings.pattern, Destination.AdvancedSettings.route())
+        assertMatchesPattern(Destination.Diagnostics.pattern, Destination.Diagnostics.route())
+        assertMatchesPattern(
+            Destination.DiagnosticReport.pattern,
+            Destination.DiagnosticReport.route("report 1"),
+        )
+        assertMatchesPattern(Destination.About.pattern, Destination.About.route())
+        assertMatchesPattern(Destination.Update.pattern, Destination.Update.route())
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route(hostId = 7))
         assertMatchesPattern(Destination.HostForm.pattern, Destination.HostForm.route())
         assertMatchesPattern(
@@ -98,8 +138,31 @@ class DestinationsTest {
     }
 
     @Test
-    fun `tree route carries the host id`() {
-        assertEquals("tree/42", Destination.Tree.route(hostId = 42))
+    fun `workspaces route carries the host id`() {
+        assertEquals("workspaces/42", Destination.Workspaces.route(hostId = 42))
+        assertEquals("workspaces/42", Destination.Tree.route(hostId = 42))
+    }
+
+    @Test
+    fun `workspace route keeps the canonical path in one encoded query argument`() {
+        val route = Destination.Workspace.route(
+            hostId = 42,
+            path = "/home/alexey/git/pocket shell",
+        )
+
+        assertEquals(
+            "workspace/42?workspacePath=%2Fhome%2Falexey%2Fgit%2Fpocket%20shell",
+            route,
+        )
+        assertEquals(2, route.substringBefore('?').split("/").size)
+    }
+
+    @Test
+    fun `services and host usage routes retain their selected host`() {
+        assertEquals("usage/42", Destination.HostUsage.route(hostId = 42))
+        assertEquals("tunnel/42/5173", Destination.TunnelDetail.route(42, 5173))
+        assertEquals("add-tunnel/42?remotePort=-1", Destination.AddTunnel.route(42))
+        assertEquals("add-tunnel/42?remotePort=5173", Destination.AddTunnel.route(42, 5173))
     }
 
     @Test

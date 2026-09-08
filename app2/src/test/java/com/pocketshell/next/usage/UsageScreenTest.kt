@@ -1,5 +1,6 @@
 package com.pocketshell.next.usage
 
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
@@ -16,6 +17,8 @@ import com.pocketshell.core.usage.UsageResetCredits
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageWindow
 import com.pocketshell.uikit.theme.PocketShellTheme
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -23,14 +26,14 @@ import org.junit.runner.RunWith
 import java.time.Instant
 
 /**
- * The usage panel's compact-first layout (issue #2534).
+ * The usage panel's host-scoped Quiet rows (issue #2611).
  *
  * Journey J12 proves the glance-pill → panel path against a real host; this
  * suite pins the composition rules that journey would only catch by screenshot:
- * first paint is the compact strip (plus last-sync / counts / reset banner), a
- * provider card is mounted only after its compact row is tapped, and the compact
- * percent stays the most-constrained window even when a less-used window resets
- * sooner.
+ * first paint keeps provider rows compact (plus last-sync / counts / reset
+ * banner), tapping a row reveals its real windows and reset credits inline, and
+ * the compact percent stays the most-constrained window even when a less-used
+ * window resets sooner.
  */
 @RunWith(AndroidJUnit4::class)
 class UsageScreenTest {
@@ -60,66 +63,91 @@ class UsageScreenTest {
     }
 
     @Test
-    fun opening_usage_shows_compact_strip_without_provider_cards() {
+    fun opening_usage_shows_quiet_provider_rows_without_legacy_chrome() {
         setContent()
 
         composeRule.onNodeWithTag(USAGE_SCREEN_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(USAGE_SUMMARY_STRIP_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(usageSummaryRowTag("Codex")).assertIsDisplayed()
-        composeRule.onNodeWithTag(usageSummaryRowTag("Claude Code")).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_PROVIDER_LIST_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(usageProviderRowTag("Codex")).assertIsDisplayed()
+        composeRule.onNodeWithTag(usageProviderRowTag("claude")).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(USAGE_SYNC_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(USAGE_COUNTS_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(USAGE_RESET_BANNER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Codex limits reset at 5:00 PM").assertIsDisplayed()
+        composeRule.onNodeWithText("Heavy work can resume.").assertIsDisplayed()
 
-        composeRule.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
-        composeRule.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
-        composeRule.onNodeWithTag(usageProviderCardTag("copilot")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("copilot")).assertDoesNotExist()
     }
 
     @Test
-    fun tapping_codex_row_shows_its_card_and_tapping_again_collapses() {
+    fun tapping_codex_row_shows_inline_details_and_tapping_again_collapses() {
         setContent()
 
-        composeRule.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
 
-        composeRule.onNodeWithTag(usageSummaryRowTag("Codex")).performClick()
+        composeRule.onNodeWithTag(usageProviderToggleTag("codex")).performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(usageProviderCardTag("codex")).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex")).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(usageWindowRowTag("codex", "7d")).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
 
-        composeRule.onNodeWithTag(usageSummaryRowTag("Codex")).performScrollTo().performClick()
+        composeRule.onNodeWithTag(usageProviderToggleTag("codex")).performScrollTo().performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
         composeRule.onNodeWithTag(USAGE_RESET_CREDITS_SECTION_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(usageProviderCardTag("claude")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("claude")).assertDoesNotExist()
     }
 
     @Test
     fun tapping_claude_expands_only_claude() {
         setContent()
 
-        composeRule.onNodeWithTag(usageSummaryRowTag("Claude Code")).performClick()
+        composeRule.onNodeWithTag(usageProviderToggleTag("claude"), useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag(usageProviderCardTag("claude")).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("claude")).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(usageWindowRowTag("claude", "5h")).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(usageProviderCardTag("codex")).assertDoesNotExist()
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex")).assertDoesNotExist()
     }
 
     @Test
-    fun compact_codex_row_shows_most_constrained_percent_and_soonest_reset() {
+    fun quiet_codex_row_shows_most_constrained_percent() {
         setContent()
 
         composeRule.onNode(
-            hasTestTag(usageSummaryRowTag("Codex")) and
-                hasAnyDescendant(hasText("60% used")) and
-                hasAnyDescendant(hasText("in 4h")),
+            hasTestTag(usageProviderRowTag("Codex")) and
+                hasAnyDescendant(hasText("60% used", substring = true)) and
+                hasAnyDescendant(hasText("7d window", substring = true)),
             useUnmergedTree = true,
         ).assertIsDisplayed()
+    }
+
+    @Test
+    fun `large text can scroll to provider details`() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+                PocketShellTheme {
+                    UsageScreen(
+                        state = sampleState(),
+                        onBack = {},
+                        onRefresh = {},
+                        now = NOW,
+                        initiallyExpandedProviders = setOf("Codex"),
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag(usageProviderDetailsTag("codex"))
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test
@@ -147,6 +175,8 @@ class UsageScreenTest {
     }
 
     private fun sampleState(): UsageScreenState = UsageScreenState(
+        selectedHostId = 1,
+        selectedHostName = "hetzner",
         hosts = listOf(
             UsageHostSnapshot(
                 hostId = 1,

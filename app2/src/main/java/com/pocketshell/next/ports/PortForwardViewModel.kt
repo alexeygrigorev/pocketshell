@@ -6,12 +6,14 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor.ConnectionState
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.next.nav.Destination
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
@@ -38,6 +40,12 @@ data class PortForwardUiState(
      */
     val attention: String? = null,
     val rows: List<TunnelInfo> = emptyList(),
+    /** All discovered ports for Services & tunnels, before the legacy noise filter. */
+    val discoveredRows: List<TunnelInfo> = emptyList(),
+    /** Remote ports with a durable user-selected remote-to-local mapping. */
+    val manualRemotePorts: Set<Int> = emptySet(),
+    /** Durable Quiet labels for manually added tunnels, keyed by remote port. */
+    val manualTunnelNames: Map<Int, String> = emptyMap(),
     val showAllPorts: Boolean = false,
     /** Rows the default filter is hiding right now. */
     val hiddenCount: Int = 0,
@@ -65,6 +73,7 @@ data class PortForwardUiState(
 class PortForwardViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val hostDao: HostDao,
+    private val remappingDao: PortRemappingDao,
     private val controller: ForwardingController,
     private val showAllPortsStore: ShowAllPortsStore,
 ) : ViewModel() {
@@ -94,6 +103,14 @@ class PortForwardViewModel @Inject constructor(
                 showAllPorts = showAll,
                 loading = false,
             ).reFiltered()
+        }
+        viewModelScope.launch {
+            remappingDao.getByHostId(hostId).collect { mappings ->
+                _state.value = _state.value.copy(
+                    manualRemotePorts = mappings.map { it.remotePort }.toSet(),
+                    manualTunnelNames = mappings.associate { it.remotePort to it.name },
+                )
+            }
         }
         viewModelScope.launch {
             controller.snapshot.collect { snapshot ->
@@ -128,6 +145,25 @@ class PortForwardViewModel @Inject constructor(
         viewModelScope.launch { controller.togglePort(hostId, remotePort) }
     }
 
+    /** Adds a real remote→loopback mapping and starts the host forwarder. */
+    suspend fun addManualTunnel(remotePort: Int, localPort: Int, name: String = "") {
+        controller.addManualTunnel(hostId, remotePort, localPort, name)
+    }
+
+    /** Checks both saved mappings and currently active device-local binds. */
+    suspend fun localPortCollision(localPort: Int): String? =
+        controller.localPortCollision(hostId, localPort)
+
+    /** Removes a real persisted mapping. */
+    fun removeManualTunnel(remotePort: Int) {
+        viewModelScope.launch { controller.removeManualTunnel(hostId, remotePort) }
+    }
+
+    /** Removes a manual mapping and waits for the live supervisor to remount. */
+    suspend fun removeManualTunnelNow(remotePort: Int) {
+        controller.removeManualTunnel(hostId, remotePort)
+    }
+
     /** The "Show hidden/noisy ports" checkbox. Persisted globally. */
     fun setShowAllPorts(showAll: Boolean) {
         _state.value = _state.value.copy(showAllPorts = showAll).reFiltered()
@@ -141,6 +177,7 @@ class PortForwardViewModel @Inject constructor(
      */
     private fun PortForwardUiState.reFiltered(): PortForwardUiState = copy(
         rows = InterestingPortFilter.filter(allTunnels, showAllPorts),
+        discoveredRows = allTunnels,
         hiddenCount = InterestingPortFilter.hiddenCount(allTunnels),
     )
 }

@@ -109,23 +109,34 @@ class HostListNavigationTest {
         setContent()
 
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("No hosts yet").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithText("No hosts yet").assertExists()
+        composeRule.onNodeWithText("Your work, from here.").assertExists()
     }
 
-    /**
-     * The fast-follow gap this suite exists to close: before this test, there
-     * was no navigable UI path anywhere in the app that reached
-     * `Destination.Settings` — the route existed and `SettingsScreen` worked,
-     * but nothing could tap into it.
-     */
     @Test
-    fun `tapping Settings in the host list header navigates to Settings`() {
+    fun `empty Add host opens the two real setup methods`() {
         val nav = setContent()
 
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("No hosts yet").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("Add host").performClick()
+        composeRule.onNodeWithTag(HOST_LIST_ADD_METHODS_TAG).assertExists()
+        composeRule.onNodeWithTag(HOST_LIST_ADD_DETAILS_TAG).performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("HostForm(hostId=null)").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals(Destination.HostForm.pattern, nav.currentBackStackEntry?.destination?.route)
+    }
+
+    @Test
+    fun `tapping Settings in the empty state navigates to Settings`() {
+        val nav = setContent()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
         }
 
         composeRule.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
@@ -135,6 +146,52 @@ class HostListNavigationTest {
 
         assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
         composeRule.onNodeWithText("Settings").assertExists()
+    }
+
+    /**
+     * The fast-follow gap this suite exists to close: before this test, there
+     * was no navigable UI path anywhere in the app that reached
+     * `Destination.Settings` — the route existed and `SettingsScreen` worked,
+     * but nothing could tap into it.
+     */
+    @Test
+    fun `tapping Settings in the populated tools section navigates to Settings`() {
+        val keyId = runBlocking {
+            stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
+        }
+        runBlocking { insertHost(keyId, "hetzner", "135.181.114.209", "alexey") }
+        val nav = setContent()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("hetzner").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag(HOST_LIST_SETTINGS_ROW_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Settings").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        assertEquals(Destination.Settings.pattern, nav.currentBackStackEntry?.destination?.route)
+        composeRule.onNodeWithText("Settings").assertExists()
+    }
+
+    @Test
+    fun `tapping SSH keys in the populated tools section opens key management`() {
+        val keyId = runBlocking {
+            stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
+        }
+        runBlocking { insertHost(keyId, "hetzner", "135.181.114.209", "alexey") }
+        val nav = setContent()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("SSH keys").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(HOST_LIST_KEYS_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("SshKeys").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        assertEquals(Destination.SshKeys.pattern, nav.currentBackStackEntry?.destination?.route)
     }
 
     private fun setContent(): NavHostController {
@@ -151,24 +208,26 @@ class HostListNavigationTest {
                         onEditHost = actions.onEditHost,
                         onScanQr = actions.onScanQr,
                         onOpenSettings = actions.onOpenSettings,
+                        onOpenSshKeys = actions.onOpenSshKeys,
                         viewModel = vm,
                     )
                 },
-                hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
+                hostFormScreen = { hostId, _, _, _ -> Text("HostForm(hostId=$hostId)") },
                 qrScanScreen = { _, _ -> Text("QrScan") },
                 // `SettingsRoute`'s default resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot
                 // provide. This suite is about the host list header's tap →
                 // `Destination.Settings` edge, so the destination is a
                 // stand-in that just names itself.
-                settingsScreen = { _, _, _ -> Text("Settings") },
+                settingsScreen = { _ -> Text("Settings") },
+                sshKeysScreen = { _, _ -> Text("SshKeys") },
                 connectViewModel = { stack.viewModel },
                 // The U-3 session tree resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot
                 // provide. This suite is about the host-tap → Tree(hostId)
                 // edge, so the destination is a stand-in echoing the delivered
                 // argument.
-                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

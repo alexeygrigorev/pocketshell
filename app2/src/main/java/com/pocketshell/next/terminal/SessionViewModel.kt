@@ -66,8 +66,8 @@ sealed interface SessionUiState {
      * Robolectric and instrumented Compose tests. The remaining-time form moves
      * the tick to the one place already driven by a virtual clock in tests.)
      *
-     * [terminal] is the SAME emulator instance the session was [Live] on: tmux
-     * repaints on reattach, so there is deliberately no client-side snapshot or
+     * [terminal] is the SAME emulator instance the session was [Live] on: the
+     * host repaints on reattach, so there is deliberately no client-side snapshot or
      * reseed — the last frame simply stays on screen, under the banner, until
      * new bytes arrive. Carrying it here rather than letting the screen remember
      * the last live one keeps the screen stateless.
@@ -240,7 +240,7 @@ class SessionViewModel @Inject constructor(
      * INTERMEDIATE size while [cols]/[rows] say otherwise — and because
      * [onResized] skips a size it believes it already sent, nothing ever
      * corrects it. That is a phone-visible stuck-wrong-size terminal: the
-     * emulator grid and the remote pty disagree, so tmux paints a screen that
+     * emulator grid and the remote pty disagree, so the host paints a screen that
      * does not fit the grid it is painted into (observed on this journey as a
      * 63x24 emulator against a 63x49 remote pane).
      *
@@ -267,7 +267,7 @@ class SessionViewModel @Inject constructor(
      *
      * Idempotent by design: the screen calls it from a `LaunchedEffect`, which
      * re-runs on configuration change and on returning to a recomposed route,
-     * and a second attach would open a second PTY on the same tmux session.
+     * and a second attach would open a second PTY on the same session.
      * A repeat call after a failure is also ignored — [retryNow] is the retry.
      */
     fun open(hostId: Long, sessionName: String) {

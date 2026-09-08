@@ -15,6 +15,13 @@ interface PortRemappingDao {
     @Query("SELECT * FROM port_remappings WHERE hostId = :hostId AND remotePort = :remotePort")
     suspend fun getByRemotePort(hostId: Long, remotePort: Int): PortRemappingEntity?
 
+    /**
+     * Local binds are device-wide: a second host cannot claim a port already
+     * reserved by a saved tunnel on the first host.
+     */
+    @Query("SELECT * FROM port_remappings WHERE localPort = :localPort LIMIT 1")
+    suspend fun getByLocalPort(localPort: Int): PortRemappingEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(remapping: PortRemappingEntity): Long
 

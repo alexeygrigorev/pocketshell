@@ -4,8 +4,8 @@ The PocketShell Android app drives a small server-side CLI over SSH for several
 features:
 
 - **Usage panel** → `pocketshell usage --json` (provider quota/limits)
-- **Recurring jobs** → `pocketshell jobs ...`
-- **Env / hooks / sessions** → `pocketshell env|hooks|...`
+- **Sessions** → `pocketshell sessions ...` through the bundled aplexer runtime
+- **Env / hooks / usage** → `pocketshell env|hooks|usage ...`
 
 If the CLI isn't reachable over a **non-interactive** SSH command, the app shows
 e.g. **"<host>: pocketshell not installed — server-side usage tracking
@@ -62,12 +62,14 @@ Always back up first: `cp ~/.bashrc ~/.bashrc.bak`.
 ## 3. Verify (the same path the app uses)
 
 ```bash
-ssh <host> 'command -v pocketshell && pocketshell usage --json'
+ssh <host> 'command -v pocketshell && command -v a && command -v aplexer && pocketshell sessions list --json'
 ```
 
-You should see the absolute path to `pocketshell` followed by one JSON line per
-provider (`claude`, `codex`, `copilot`, ...). If you get `command not found`,
-the PATH fix in step 2 isn't in effect for non-interactive shells.
+You should see the absolute paths to `pocketshell`, `a`, and `aplexer`, followed
+by a schema-3 session document. The `pocketshell` package resolves the bundled
+`a` beside its interpreter; a separately installed `a` on `PATH` is ignored.
+If a binary is missing, reinstall the helper with `uv tool install --force
+pocketshell`.
 
 > Note: individual providers may report their own `error` (e.g. `zai`:
 > `goz not on PATH`) if that provider's helper tool isn't installed — that's
@@ -89,6 +91,7 @@ package are bumped in lockstep on each release tag).
 |---|---|---|
 | "pocketshell not installed" / "server-side usage tracking unavailable" | `~/.local/bin` not on non-interactive SSH PATH | Step 2 (PATH above the `.bashrc` guard) |
 | `pocketshell: command not found` over `ssh host 'pocketshell ...'` | not installed, or PATH | Step 1 + Step 2 |
+| `sessions list` reports bundled `a`/`aplexer` missing | incomplete or damaged helper install | `uv tool install --force pocketshell`; do not install a separate session runtime |
 | Usage panel shows a "bundled `quse` missing" packaging error (NOT "pocketshell not installed") | `quse` is now a PINNED dependency shipped WITH `pocketshell` (issue #1318) and resolved next to the interpreter, never from PATH. This error means the install is broken (e.g. a partial/corrupt install) | Reinstall pocketshell (`uv tool install --force pocketshell` — that reinstalls the pinned `quse` too). Do NOT install a separate host `quse`; a host-level `quse` on PATH is intentionally ignored so a host upgrade cannot break the schema. |
 | One provider shows an error, others OK | that provider's helper (e.g. `goz`) missing | install that helper, or ignore |
 | Worked before, broke after dotfile edit | PATH line moved below the guard | Step 2 |

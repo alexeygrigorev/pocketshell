@@ -1,7 +1,6 @@
 {
-  "schema": 2,
+  "schema": 3,
   "name": "k2-fixture-tmp",
-  "manager": "tmux",
   "id": null,
   "created": false
 }

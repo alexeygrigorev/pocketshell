@@ -22,13 +22,12 @@ import java.nio.charset.StandardCharsets
  *   connections registry (task M-3). That is the deliberate break from the old
  *   graph, where a credential-carrying destination was the norm.
  *
- * Route set is fixed by plan §A.1: Hosts, Tree, Session, Files, Settings, Usage,
+ * Route set is fixed by plan §A.1: Hosts, Workspaces, Workspace, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
- * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus
- * [CrashReports] (task P-10's local crash-report browser, reached from
- * Settings → Diagnostics). A new screen is a new object here, never an ad-hoc
- * string at a call site.
+ * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus the categorized
+ * Settings/support routes from issue #2610. A new screen is a new object here,
+ * never an ad-hoc string at a call site.
  */
 sealed class Destination(val pattern: String) {
 
@@ -42,25 +41,120 @@ sealed class Destination(val pattern: String) {
         fun route(): String = pattern
     }
 
+    /** Terminal reading settings. */
+    data object TerminalSettings : Destination("settings/terminal") {
+        fun route(): String = pattern
+    }
+
+    /** Dictation settings. */
+    data object VoiceSettings : Destination("settings/voice") {
+        fun route(): String = pattern
+    }
+
+    /** Focused dictation-language choice page. */
+    data object VoiceLanguage : Destination("settings/voice/language") {
+        fun route(): String = pattern
+    }
+
+    /** App-switching and connection-lifetime settings. */
+    data object ConnectionSettings : Destination("settings/connections") {
+        fun route(): String = pattern
+    }
+
+    /** Focused background-grace choice page. */
+    data object GraceSettings : Destination("settings/connections/grace") {
+        fun route(): String = pattern
+    }
+
+    /** Timing and compatibility settings. */
+    data object AdvancedSettings : Destination("settings/advanced") {
+        fun route(): String = pattern
+    }
+
+    /** Local diagnostics index. */
+    data object Diagnostics : Destination("diagnostics") {
+        fun route(): String = pattern
+    }
+
+    /** One report, loaded from the on-device crash-report store. */
+    data object DiagnosticReport : Destination("diagnostics/report/{$ARG_REPORT_ID}") {
+        fun route(reportId: String): String =
+            "diagnostics/report/${encodeSegment(reportId)}"
+    }
+
+    /** Installed build identity and update entry point. */
+    data object About : Destination("settings/about") {
+        fun route(): String = pattern
+    }
+
+    /** Real GitHub release-check state and native release handoffs. */
+    data object Update : Destination("settings/about/update") {
+        fun route(): String = pattern
+    }
+
     /** Provider quota / usage panel. */
     data object Usage : Destination("usage") {
         fun route(): String = pattern
     }
 
-    /** Workspace + session tree for one host. */
-    data object Tree : Destination("tree/{$ARG_HOST_ID}") {
-        fun route(hostId: Long): String = "tree/$hostId"
+    /** Host-scoped quota panel opened from a workspace or terminal. */
+    data object HostUsage : Destination("usage/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "usage/$hostId"
+    }
+
+    /** Host-scoped Quiet root: durable workspace navigation plus root sessions. */
+    data object Workspaces : Destination("workspaces/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "workspaces/$hostId"
+    }
+
+    /**
+     * One persistent workspace on a host. The canonical absolute path is a
+     * query argument because it contains `/`; route restoration therefore
+     * carries the workspace identity without relying on in-memory selection.
+     */
+    data object Workspace : Destination("workspace/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
+        fun route(hostId: Long, path: String): String =
+            "workspace/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
+    }
+
+    /** The same workspace route with the new-session sheet already open. */
+    data object WorkspaceStart :
+        Destination("workspace-start/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
+        fun route(hostId: Long, path: String): String =
+            "workspace-start/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
+    }
+
+    /** Host-scoped page for changing the persistent root/workspace order. */
+    data object ReorderWorkspaces : Destination("reorder-workspaces/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "reorder-workspaces/$hostId"
+    }
+
+    /**
+     * Compatibility name for existing callers while the destination migrates
+     * from the legacy session-tree vocabulary. It resolves to the Quiet route;
+     * production navigation uses [Workspaces] directly.
+     */
+    @Deprecated("Use Destination.Workspaces")
+    data object Tree : Destination(Workspaces.pattern) {
+        fun route(hostId: Long): String = Workspaces.route(hostId)
     }
 
     /**
      * A live session on [ARG_HOST_ID], identified by its server-side
-     * [ARG_SESSION_NAME] (tmux session name, or aplexer `workspace:tag`).
+     * [ARG_SESSION_NAME] (aplexer session name, or aplexer `workspace:tag`).
      * The name is the identity the host CLI speaks — the client never
      * carries sockets or UUIDs (plan §B.0).
      */
-    data object Session : Destination("session/{$ARG_HOST_ID}/{$ARG_SESSION_NAME}") {
-        fun route(hostId: Long, sessionName: String): String =
-            "session/$hostId/${encodeSegment(sessionName)}"
+    data object Session : Destination(
+        "session/{$ARG_HOST_ID}/{$ARG_SESSION_NAME}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}",
+    ) {
+        fun route(hostId: Long, sessionName: String, workspacePath: String? = null): String =
+            buildString {
+                append("session/$hostId/${encodeSegment(sessionName)}")
+                workspacePath?.takeIf { it.isNotBlank() }?.let {
+                    append("?$ARG_WORKSPACE_PATH=${encodeSegment(it)}")
+                }
+            }
     }
 
     /**
@@ -110,6 +204,21 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "ports/$hostId"
     }
 
+    /** Quiet Services & tunnels detail for one remote port. */
+    data object TunnelDetail : Destination("tunnel/{$ARG_HOST_ID}/{$ARG_REMOTE_PORT}") {
+        fun route(hostId: Long, remotePort: Int): String = "tunnel/$hostId/$remotePort"
+    }
+
+    /** Quiet manual tunnel form; a missing port opens a blank form. */
+    data object AddTunnel : Destination("add-tunnel/{$ARG_HOST_ID}?$ARG_REMOTE_PORT={$ARG_REMOTE_PORT}") {
+        fun route(hostId: Long, remotePort: Int? = null): String =
+            if (remotePort == null) {
+                "add-tunnel/$hostId?$ARG_REMOTE_PORT=$NO_REMOTE_PORT"
+            } else {
+                "add-tunnel/$hostId?$ARG_REMOTE_PORT=$remotePort"
+            }
+    }
+
     /**
      * The add/edit host form (task P-6).
      *
@@ -149,21 +258,9 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "workspace-roots/$hostId"
     }
 
-    /**
-     * The local crash-report browser (task P-10), opened from Settings →
-     * Diagnostics.
-     *
-     * Argument-free on purpose: crash reports are captured by
-     * `CrashReporter.install()` into the app's own `filesDir`, so they belong to
-     * the installation rather than to any host or session. Nothing about the
-     * screen varies by route.
-     */
-    data object CrashReports : Destination("crash-reports") {
-        fun route(): String = pattern
-    }
-
     companion object {
         const val ARG_HOST_ID: String = "hostId"
+        const val ARG_REPORT_ID: String = "reportId"
 
         /**
          * "No host" for [HostForm]. `NavType.LongType` has no null, so Add
@@ -172,6 +269,18 @@ sealed class Destination(val pattern: String) {
         const val NO_HOST_ID: Long = -1L
         const val ARG_SESSION_NAME: String = "sessionName"
         const val ARG_PATH: String = "path"
+        const val ARG_REMOTE_PORT: String = "remotePort"
+        const val NO_REMOTE_PORT: Int = -1
+
+        /**
+         * Compatibility alias for the pre-#2610 name. The route itself is now
+         * [Diagnostics]; retaining the alias avoids creating a second
+         * crash-report destination for older callers.
+         */
+        @Deprecated("Use Destination.Diagnostics")
+        val CrashReports: Diagnostics
+            get() = Diagnostics
+        const val ARG_WORKSPACE_PATH: String = "workspacePath"
 
         /**
          * Every destination, in graph order.
@@ -188,8 +297,11 @@ sealed class Destination(val pattern: String) {
          */
         val all: List<Destination>
             get() = listOf(
-                Hosts, Tree, Session, Files, FileViewer, Ports, Settings, Usage,
-                HostForm, SshKeys, QrScan, WorkspaceRoots, CrashReports,
+                Hosts, Workspaces, Workspace, Session, Files, FileViewer, Ports, Settings,
+                TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
+                GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
+                About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,
+                HostForm, SshKeys, QrScan, WorkspaceRoots, WorkspaceStart, ReorderWorkspaces,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

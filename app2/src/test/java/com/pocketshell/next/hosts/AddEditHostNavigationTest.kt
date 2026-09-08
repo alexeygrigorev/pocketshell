@@ -79,9 +79,10 @@ class AddEditHostNavigationTest {
         val nav = setContent()
 
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("No hosts yet").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("Add host").performClick()
+        composeRule.onNodeWithTag(HOST_LIST_ADD_DETAILS_TAG).performClick()
         composeRule.waitForIdle()
         assertEquals(Destination.HostForm.pattern, nav.currentBackStackEntry?.destination?.route)
 
@@ -137,6 +138,7 @@ class AddEditHostNavigationTest {
 
         // Now add a second host.
         composeRule.onNodeWithTag(HOST_LIST_ADD_TAG).performClick()
+        composeRule.onNodeWithTag(HOST_LIST_ADD_DETAILS_TAG).performClick()
         composeRule.waitForIdle()
         typeHost(name = "beta", hostname = "10.0.0.2", port = "22", username = "root")
         chooseKey()
@@ -159,9 +161,10 @@ class AddEditHostNavigationTest {
         setContent()
 
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("No hosts yet").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Your work, from here.").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("Add host").performClick()
+        composeRule.onNodeWithTag(HOST_LIST_ADD_DETAILS_TAG).performClick()
         composeRule.waitForIdle()
 
         typeHost(name = "h", hostname = "10.0.0.1", port = "22x", username = "u")
@@ -176,6 +179,7 @@ class AddEditHostNavigationTest {
     private fun typeHost(name: String, hostname: String, port: String, username: String) {
         composeRule.onNodeWithTag(HOST_FORM_NAME_TAG).performTextInput(name)
         composeRule.onNodeWithTag(HOST_FORM_HOSTNAME_TAG).performTextInput(hostname)
+        composeRule.onNodeWithTag(HOST_FORM_OPTIONS_TAG).performClick()
         composeRule.onNodeWithTag(HOST_FORM_PORT_TAG).performTextClearance()
         composeRule.onNodeWithTag(HOST_FORM_PORT_TAG).performTextInput(port)
         composeRule.onNodeWithTag(HOST_FORM_USERNAME_TAG).performTextInput(username)
@@ -233,9 +237,15 @@ class AddEditHostNavigationTest {
                     )
                 },
                 connectViewModel = { stack.viewModel },
-                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
-                hostFormScreen = { hostId, onDone, onAddKey ->
-                    AddEditHostRoute(hostId = hostId, onDone = onDone, onAddKey = onAddKey, viewModel = formViewModel)
+                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                hostFormScreen = { hostId, onDone, onAddKey, onTestConnection ->
+                    AddEditHostRoute(
+                        hostId = hostId,
+                        onDone = onDone,
+                        onAddKey = onAddKey,
+                        onTestConnection = onTestConnection,
+                        viewModel = formViewModel,
+                    )
                 },
             )
         }

@@ -26,8 +26,8 @@ write_pocketshell_version() {
   chmod 666 "$version_file"
 }
 
-# Issue #231 (D22 hard-cut): the bootstrapper now probes/installs the single
-# unified `pocketshell` CLI instead of the legacy `tmuxctl` + `quse` pair.
+# Issue #231 (D22 hard-cut): the bootstrapper probes/installs the single
+# unified `pocketshell` CLI and its host-side aplexer session runtime.
 case "$scenario" in
   ready)
     for tool in pocketshell systemctl; do
@@ -62,7 +62,7 @@ case "$scenario" in
     write_daemon_state active enabled
     ;;
   notifications)
-    # Issue #1236 (D26): a host with the CLI + tmux ready but the agent
+    # Issue #1236 (D26): a host with the CLI ready but the agent
     # stop/idle notification hooks NOT installed — a SILENT host. Enable the
     # fixture's real `hooks` support (marker) and seed a PRE-EXISTING foreign
     # Claude hook so the bootstrap install can be asserted to MERGE

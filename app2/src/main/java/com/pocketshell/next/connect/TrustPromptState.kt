@@ -21,6 +21,18 @@ data class TrustPromptState(
     /** The previously trusted fingerprint; non-null exactly when [isMismatch]. */
     val previousFingerprintSha256: String?,
 ) {
+    /**
+     * The digest algorithm named by the transport fingerprint. The transport
+     * contract carries `SHA256:<base64>` and deliberately does not carry the
+     * server key type, so this label describes the value the user is copying.
+     */
+    val fingerprintAlgorithm: String
+        get() = fingerprintAlgorithmLabel(fingerprintSha256)
+
+    /** Same digest label for the old value in a changed-key comparison. */
+    val previousFingerprintAlgorithm: String?
+        get() = previousFingerprintSha256?.let(::fingerprintAlgorithmLabel)
+
     companion object {
         /**
          * Maps a [TrustDecision] to a prompt, or null for
@@ -45,5 +57,14 @@ data class TrustPromptState(
                 previousFingerprintSha256 = decision.storedSha256,
             )
         }
+    }
+}
+
+internal fun fingerprintAlgorithmLabel(value: String): String {
+    return when (value.substringBefore(':').uppercase()) {
+        "SHA256" -> "SHA-256"
+        "SHA512" -> "SHA-512"
+        "SHA1" -> "SHA-1"
+        else -> "Fingerprint digest"
     }
 }

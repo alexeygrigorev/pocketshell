@@ -138,6 +138,116 @@ class FileExplorerViewModelTest {
     }
 
     @Test
+    fun `create folder uses the current browser location and refreshes the listing`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedDirectory(WORKSPACE) }
+            val viewModel = explorer(hostId, WORKSPACE)
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            viewModel.openCreateFolder()
+            viewModel.setCreateFolderName("notes")
+            viewModel.createFolder()
+            advanceUntilIdle()
+
+            assertTrue(viewModel.state.value.createFolder.visible.not())
+            assertTrue(stack.sftp.stat("$WORKSPACE/notes")?.isDirectory == true)
+            assertEquals(listOf("notes"), viewModel.state.value.entries.map { it.name })
+        }
+
+    @Test
+    fun `new text file creates an empty remote file and emits the editor handoff`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedDirectory(WORKSPACE) }
+            val viewModel = explorer(hostId, WORKSPACE)
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            viewModel.openNewTextFile()
+            viewModel.setNewTextFileName("notes.md")
+            viewModel.createNewTextFile()
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.newTextFile.visible)
+            assertEquals("", stack.sftp.textAt("$WORKSPACE/notes.md"))
+            assertEquals("$WORKSPACE/notes.md", viewModel.state.value.newFilePathToOpen)
+            assertEquals(listOf("notes.md"), viewModel.state.value.entries.map { it.name })
+
+            viewModel.consumeNewFilePath()
+            assertNull(viewModel.state.value.newFilePathToOpen)
+        }
+
+    @Test
+    fun `invalid folder names keep the form open without touching the host`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedDirectory(WORKSPACE) }
+            val viewModel = explorer(hostId, WORKSPACE)
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            viewModel.openCreateFolder()
+            viewModel.setCreateFolderName("../secrets")
+            viewModel.createFolder()
+
+            val form = viewModel.state.value.createFolder
+            assertTrue(form.visible)
+            assertEquals("../secrets", form.name)
+            assertTrue(form.failure.orEmpty().contains("path separator"))
+            assertNull(stack.sftp.stat("$WORKSPACE/secrets"))
+        }
+
+    @Test
+    fun `rename rejects an existing sibling and preserves the typed name`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = {
+                it.seedFile("$WORKSPACE/a.txt", "a")
+                it.seedFile("$WORKSPACE/b.txt", "b")
+            }
+            val viewModel = explorer(hostId, WORKSPACE)
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            val source = viewModel.state.value.entries.single { it.name == "a.txt" }
+            viewModel.openRename(source)
+            viewModel.setRenameName("b.txt")
+            viewModel.renameFile()
+            advanceUntilIdle()
+
+            val rename = viewModel.state.value.renameFile
+            assertTrue(rename.visible)
+            assertEquals("b.txt", rename.name)
+            assertTrue(rename.failure.orEmpty().contains("already exists"))
+            assertEquals("a", stack.sftp.textAt("$WORKSPACE/a.txt"))
+            assertEquals("b", stack.sftp.textAt("$WORKSPACE/b.txt"))
+        }
+
+    @Test
+    fun `delete requires the confirmation transition and removes the selected remote file`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { it.seedFile("$WORKSPACE/a.txt", "a") }
+            val viewModel = explorer(hostId, WORKSPACE)
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            val entry = viewModel.state.value.entries.single()
+            viewModel.requestDelete(entry)
+            assertTrue(viewModel.state.value.deleteFile.visible)
+            assertEquals("a", stack.sftp.textAt(entry.path))
+
+            viewModel.confirmDelete()
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.deleteFile.visible)
+            assertNull(stack.sftp.stat(entry.path))
+            assertTrue(viewModel.state.value.isEmptyAndHealthy)
+        }
+
+    @Test
     fun `an empty directory is empty AND healthy, not an error`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         stack.seedSftp = { it.seedDirectory(WORKSPACE) }
@@ -213,6 +323,7 @@ class FileExplorerViewModelTest {
             assertEquals(listOf("notes.txt"), viewModel.state.value.entries.map { it.name })
             val transfer = viewModel.state.value.transfer
             assertTrue("expected a success banner, got $transfer", transfer is TransferState.Done)
+            assertEquals(FileTransferStatus.Completed, viewModel.state.value.transferRecords.single().status)
         }
 
     @Test

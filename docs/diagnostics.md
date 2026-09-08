@@ -23,7 +23,7 @@ The recorder focuses on metadata needed to reconstruct the cases behind issue
 
 - app lifecycle: app created, foreground, background, grace-window start,
   grace-window elapsed, and foreground return within or after the grace window.
-- connection lifecycle: SSH open attempts, tmux connect and reconnect starts,
+- connection lifecycle: SSH open attempts, host-session attach and reconnect starts,
   successes, and failures. Disconnect markers, latency milestones, and
   reconnect cause-trail breadcrumbs are also recorded.
 - network lifecycle: validated default-network changes, deferred changes while
@@ -41,7 +41,7 @@ and keystrokes. Attachment contents and conversation text are also excluded.
 Secrets such as API keys and passphrases are excluded, along with tokens,
 cookies, and private-key paths.
 
-Hostnames, usernames, tmux session names, and filesystem paths are exported as
+Hostnames, usernames, session names, and filesystem paths are exported as
 stable short SHA-256 fingerprints when they appear in metadata. This preserves
 correlation across events without exposing the original text.
 

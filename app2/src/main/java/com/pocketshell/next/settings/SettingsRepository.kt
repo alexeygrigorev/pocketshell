@@ -43,16 +43,14 @@ import kotlinx.coroutines.flow.asStateFlow
  * and retries on the fresh one, which makes the recovery durable AND leaves
  * writes working (D22: one path, no "degraded mode" flag).
  *
- * ## Fields that are stored but not yet read
+ * ## Fields consumed by their owning features
  *
  * [AppSettings.voiceLanguage] is read by the composer mic tap as the
  * recognizer language hint. [AppSettings.voiceSilenceThresholdSeconds] is
  * sampled lazily by [com.pocketshell.next.voice.AndroidSpeechRecognitionProvider]
- * on each start. [AppSettings.usageWarnThresholdPercent]
- * is likewise the usage panel's (task P-5) to read. Each is a settings-surface
- * value its owning task consumes; the alternative — landing the screen without
- * them and editing it three more times — is worse. They are called out here so
- * "nothing reads this" is a known state, not a discovery.
+ * on each start. [AppSettings.usageWarnThresholdPercent] is read by the usage
+ * panel and its session glance pill on every refresh, so changing the setting
+ * takes effect without restarting the app.
  *
  * [AppSettings.backgroundGraceMillis] WAS on that list and no longer is: issue
  * #2488 is what "a known state" turns into when nobody comes back for it — the
@@ -145,6 +143,27 @@ class SettingsRepository @Inject constructor(
         if (_settings.value.agentSubmitEnterDelayMs == snapped) return
         write { putInt(KEY_AGENT_SUBMIT_ENTER_DELAY_MS, snapped) }
         _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
+    }
+
+    /**
+     * Restore the controls grouped under Settings → Advanced in one atomic
+     * snapshot. Terminal size, language, and connection grace are deliberately
+     * outside this action because they have their own pages and user intent.
+     */
+    fun resetAdvancedDefaults() {
+        val current = _settings.value
+        val reset = current.copy(
+            voiceSilenceThresholdSeconds = AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+            usageWarnThresholdPercent = AppSettings.DEFAULT_USAGE_WARN_PERCENT,
+            agentSubmitEnterDelayMs = AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+        )
+        if (current == reset) return
+        write {
+            putFloat(KEY_VOICE_SILENCE_SECONDS, reset.voiceSilenceThresholdSeconds)
+            putInt(KEY_USAGE_WARN_THRESHOLD, reset.usageWarnThresholdPercent)
+            putInt(KEY_AGENT_SUBMIT_ENTER_DELAY_MS, reset.agentSubmitEnterDelayMs)
+        }
+        _settings.value = reset
     }
 
     private fun write(edit: SharedPreferences.Editor.() -> Unit) {

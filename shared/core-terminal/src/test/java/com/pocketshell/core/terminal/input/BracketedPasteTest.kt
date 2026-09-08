@@ -22,7 +22,7 @@ class BracketedPasteTest {
     }
 
     @Test
-    fun hexPayloadMatchesTmuxSendKeysShape() {
+    fun hexPayloadMatchesTerminalControlShape() {
         val hex = BracketedPaste.hexPayload("a\nb".toByteArray(Charsets.UTF_8))
 
         assertEquals(
@@ -46,8 +46,8 @@ class BracketedPasteTest {
     }
 
     /**
-     * THE contract the #1636 atomic paste rides on: the chunks the tmux paste
-     * buffer is filled with must re-assemble into the framed payload byte for
+     * THE contract the #1636 atomic paste rides on: the chunks sent to the
+     * terminal must re-assemble into the framed payload byte for
      * byte. Swept across chunk sizes so a boundary lands inside every UTF-8
      * sequence length in the corpus.
      */
@@ -135,7 +135,7 @@ class BracketedPasteTest {
     }
 
     /**
-     * Issue #1854: the tmux lane must recognise an ALREADY-framed block so it
+     * Issue #1854: the terminal lane must recognise an ALREADY-framed block so it
      * delivers it instead of framing it a second time.
      */
     @Test

@@ -267,7 +267,7 @@ private fun ForwardingToggleRow(enabled: Boolean, onEnabledChange: (Boolean) -> 
             Text(
                 text = "Forward ports from this host",
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
+                style = PocketShellType.body,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(2.dp))
@@ -278,7 +278,7 @@ private fun ForwardingToggleRow(enabled: Boolean, onEnabledChange: (Boolean) -> 
                     "Off — nothing is forwarded and no connection is held"
                 },
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
+                style = PocketShellType.body,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -343,18 +343,18 @@ private fun PortForwardRow(tunnel: TunnelInfo, onToggle: () -> Unit) {
                 Text(
                     text = formatBytes(tunnel.bytesIn + tunnel.bytesOut),
                     color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                 )
                 Text(
                     text = "${formatBytes(tunnel.speedBps)}/s",
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                 )
             } else {
                 Text(
                     text = "-",
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                 )
             }
         }
@@ -381,7 +381,7 @@ private fun CenteredMessage(text: String, modifier: Modifier) {
         Text(
             text,
             color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.body,
             textAlign = TextAlign.Center,
         )
     }

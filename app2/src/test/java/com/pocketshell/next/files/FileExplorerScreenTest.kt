@@ -161,6 +161,58 @@ class FileExplorerScreenTest {
         composeRule.onNodeWithTag(FILE_EXPLORER_UP_TAG).assertIsEnabled()
     }
 
+    @Test
+    fun `file tools content keeps remote operations in one action surface`() {
+        val actions = mutableListOf<String>()
+        composeRule.setContent {
+            PocketShellTheme {
+                FileToolsSheetContent(
+                    path = "/home/testuser/git/pocketshell",
+                    onUpload = { actions += "upload" },
+                    onCreateFolder = { actions += "folder" },
+                    onNewTextFile = { actions += "new" },
+                    onOpenTransfers = { actions += "transfers" },
+                    onDismiss = { actions += "dismiss" },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Upload files").performClick()
+        composeRule.onNodeWithText("Create folder").performClick()
+        composeRule.onNodeWithText("New text file").performClick()
+        composeRule.onNodeWithText("Transfers").performClick()
+
+        assertEquals(listOf("upload", "folder", "new", "transfers"), actions)
+    }
+
+    @Test
+    fun `file action content exposes copy rename delete and hides binary editing`() {
+        val actions = mutableListOf<String>()
+        composeRule.setContent {
+            PocketShellTheme {
+                FileActionSheetContent(
+                    entry = file("/w/archive.bin"),
+                    onPreview = { actions += "preview" },
+                    onEdit = { actions += "edit" },
+                    onDownload = { actions += "download" },
+                    onCopyPath = { actions += "copy" },
+                    onRename = { actions += "rename" },
+                    onDelete = { actions += "delete" },
+                    onDismiss = { actions += "dismiss" },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Preview").performClick()
+        composeRule.onNodeWithText("Download").performClick()
+        composeRule.onNodeWithText("Copy path").performClick()
+        composeRule.onNodeWithText("Rename").performClick()
+        composeRule.onNodeWithText("Delete…").performClick()
+        composeRule.onNodeWithText("Edit").assertDoesNotExist()
+
+        assertEquals(listOf("preview", "download", "copy", "rename", "delete"), actions)
+    }
+
     // --- helpers ----------------------------------------------------------
 
     private fun setContent(

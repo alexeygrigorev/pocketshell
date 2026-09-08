@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,7 +46,9 @@ import com.pocketshell.uikit.theme.PocketShellType
  * - **title** — the primary scan target, [PocketShellType.bodyDense]`(13)`
  *   Medium on the bright text token.
  * - **[subtitle]** (optional) — paths / IDs / `user@host`, rendered
- *   [PocketShellType.bodyMono]`(13)` on the muted token. Single line, ellipsised.
+ *   [PocketShellType.bodyMono]`(13)` on the muted token. The default is a
+ *   single ellipsised line; callers such as [WorkspaceRow] may opt into a
+ *   second line when the label itself is part of navigation.
  * - **[trailing]** (optional) — badge ([Badge]) / count / kebab ([Kebab]). One
  *   overflow affordance per row (design language: avoid multiple inline action
  *   buttons).
@@ -73,13 +76,15 @@ fun ListRow(
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null,
+    titleMaxLines: Int = 1,
+    subtitleMaxLines: Int = 1,
+    titleStyle: TextStyle = PocketShellType.body,
+    subtitleStyle: TextStyle = PocketShellType.metadata,
+    titleWeight: FontWeight? = null,
 ) {
-    // Visual paint floor is the compact 44dp row height; when the row is
-    // tappable the floor is raised to the 48dp a11y touch floor. Baking the
-    // floor in here is the contract: screens consuming ListRow cannot drop the
-    // hit area below 48dp.
-    val minHeight =
-        if (onClick != null) PocketShellDensity.tapTargetMin else PocketShellDensity.rowMinHeight
+    // Every standard row is a 72dp minimum hit target. WorkspaceRow raises
+    // this to the separate 88dp workspace navigation target.
+    val minHeight = PocketShellDensity.rowMinHeight
 
     Row(
         modifier = modifier
@@ -112,9 +117,9 @@ fun ListRow(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
+                style = titleStyle,
+                fontWeight = titleWeight,
+                maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
             )
             if (subtitle != null) {
@@ -122,8 +127,8 @@ fun ListRow(
                 Text(
                     text = subtitle,
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyMono,
-                    maxLines = 1,
+                    style = subtitleStyle,
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

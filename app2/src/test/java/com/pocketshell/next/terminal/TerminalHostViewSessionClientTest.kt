@@ -19,8 +19,10 @@ import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TextStyle
 import com.termux.view.TerminalView
+import com.termux.view.textselection.TextSelectionCursorController
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,7 +48,7 @@ import org.junit.runner.RunWith
  * Long-press → drag → Copy in the vendored selection action mode calls
  * `session.onCopyTextToClipboard`, and Paste calls
  * `session.onPasteTextFromClipboard`; both reach the session's client. With a
- * no-op client the menu items did nothing, silently. `OSC 52` (tmux
+ * no-op client the menu items did nothing, silently. `OSC 52` (terminal
  * `set-clipboard`, an agent copying a snippet) lands on the same copy path.
  *
  * These tests drive the vendored entry points the menu itself calls, on the
@@ -132,6 +134,30 @@ class TerminalHostViewSessionClientTest {
 
         composeRule.runOnUiThread { session.onCopyTextToClipboard("echo copied") }
 
+        assertEquals("echo copied", clipboardText())
+    }
+
+    @Test
+    fun `copy action uses text retained when native selection opens more actions`() {
+        val session = host()
+        val view = requireTerminalView()
+
+        composeRule.runOnUiThread {
+            // ACTION_MORE in the vendored native selection controller stores
+            // the selected text before handing control to PocketShell's
+            // action sheet. Seed that real controller state, then invoke the
+            // same internal action the sheet calls.
+            val controller = TextSelectionCursorController(view)
+            TerminalView::class.java.getDeclaredField("mTextSelectionCursorController")
+                .apply { isAccessible = true }
+                .set(view, controller)
+            controller.javaClass.getDeclaredField("mStoredSelectedText")
+                .apply { isAccessible = true }
+                .set(controller, "echo copied")
+        }
+        composeRule.waitForIdle()
+
+        assertTrue(view.copySelectionToClipboard())
         assertEquals("echo copied", clipboardText())
     }
 

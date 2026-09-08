@@ -48,7 +48,14 @@ Hard cuts only — no legacy detection path, deprecation shim, "use the old beha
 
 ## Connection Manager is the most critical subsystem (locked, D28)
 
-The SSH/tmux connection/lease/reconnect/grace core is managed as first-class architecture, never patches-on-patches: prefer a clean rewrite over stacking another shim when the design stops extending cleanly. The orchestrator stops and flags the maintainer the moment cardinal rework looks needed, rather than silently patching further — that call belongs to the maintainer. Load-bearing journeys (bg→fg grace, multi-session switch, reconnect/EOF) run in per-PR CI and must fail on user-visible regressions, not merely internal/shadow-state divergence. Full rationale: `docs/decisions.md` D28.
+The SSH connection/lease/reconnect/grace core is managed as first-class
+architecture, never patches-on-patches: prefer a clean rewrite over stacking
+another shim when the design stops extending cleanly. The orchestrator stops
+and flags the maintainer the moment cardinal rework looks needed, rather than
+silently patching further — that call belongs to the maintainer. Load-bearing
+journeys (background grace, multi-session switch, reconnect/EOF) run in per-PR
+CI and must fail on user-visible regressions, not merely internal/shadow-state
+divergence. Full historical rationale: `docs/decisions.md` D28.
 
 ## Durable-fix gate — reopened issues need a class regression test (locked, D31)
 
@@ -187,7 +194,7 @@ Parallelism is issue-scoped, not role-skipping. Each active issue keeps its own 
 - Emulator-touching work is the real contention bottleneck, not the agent count. Every connected/emulator test goes through `scripts/connected-test.sh --suffix i<issue> <gradle args>` — it holds the shared AVD lock and installs under a per-worktree `applicationIdSuffix` so parallel agents coexist on one emulator instead of SIGKILL-ing each other's installs. Add `--pool` for parallel journey lanes (distinct emulator + isolated `agents`-fixture port per lane; warm/inspect with `scripts/agents-pool.sh up|status|down`). See [docs/testing.md](docs/testing.md) for the full pool detail and [docs/ci-pitfalls.md](docs/ci-pitfalls.md) for what a contended box can do to a "green" result.
 - Choosing an agent type: `implementer` writes code+tests for one issue; `reviewer` inspects a diff and posts a verdict; `release-owner` cuts/stabilizes/tags/merges a release from its own worktree ([docs/release.md](docs/release.md)); `researcher` runs a read-only research spike and posts one structured comment (prefer over `Explore` for sustained, cited output); `Explore` is for ad-hoc code search; `general-purpose` is the catch-all for multi-step tasks that don't fit the above. Model choice never waives a process gate.
 
-### tmux socket isolation
+### Operational tmux socket isolation
 
 Agents, automation, and tests must not use the maintainer's default tmux socket at `/tmp/tmux-$UID/default` unless the maintainer explicitly asks for a live default-socket repro or recovery task. Use an isolated namespace instead: `tmux -L "pocketshell-$RUN_ID" ...`, `tmux -S "/tmp/pocketshell-tmux-$RUN_ID.sock" ...`, or `TMUX_TMPDIR="$(mktemp -d)" tmux ...`. If the default socket already looks missing, replaced, or split-brained, follow [docs/tmux-socket-recovery.md](docs/tmux-socket-recovery.md) before starting new default-socket sessions.
 
@@ -234,7 +241,10 @@ If any check fails, do not commit — send it back to an implementer unless it's
 
 ## Quality Assurance
 
-Two emulation surfaces are first-class: the Android emulator (UI/visual) and the Docker remote server (SSH/tmux/agent-detection/usage). The orchestrator runs final QA; approval and merge depend on orchestrator verification even when sub-agents wrote the tests.
+Two emulation surfaces are first-class: the Android emulator (UI/visual) and
+the Docker remote server (SSH, aplexer, agent detection, and usage). The
+orchestrator runs final QA; approval and merge depend on orchestrator
+verification even when sub-agents wrote the tests.
 
 Reviewer approval for a user-facing flow must include emulator evidence (command, whether Docker was involved, observed result) or return `CHANGES REQUESTED`/`BLOCKED`. Reject stale, missing, contradicted, or non-reproducible artifacts. The detailed acceptance bars — session-switch/reconnect journeys, visual/composer/keyboard/layout regressions, the containment-assertion checklist, fast design renders, and terminal artifact review — live in [docs/review-standards.md](docs/review-standards.md). Load it before reviewing any of those change classes; a code-read plus one happy-path screenshot is grounds for `CHANGES REQUESTED` on all of them.
 

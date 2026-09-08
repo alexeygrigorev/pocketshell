@@ -89,6 +89,22 @@ class PortScannerTest {
     }
 
     @Test
+    fun `parseProcNetOutput extracts listening ports from minimal Linux proc tables`() {
+        val out = """
+            sl  local_address rem_address   st ...
+             0: 0100007F:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 123 1 0000000000000000 100 0 0 10 0
+             1: 00000000:1435 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 456 1 0000000000000000 100 0 0 10 0
+             2: 00000000:0017 00000000:0000 01 00000000:00000000 00:00000000 00000000   100        0 789 1 0000000000000000 100 0 0 10 0
+             3: 00000000:1435 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 999 1 0000000000000000 100 0 0 10 0
+        """.trimIndent()
+
+        assertEquals(
+            listOf(RemotePort(22, ""), RemotePort(5173, "")),
+            PortScanner.parseProcNetOutput(out),
+        )
+    }
+
+    @Test
     fun `scan reports Failed when every strategy fails`() = runTest {
         // Issue #2489: the failure case is its own type, not an empty list —
         // the AutoForwarder must be able to tell "the scan didn't work" from
@@ -179,6 +195,27 @@ class PortScannerTest {
         val result = PortScanner.scan(host)
         assertTrue("expected a successful scan, got $result", result is PortScanResult.Ports)
         assertTrue((result as PortScanResult.Ports).ports.contains(RemotePort(9000, "")))
+    }
+
+    @Test
+    fun `scan falls through to proc net when command line scanners are unavailable`() = runTest {
+        val proc = """
+            sl local_address rem_address st
+             0: 00000000:1435 00000000:0000 0A
+        """.trimIndent()
+        val host = stubHost { cmd ->
+            when {
+                cmd.startsWith("ss -tlnp") -> exec("")
+                cmd.startsWith("netstat -tlnp") -> exec("")
+                cmd.startsWith("ss -tln") -> exec("")
+                cmd.startsWith("cat /proc/net/tcp") -> exec(proc)
+                else -> error("unexpected command: $cmd")
+            }
+        }
+        assertEquals(
+            PortScanResult.Ports(listOf(RemotePort(5173, ""))),
+            PortScanner.scan(host),
+        )
     }
 
     /**

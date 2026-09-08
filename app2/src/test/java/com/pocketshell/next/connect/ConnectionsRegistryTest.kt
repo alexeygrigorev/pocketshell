@@ -264,4 +264,29 @@ class ConnectionsRegistryTest {
         assertTrue(registry.getOrConnect(hostId) is ConnectResult.Connected)
         assertEquals(3, factory.dialCount)
     }
+
+    @Test
+    fun `close removes only the requested host connection`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val factory = FakeHostConnectionFactory()
+        val registry = registry(factory, dispatcher)
+        val otherHostId = db.hostDao().insert(
+            HostEntity(
+                name = "second",
+                hostname = "second.invalid",
+                username = "tester",
+                keyId = keyId,
+            ),
+        )
+
+        val first = (registry.getOrConnect(hostId) as ConnectResult.Connected).connection
+        val second = (registry.getOrConnect(otherHostId) as ConnectResult.Connected).connection
+
+        registry.close(hostId)
+
+        assertTrue(first.state.value is TransportState.Closed)
+        assertNull(registry.current(hostId))
+        assertSame(second, registry.current(otherHostId))
+        assertEquals(listOf(second), registry.liveConnections())
+    }
 }

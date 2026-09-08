@@ -166,7 +166,7 @@ area   ci-harness           changed  JVM-driven shell harness tests for the CI s
 # two-ended wire seam (rule 5 above), not from a `couple` row, and I9 in
 # --coverage-invariant pins both journeys (#1509, FolderListOldCliHydrateDockerTest)
 # and UNIT consumers (PocketshellUsageJsonParserTest, AppDatabaseTest,
-# SessionAgentKindOptionTest) to it by name. Measured consequence, stated rather
+# SessionTreeNavigationTest) to it by name. Measured consequence, stated rather
 # than buried: with both ends marked, a `tools/pocketshell/**` change selects
 # 158 of 161 journeys and 570 of 659 unit classes — a host-CLI change is now
 # effectively a full run. That is the deliberate answer for the #847 class.
@@ -294,6 +294,7 @@ src    app2/src/main/java/com/pocketshell/next/terminal/*     tmux-session      
 src    app2/src/main/java/com/pocketshell/next/composer/*     composer-voice       full
 src    app2/src/main/java/com/pocketshell/next/voice/*        composer-voice       full
 src    app2/src/main/java/com/pocketshell/next/tree/*         projects-tree        full
+src    app2/src/main/java/com/pocketshell/next/workspaces/*  projects-tree        full
 src    app2/src/main/java/com/pocketshell/next/ports/*        portfwd              full
 src    app2/src/main/java/com/pocketshell/next/files/*        files                full
 src    app2/src/main/java/com/pocketshell/next/hosts/*        hosts-settings       full
@@ -345,6 +346,7 @@ test   app2/src/*/java/com/pocketshell/next/terminal/*     tmux-session         
 test   app2/src/*/java/com/pocketshell/next/composer/*     composer-voice       full
 test   app2/src/*/java/com/pocketshell/next/voice/*        composer-voice       full
 test   app2/src/*/java/com/pocketshell/next/tree/*         projects-tree        full
+test   app2/src/*/java/com/pocketshell/next/workspaces/*  projects-tree        full
 test   app2/src/*/java/com/pocketshell/next/ports/*        portfwd              full
 test   app2/src/*/java/com/pocketshell/next/files/*        files                full
 test   app2/src/*/java/com/pocketshell/next/hosts/*        hosts-settings       full

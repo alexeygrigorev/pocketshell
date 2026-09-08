@@ -34,16 +34,12 @@ import org.robolectric.RobolectricTestRunner
  * The state that triggers it — "alternate buffer active AND mouse tracking
  * inactive" — is not something PocketShell chooses; it is what a specific host
  * hands the app on attach. So the emulator here is driven by verbatim PTY
- * captures of the attach paths the app really opens (see
+ * captures of the aplexer attach paths the app really opens (see
  * `src/test/resources/pocketshell/scroll/README.md`), not by a hand-written
- * escape string that could encode the wrong assumption. The two non-happy ones
- * are the fixtures #2555 was missing:
- *
- *  - a **stock-config tmux** attach — `mouse` defaults to `off` in tmux, so any
- *    host without `set -g mouse on` puts the app's emulator on the alt screen
- *    with no mouse tracking;
- *  - an **aplexer** attach onto an alt-screen workload — aplexer forwards the
- *    workload's `CSI ? 1049 h` and never enables mouse tracking of its own.
+ * escape string that could encode the wrong assumption. The aplexer attach
+ * onto an alt-screen workload is the non-happy host state #2555 was missing:
+ * aplexer forwards the workload's `CSI ? 1049 h` and never enables mouse
+ * tracking of its own.
  *
  * ## Scope of the assertions
  *
@@ -75,25 +71,6 @@ class TerminalScrollGestureTest {
     // --- the reported defect -------------------------------------------------
 
     @Test
-    fun `stock-config tmux attach - a drag sends no arrow keys`() {
-        val view = attachedView("tmux-default-config-attach.bin")
-
-        assertTrue(
-            "fixture must reproduce the reported host state: alternate buffer active",
-            view.mEmulator.isAlternateBufferActive,
-        )
-        assertFalse(
-            "fixture must reproduce the reported host state: mouse tracking inactive",
-            view.mEmulator.isMouseTrackingActive,
-        )
-
-        view.doScroll(dragEvent(), -3)
-        view.doScroll(dragEvent(), 3)
-
-        assertEquals("", drainSessionOutput())
-    }
-
-    @Test
     fun `aplexer attach to an alt-screen workload - a drag sends no arrow keys`() {
         val view = attachedView("aplexer-altscreen-attach.bin")
 
@@ -111,12 +88,11 @@ class TerminalScrollGestureTest {
      * screen, an alt screen with no mouse tracking must never turn a drag into
      * a keystroke. `ESC [ A` and `ESC O A` are both spellings of "up" — the
      * second is what the same code path emits once an application has turned on
-     * DECCKM (`CSI ? 1 h`), which tmux does on every attach.
+     * DECCKM (`CSI ? 1 h`), which the attached workload may enable.
      */
     @Test
     fun `no alt-screen drag emits a cursor key in either cursor-key mode`() {
         listOf(
-            "tmux-default-config-attach.bin",
             "aplexer-altscreen-attach.bin",
         ).forEach { fixture ->
             listOf(false, true).forEach { applicationCursorKeys ->
@@ -141,8 +117,10 @@ class TerminalScrollGestureTest {
     // --- the paths that must NOT change -------------------------------------
 
     @Test
-    fun `tmux with mouse on still gets wheel events, not arrow keys`() {
-        val view = attachedView("tmux-mouse-on-attach.bin")
+    fun `a mouse-tracking alt-screen workload still gets wheel events`() {
+        val view = attachedView("aplexer-altscreen-attach.bin")
+        view.mEmulator.append(MOUSE_TRACKING_ON)
+        drainSessionOutput()
 
         assertTrue(view.mEmulator.isAlternateBufferActive)
         assertTrue(
@@ -155,8 +133,8 @@ class TerminalScrollGestureTest {
         view.doScroll(dragEvent(), 2)
         val down = drainSessionOutput()
 
-        // SGR mouse (CSI ? 1006 h, which tmux sets): button 64 = wheel up,
-        // 65 = wheel down, at the 1-based cell under the finger.
+        // SGR mouse: button 64 = wheel up, 65 = wheel down, at the 1-based
+        // cell under the finger.
         assertEquals(WHEEL_UP + WHEEL_UP, up)
         assertEquals(WHEEL_DOWN + WHEEL_DOWN, down)
     }
@@ -341,6 +319,9 @@ class TerminalScrollGestureTest {
 
         /** `CSI ? 1 l` — DECCKM off: cursor keys are `ESC [ A` / `ESC [ B`. */
         val CSI_NORMAL_CURSOR_KEYS = "$ESC[?1l".toByteArray()
+
+        /** `CSI ? 1000;1006 h` — tracking with the SGR mouse protocol. */
+        val MOUSE_TRACKING_ON = "$ESC[?1000;1006h".toByteArray()
 
         /** SGR-encoded wheel-up press at the top-left cell. */
         const val WHEEL_UP = ESC + "[<64;1;1M"

@@ -45,14 +45,32 @@ internal class CrashReportsViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal var clock: Clock = Clock.systemUTC()
 
-    private val _reports = MutableStateFlow(store.list())
+    private val _reports = MutableStateFlow<List<CrashReport>>(emptyList())
     val reports: StateFlow<List<CrashReport>> = _reports.asStateFlow()
+
+    private val _loadState = MutableStateFlow<CrashReportsLoadState>(CrashReportsLoadState.Loading)
+    val loadState: StateFlow<CrashReportsLoadState> = _loadState.asStateFlow()
 
     private val _shareAllState = MutableStateFlow<ShareAllState>(ShareAllState.Idle)
     val shareAllState: StateFlow<ShareAllState> = _shareAllState.asStateFlow()
 
+    init {
+        reload()
+    }
+
     fun reload() {
-        _reports.value = store.list()
+        _loadState.value = CrashReportsLoadState.Loading
+        runCatching { store.list() }
+            .onSuccess { reports ->
+                _reports.value = reports
+                _loadState.value = CrashReportsLoadState.Ready
+            }
+            .onFailure { error ->
+                _reports.value = emptyList()
+                _loadState.value = CrashReportsLoadState.Failed(
+                    error.message ?: "Could not read local diagnostic reports.",
+                )
+            }
     }
 
     fun read(report: CrashReport): String = store.read(report)
@@ -70,9 +88,11 @@ internal class CrashReportsViewModel @Inject constructor(
 
     /**
      * Begin the Share-all flow by preparing a zip in cache. The composable
-     * observes [ShareAllState.Prepared] and launches the platform chooser.
+     * invokes [onPrepared] on the main dispatcher once the archive is ready;
+     * the screen uses that callback to launch the platform chooser. The state
+     * remains available for loading/error UI and deterministic tests.
      */
-    fun shareAll() {
+    fun shareAll(onPrepared: (File) -> Unit = {}) {
         if (_reports.value.isEmpty()) return
         if (_shareAllState.value is ShareAllState.Preparing) return
         val reportFiles = _reports.value.map { it.file }.filter { it.isFile }
@@ -98,6 +118,7 @@ internal class CrashReportsViewModel @Inject constructor(
                 archive = archive,
                 reportCount = reportFiles.size,
             )
+            onPrepared(archive)
         }
     }
 
@@ -131,6 +152,13 @@ internal class CrashReportsViewModel @Inject constructor(
             .filter { it.isNotBlank() }
             .joinToString(separator = " ")
             .ifBlank { "device" }
+}
+
+/** Real local-store states surfaced by the Diagnostics screen. */
+internal sealed interface CrashReportsLoadState {
+    data object Loading : CrashReportsLoadState
+    data object Ready : CrashReportsLoadState
+    data class Failed(val message: String) : CrashReportsLoadState
 }
 
 /** State machine for the Share-all action. */

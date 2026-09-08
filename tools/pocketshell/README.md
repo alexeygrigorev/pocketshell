@@ -2,9 +2,25 @@
 
 Unified server-side Python utility for the [PocketShell](https://github.com/alexeygrigorev/pocketshell)
 Android client. The app probes for this single helper on each remote
-host and uses its subcommands for usage, tmux session/job metadata,
-agent conversations, QR host setup, repository discovery, environment
-files, hooks, logs, and daemon lifecycle checks.
+host and uses its subcommands for usage, aplexer session lifecycle, agent
+conversations, QR host setup, repository discovery, environment files, hooks,
+logs, and daemon lifecycle checks.
+
+## Durable workspaces
+
+The Quiet workspace-first client uses the host-side workspace membership
+contract before it has any live session to enumerate:
+
+```text
+pocketshell workspaces list --host <host> --json
+pocketshell workspaces add <path> --host <host> --json
+pocketshell workspaces remove <path> --host <host> --json
+```
+
+Membership is stored in the existing private tree registry. Each entry has a
+canonical absolute `path` for identity and a separate `display_path` for the
+path spelling shown in the UI. Adding or removing the same path repeatedly is
+safe, and `list` retains empty workspaces.
 
 ## Install
 
@@ -49,9 +65,10 @@ Top-level commands in the current helper:
 
 ```text
 pocketshell usage [provider] [--json]       # provider quota / usage
-pocketshell send --pane %3 --token <id>     # acknowledged pane delivery
-pocketshell sessions list [--by activity]   # tmux session summaries
-pocketshell jobs ...                        # tmux recurring jobs
+pocketshell sessions list --json           # schema-3 aplexer session rows
+pocketshell sessions create NAME --json      # create or reuse a session
+pocketshell sessions attach NAME             # attach to a live session
+pocketshell sessions kill NAME --json        # stop and reap a session
 pocketshell agent-log ...                   # agent conversation logs
 pocketshell repos list ...                  # local / GitHub repositories
 pocketshell github status [--json]          # gh install / auth state
@@ -68,136 +85,25 @@ flag set. Some parity subcommands still proxy through the existing host
 tools internally so their output remains byte-identical to what the app
 already parses.
 
-### `pocketshell send`
+### `pocketshell sessions`
 
-Deliver a payload into an exact tmux pane, **exactly once per token**. The
-exit status IS the acknowledgement — the client no longer has to read the
-terminal screen and guess whether its prompt landed (issue #2122, epic
-#2121).
+The session group is deliberately aplexer-only. `list`, `create`, `attach`, and
+`kill` all use the bundled `a` executable resolved next to the installed
+PocketShell interpreter; a missing or unusable aplexer is reported as an error
+instead of an empty session list.
 
 ```bash
-printf 'summarise the diff' | pocketshell send --pane %3 --token <row-id> --enter
-pocketshell send --prune-older-than 30d
+pocketshell sessions list --json
+pocketshell sessions create my-session --cwd ~/git/project --mem none --json
+pocketshell sessions attach my-session
+pocketshell sessions kill my-session --json
 ```
 
-The payload is read from **stdin as raw bytes** and delivered byte-exact
-(`load-buffer -` → `paste-buffer -d -r`, never argv). This command does not
-add bracketed-paste markers: the client already frames its payload, and
-framing twice put the inner markers into the receiving program as literal
-text (issue #1854). Callers that want bracketed paste write the framed bytes
-to stdin.
-
-Exit codes are stable. Both renderings below — this table and `--help` — are
-generated from the one `EXIT_CODE_TABLE` the code exits with, so neither can
-drift from the other (issue #2153; regenerate with
-`tools/pocketshell/scripts/sync-readme-exit-codes.py`, pinned by a test in the
-`Python utility tests (pocketshell)` check):
-
-<!-- BEGIN GENERATED: send exit codes (source: EXIT_CODE_TABLE in pocketshell/send.py) -->
-
-| Exit | stdout reason | Meaning |
-| ---- | ------------- | ------- |
-| 0 | `delivered` \| `already-delivered` \| `pruned` | Success. 'delivered' = injected by THIS call and journaled. 'already-delivered' = the token was already journaled, nothing was injected. 'pruned' = --prune-older-than removed N records. |
-| 2 | `bad-usage` | Invalid or missing arguments. Nothing was injected or journaled. |
-| 3 | `pane-not-found` | The pane id does not exist on the tmux server, or it is dead. Nothing was injected; the token is NOT journaled and stays retryable. |
-| 4 | `tmux-failed` | tmux is missing, no server is running, or a tmux command returned a definitive failure. This call put NOTHING into the pane and recorded no delivery, and it left the journal exactly as it found it: a claim this call took is released, and a pre-existing unresolved record it overwrote under --resend-interrupted is restored byte-for-byte. A retry therefore cannot duplicate — but 'unchanged' is not 'absent': if the token was already journaled-unresolved it still is, and the next plain call answers 'send-interrupted' rather than injecting. |
-| 5 | `send-interrupted` \| `journal-corrupt` | Delivery is genuinely UNKNOWN and the token is left journaled-unresolved, so no plain call will ever inject it again. Two ways in. Either a PREVIOUS attempt died without an answer (or left an unreadable record) and its owning process is gone, in which case this call injected nothing; or THIS call got past the point of no return — tmux accepted the paste and then the Enter failed, or the delivery could not be journaled — in which case the payload may ALREADY be in the pane. Never auto-retry either reading. Re-run with --resend-interrupted only to accept a possible duplicate. |
-| 6 | `timeout` | A tmux invocation exceeded --timeout. If the timeout hit at or after the commit the token is left in the unknown state above and the payload may ALREADY be in the pane; a retry then reports 'send-interrupted' rather than injecting again. |
-| 7 | `journal-failed` | The durable token journal could not be read or written (permissions, disk). Nothing was injected — the journal is written BEFORE the pane is touched precisely so this failure is safe. |
-| 8 | `send-in-progress` | Another send for this token is STILL RUNNING (its process is alive on this host). Nothing was injected by this call and nothing is unknown: the outcome is owned by that call. Retry shortly to read the answer — it will be 'delivered'/'already-delivered' or, if that process dies, 'send-interrupted'. --resend-interrupted does not override this: there is no unknown to resolve while the owner is alive, and forcing one would duplicate the payload. |
-
-<!-- END GENERATED: send exit codes -->
-
-(`pruned` prints the record count after the reason word: `pruned <n>`.)
-
-**The paste is the point of no return, and that is the boundary between exit 4
-and exit 5** (issue #2136). A client that branches on this table to decide
-whether to auto-retry (#2124) needs one property, and it is exactly what exit 4
-now means:
-
-> **Exit 4 ⇒ this call put nothing into the pane, and left the journal exactly
-> as it found it.**
-
-Every exit-4 site satisfies it. Failures at the pane lookup or while filling
-the paste buffer happen before the journal is written at all — nothing injected,
-token unclaimed, cleanly retryable; this is the ordinary case. A definitive
-`paste-buffer` failure (tmux answered "no", or tmux became unexecutable before
-the paste) rolls this call's claim back: for a plain call that returns the token
-to absent, and under `--resend-interrupted` the *pre-existing* unresolved record
-is restored byte-for-byte rather than erased.
-
-Note what "unchanged" does **not** mean. It does not mean "absent": a token that
-was already journaled-unresolved still is, so the next plain call answers exit 5
-rather than injecting. A retry after exit 4 can therefore never duplicate, but
-it is not guaranteed to inject.
-
-**Exit 5 in detail** — it carries two different facts, and a client must treat
-both the same way (do not auto-retry; surface the choice):
-
-- A **previous** attempt for this token died without an answer, or left an
-  unreadable record, and its owning process is gone. This call injected nothing.
-- **This** call got past the paste. tmux accepted the payload, so it **is** in
-  the pane, and then either the `send-keys Enter` failed or the delivery could
-  not be journaled. The claim is deliberately kept — rolling it back is what
-  would let a plain retry paste the payload a second time.
-
-Both readings leave the token journaled-unresolved, so the invariant is the same
-for both: no plain call will ever inject it again, and `--resend-interrupted` is
-the explicit opt-in that accepts a possible duplicate.
-
-The `Enter` step has two failure shapes — tmux answers non-zero, or tmux stops
-being executable between the paste and the `send-keys` — and they leave
-byte-identical state. They report one outcome (exit 5). Until #2136 the second
-reported exit 4, which told a client the pane was untouched while the payload
-was sitting in it.
-
-stdout is machine-readable: the first whitespace-delimited token is one of
-the reasons above; human detail goes to stderr. Every retry path drains stdin
-before exiting, so a caller piping a payload never takes SIGPIPE on a
-successful acknowledgement. (Argument validation runs *before* stdin is read,
-deliberately: a caller with an open-but-idle stdin gets `bad-usage`
-immediately instead of blocking on a payload that will never arrive.)
-
-**Durability invariant: at-most-once, except on an explicit opt-in.** A token
-is never injected a second time unless the caller passes
-`--resend-interrupted` on the injecting call itself; no sequence of failures,
-kills, races or automatic housekeeping can turn an injected token back into a
-state a plain call will inject. The journal under
-`${XDG_STATE_HOME:-~/.local/state}/pocketshell/sends/` is two-phase — a
-`pending` record is written (atomically, fsync'd) immediately before the one
-command that can put bytes into the pane, then promoted to `delivered` once
-tmux answers. A definitive tmux failure rolls that claim back, so ordinary
-errors stay cleanly retryable; rolling back means undoing *this* call, so a
-record this call created is removed and a pre-existing unresolved record it
-overwrote is restored byte-for-byte rather than erased.
-
-An unresolved record is then read against its owner process: gone ⇒ a previous
-attempt died and delivery is genuinely unknown (exit 5, resolvable with
-`--resend-interrupted`, so the state is never absorbing); still running ⇒
-nothing is unknown and the outcome belongs to that call (exit 8, retryable).
-`--resend-interrupted` does not override a live owner — there is no unknown to
-resolve, and forcing one would simply duplicate the payload.
-
-The invariant's honest edges: a definitive non-zero from `paste-buffer` is
-taken as proof nothing reached the pane; the journal directory must survive
-(delete it and the memory is gone); `--prune-older-than` is an operator
-action that *can* clear unresolved records; and exit 8 is bounded by the owner
-process's **liveness**, not by the owner's `--timeout`. A suspended owner
-(reproduced with `SIGSTOP`) holds its token in `send-in-progress` for as long
-as it stays stopped, because the liveness probe asks whether the process still
-exists, not whether it is making progress, and `--timeout` bounds the tmux
-calls of the process that passed it rather than some other process's lifetime.
-This fails safe — the payload is never duplicated and the token never becomes
-absorbing once the owner dies — and a client cannot reach it through its own
-use, since it would have to suspend its own in-flight send. Nothing reaps a
-suspended owner.
-
-Records carry a timestamp and are pruned two ways: explicitly with
-`--prune-older-than <30d|12h|90m|3600s>`, and automatically on delivery at a
-**30-day default retention** (throttled to at most once every 6 h), so the
-directory cannot grow without bound even if pruning is never invoked. The
-automatic sweep only removes **resolved** records — ageing an unknown out of
-the journal would silently make the token injectable again.
+The list and lifecycle responses use schema 3. Rows carry the aplexer id,
+workspace, tag, phase, attachment state, and agent metadata; there is no
+backend discriminator or legacy session socket. Create is idempotent for the
+same workspace and tag. Kill stops the workload and reaps the aplexer record
+before returning its JSON result.
 
 ### `pocketshell usage`
 
@@ -214,7 +120,7 @@ absent/unavailable daemon or explicitly supported method skew falls through
 to the one-shot subprocess path. Timeout, malformed-response, and
 daemon-internal failures are surfaced instead of being retried locally.
 
-All daemon-backed wrappers (`usage`, `repos`, `tree`, `jobs`, `sessions`, and
+All daemon-backed wrappers (`usage`, `repos`, `tree`, `sessions`, and
 `agents kind`) use one typed fallback boundary. It emits the safe
 `pocketshell.daemon_call` event with `reason`, `method`, `phase`, RPC code, and
 available CLI/daemon versions. It never logs RPC parameters or command output.
@@ -463,9 +369,8 @@ uv sync --group dev
 uv run pytest
 ```
 
-The tests stub `pocketshell.usage.subprocess.run` (and the `quse`/`tmuxctl`
-binary resolvers) so they run in seconds without invoking any real binary or
-hitting a provider API.
+The tests stub subprocess boundaries and the bundled aplexer resolver so
+they run in seconds without invoking a real host session.
 
 ## Release flow
 

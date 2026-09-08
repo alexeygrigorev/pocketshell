@@ -262,13 +262,13 @@ const val HOST_CONNECTING_SPINNER_TAG: String = "host-connecting-row:spinner"
  * precedence between bootstrap-readiness and connection/session state:
  *
  * - [Attention] (amber) — the host needs server-side setup attention:
- *   `tmux` / `pocketshell` missing, a stale CLI, or the jobs daemon
- *   disabled. Installing / fixing the tooling is the only useful action,
+ *   `aplexer` / `pocketshell` missing or a stale CLI. Installing / fixing the
+ *   tooling is the only useful action,
  *   so it wins over session-count colour exactly as the old setup badge
  *   took precedence over the status chip.
  * - [Error] (red) — the last SSH attempt failed.
  * - [Active] (green) — the app is attached, or the host has at least one
- *   live tmux session.
+ *   live aplexer session.
  * - [Idle] (muted) — the host is reachable and verified but has no active
  *   sessions.
  * - [Unverified] — no verified state yet (cold launch / probe in flight);
@@ -286,7 +286,6 @@ internal fun resolveHostDotState(status: HostStatus, setupState: HostSetupState)
     when (setupState) {
         HostSetupState.NeedsSetup,
         HostSetupState.CliUpdateNeeded,
-        HostSetupState.DaemonDisabled,
         -> HostDotState.Attention
         HostSetupState.Ready,
         HostSetupState.OptionalUnavailable,

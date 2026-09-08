@@ -95,12 +95,10 @@ METHOD_TTLS: Mapping[str, float] = {
     # rarely change minute-to-minute; the longer window keeps the
     # Android picker fast without burning rate-limit quota.
     "repos.list_remote": 300.0,
-    # tmuxctl-backed lists are relatively cheap, but Android may poll
-    # them from dashboards. Keep the window short so daemon-side
-    # mutations can invalidate immediately and external tmux changes are
-    # not hidden for long.
+    # Session lists are cheap, but Android may poll them from dashboards.
+    # Keep the window short so external session changes are not hidden for
+    # long.
     "sessions.list": 5.0,
-    "jobs.list": 5.0,
     # `tree.get` is the cold-start hydrate read. Short TTL like `sessions.list`
     # so a `tree.upsert` mutation (which also invalidates it explicitly) is not
     # masked for long and an external edit is not hidden. `tree.upsert` and
@@ -678,64 +676,15 @@ def _repos_open_handler(params: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Methods: sessions.* / jobs.*
+# Method: sessions.*
 # ---------------------------------------------------------------------------
 
 
 def _sessions_list_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``sessions.list`` to the existing tmuxctl-backed wrapper."""
+    """Delegate ``sessions.list`` to the host session wrapper."""
     from pocketshell import sessions as _sessions
 
     return _sessions.daemon_handler_list(dict(params))
-
-
-def _jobs_list_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.list`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_list(dict(params))
-
-
-def _jobs_show_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.show`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_show(dict(params))
-
-
-def _jobs_trigger_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.trigger`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_trigger(dict(params))
-
-
-def _jobs_add_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.add`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_add(dict(params))
-
-
-def _jobs_edit_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.edit`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_edit(dict(params))
-
-
-def _jobs_remove_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.remove`` to the existing tmuxctl-backed wrapper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_remove(dict(params))
-
-
-def _jobs_status_handler(params: Mapping[str, Any]) -> dict[str, Any]:
-    """Delegate ``jobs.status`` to the scheduler status helper."""
-    from pocketshell import jobs as _jobs
-
-    return _jobs.daemon_handler_status(dict(params))
 
 
 # ---------------------------------------------------------------------------
@@ -748,7 +697,7 @@ def _agents_kind_for_panes_handler(params: Mapping[str, Any]) -> dict[str, Any]:
 
     Replaces the client's fragile ``ps -eo … | grep`` agent scan (#809/#811)
     with a server-side cgroup-v2 + ``/proc`` read: each pane's ``pane_pid``
-    resolves to its ``tmuxctl-<session>.scope`` via ``/proc/<pid>/cgroup``, the
+    resolves to its ``aplexer-workload-<session>.scope`` via ``/proc/<pid>/cgroup``, the
     scope's ``cgroup.procs`` are read, and each proc's ``comm``/``cmdline`` is
     matched against the claude/codex/opencode token rules (mirrored from
     ``AgentDetector.namesAgent``). No ``systemctl`` shell-out — raw cgroupfs.
@@ -761,7 +710,7 @@ def _agents_kind_for_panes_handler(params: Mapping[str, Any]) -> dict[str, Any]:
 
         {"results": [
             {"pane_id": "%1", "agent_kind": "claude",
-             "scope": "tmuxctl-git-pocketshell.scope", "evidence_pid": 2647069},
+             "scope": "aplexer-workload-git-pocketshell.scope", "evidence_pid": 2647069},
             ...
         ]}
 
@@ -835,13 +784,6 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "repos.clone": _repos_clone_handler,
     "repos.open": _repos_open_handler,
     "sessions.list": _sessions_list_handler,
-    "jobs.list": _jobs_list_handler,
-    "jobs.show": _jobs_show_handler,
-    "jobs.trigger": _jobs_trigger_handler,
-    "jobs.add": _jobs_add_handler,
-    "jobs.edit": _jobs_edit_handler,
-    "jobs.remove": _jobs_remove_handler,
-    "jobs.status": _jobs_status_handler,
     "agents.kind_for_panes": _agents_kind_for_panes_handler,
     "tree.get": _tree_get_handler,
     "tree.upsert": _tree_upsert_handler,
@@ -864,10 +806,6 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
 # change as soon as a clone lands.
 METHOD_CACHE_INVALIDATIONS: Mapping[str, tuple[str, ...]] = {
     "repos.clone": ("repos.list_local",),
-    "jobs.add": ("jobs.list",),
-    "jobs.edit": ("jobs.list",),
-    "jobs.remove": ("jobs.list",),
-    "jobs.trigger": ("jobs.list",),
     # `tree.upsert` rewrites the host's persisted node list, so the cached
     # `tree.get` cold-start read is stale the moment it lands — drop it so the
     # very next `tree.get` reflects the just-persisted ordering/expansion.

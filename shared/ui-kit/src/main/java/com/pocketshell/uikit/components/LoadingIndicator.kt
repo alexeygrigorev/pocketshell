@@ -60,7 +60,7 @@ enum class SpinnerSize {
  *   `surface-elev` track.
  * - [Spinner] — indeterminate **circular** progress. The standard centered
  *   "something is happening" affordance, with an optional label slot
- *   ("Attaching…", "waiting for tmux panes…"). Sizes come from the enumerated
+ *   ("Attaching…", "waiting for session output…"). Sizes come from the enumerated
  *   [SpinnerSize] rung set, not free `dp`.
  *
  * For a KNOWN percentage (usage quota, download progress) keep using the
@@ -112,7 +112,7 @@ object LoadingIndicator {
      * Centered in its available width. The diameter + stroke come from the
      * enumerated [size] rung (never a raw `dp`). When [label] is non-null it
      * renders below the spinner in [PocketShellType.bodyDense] muted text
-     * ("Attaching…", "waiting for tmux panes…").
+     * ("Attaching…", "waiting for session output…").
      *
      * For a spinner shown ON an accent-filled surface (e.g. the in-button
      * progress on a primary CTA while it submits), set [onAccent] = true: the

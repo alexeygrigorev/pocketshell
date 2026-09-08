@@ -27,7 +27,7 @@ import org.junit.runner.RunWith
  * Journey J04 proves the sheet creates a real session on a real host; this
  * suite pins the rules a device journey would only catch by accident: that a
  * blank name cannot be submitted at all, that Create carries the form's own
- * values (name AND `--cwd`, plus `--engine`/`--backend` when selected), that
+ * values (name AND `--cwd`, plus `--engine`/`--profile` when selected), that
  * Cancel creates nothing, that a failed create leaves the sheet standing with
  * the host's words on it instead of closing and losing the user's text, and
  * that a disabled/unavailable engine never becomes a chip.
@@ -47,7 +47,7 @@ class CreateSessionSheetTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `the sheet renders both fields, the hint, type backend and both actions`() {
+    fun `the sheet renders both fields, type and both actions`() {
         setContent(CreateSessionState(visible = true), defaultFolder = "/home/a/git/pocketshell")
 
         composeRule.onNodeWithTag(CREATE_SESSION_SHEET_TAG).assertIsDisplayed()
@@ -57,9 +57,6 @@ class CreateSessionSheetTest {
         composeRule.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_TYPE_AGENT_TAG).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_BACKEND_DEFAULT_TAG).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_BACKEND_TMUX_TAG).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_BACKEND_APLEXER_TAG).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_CANCEL_TAG).assertIsDisplayed()
 
@@ -210,13 +207,12 @@ class CreateSessionSheetTest {
     }
 
     @Test
-    fun `Create on Agent carries engine profile and backend`() {
+    fun `Create on Agent carries engine and profile`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("/srv/reviews")
         form.onKindChange(CreateSessionKind.Agent)
         form.onEngineChange("claude")
         form.onProfileChange("Claude (Z.AI)")
-        form.onBackendChange(CreateSessionBackend.Tmux)
         setContent(
             CreateSessionState(
                 visible = true,
@@ -242,7 +238,6 @@ class CreateSessionSheetTest {
                     cwd = "/srv/reviews",
                     engine = "claude",
                     profile = "Claude (Z.AI)",
-                    backend = "tmux",
                 ),
             ),
             submitted,
@@ -250,14 +245,13 @@ class CreateSessionSheetTest {
     }
 
     @Test
-    fun `Create on Shell omits engine even after a backend pick`() {
+    fun `Create on Shell omits engine after switching from Agent`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("/srv/demo")
         form.onNameChange("demo")
         form.onKindChange(CreateSessionKind.Agent)
         form.onEngineChange("claude")
         form.onKindChange(CreateSessionKind.Shell)
-        form.onBackendChange(CreateSessionBackend.HostDefault)
         setContent(
             CreateSessionState(
                 visible = true,

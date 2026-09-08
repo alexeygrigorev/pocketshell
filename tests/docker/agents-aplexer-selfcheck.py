@@ -12,21 +12,20 @@ Why this exists
 ``sys.executable`` and NOWHERE else — the PATH lookup is a D22 hard cut
 (#2543). That makes binary PLACEMENT load-bearing in a way no build step
 would otherwise notice: with ``a`` reachable only through PATH, every real-CLI
-aplexer probe returns ``None``, ``sessions list --json`` reports
-``managers: ["tmux"]`` with zero aplexer rows, and the exit code is 0. The
-fixture then looks perfectly healthy while proving nothing — the vacuous-pass
+aplexer probe returns ``None``, ``sessions list --json`` reports an empty
+successful payload, and the exit code is 0. The fixture then looks perfectly
+healthy while proving nothing — the vacuous-pass
 shape ``docs/ci-pitfalls.md`` catalogues, and the one the spike behind #2563
 actually hit.
 
 So this script converts that silence into a loud, named failure. It drives the
 REAL, unmodified CLI (``python3 -m pocketshell``, the same entry point
-``pocketshell-real-send`` uses — never the deterministic ``agent-bin``
+``pocketshell-real`` uses — never the deterministic ``agent-bin``
 shim) through a complete aplexer lifecycle:
 
     resolve the bundled `a`
-      -> sessions create --backend aplexer
-      -> sessions list --json  contains that row, manager=aplexer,
-                               phase=running, alive=true
+      -> sessions create
+      -> sessions list --json  contains that row, phase=running, alive=true
       -> sessions kill --json  reports killed=true, reaped=true
       -> sessions list --json  no longer contains it
 
@@ -150,8 +149,8 @@ def check_placement() -> tuple[str, str]:
         raise fail(
             "placement",
             "the real CLI cannot resolve a bundled `a`, so every aplexer probe "
-            "returns nothing and `sessions list --json` reports "
-            "managers: [\"tmux\"] with ZERO aplexer rows and exit 0 — a "
+            "returns nothing and `sessions list --json` reports no rows with "
+            "exit 0 — a "
             "silently empty fixture. `a` must live next to the interpreter at "
             f"{expected}; being on PATH is NOT enough (PATH lookup is a D22 "
             f"hard cut, #2543). Tried: {report.tried}",
@@ -194,6 +193,11 @@ def list_json() -> dict:
         ) from exc
     if not isinstance(payload, dict):
         raise fail("enumerate", f"expected a JSON object, got {type(payload).__name__}")
+    if payload.get("schema") != 3 or not isinstance(payload.get("errors"), list):
+        raise fail(
+            "enumerate",
+            f"expected schema 3 with an errors list, got schema={payload.get('schema')!r}",
+        )
     return payload
 
 
@@ -213,7 +217,6 @@ def check_lifecycle(binary: str) -> None:
         # test_sessions_mem_cap.py` proves it against a real delegated scope.
         [
             "sessions", "create", tag,
-            "--backend", "aplexer",
             "--cwd", workspace,
             "--mem", "none",
             "--json",
@@ -223,7 +226,7 @@ def check_lifecycle(binary: str) -> None:
     if created.returncode != 0:
         raise fail(
             "create",
-            f"`sessions create --backend aplexer` exited {created.returncode} "
+            f"`sessions create` exited {created.returncode} "
             f"using {binary}: {(created.stderr or created.stdout).strip()[:600]}",
         )
     try:
@@ -232,12 +235,6 @@ def check_lifecycle(binary: str) -> None:
         raise fail(
             "create", f"create emitted non-JSON: {created.stdout[:400]!r}"
         ) from exc
-    if envelope.get("manager") != "aplexer":
-        raise fail(
-            "create",
-            f"create routed to manager={envelope.get('manager')!r}, expected "
-            "'aplexer' — the fixture would exercise tmux while claiming aplexer",
-        )
     name = str(envelope.get("name") or "")
     if not name:
         raise fail("create", f"create envelope carries no name: {envelope}")
@@ -245,14 +242,13 @@ def check_lifecycle(binary: str) -> None:
     try:
         payload = list_json()
         rows = _sessions(payload)
-        aplexer_rows = [row for row in rows if row.get("manager") == "aplexer"]
+        aplexer_rows = rows
         if not aplexer_rows:
             raise fail(
                 "enumerate",
                 "a real aplexer session was just created, yet `sessions list "
                 "--json` returned ZERO aplexer rows "
-                f"(managers={payload.get('managers')!r}, "
-                f"errors={payload.get('errors')!r}). This is the silent, "
+                f"(errors={payload.get('errors')!r}). This is the silent, "
                 "green-and-empty fixture #2563 exists to make impossible.",
             )
         mine = [row for row in aplexer_rows if row.get("tag") == tag]
@@ -280,12 +276,6 @@ def check_lifecycle(binary: str) -> None:
                 "enumerate",
                 f"row workspace is {row.get('workspace')!r}, expected {workspace!r}",
             )
-        if "aplexer" not in (payload.get("managers") or []):
-            raise fail(
-                "enumerate",
-                f"managers is {payload.get('managers')!r}; 'aplexer' answered "
-                "with rows so it must be listed as a manager",
-            )
         print(f"{MARKER} live row: {json.dumps(row, sort_keys=True)}")
     except CheckFailed:
         run_cli(["sessions", "kill", name, "--json"], timeout=LIST_TIMEOUT_S)
@@ -302,10 +292,6 @@ def check_lifecycle(binary: str) -> None:
         kill_envelope = json.loads(killed.stdout)
     except ValueError as exc:
         raise fail("kill", f"kill emitted non-JSON: {killed.stdout[:400]!r}") from exc
-    if kill_envelope.get("manager") != "aplexer":
-        raise fail(
-            "kill", f"kill routed to manager={kill_envelope.get('manager')!r}"
-        )
     if kill_envelope.get("killed") is not True:
         raise fail("kill", f"kill reported killed={kill_envelope.get('killed')!r}")
     if kill_envelope.get("reaped") is not True:
@@ -323,7 +309,7 @@ def check_lifecycle(binary: str) -> None:
         remaining = [
             row
             for row in _sessions(list_json())
-            if row.get("manager") == "aplexer" and row.get("tag") == tag
+            if row.get("tag") == tag
         ]
         if not remaining:
             break

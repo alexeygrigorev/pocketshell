@@ -24,11 +24,9 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
+import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.terminal.SESSION_ERROR_BANNER_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -62,14 +60,14 @@ import org.junit.runner.RunWith
  *
  * Assertions read `TerminalBuffer.getTranscriptText()` off the live
  * `TerminalView` in the running Activity — the pixels the renderer paints —
- * and then cross-check against `tmux capture-pane -p` over an INDEPENDENT SSH
+ * and then cross-check against `a capture --screen --plain` over an INDEPENDENT SSH
  * connection. A device-only assertion could pass on locally echoed bytes that
  * never left; a host-only one could pass with a black screen. Same discipline
  * as J03, for the same D29 reason.
  *
  * ## The non-happy host is a REAL dead session
  *
- * The undelivered case is produced by killing the tmux session out from under
+ * The undelivered case is produced by killing the aplexer session out from under
  * an attached screen, so the composer is asked to send into a genuinely dead
  * pane rather than a flag a test set. That is the state the maintainer hits
  * (the box went to sleep, the session ended), and a fixture that only ever
@@ -101,7 +99,7 @@ class J07ComposerSendJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J07_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j07_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -131,19 +129,20 @@ class J07ComposerSendJourney {
         graph.composerDraftStore().clear("$hostId/$SESSION")
     }
 
-    /** Same per-session `tmuxctl-<name>` socket convention `sessions attach` resolves. */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    /** Create a real aplexer session and paint a known prompt and banner. */
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+        )
         SystemClock.sleep(500)
         val pane = capturePane()
         check(squashed(pane).contains(BANNER)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
+            "the fixture aplexer session did not come up: a capture says\n$pane"
         }
     }
 
@@ -201,16 +200,10 @@ class J07ComposerSendJourney {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
-        // Kill the link out from under the attached screen. `kill-server`, not
-        // `kill-session`: killing the session alone leaves the tmux server up,
-        // and whether the attached client notices is a timing-dependent
-        // property of the server's teardown — a first run passed on it and a
-        // second timed out. Killing the server EOFs the attach's PTY
-        // immediately, which is the deterministic version of the same event the
-        // maintainer hits (the box slept, the session is gone). The socket is
-        // this session's own `tmuxctl-<name>`, so nothing else on the fixture
-        // is touched.
-        AgentsFixture.exec("tmux -S $SOCKET kill-server 2>/dev/null || true")
+        // Kill the session out from under the attached screen. This is the
+        // deterministic version of the host disappearing while the user is
+        // composing, and it leaves the other fixture sessions untouched.
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         awaitTag(SESSION_ERROR_BANNER_TAG, "the session-ended banner")
 
         openComposer()
@@ -321,12 +314,7 @@ class J07ComposerSendJourney {
     // --- helpers ----------------------------------------------------------
 
     private fun openSession() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
     }
 
     private fun openComposer() {
@@ -356,7 +344,7 @@ class J07ComposerSendJourney {
         throw AssertionError(
             "the terminal never rendered $what within ${TIMEOUT_MS}ms.\n" +
                 "Rendered viewport was:\n$last\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -385,7 +373,9 @@ class J07ComposerSendJourney {
 
     /** The host's own view of the pane, over an INDEPENDENT SSH connection. */
     private fun capturePane(): String =
-        AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:' 2>/dev/null || true")
+        AgentsFixture.exec(
+            "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain 2>/dev/null || true",
+        )
 
     /**
      * Whitespace-free view of terminal text, for wrap-proof matching: a
@@ -416,7 +406,7 @@ class J07ComposerSendJourney {
             "$what never appeared within ${TIMEOUT_MS}ms.\n" +
                 "Rendered viewport was:\n" + renderedTranscript() + "\n" +
                 "The host says its sessions are:\n" +
-                AgentsFixture.exec("tmux -S $SOCKET list-sessions 2>&1 || true") + "\n" +
+                AgentsFixture.exec("pocketshell sessions list --json 2>&1 || true") + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -426,10 +416,9 @@ class J07ComposerSendJourney {
         const val POLL_MS = 250L
         const val JOURNEY = "j07-composer-send"
 
-        const val SESSION = "j07-shell"
-
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
+        const val TAG = "j07-shell"
+        const val SESSION = "testuser:j07-shell"
+        const val WORKSPACE = "/home/testuser"
 
         const val PROMPT = "J07READY\$"
         const val BANNER = "J07-FIXTURE-PANE"

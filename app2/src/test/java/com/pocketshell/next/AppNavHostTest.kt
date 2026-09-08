@@ -6,8 +6,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.nav.Destination
+import org.junit.Assert.assertEquals
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -39,6 +41,8 @@ class AppNavHostTest {
      * shared test stack and never taps a host.
      */
     private val stack = TestConnectStack()
+    private var openSession: ((SessionRow) -> Unit)? = null
+    private var switchSession: ((SessionRow) -> Unit)? = null
 
     @After
     fun tearDown() {
@@ -50,6 +54,50 @@ class AppNavHostTest {
         setContentWithNav()
 
         composeRule.onNodeWithText("Hosts").assertExists()
+    }
+
+    @Test
+    fun `switching back to a session reuses its existing navigation entry`() {
+        val nav = setContentWithNav()
+
+        composeRule.runOnUiThread {
+            nav.navigate(Destination.Workspaces.route(hostId = 7))
+        }
+        composeRule.waitForIdle()
+        val open = requireNotNull(openSession)
+
+        composeRule.runOnUiThread { open(session("alpha", "/home/alexey/git/alpha")) }
+        composeRule.waitForIdle()
+        assertEquals(Destination.Session.pattern, nav.currentBackStackEntry?.destination?.route)
+        assertEquals(
+            "alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_SESSION_NAME),
+        )
+        assertEquals(
+            "/home/alexey/git/alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_WORKSPACE_PATH),
+        )
+
+        composeRule.runOnUiThread {
+            requireNotNull(switchSession)(session("beta", "/home/alexey/git/beta"))
+        }
+        composeRule.waitForIdle()
+        composeRule.runOnUiThread {
+            requireNotNull(switchSession)(session("alpha", "/home/alexey/git/alpha"))
+        }
+        composeRule.waitForIdle()
+
+        assertEquals(
+            "alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_SESSION_NAME),
+        )
+        assertEquals(
+            "/home/alexey/git/alpha",
+            nav.currentBackStackEntry?.arguments?.getString(Destination.ARG_WORKSPACE_PATH),
+        )
+        nav.popBackStack()
+        composeRule.waitForIdle()
+        assertEquals(Destination.Workspaces.pattern, nav.currentBackStackEntry?.destination?.route)
     }
 
     @Test
@@ -77,7 +125,16 @@ class AppNavHostTest {
         assertNavigatesTo(nav, Destination.Settings.route(), "Settings")
         assertNavigatesTo(nav, Destination.WorkspaceRoots.route(hostId = 7), "WorkspaceRoots(hostId=7)")
         assertNavigatesTo(nav, Destination.Usage.route(), "Usage")
-        assertNavigatesTo(nav, Destination.CrashReports.route(), "CrashReports")
+        assertNavigatesTo(nav, Destination.Diagnostics.route(), "Diagnostics")
+        assertNavigatesTo(nav, Destination.DiagnosticReport.route("report 1"), "DiagnosticReport(id=report 1)")
+        assertNavigatesTo(nav, Destination.TerminalSettings.route(), "TerminalSettings")
+        assertNavigatesTo(nav, Destination.VoiceSettings.route(), "VoiceSettings")
+        assertNavigatesTo(nav, Destination.VoiceLanguage.route(), "VoiceLanguage")
+        assertNavigatesTo(nav, Destination.ConnectionSettings.route(), "ConnectionSettings")
+        assertNavigatesTo(nav, Destination.GraceSettings.route(), "GraceSettings")
+        assertNavigatesTo(nav, Destination.AdvancedSettings.route(), "AdvancedSettings")
+        assertNavigatesTo(nav, Destination.About.route(), "About")
+        assertNavigatesTo(nav, Destination.Update.route(), "Update")
         assertNavigatesTo(nav, Destination.SshKeys.route(), "SshKeys")
         assertNavigatesTo(nav, Destination.QrScan.route(), "QrScan")
         assertNavigatesTo(nav, Destination.Hosts.route(), "Hosts")
@@ -116,6 +173,8 @@ class AppNavHostTest {
     }
 
     private fun setContentWithNav(): NavHostController {
+        openSession = null
+        switchSession = null
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
@@ -134,28 +193,42 @@ class AppNavHostTest {
                 // reason as the ones above, so they get stand-ins that echo the
                 // argument the route delivered — this suite pins the patterns
                 // and their argument decoding, not the screens.
-                hostFormScreen = { hostId, _, _ -> Text("HostForm(hostId=$hostId)") },
-                sshKeysScreen = { Text("SshKeys") },
+                hostFormScreen = { hostId, _, _, _ -> Text("HostForm(hostId=$hostId)") },
+                sshKeysScreen = { _, _ -> Text("SshKeys") },
                 qrScanScreen = { _, _ -> Text("QrScan") },
                 // Task P-6: Settings and WorkspaceRoots resolve ViewModels
                 // through `hiltViewModel()` too, for the same reason as every
                 // other stand-in above. Their own behaviour is covered by
                 // `com.pocketshell.next.settings.*`; this suite pins that
                 // `NavHost` accepts both patterns and decodes the host id.
-                settingsScreen = { _, _, _ -> Text("Settings") },
+                settingsScreen = { _ -> Text("Settings") },
+                terminalSettingsScreen = { Text("TerminalSettings") },
+                voiceSettingsScreen = { _, _ -> Text("VoiceSettings") },
+                languageSettingsScreen = { Text("VoiceLanguage") },
+                connectionSettingsScreen = { _, _, _ -> Text("ConnectionSettings") },
+                graceSettingsScreen = { Text("GraceSettings") },
+                advancedSettingsScreen = { Text("AdvancedSettings") },
+                diagnosticsScreen = { _, _ -> Text("Diagnostics") },
+                diagnosticReportScreen = { reportId, _ -> Text("DiagnosticReport(id=$reportId)") },
+                aboutScreen = { _, _ -> Text("About") },
+                updateScreen = { Text("Update") },
                 workspaceRootsScreen = { hostId, _ -> Text("WorkspaceRoots(hostId=$hostId)") },
                 connectViewModel = { stack.viewModel },
                 // Same rationale as `hostsScreen`: the real session tree
                 // resolves its ViewModel through `hiltViewModel()`. The
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
-                treeScreen = { hostId, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, onOpenSession, _, _, _, _, _ ->
+                    openSession = onOpenSession
+                    Text("Tree(hostId=$hostId)")
+                },
                 // Same rationale again for U-4's terminal: the real screen
                 // resolves `SessionViewModel` through `hiltViewModel()` AND
                 // dials a host. The stand-in echoes both route arguments, which
                 // is what this suite is pinning — that a session name with a
                 // space and a `:` survives the encode/decode round trip.
-                sessionScreen = { hostId, sessionName, _, _ ->
+                sessionScreen = { hostId, sessionName, _, _, _, onOpenSession, _ ->
+                    switchSession = onOpenSession
                     Text("Session(hostId=$hostId, name=$sessionName)")
                 },
                 // Same rationale again: the P-4 port-forward route resolves its
@@ -164,6 +237,9 @@ class AppNavHostTest {
                 // and `PortForwardViewModelTest`; what this suite pins is that
                 // `NavHost` accepts the pattern and its Long argument.
                 portsScreen = { _ -> Text("Ports") },
+                servicesScreen = { _, _, _ -> Text("Ports") },
+                tunnelDetailScreen = { remotePort, _ -> Text("Tunnel($remotePort)") },
+                addTunnelScreen = { remotePort, _ -> Text("AddTunnel($remotePort)") },
                 // Task P-3: the file explorer and viewer resolve their
                 // ViewModels through `hiltViewModel()` too. Their behaviour is
                 // covered by `com.pocketshell.next.files.*`; the stand-ins here
@@ -174,13 +250,7 @@ class AppNavHostTest {
                 // Task P-5: the real usage panel resolves `UsageViewModel`
                 // through `hiltViewModel()`, same rationale as the others.
                 usageScreen = { Text("Usage") },
-                // Issue #2476: the crash-report browser resolves
-                // `CrashReportsViewModel` through `hiltViewModel()` too. The
-                // real screen inside the real graph, reached by tapping the
-                // Settings row, is covered by
-                // `com.pocketshell.next.settings.SettingsNavigationTest`; this
-                // suite pins that `NavHost` accepts the pattern.
-                crashReportsScreen = { Text("CrashReports") },
+                hostUsageScreen = { hostId, _ -> Text("Usage(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()
@@ -196,4 +266,19 @@ class AppNavHostTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText(expectedLabel).assertExists("route '$route' did not render '$expectedLabel'")
     }
+
+    private fun session(name: String, workspace: String): SessionRow = SessionRow(
+        name = name,
+        id = null,
+        workspace = workspace,
+        tag = null,
+        engine = null,
+        profile = null,
+        agent = null,
+        agentState = null,
+        agentStateSource = null,
+        attached = true,
+        createdEpoch = 1L,
+        activityEpoch = null,
+    )
 }

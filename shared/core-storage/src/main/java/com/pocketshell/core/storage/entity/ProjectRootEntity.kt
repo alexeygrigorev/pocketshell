@@ -29,4 +29,6 @@ data class ProjectRootEntity(
     val label: String,
     val path: String,
     val createdAt: Long = System.currentTimeMillis(),
+    /** User-controlled placement on the host workspace screen. */
+    val sortOrder: Long = createdAt,
 )

@@ -25,7 +25,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 20
+const val APP_DATABASE_SCHEMA_VERSION = 22
 
 /**
  * The PocketShell Room database.
@@ -37,6 +37,12 @@ const val APP_DATABASE_SCHEMA_VERSION = 20
  * metadata. Bumped to 17 because issue #1447 drops the never-populated
  * `sessions` / `agent_sessions` stub tables (superseded by the host-side
  * daemon session registry, epic #821); see [MIGRATION_16_17].
+ *
+ * Schema 22 is the current product model. It has no session-runtime or
+ * backend-installation field: session identity and lifecycle come from the
+ * host-side aplexer contract. The older migration bodies below are retained
+ * because an existing database must be opened at each version it has recorded
+ * before Room can apply the final migration to version 22.
  *
  * `exportSchema = true` (Room writes the versioned schema JSON to the
  * `room.schemaLocation` dir configured in this module's `build.gradle.kts`).
@@ -73,6 +79,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun commandTemplateDao(): CommandTemplateDao
     abstract fun sentMessageDao(): SentMessageDao
 }
+
+/*
+ * Historical migration SQL may mention `tmuxInstalled` while it reconstructs
+ * the hosts table shape shipped by an older APK. This is migration input, not
+ * a current entity, DAO field, query, or runtime capability. The 20->21
+ * rebuild below deliberately omits the obsolete column while copying every
+ * supported current host field, so an upgraded database is tmux-free without
+ * losing supported user data.
+ */
 
 val MIGRATION_2_8: Migration = legacyMigrationToVersionEight(2)
 val MIGRATION_3_8: Migration = legacyMigrationToVersionEight(3)
@@ -314,6 +329,87 @@ val MIGRATION_19_20: Migration = object : Migration(19, 20) {
     }
 }
 
+/**
+ * Issue #2561 storage boundary: the current host model no longer stores a
+ * backend-installation flag. This migration is the point where the historical
+ * `tmuxInstalled` column is intentionally dropped. Earlier migrations still
+ * describe old on-disk schemas so Room can reach this boundary; only current
+ * entity fields are copied into the version-21 table.
+ */
+val MIGRATION_20_21: Migration = object : Migration(20, 21) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE hosts_migration_20_21 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                treeIdentity TEXT NOT NULL,
+                trustedHostKeyAlgorithm TEXT,
+                trustedHostKeySha256 TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_migration_20_21 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_migration_20_21 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+
+        // Quiet Services labels manual tunnel mappings. This column was added
+        // in the same release as the host-model cleanup, so one v20 -> v21
+        // migration must preserve both changes for existing installs.
+        db.execSQL("ALTER TABLE port_remappings ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+    }
+}
+
+/** Adds the user-controlled root placement used by the Quiet reorder page. */
+val MIGRATION_21_22: Migration = object : Migration(21, 22) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE project_roots ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0")
+        // Existing roots retain their previous creation order until the user
+        // moves one. This is a one-time data backfill, not an activity sort.
+        db.execSQL("UPDATE project_roots SET sortOrder = createdAt")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -334,6 +430,8 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_17_18,
     MIGRATION_18_19,
     MIGRATION_19_20,
+    MIGRATION_20_21,
+    MIGRATION_21_22,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

@@ -5,7 +5,7 @@ package com.pocketshell.next.terminal
  * catalog in #2521).
  *
  * app2 talks to a plain PTY, so the mapping is the raw control bytes a VT
- * terminal has used since the 1970s, not tmux `send-keys` named keys. The
+ * terminal has used since the 1970s, not session input named keys. The
  * #1662 panel catalog (arrows, Esc/Tab/⇧Tab/Enter, `^B ^C ^D ^Q ^X`, and
  * the Ctrl-page letters) all route through [keyBarBytes].
  *

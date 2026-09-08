@@ -259,7 +259,7 @@ def test_installed_engine_stays_createable_despite_stale_aplexer_unavailable(
 
 
 # ---------------------------------------------------------------------------
-# Issue #2276 round 4: the harness is installed, launchable from the tmux
+# Issue #2276 round 4: the harness is installed, launchable from the host
 # pane's LOGIN shell, but invisible to the app's NON-interactive SSH exec
 # channel (`PocketshellCommand.wrap` -> `pocketshell engines list --json`).
 # On the maintainer's host that is `~/.nvm/versions/node/v24.13.1/bin/codex`.
@@ -350,8 +350,8 @@ def test_manifest_reports_harness_installed_outside_the_exec_path(tmp_path):
 def test_manifest_resolves_a_harness_through_the_login_shell_path(tmp_path):
     """The login shell is the environment the harness is really launched in.
 
-    tmux runs the user's shell as a login shell and the create flow types the
-    wrapper into that pane, so a harness only reachable there must count as
+    The host session runs the user's shell as a login shell and the create flow
+    starts the wrapper there, so a harness only reachable there must count as
     available even when no known absolute install location holds it.
     """
     engines.clear_resolution_cache()

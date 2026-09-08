@@ -189,4 +189,24 @@ class SettingsRepositoryTest {
         repo.setAgentSubmitEnterDelayMs(180)
         assertEquals(200, repo.settings.value.agentSubmitEnterDelayMs)
     }
+
+    @Test
+    fun `resetAdvancedDefaults restores every advanced control and leaves other pages alone`() {
+        val repo = repository()
+        repo.setTerminalTextSizePx(40)
+        repo.setVoiceLanguage("de")
+        repo.setBackgroundGraceMillis(AppSettings.BACKGROUND_GRACE_5_MINUTES_MS)
+        repo.setVoiceSilenceThresholdSeconds(12f)
+        repo.setUsageWarnThresholdPercent(90)
+        repo.setAgentSubmitEnterDelayMs(300)
+
+        repo.resetAdvancedDefaults()
+
+        assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, repo.settings.value.voiceSilenceThresholdSeconds)
+        assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, repo.settings.value.usageWarnThresholdPercent)
+        assertEquals(AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS, repo.settings.value.agentSubmitEnterDelayMs)
+        assertEquals(40, repo.settings.value.terminalTextSizePx)
+        assertEquals("de", repo.settings.value.voiceLanguage)
+        assertEquals(AppSettings.BACKGROUND_GRACE_5_MINUTES_MS, repo.settings.value.backgroundGraceMillis)
+    }
 }

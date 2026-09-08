@@ -23,9 +23,8 @@ import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.ToxiproxyControl
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
-import com.pocketshell.next.hosts.hostRowTag
-import com.pocketshell.next.tree.SESSION_TREE_TAG
-import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.connect.openQuietSession
 import com.termux.view.TerminalView
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -72,7 +71,7 @@ import org.junit.runner.RunWith
  *
  * As in J03: assertions read `TerminalBuffer.getTranscriptText()` off the live
  * `TerminalView` in the running Activity — the exact text the renderer paints —
- * and the post-reconnect one is cross-checked against `tmux capture-pane -p`
+ * and the post-reconnect one is cross-checked against `a capture --screen --plain`
  * over the independent connection. A device-only assertion could pass on
  * locally echoed bytes that never left; a host-only assertion could pass with a
  * black screen.
@@ -111,7 +110,7 @@ class J05ReconnectAfterDropJourney {
         val fingerprint = probeThroughProxy(proxyPort)
         println("J05_FIXTURE proxy=10.0.2.2:$proxyPort direct=${AgentsFixture.port} $fingerprint")
 
-        seedTmuxSession()
+        seedAplexerSession()
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j05_fixture_key")
         val keyId = graph.sshKeyDao().insert(
@@ -244,26 +243,26 @@ class J05ReconnectAfterDropJourney {
     // --- fixture ----------------------------------------------------------
 
     /**
-     * Creates the session on its own `tmuxctl-<name>` socket — the per-session
-     * socket convention `sessions attach` resolves against — and paints a known
+     * Creates a real aplexer session and paints a known
      * prompt plus a marker line into it.
      *
      * Recreated per test rather than reused, so a test that types into the pane
      * cannot leave text behind that would make the NEXT test's assertion pass
      * for the wrong reason.
      */
-    private fun seedTmuxSession() {
-        AgentsFixture.exec("tmux -S $SOCKET kill-session -t '=$SESSION' 2>/dev/null || true")
-        AgentsFixture.exec("mkdir -p $SOCKET_DIR && chmod 700 $SOCKET_DIR")
+    private fun seedAplexerSession() {
+        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
         AgentsFixture.exec(
-            "tmux -S $SOCKET new-session -d -s $SESSION -c /home/testuser -x 80 -y 24",
+            "pocketshell sessions create --cwd '$WORKSPACE' --mem none --json -- '$TAG' >/dev/null",
         )
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'PS1=\"$PROMPT \"' Enter")
-        AgentsFixture.exec("tmux -S $SOCKET send-keys -t '=$SESSION:' 'clear; echo $BANNER' Enter")
+        AgentsFixture.exec(
+            "a send --workspace '$WORKSPACE' --tag '$TAG' --enter " +
+                "'PS1=\"$PROMPT \"; clear; echo $BANNER'",
+        )
         SystemClock.sleep(500)
         val pane = capturePane()
         check(squashed(pane).contains(BANNER)) {
-            "the fixture tmux session did not come up: capture-pane says\n$pane"
+            "the fixture aplexer session did not come up: a capture says\n$pane"
         }
     }
 
@@ -291,17 +290,12 @@ class J05ReconnectAfterDropJourney {
 
     /** Host tap → the session tree for that host. */
     private fun openTree() {
-        awaitTag(hostRowTag(hostId))
-        compose.onNodeWithTag(hostRowTag(hostId)).performClick()
-        awaitTag(SESSION_TREE_TAG)
+        compose.openQuietHost(hostId, TIMEOUT_MS)
     }
 
     /** ...and on into the fixture session's terminal. */
     private fun openSession() {
-        openTree()
-        awaitTag(sessionRowTag(SESSION))
-        compose.onNodeWithTag(sessionRowTag(SESSION)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        compose.openQuietSession(hostId, SESSION, WORKSPACE, TIMEOUT_MS)
     }
 
     /**
@@ -350,7 +344,7 @@ class J05ReconnectAfterDropJourney {
                 "Screen state: ${screenDiagnosis()}\n" +
                 "Proxy state: " + runCatching { proxy.state().toString() }.getOrElse { "$it" } +
                 "\nRendered viewport was:\n$last\n" +
-                "The host's own capture-pane says:\n" + capturePane() + "\n" +
+                "The host's own aplexer capture says:\n" + capturePane() + "\n" +
                 "Screenshot: ${shot.absolutePath}",
         )
     }
@@ -430,7 +424,9 @@ class J05ReconnectAfterDropJourney {
      * test is cut.
      */
     private fun capturePane(): String =
-        AgentsFixture.exec("tmux -S $SOCKET capture-pane -p -t '=$SESSION:' 2>/dev/null || true")
+        AgentsFixture.exec(
+            "a capture --workspace '$WORKSPACE' --tag '$TAG' --screen --plain 2>/dev/null || true",
+        )
 
     /** Whitespace-free view of terminal text, for wrap-proof matching (see J03). */
     private fun squashed(text: String): String = text.filterNot { it.isWhitespace() }
@@ -456,10 +452,9 @@ class J05ReconnectAfterDropJourney {
         const val POLL_MS = 250L
         const val JOURNEY = "j05-reconnect"
 
-        const val SESSION = "j05-shell"
-
-        const val SOCKET_DIR = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\""
-        const val SOCKET = "\"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)/tmuxctl-$SESSION\""
+        const val TAG = "j05-shell"
+        const val SESSION = "testuser:j05-shell"
+        const val WORKSPACE = "/home/testuser"
 
         const val PROMPT = "J05READY\$"
         const val BANNER = "J05-FIXTURE-PANE"

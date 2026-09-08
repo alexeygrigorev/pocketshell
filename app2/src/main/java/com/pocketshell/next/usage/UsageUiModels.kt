@@ -85,6 +85,9 @@ data class UsageFailedHost(
  * says which, rather than showing one blank screen for both.
  */
 data class UsageScreenState(
+    /** The selected host for the Quiet Usage destination, or null for the legacy aggregate route. */
+    val selectedHostId: Long? = null,
+    val selectedHostName: String? = null,
     val hosts: List<UsageHostSnapshot> = emptyList(),
     val missingToolHosts: List<UsageMissingToolHost> = emptyList(),
     val failedHosts: List<UsageFailedHost> = emptyList(),
@@ -95,6 +98,8 @@ data class UsageScreenState(
     val connectedHostCount: Int = 0,
     /** The "limits just reset" banner content, or null when nothing recent. */
     val resetBanner: UsageResetBannerState? = null,
+    /** The persisted warning threshold used for every rendered quota surface. */
+    val warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
 ) {
     val providerCount: Int
         get() = hosts.sumOf { it.records.size }
@@ -132,8 +137,15 @@ fun usageScreenState(
     isRefreshing: Boolean = false,
     loaded: Boolean = true,
     resetBanner: UsageResetBannerState? = null,
+    selectedHostId: Long? = null,
+    selectedHostName: String? = null,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
 ): UsageScreenState = UsageScreenState(
-    hosts = snapshots.filterIsInstance<UsageSnapshot.Records>().map { snapshot ->
+    selectedHostId = selectedHostId,
+    selectedHostName = selectedHostName ?: snapshots.firstOrNull { it.hostId == selectedHostId }?.hostName,
+    hosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.Records>().map { snapshot ->
         UsageHostSnapshot(
             hostId = snapshot.hostId,
             hostName = snapshot.hostName,
@@ -141,10 +153,14 @@ fun usageScreenState(
             lastSyncedAt = snapshot.fetchedAt,
         )
     },
-    missingToolHosts = snapshots.filterIsInstance<UsageSnapshot.ToolMissing>().map { snapshot ->
+    missingToolHosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.ToolMissing>().map { snapshot ->
         UsageMissingToolHost(hostId = snapshot.hostId, hostName = snapshot.hostName)
     },
-    failedHosts = snapshots.filterIsInstance<UsageSnapshot.Failed>().map { snapshot ->
+    failedHosts = snapshots
+        .filter { selectedHostId == null || it.hostId == selectedHostId }
+        .filterIsInstance<UsageSnapshot.Failed>().map { snapshot ->
         UsageFailedHost(
             hostId = snapshot.hostId,
             hostName = snapshot.hostName,
@@ -155,6 +171,7 @@ fun usageScreenState(
     loaded = loaded,
     connectedHostCount = connectedHostCount,
     resetBanner = resetBanner,
+    warnPercent = warnPercent,
 )
 
 /**

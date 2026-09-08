@@ -97,7 +97,7 @@ class SessionViewModelTest {
             // still resolves, and single-quoted because the name is user data.
             val request = connection().ptyRequests.single()
             assertEquals(
-                "exec pocketshell sessions attach --hide-status -- '$SESSION'",
+                "exec pocketshell sessions attach -- '$SESSION'",
                 request.command,
             )
             // Opened at the documented default until the view reports its real
@@ -332,7 +332,8 @@ class SessionViewModelTest {
             assertTrue("expected Reconnecting, got $state", state is SessionUiState.Reconnecting)
             state as SessionUiState.Reconnecting
             assertSame("the emulator must survive the drop", attached, state.terminal)
-            // What the user was reading is still on screen: tmux repaints on
+            // What the user was reading is still on screen: the host session
+            // repaints on
             // reattach, so there is deliberately no clear, no snapshot and no
             // reseed. A cleared pane here is the symptom this task exists for.
             assertTrue(
@@ -482,7 +483,7 @@ class SessionViewModelTest {
      * [com.pocketshell.core.transport.HostConnection.scheduleGraceClose] is the
      * whole mechanism, and its deadline calls the connection's own `close()`.
      * That is a DELIBERATE close as far as the transport is concerned — but it
-     * is emphatically not the session ending: the tmux session is untouched on
+     * is emphatically not the session ending: the host session is untouched on
      * the host, and the rewrite plan's foreground-return contract says coming
      * back reattaches to it.
      *

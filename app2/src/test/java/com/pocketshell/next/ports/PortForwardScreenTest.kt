@@ -1,11 +1,13 @@
 package com.pocketshell.next.ports
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor.ConnectionState
 import com.pocketshell.core.portfwd.TunnelInfo
@@ -214,6 +216,7 @@ class PortForwardScreenTest {
 
         composeRule.onNodeWithTag(PORT_TABLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("Forwarding").assertIsDisplayed()
+        composeRule.onNodeWithTag(PORT_TABLE_TAG).performScrollToNode(hasText("Available"))
         composeRule.onNodeWithText("Available").assertIsDisplayed()
     }
 

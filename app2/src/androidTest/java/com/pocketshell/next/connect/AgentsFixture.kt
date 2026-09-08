@@ -1,13 +1,19 @@
 package com.pocketshell.next.connect
 
+import android.app.Instrumentation
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.view.View
+import android.view.ViewGroup
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.Buffer
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.userauth.password.PasswordFinder
+import com.termux.view.TerminalView
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.rules.TestRule
 import org.junit.runner.Description
@@ -253,6 +259,7 @@ class SeedBeforeLaunchRule(private val seed: suspend (Description) -> Unit) : Te
 object JourneyScreenshots {
     fun capture(name: String, journey: String = "j01-connect-trust"): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val startedAt = SystemClock.elapsedRealtime()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(250)
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
@@ -267,8 +274,47 @@ object JourneyScreenshots {
                 "could not write ${file.absolutePath}"
             }
         }
+        val viewport = File(dir, "$name-viewport.png")
+        FileOutputStream(viewport).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "could not write ${viewport.absolutePath}"
+            }
+        }
+        val transcript = terminalTranscript(instrumentation)
+        transcript?.let { text ->
+            File(dir, "$name-visible-terminal.txt").writeText(text)
+        }
+        File(dir, "$name-timing.txt").writeText(
+            "captured_at_elapsed_ms=${SystemClock.elapsedRealtime()}\n" +
+                "capture_wait_ms=${SystemClock.elapsedRealtime() - startedAt}\n" +
+                "terminal_transcript_present=${transcript != null}\n",
+        )
         bitmap.recycle()
         println("J01_SCREENSHOT ${file.absolutePath}")
         return file
+    }
+
+    private fun terminalTranscript(instrumentation: Instrumentation): String? {
+        var transcript: String? = null
+        instrumentation.runOnMainSync {
+            val activity = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED)
+                .firstOrNull()
+            activity?.window?.decorView?.let { root ->
+                findTerminalView(root)?.let { view ->
+                    transcript = view.mEmulator?.screen?.transcriptText
+                }
+            }
+        }
+        return transcript
+    }
+
+    private fun findTerminalView(view: View): TerminalView? {
+        if (view is TerminalView) return view
+        if (view !is ViewGroup) return null
+        for (index in 0 until view.childCount) {
+            findTerminalView(view.getChildAt(index))?.let { return it }
+        }
+        return null
     }
 }

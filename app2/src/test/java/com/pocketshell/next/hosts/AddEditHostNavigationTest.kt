@@ -237,7 +237,7 @@ class AddEditHostNavigationTest {
                     )
                 },
                 connectViewModel = { stack.viewModel },
-                workspacesScreen = { hostId, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 hostFormScreen = { hostId, onDone, onAddKey, onTestConnection ->
                     AddEditHostRoute(
                         hostId = hostId,

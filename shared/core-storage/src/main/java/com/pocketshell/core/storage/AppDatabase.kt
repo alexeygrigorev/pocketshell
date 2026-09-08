@@ -25,7 +25,7 @@ import com.pocketshell.core.storage.entity.SentMessageEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 21
+const val APP_DATABASE_SCHEMA_VERSION = 22
 
 /**
  * The PocketShell Room database.
@@ -38,11 +38,11 @@ const val APP_DATABASE_SCHEMA_VERSION = 21
  * `sessions` / `agent_sessions` stub tables (superseded by the host-side
  * daemon session registry, epic #821); see [MIGRATION_16_17].
  *
- * Schema 21 is the current product model. It has no session-runtime or
+ * Schema 22 is the current product model. It has no session-runtime or
  * backend-installation field: session identity and lifecycle come from the
  * host-side aplexer contract. The older migration bodies below are retained
  * because an existing database must be opened at each version it has recorded
- * before Room can apply the final migration to version 21.
+ * before Room can apply the final migration to version 22.
  *
  * `exportSchema = true` (Room writes the versioned schema JSON to the
  * `room.schemaLocation` dir configured in this module's `build.gradle.kts`).
@@ -400,6 +400,16 @@ val MIGRATION_20_21: Migration = object : Migration(20, 21) {
     }
 }
 
+/** Adds the user-controlled root placement used by the Quiet reorder page. */
+val MIGRATION_21_22: Migration = object : Migration(21, 22) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE project_roots ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0")
+        // Existing roots retain their previous creation order until the user
+        // moves one. This is a one-time data backfill, not an activity sort.
+        db.execSQL("UPDATE project_roots SET sortOrder = createdAt")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -421,6 +431,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_18_19,
     MIGRATION_19_20,
     MIGRATION_20_21,
+    MIGRATION_21_22,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

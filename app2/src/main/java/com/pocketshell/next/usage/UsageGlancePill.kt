@@ -1,31 +1,24 @@
 package com.pocketshell.next.usage
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import java.time.Duration
@@ -333,9 +326,9 @@ private data class GlanceCandidate(
 }
 
 /**
- * The pill itself. A 32dp rounded elevated surface with a hairline border — the
- * same small-affordance chrome the rest of the app's top-bar controls use, so
- * it reads as chrome and not as a card.
+ * The usage glance is a neutral text affordance. Quiet keeps usage readable
+ * without a colored chip, severity dot, elevated surface, or provider-specific
+ * badge in the terminal header.
  */
 @Composable
 fun UsageGlancePill(
@@ -343,57 +336,35 @@ fun UsageGlancePill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val contentAlpha = if (state.stale) STALE_CONTENT_ALPHA else 1f
     Row(
         modifier = modifier
-            .height(32.dp)
-            .background(color = PocketShellColors.SurfaceElev, shape = PocketShellShapes.large)
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = PocketShellShapes.large,
-            )
+            .heightIn(min = 48.dp)
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { this.contentDescription = state.contentDescription }
             .testTag(USAGE_GLANCE_PILL_TAG)
-            .padding(horizontal = PocketShellSpacing.md),
+            .padding(horizontal = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Small severity dot — the tint reads even before the number does.
-        Canvas(modifier = Modifier.size(8.dp)) {
-            drawCircle(color = usageGlanceKindColor(state.kind).copy(alpha = contentAlpha))
-        }
-        Spacer(modifier = Modifier.width(PocketShellSpacing.xs + 2.dp))
         Text(
             text = state.attribution,
-            color = PocketShellColors.TextSecondary.copy(alpha = contentAlpha),
-            style = PocketShellType.bodyDense,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.metadata,
             maxLines = 1,
         )
         Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
         Text(
             text = "${state.percent}%",
-            color = PocketShellColors.Text.copy(alpha = contentAlpha),
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
+            color = PocketShellColors.Text,
+            style = PocketShellType.metadata,
             maxLines = 1,
         )
         if (state.stale) {
-            Spacer(modifier = Modifier.width(PocketShellSpacing.xs + 2.dp))
+            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
             Text(
                 text = state.fetchedClock,
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.bodyDense,
+                style = PocketShellType.metadata,
             )
         }
     }
-}
-
-private const val STALE_CONTENT_ALPHA = 0.6f
-
-internal fun usageGlanceKindColor(kind: PillKind): Color = when (kind) {
-    PillKind.Ok -> PocketShellColors.Green
-    PillKind.Warn -> PocketShellColors.Amber
-    PillKind.Blocked -> PocketShellColors.Red
-    PillKind.Error -> PocketShellColors.TextMuted
 }

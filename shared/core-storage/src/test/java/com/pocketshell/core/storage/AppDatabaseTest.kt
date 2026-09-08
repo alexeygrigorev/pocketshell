@@ -252,16 +252,16 @@ class AppDatabaseTest {
             HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
         )
         db.projectRootDao().insert(
-            ProjectRootEntity(hostId = hostId, label = "[01] git", path = "~/git"),
+            ProjectRootEntity(hostId = hostId, label = "git", path = "~/git", sortOrder = 1L),
         )
         db.projectRootDao().insert(
-            ProjectRootEntity(hostId = hostId, label = "[00] tmp", path = "~/tmp"),
+            ProjectRootEntity(hostId = hostId, label = "tmp", path = "~/tmp", sortOrder = 0L),
         )
 
         val roots = db.projectRootDao().getByHostId(hostId).first()
 
         assertEquals(listOf("~/tmp", "~/git"), roots.map { it.path })
-        assertEquals(listOf("[00] tmp", "[01] git"), roots.map { it.label })
+        assertEquals(listOf("tmp", "git"), roots.map { it.label })
     }
 
     @Test
@@ -636,6 +636,29 @@ class AppDatabaseTest {
                 ) VALUES(
                     1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
                     5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json', '~/bin'
+                )
+                """.trimIndent(),
+            )
+        } else if (version == 21) {
+            // Version 21 is the first schema after the tmux storage boundary.
+            db.execSQL(
+                "INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt) " +
+                    "VALUES(1, 'key-v$version', '/keys/k', 'sha256:v$version', 1, 100)",
+            )
+            db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                    pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                    pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                    pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                    treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 103, 1, 104, '1.0', '1.0', 1,
+                    1, 1, 'pocketshell usage --json', 'tree-v$version',
+                    'ssh-ed25519', 'SHA256:trusted-v$version'
                 )
                 """.trimIndent(),
             )
@@ -1189,6 +1212,60 @@ class AppDatabaseTest {
     }
 
     private fun applyMigration20To21Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE hosts_migration_20_21 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                treeIdentity TEXT NOT NULL,
+                trustedHostKeyAlgorithm TEXT,
+                trustedHostKeySha256 TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_migration_20_21 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, lastBootstrapAt,
+                pocketshellInstalled, pocketshellLastDetectedAt, pocketshellCliVersion,
+                pocketshellExpectedCliVersion, pocketshellVersionCompatible,
+                pocketshellDaemonRunning, pocketshellDaemonEnabled, usageCommandOverride,
+                treeIdentity, trustedHostKeyAlgorithm, trustedHostKeySha256
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_migration_20_21 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
         db.execSQL("ALTER TABLE port_remappings ADD COLUMN name TEXT NOT NULL DEFAULT ''")
     }
 

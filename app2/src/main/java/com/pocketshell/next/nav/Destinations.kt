@@ -117,6 +117,18 @@ sealed class Destination(val pattern: String) {
             "workspace/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
     }
 
+    /** The same workspace route with the new-session sheet already open. */
+    data object WorkspaceStart :
+        Destination("workspace-start/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
+        fun route(hostId: Long, path: String): String =
+            "workspace-start/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
+    }
+
+    /** Host-scoped page for changing the persistent root/workspace order. */
+    data object ReorderWorkspaces : Destination("reorder-workspaces/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "reorder-workspaces/$hostId"
+    }
+
     /**
      * Compatibility name for existing callers while the destination migrates
      * from the legacy session-tree vocabulary. It resolves to the Quiet route;
@@ -282,7 +294,7 @@ sealed class Destination(val pattern: String) {
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
                 About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,
-                HostForm, SshKeys, QrScan, WorkspaceRoots,
+                HostForm, SshKeys, QrScan, WorkspaceRoots, WorkspaceStart, ReorderWorkspaces,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

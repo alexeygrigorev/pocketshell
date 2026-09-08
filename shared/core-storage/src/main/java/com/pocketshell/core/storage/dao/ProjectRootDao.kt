@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ProjectRootDao {
-    @Query("SELECT * FROM project_roots WHERE hostId = :hostId ORDER BY label, path")
+    @Query("SELECT * FROM project_roots WHERE hostId = :hostId ORDER BY sortOrder, createdAt, id")
     fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -25,4 +25,7 @@ interface ProjectRootDao {
 
     @Query("DELETE FROM project_roots WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("UPDATE project_roots SET sortOrder = :sortOrder WHERE id = :id")
+    suspend fun updateSortOrder(id: Long, sortOrder: Long)
 }

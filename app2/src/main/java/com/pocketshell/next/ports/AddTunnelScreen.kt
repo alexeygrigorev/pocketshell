@@ -201,12 +201,12 @@ fun AddTunnelScreen(
             Text(
                 text = "The tunnel uses loopback-only exposure. A service is not started until you save this mapping.",
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
+                style = PocketShellType.body,
             )
             Text(
                 text = "Valid ports are 1–65535.",
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
             PocketShellButton(
                 text = "Start tunnel",

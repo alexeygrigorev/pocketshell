@@ -39,14 +39,17 @@ object PocketShellSpacing {
  * never shrink the hit area below 48 dp.
  */
 object PocketShellDensity {
-    /** 44 dp — list / tree row minimum height (down from M3's 56–72). */
-    val rowMinHeight = 44.dp
+    /** 72 dp — standard Quiet row minimum height. */
+    val rowMinHeight = 72.dp
 
     /** 88 dp — the Quiet workspace row's primary navigation target. */
     val workspaceRowMinHeight = 88.dp
 
-    /** 8 dp — row vertical padding (the visual-density rung, not the touch floor). */
-    val rowPadV = 8.dp
+    /** 72 dp — the Quiet standard row's minimum touch and reading height. */
+    val standardRowMinHeight = 72.dp
+
+    /** 12 dp — row vertical padding. Rows may grow for wrapped content. */
+    val rowPadV = 12.dp
 
     /** 12 dp — row horizontal padding. */
     val rowPadH = 12.dp

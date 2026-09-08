@@ -8,13 +8,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -56,8 +62,16 @@ const val WORKSPACE_ERROR_TAG: String = "workspace-error"
 const val WORKSPACE_CREATE_NOTICE_TAG: String = "workspace-create-notice"
 const val WORKSPACE_RETRY_TAG: String = "workspace-retry"
 const val WORKSPACE_BACK_TAG: String = "workspace-back"
+const val WORKSPACE_ACTIONS_TAG: String = "workspace-actions"
 const val WORKSPACE_NEW_SESSION_TAG: String = "workspace-new-session"
 const val WORKSPACE_NEW_SESSION_LABEL: String = "New session"
+const val WORKSPACE_COPY_PATH_TAG: String = "workspace-copy-path"
+const val WORKSPACE_REORDER_TAG: String = "workspace-reorder"
+const val WORKSPACE_CREATE_FOLDER_TAG: String = "workspace-create-folder"
+const val WORKSPACE_CREATE_FOLDER_NAME_TAG: String = "workspace-create-folder-name"
+const val WORKSPACE_CREATE_FOLDER_CONFIRM_TAG: String = "workspace-create-folder-confirm"
+const val WORKSPACE_REMOVE_FROM_LIST_TAG: String = "workspace-remove-from-list"
+const val WORKSPACE_REMOVE_CONFIRM_TAG: String = "workspace-remove-confirm"
 
 /** Route-level binding for a canonical workspace path restored from NavState. */
 @Composable
@@ -67,11 +81,16 @@ fun WorkspaceRoute(
     onOpenPorts: () -> Unit,
     onBack: () -> Unit,
     onOpenUsage: () -> Unit,
+    onOpenReorder: () -> Unit = {},
+    startSessionOnEntry: Boolean = false,
     modifier: Modifier = Modifier,
     viewModel: SessionTreeViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LaunchedEffect(startSessionOnEntry) {
+        if (startSessionOnEntry) viewModel.openCreateSheet()
+    }
     LaunchedEffect(state.create.openRequest) {
         val name = state.create.openRequest ?: return@LaunchedEffect
         viewModel.consumeOpenRequest()
@@ -85,12 +104,18 @@ fun WorkspaceRoute(
         onOpenPorts = onOpenPorts,
         onBack = onBack,
         onOpenUsage = onOpenUsage,
+        onOpenReorder = onOpenReorder,
         onCreateSession = viewModel::openCreateSheet,
         onSubmitCreate = viewModel::createSession,
         onDismissCreate = viewModel::dismissCreateSheet,
         onRequestStop = viewModel::requestStopSession,
         onConfirmStop = viewModel::confirmStopSession,
         onCancelStop = viewModel::cancelStopSession,
+        onOpenCreateFolder = viewModel::openCreateFolder,
+        onCreateFolderNameChange = viewModel::setCreateFolderName,
+        onConfirmCreateFolder = viewModel::createFolder,
+        onDismissCreateFolder = viewModel::dismissCreateFolder,
+        onConfirmRemoveFromList = { viewModel.removeWorkspaceFromList(onBack) },
         modifier = modifier,
     )
 }
@@ -106,6 +131,7 @@ fun WorkspaceScreen(
     onOpenPorts: () -> Unit = {},
     onBack: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    onOpenReorder: () -> Unit = {},
     modifier: Modifier = Modifier,
     onCreateSession: () -> Unit = {},
     onSubmitCreate: (CreateSessionRequest) -> Unit = {},
@@ -113,7 +139,14 @@ fun WorkspaceScreen(
     onRequestStop: (String) -> Unit = {},
     onConfirmStop: () -> Unit = {},
     onCancelStop: () -> Unit = {},
+    onOpenCreateFolder: () -> Unit = {},
+    onCreateFolderNameChange: (String) -> Unit = {},
+    onConfirmCreateFolder: () -> Unit = {},
+    onDismissCreateFolder: () -> Unit = {},
+    onConfirmRemoveFromList: () -> Unit = {},
 ) {
+    val clipboard = LocalClipboardManager.current
+    var removeDialogVisible by remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -136,11 +169,41 @@ fun WorkspaceScreen(
             trailing = {
                 Kebab(
                     items = listOf(
+                        KebabItem(
+                            label = WORKSPACE_NEW_SESSION_LABEL,
+                            onClick = onCreateSession,
+                            testTag = WORKSPACE_NEW_SESSION_TAG,
+                        ),
                         KebabItem(label = "Files", onClick = onOpenFiles),
                         KebabItem(label = "Ports", onClick = onOpenPorts),
                         KebabItem(label = "Usage", onClick = onOpenUsage),
+                        KebabItem(
+                            label = "Copy folder path",
+                            onClick = {
+                                state.workspacePath?.let { path ->
+                                    clipboard.setText(AnnotatedString(path))
+                                }
+                            },
+                            testTag = WORKSPACE_COPY_PATH_TAG,
+                        ),
+                        KebabItem(
+                            label = "Reorder workspaces",
+                            onClick = onOpenReorder,
+                            testTag = WORKSPACE_REORDER_TAG,
+                        ),
+                        KebabItem(
+                            label = "Create folder",
+                            onClick = onOpenCreateFolder,
+                            testTag = WORKSPACE_CREATE_FOLDER_TAG,
+                        ),
+                        KebabItem(
+                            label = "Remove from list",
+                            onClick = { removeDialogVisible = true },
+                            testTag = WORKSPACE_REMOVE_FROM_LIST_TAG,
+                        ),
                     ),
                     contentDescription = "Workspace actions",
+                    triggerTestTag = WORKSPACE_ACTIONS_TAG,
                 )
             },
         )
@@ -260,6 +323,55 @@ fun WorkspaceScreen(
         )
     }
 
+    if (state.workspaceAction.createFolderVisible) {
+        com.pocketshell.uikit.components.FormDialog(
+            title = "Create folder",
+            confirmLabel = if (state.workspaceAction.creatingFolder) "Creating…" else "Create folder",
+            onConfirm = onConfirmCreateFolder,
+            onDismiss = onDismissCreateFolder,
+            confirmEnabled = state.workspaceAction.createFolderName.isNotBlank() &&
+                !state.workspaceAction.creatingFolder,
+            confirmTestTag = WORKSPACE_CREATE_FOLDER_CONFIRM_TAG,
+        ) {
+            Text(
+                text = "Creates a folder inside ${state.workspacePath.orEmpty()}.",
+                color = com.pocketshell.uikit.theme.PocketShellColors.TextMuted,
+                style = com.pocketshell.uikit.theme.PocketShellType.metadata,
+            )
+            androidx.compose.material3.OutlinedTextField(
+                value = state.workspaceAction.createFolderName,
+                onValueChange = onCreateFolderNameChange,
+                label = { Text("Folder name") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(WORKSPACE_CREATE_FOLDER_NAME_TAG),
+            )
+            state.workspaceAction.createFolderFailure?.let { message ->
+                Text(
+                    text = message,
+                    color = com.pocketshell.uikit.theme.PocketShellColors.Red,
+                    style = com.pocketshell.uikit.theme.PocketShellType.metadata,
+                )
+            }
+        }
+    }
+
+    if (removeDialogVisible) {
+        ConfirmDialog(
+            title = "Remove from list?",
+            message = "The folder and its running sessions stay on the host. You can add this workspace again later.",
+            confirmLabel = "Remove from list",
+            destructive = true,
+            onConfirm = {
+                removeDialogVisible = false
+                onConfirmRemoveFromList()
+            },
+            onDismiss = { removeDialogVisible = false },
+            confirmTestTag = WORKSPACE_REMOVE_CONFIRM_TAG,
+        )
+    }
+
     state.pendingStop?.let { name ->
         ConfirmDialog(
             title = STOP_SESSION_TITLE,
@@ -284,6 +396,10 @@ private fun WorkspaceSessionRow(
 ) {
     ListRow(
         title = session.name,
+        subtitle = sessionKindLabel(session),
+        titleStyle = com.pocketshell.uikit.theme.PocketShellType.title,
+        subtitleStyle = com.pocketshell.uikit.theme.PocketShellType.metadata,
+        titleWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
         trailing = {
             Kebab(
                 items = listOf(

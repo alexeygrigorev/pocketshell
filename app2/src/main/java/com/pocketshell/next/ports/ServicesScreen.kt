@@ -115,6 +115,7 @@ fun ServicesScreen(
         ScreenHeader(
             title = "Services & tunnels",
             subtitle = state.hostName.ifBlank { state.hostSubtitle },
+            titleStyle = PocketShellType.title,
             leading = {
                 PocketShellButton(
                     text = "Back",
@@ -128,7 +129,7 @@ fun ServicesScreen(
                 Text(
                     text = state.connection.quietLabel(state.enabled),
                     color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                 )
             },
         )
@@ -220,13 +221,13 @@ private fun DiscoveryRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
             Text(
                 text = "Discover services",
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
+                style = PocketShellType.body,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = "Look for listening ports on this host.",
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -271,7 +272,7 @@ private fun ServiceRow(
             Text(
                 text = if (active || manual) "Details" else "Add",
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
         },
         modifier = Modifier.testTag(servicesRowTag(tunnel.remotePort)),

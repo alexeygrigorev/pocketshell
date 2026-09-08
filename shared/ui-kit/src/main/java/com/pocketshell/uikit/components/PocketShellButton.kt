@@ -110,7 +110,7 @@ fun PocketShellButton(
     ) {
         Text(
             text = text,
-            style = if (compact) PocketShellType.bodyDense else LocalTextStyle.current,
+            style = if (compact) PocketShellType.button else LocalTextStyle.current,
             fontWeight = if (variant == ButtonVariant.Primary) FontWeight.SemiBold else FontWeight.Medium,
         )
     }

@@ -40,7 +40,7 @@ fun QuietChoiceRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .defaultMinSize(minHeight = PocketShellDensity.rowMinHeight)
             .selectable(
                 selected = selected,
                 role = Role.RadioButton,
@@ -57,14 +57,13 @@ fun QuietChoiceRow(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Medium,
+                style = PocketShellType.body,
             )
             if (subtitle != null) {
                 Text(
                     text = subtitle,
                     color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
+                    style = PocketShellType.metadata,
                 )
             }
         }

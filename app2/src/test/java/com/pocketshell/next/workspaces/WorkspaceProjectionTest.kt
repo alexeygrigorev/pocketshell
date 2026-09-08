@@ -84,6 +84,70 @@ class WorkspaceProjectionTest {
         assertEquals(listOf("observed"), workspace.sessions.map { it.name })
     }
 
+    @Test
+    fun `workspace summary names session kinds and collapses duplicate kinds`() {
+        val sessions = listOf(
+            session("claude-1", "/home/x/git/app").copy(agent = "claude"),
+            session("claude-2", "/home/x/git/app").copy(agent = "claude"),
+            session("codex", "/home/x/git/app").copy(agent = "codex"),
+            session("shell", "/home/x/git/app"),
+        )
+
+        assertEquals(
+            "Claude ×2 · Codex · Terminal",
+            workspaceSessionSummary(sessions),
+        )
+    }
+
+    @Test
+    fun `workspace summary limits visible kinds without using a path`() {
+        val sessions = listOf(
+            session("claude", "/home/x/git/app").copy(agent = "claude"),
+            session("codex", "/home/x/git/app").copy(agent = "codex"),
+            session("grok", "/home/x/git/app").copy(agent = "grok"),
+            session("open", "/home/x/git/app").copy(agent = "opencode"),
+        )
+
+        assertEquals(
+            "Claude · Codex · Grok · +1 more kinds",
+            workspaceSessionSummary(sessions),
+        )
+    }
+
+    @Test
+    fun `explicit workspace order survives live session refresh`() {
+        val result = projectWorkspaceRoots(
+            sessions = emptyList(),
+            memberships = listOf(
+                WorkspaceMembership("/home/alexey/git/first", "~/git/first"),
+                WorkspaceMembership("/home/alexey/git/second", "~/git/second"),
+            ),
+            registeredRoots = listOf(RegisteredWorkspaceRoot("/home/alexey/git", "Git")),
+            workspaceOrders = mapOf(
+                "/home/alexey/git" to listOf(
+                    "/home/alexey/git/second",
+                    "/home/alexey/git/first",
+                ),
+            ),
+        )
+
+        assertEquals(listOf("second", "first"), result.single().workspaces.map { it.label })
+    }
+
+    @Test
+    fun `saved roots use manual order before creation time`() {
+        val result = projectWorkspaceRoots(
+            sessions = emptyList(),
+            memberships = emptyList(),
+            registeredRoots = listOf(
+                RegisteredWorkspaceRoot("/home/alexey/work", "Work", createdAt = 20L, sortOrder = 1L),
+                RegisteredWorkspaceRoot("/home/alexey/git", "Git", createdAt = 10L, sortOrder = 0L),
+            ),
+        )
+
+        assertEquals(listOf("Git", "Work"), result.map { it.label })
+    }
+
     private fun session(name: String, workspace: String?): SessionRow = SessionRow(
         name = name,
         id = null,

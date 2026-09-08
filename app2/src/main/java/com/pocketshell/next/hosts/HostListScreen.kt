@@ -59,7 +59,9 @@ const val HOST_LIST_UPDATE_DISMISS_TAG: String = "host-list-update-dismiss"
 const val HOST_LIST_UPDATE_RETRY_TAG: String = "host-list-update-retry"
 const val HOST_LIST_UPDATE_FAILURE_TAG: String = "host-list-update-failure"
 const val HOST_LIST_KEYS_TAG: String = "host-list-ssh-keys"
-const val HOST_LIST_SETTINGS_ROW_TAG: String = "host-list-settings-row"
+// Keep the pre-Quiet journey tag as the canonical semantics tag. The longer
+// name remains a source-compatible alias for host-list tests and callers.
+const val HOST_LIST_SETTINGS_ROW_TAG: String = HOST_LIST_SETTINGS_TAG
 const val HOST_LIST_ADD_FOOTER_TAG: String = HOST_LIST_ADD_TAG
 const val HOST_LIST_ADD_METHODS_TAG: String = "host-list-add-methods"
 const val HOST_LIST_ADD_SCAN_TAG: String = "host-list-add-scan"
@@ -209,11 +211,23 @@ fun HostListScreen(
                 title = "Your work, from here.",
                 description = "Connect to a development machine to open its workspaces and terminals.",
                 action = {
-                    PocketShellButton(
-                        text = "Add host",
-                        onClick = { showAddHostMethods = true },
-                        modifier = Modifier.testTag(HOST_LIST_ADD_FOOTER_TAG),
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+                    ) {
+                        PocketShellButton(
+                            text = "Add host",
+                            onClick = { showAddHostMethods = true },
+                            modifier = Modifier.testTag(HOST_LIST_ADD_FOOTER_TAG),
+                        )
+                        PocketShellButton(
+                            text = "Settings",
+                            onClick = onOpenSettings,
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                            modifier = Modifier.testTag(HOST_LIST_SETTINGS_TAG),
+                        )
+                    }
                 },
             )
 

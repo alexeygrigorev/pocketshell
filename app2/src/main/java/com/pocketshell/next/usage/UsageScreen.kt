@@ -259,7 +259,7 @@ private fun UsageProviderRow(
                     Text(
                         text = if (expanded) "Hide" else "Details",
                         color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.labelMono,
+                        style = PocketShellType.metadata,
                     )
                 }
             } else {
@@ -297,7 +297,7 @@ private fun UsageProviderDetails(
         Text(
             text = "Status · ${statusLabel(record)}",
             color = thresholdTextColor(status),
-            style = PocketShellType.labelMono,
+            style = PocketShellType.metadata,
         )
         record.windows.forEach { window ->
             UsageWindowRow(window = window, record = record, now = now)
@@ -309,7 +309,7 @@ private fun UsageProviderDetails(
             Text(
                 text = message,
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
         }
     }
@@ -355,7 +355,7 @@ private fun UsageResetCreditsSection(
                 Text(
                     text = credit.title,
                     color = PocketShellColors.Text,
-                    style = PocketShellType.bodyDense,
+                    style = PocketShellType.body,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -365,14 +365,14 @@ private fun UsageResetCreditsSection(
                 Text(
                     text = expiry.primary,
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
+                    style = PocketShellType.metadata,
                     modifier = Modifier.testTag(usageResetCreditExpiryTag(index)),
                 )
                 expiry.absolute?.let { absolute ->
                     Text(
                         text = absolute,
                         color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.labelMono,
+                        style = PocketShellType.metadata,
                     )
                 }
             }
@@ -404,7 +404,7 @@ private fun UsageWindowRow(
             Text(
                 text = formatPercentUsed(window.percent),
                 color = PocketShellColors.Text,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -442,14 +442,14 @@ private fun UsageResetFoot(
             Text(
                 text = primary,
                 color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
             )
         }
         if (absolute != null) {
             Text(
                 text = absolute,
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
@@ -476,14 +476,14 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
         Text(
             text = "${host.hostName}: ${host.toolName} not installed",
             color = PocketShellColors.TextMuted,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.body,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = "server-side usage tracking unavailable",
             color = PocketShellColors.TextSecondary,
-            style = PocketShellType.labelMono,
+            style = PocketShellType.metadata,
             modifier = Modifier.padding(top = PocketShellSpacing.sm),
         )
         Text(
@@ -508,7 +508,7 @@ private fun UsageFailedHostPanel(host: UsageFailedHost) {
             Text(
                 text = usageTelemetryMessageForDisplay(host.reason) ?: USAGE_DATA_UNAVAILABLE,
                 color = PocketShellColors.TextSecondary,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag(usageFailedHostReasonTag(host.hostId)),

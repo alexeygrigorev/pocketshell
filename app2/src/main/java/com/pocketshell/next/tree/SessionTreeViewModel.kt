@@ -8,10 +8,12 @@ import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.ProfileInfo
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.core.hostapi.SessionListError
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.files.RemotePath
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.workspaces.canonicalRemotePath
@@ -70,6 +72,8 @@ data class SessionTreeUiState(
     val pendingStop: String? = null,
     /** Everything the create-session sheet needs (task U-6). */
     val create: CreateSessionState = CreateSessionState(),
+    /** Folder actions owned by the workspace route. */
+    val workspaceAction: WorkspaceActionState = WorkspaceActionState(),
 ) {
     val sessionCount: Int
         get() = if (workspacePath != null) workspaceSessions.size else roots.sumOf { it.sessionCount }
@@ -97,6 +101,14 @@ data class SessionTreeUiState(
             ?.workspace
             ?: ""
 }
+
+/** State for the explicit create-folder action on a workspace. */
+data class WorkspaceActionState(
+    val createFolderVisible: Boolean = false,
+    val createFolderName: String = "",
+    val creatingFolder: Boolean = false,
+    val createFolderFailure: String? = null,
+)
 
 /**
  * The create-session sheet's state (task U-6, journey J04).
@@ -182,6 +194,7 @@ class SessionTreeViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val registry: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
 ) : ViewModel() {
 
@@ -202,6 +215,8 @@ class SessionTreeViewModel @Inject constructor(
     private var createInFlight: Job? = null
     private var pickerInFlight: Job? = null
     private var stopInFlight: Job? = null
+    private var folderInFlight: Job? = null
+    private var removeWorkspaceInFlight: Job? = null
 
     /**
      * Set when a mutation finished while [inFlight] was still reading, and
@@ -491,6 +506,118 @@ class SessionTreeViewModel @Inject constructor(
 
     private fun updateCreate(block: (CreateSessionState) -> CreateSessionState) {
         _state.update { current -> current.copy(create = block(current.create)) }
+    }
+
+    // --- workspace actions -------------------------------------------------
+
+    fun openCreateFolder() {
+        if (workspacePath == null) return
+        _state.update {
+            it.copy(
+                workspaceAction = WorkspaceActionState(createFolderVisible = true),
+            )
+        }
+    }
+
+    fun dismissCreateFolder() {
+        if (_state.value.workspaceAction.creatingFolder) return
+        _state.update { it.copy(workspaceAction = WorkspaceActionState()) }
+    }
+
+    fun setCreateFolderName(name: String) {
+        _state.update {
+            it.copy(
+                workspaceAction = it.workspaceAction.copy(
+                    createFolderName = name,
+                    createFolderFailure = null,
+                ),
+            )
+        }
+    }
+
+    /** Creates exactly one child directory in this workspace. */
+    fun createFolder() {
+        val parent = workspacePath ?: return
+        val action = _state.value.workspaceAction
+        val name = action.createFolderName.trim()
+        val invalid = name.isEmpty() || name == "." || name == ".." ||
+            name.any { it == '/' || it == '\\' || it.isISOControl() }
+        if (invalid) {
+            _state.update {
+                it.copy(
+                    workspaceAction = action.copy(
+                        createFolderVisible = true,
+                        createFolderFailure = "Use one folder name without separators.",
+                    ),
+                )
+            }
+            return
+        }
+        if (folderInFlight?.isActive == true) return
+        _state.update {
+            it.copy(
+                workspaceAction = action.copy(
+                    creatingFolder = true,
+                    createFolderFailure = null,
+                ),
+            )
+        }
+        folderInFlight = viewModelScope.launch {
+            val connection = when (val outcome = resolveConnection()) {
+                is ConnectionOutcome.Ready -> outcome.connection
+                is ConnectionOutcome.Unavailable -> {
+                    failCreateFolder(outcome.message)
+                    return@launch
+                }
+            }
+            val target = RemotePath.join(parent, name)
+            runCatching { connection.sftp().mkdir(target) }.fold(
+                onSuccess = {
+                    _state.update { it.copy(workspaceAction = WorkspaceActionState()) }
+                },
+                onFailure = { error ->
+                    failCreateFolder(userMessage(error, "Could not create the folder: "))
+                },
+            )
+        }
+    }
+
+    /** Removes only durable host membership; the remote folder and sessions survive. */
+    fun removeWorkspaceFromList(onRemoved: () -> Unit) {
+        val path = workspacePath ?: return
+        if (removeWorkspaceInFlight?.isActive == true) return
+        removeWorkspaceInFlight = viewModelScope.launch {
+            val host = hostDao.getById(hostId)
+            if (host == null) {
+                fail("This host is no longer saved on this device.")
+                return@launch
+            }
+            val connection = when (val outcome = resolveConnection()) {
+                is ConnectionOutcome.Ready -> outcome.connection
+                is ConnectionOutcome.Unavailable -> {
+                    fail(outcome.message)
+                    return@launch
+                }
+            }
+            clients.create(connection).removeWorkspace(host.treeIdentity, path).fold(
+                onSuccess = { onRemoved() },
+                onFailure = { error ->
+                    fail(userMessage(error, "Could not remove the workspace from the list: "))
+                },
+            )
+        }
+    }
+
+    private fun failCreateFolder(message: String) {
+        _state.update {
+            it.copy(
+                workspaceAction = it.workspaceAction.copy(
+                    createFolderVisible = true,
+                    creatingFolder = false,
+                    createFolderFailure = message,
+                ),
+            )
+        }
     }
 
     private suspend fun load() {

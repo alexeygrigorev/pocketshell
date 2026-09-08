@@ -44,7 +44,7 @@ class DestinationsTest {
         // The aggregate includes both Quiet workspace routes and the
         // categorized Settings/support plus Services routes. Deprecated aliases
         // (Tree and CrashReports) intentionally do not add duplicate patterns.
-        assertEquals(26, patterns.size)
+        assertEquals(28, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -55,6 +55,14 @@ class DestinationsTest {
         assertMatchesPattern(
             Destination.Workspace.pattern,
             Destination.Workspace.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
+        )
+        assertMatchesPattern(
+            Destination.WorkspaceStart.pattern,
+            Destination.WorkspaceStart.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
+        )
+        assertMatchesPattern(
+            Destination.ReorderWorkspaces.pattern,
+            Destination.ReorderWorkspaces.route(hostId = 7),
         )
         assertMatchesPattern(
             Destination.Session.pattern,

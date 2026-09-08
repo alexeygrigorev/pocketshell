@@ -59,6 +59,7 @@ import com.pocketshell.next.terminal.SessionRoute
 import com.pocketshell.next.tree.SessionTreeRoute
 import com.pocketshell.next.usage.UsageRoute
 import com.pocketshell.next.workspaces.HostWorkspacesRoute
+import com.pocketshell.next.workspaces.ReorderWorkspacesRoute
 import com.pocketshell.next.workspaces.WorkspaceRoute
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -193,17 +194,23 @@ fun AppNavHost(
         onOpenWorkspace: (String) -> Unit,
         onOpenSession: (String) -> Unit,
         onOpenFiles: () -> Unit,
+        onOpenFilesAtPath: (String) -> Unit,
         onOpenPorts: () -> Unit,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { _, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
+    ) -> Unit = { hostId, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenFilesAtPath, onOpenPorts, onBack, onOpenUsage ->
         HostWorkspacesRoute(
             onOpenWorkspace = onOpenWorkspace,
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
+            onOpenFilesAtPath = onOpenFilesAtPath,
             onOpenPorts = onOpenPorts,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
+            onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
+            onStartSessionAtPath = { path ->
+                navController.navigate(Destination.WorkspaceStart.route(hostId, path))
+            },
         )
     },
     workspaceScreen: @Composable (
@@ -214,13 +221,14 @@ fun AppNavHost(
         onOpenPorts: () -> Unit,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { _, _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
+    ) -> Unit = { hostId, _, onOpenSession, onOpenFiles, onOpenPorts, onBack, onOpenUsage ->
         WorkspaceRoute(
             onOpenSession = onOpenSession,
             onOpenFiles = onOpenFiles,
             onOpenPorts = onOpenPorts,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
+            onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
         )
     },
     sessionScreen: @Composable (
@@ -467,6 +475,7 @@ fun AppNavHost(
                 { path -> navController.navigate(Destination.Workspace.route(hostId, path)) },
                 onOpenSession,
                 onOpenFiles,
+                { path -> navController.navigate(Destination.Files.route(hostId, path)) },
                 onOpenPorts,
                 onBack,
                 onOpenUsage,
@@ -495,6 +504,33 @@ fun AppNavHost(
                 // glance pill.
                 { navController.navigate(Destination.HostUsage.route(hostId)) },
             )
+        }
+        composable(
+            route = Destination.WorkspaceStart.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_WORKSPACE_PATH) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val path = entry.arguments?.getString(Destination.ARG_WORKSPACE_PATH).orEmpty()
+            WorkspaceRoute(
+                onOpenSession = { sessionName ->
+                    navController.navigate(Destination.Session.route(hostId, sessionName))
+                },
+                onOpenFiles = { navController.navigate(Destination.Files.route(hostId, path)) },
+                onOpenPorts = { navController.navigate(Destination.Ports.route(hostId)) },
+                onBack = { navController.popBackStack() },
+                onOpenUsage = { navController.navigate(Destination.HostUsage.route(hostId)) },
+                onOpenReorder = { navController.navigate(Destination.ReorderWorkspaces.route(hostId)) },
+                startSessionOnEntry = true,
+            )
+        }
+        composable(
+            route = Destination.ReorderWorkspaces.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) {
+            ReorderWorkspacesRoute(onBack = { navController.popBackStack() })
         }
         composable(
             route = Destination.Session.pattern,

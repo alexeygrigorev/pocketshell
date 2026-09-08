@@ -1,11 +1,13 @@
 package com.pocketshell.next.settings
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -41,8 +43,12 @@ class SettingsScreenTest {
 
         listOf("terminal", "voice", "connections", "advanced", "diagnostics", "about")
             .forEach { id ->
-                composeRule.onNodeWithTag(settingsCategoryTag(id)).performScrollTo().assertIsDisplayed()
+                composeRule.onNodeWithTag(SETTINGS_LIST_TAG)
+                    .performScrollToNode(hasTestTag(settingsCategoryTag(id)))
+                composeRule.onNodeWithTag(settingsCategoryTag(id)).assertIsDisplayed()
             }
+        composeRule.onNodeWithTag(SETTINGS_LIST_TAG)
+            .performScrollToNode(hasTestTag(settingsCategoryTag("about")))
         composeRule.onNodeWithTag(settingsCategoryTag("about")).performClick()
         assertEquals(listOf("about"), opened)
     }

@@ -1,6 +1,7 @@
 package com.pocketshell.next.workspaces
 
 import androidx.lifecycle.SavedStateHandle
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.transport.ExecResult
@@ -126,6 +127,7 @@ class HostWorkspacesViewModelTest {
         clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
         hostDao = stack.db.hostDao(),
         projectRootDao = stack.db.projectRootDao(),
+        workspaceOrderStore = WorkspaceOrderStore(ApplicationProvider.getApplicationContext()),
     )
 
     private fun script(
@@ -147,7 +149,7 @@ class HostWorkspacesViewModelTest {
         }
     }
 
-    private fun emptySessions(): String = """{"schema":2,"sessions":[],"errors":[]}"""
+    private fun emptySessions(): String = """{"schema":3,"sessions":[],"errors":[]}"""
 
     private fun shellIdentity(identity: String): String = identity.replace("'", "'\\''")
 }

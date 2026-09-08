@@ -72,6 +72,7 @@ class SessionTreeRouteTest {
             savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
             registry = stack.registry,
             clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
+            hostDao = stack.db.hostDao(),
             projectRootDao = stack.db.projectRootDao(),
         )
         val opened = mutableListOf<String>()

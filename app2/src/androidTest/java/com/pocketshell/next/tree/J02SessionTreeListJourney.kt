@@ -1,6 +1,11 @@
 package com.pocketshell.next.tree
 
+import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -8,29 +13,47 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
 import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
+import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.hosts.HOST_LIST_TAG
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
+import com.pocketshell.next.terminal.SESSION_BACK_TAG
+import com.pocketshell.next.terminal.SESSION_TITLE_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_ADD_PATH_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_BACK_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_EMPTY_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_PARTIAL_BANNER_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ROOT_START_SESSION_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_REORDER_TAG
+import com.pocketshell.next.workspaces.REORDER_WORKSPACES_BACK_TAG
+import com.pocketshell.next.workspaces.REORDER_WORKSPACES_SCREEN_TAG
+import com.pocketshell.next.workspaces.REORDER_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_SEARCH_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRootAddTag
+import com.pocketshell.next.workspaces.workspaceRootActionsTag
 import com.pocketshell.next.workspaces.workspaceRootTag
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import com.termux.view.TerminalView
+import com.pocketshell.next.tree.CREATE_SESSION_SHEET_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.json.JSONObject
@@ -105,6 +128,7 @@ class J02SessionTreeListJourney {
         .around(compose)
 
     private var hostId: Long = 0
+    private var rootId: Long = 0
 
     private suspend fun seed(description: Description) {
         val graph = appGraph()
@@ -132,6 +156,15 @@ class J02SessionTreeListJourney {
                 keyId = keyId,
                 trustedHostKeyAlgorithm = "SHA256",
                 trustedHostKeySha256 = fingerprint,
+            ),
+        )
+        rootId = graph.projectRootDao().insert(
+            ProjectRootEntity(
+                hostId = hostId,
+                label = "Git",
+                path = WORKSPACE_ROOT,
+                createdAt = 1L,
+                sortOrder = 0L,
             ),
         )
     }
@@ -197,6 +230,7 @@ class J02SessionTreeListJourney {
         compose.onNodeWithTag(workspaceRootTag(WORKSPACE_ROOT)).assertIsDisplayed()
         compose.onNodeWithTag(workspaceSessionRowTag(SESSION_ROOT)).assertIsDisplayed()
         compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).assertIsDisplayed()
+        scrollToWorkspace(WORKSPACE_APLEXER)
         compose.onNodeWithTag(workspaceRowTag(WORKSPACE_APLEXER)).assertIsDisplayed()
         JourneyScreenshots.capture("01-workspaces", JOURNEY)
 
@@ -290,12 +324,169 @@ class J02SessionTreeListJourney {
         compose.onNodeWithText("Cancel").performClick()
     }
 
+    @Test
+    fun rootActionsStartAtTheRootAndOpenTheCreateSheet() {
+        openWorkspaces()
+
+        compose.onNodeWithTag(workspaceRootActionsTag(WORKSPACE_ROOT)).performClick()
+        awaitTag(HOST_WORKSPACES_ROOT_START_SESSION_TAG)
+        JourneyScreenshots.capture("06-root-actions", JOURNEY)
+        compose.onNodeWithTag(HOST_WORKSPACES_ROOT_START_SESSION_TAG).performClick()
+        awaitTag(CREATE_SESSION_SHEET_TAG)
+        compose.onNodeWithText("Folder").assertIsDisplayed()
+        JourneyScreenshots.capture("07-root-create-session", JOURNEY)
+    }
+
+    @Test
+    fun reorderPageShowsPersistentRootAndWorkspaceControls() {
+        openWorkspaces()
+
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG)
+            .performClick()
+        compose.onNodeWithTag(HOST_WORKSPACES_REORDER_TAG)
+            .performClick()
+        awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
+        awaitTag(REORDER_WORKSPACES_LIST_TAG)
+        JourneyScreenshots.capture("08-reorder-workspaces", JOURNEY)
+        compose.onNodeWithTag(
+            com.pocketshell.next.workspaces.reorderRootTag(rootId),
+        ).assertExists()
+        compose.onNodeWithTag(REORDER_WORKSPACES_LIST_TAG)
+            .performScrollToNode(
+                hasTestTag(
+                    com.pocketshell.next.workspaces.reorderWorkspaceTag(WORKSPACE_MAIN),
+                ),
+            )
+        JourneyScreenshots.capture("08-reorder-workspaces-workspace", JOURNEY)
+        compose.onNodeWithTag(
+            com.pocketshell.next.workspaces.reorderWorkspaceTag(WORKSPACE_MAIN),
+        ).assertIsDisplayed()
+
+        // Move one workspace, leave the page, and open it again through the
+        // production navigation. The second read must retain the chosen order;
+        // checking only the arrows would let a refresh silently restore the
+        // creation order.
+        compose.onNodeWithTag("move-down-pocketshell").performClick()
+        compose.awaitIdle("workspace order after move")
+        assertWorkspaceOrder(WORKSPACE_APLEXER, WORKSPACE_MAIN)
+        JourneyScreenshots.capture("08-reorder-workspaces-after-move", JOURNEY)
+
+        compose.onNodeWithTag(REORDER_WORKSPACES_BACK_TAG).performClick()
+        awaitTag(HOST_WORKSPACES_TAG)
+        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
+        compose.onNodeWithTag(HOST_WORKSPACES_REORDER_TAG).performClick()
+        awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
+        awaitTag(REORDER_WORKSPACES_LIST_TAG)
+        compose.onNodeWithTag(REORDER_WORKSPACES_LIST_TAG)
+            .performScrollToNode(
+                hasTestTag(
+                    com.pocketshell.next.workspaces.reorderWorkspaceTag(WORKSPACE_APLEXER),
+                ),
+            )
+        assertWorkspaceOrder(WORKSPACE_APLEXER, WORKSPACE_MAIN)
+        JourneyScreenshots.capture("08-reorder-workspaces-after-reopen", JOURNEY)
+    }
+
+    @Test
+    fun switchingBetweenLiveSessionsLeavesTheCorrectTerminalVisible() {
+        openQuietSessionAndAssert(
+            SESSION_APLEXER,
+            WORKSPACE_APLEXER,
+            "J02_VISIBLE_APLEXER_A",
+        )
+        JourneyScreenshots.capture("09-switch-A", JOURNEY)
+
+        backToWorkspace()
+        openSessionFromCurrentWorkspace(SESSION_OTHER, "J02_VISIBLE_OPENCODE_B")
+        JourneyScreenshots.capture("10-switch-B", JOURNEY)
+
+        backToWorkspace()
+        backToHost()
+        openWorkspaceAndSession(WORKSPACE_MAIN, SESSION_QUIET, "J02_VISIBLE_CODEX_C")
+        JourneyScreenshots.capture("11-switch-C", JOURNEY)
+
+        backToWorkspace()
+        backToHost()
+        openWorkspaceAndSession(
+            WORKSPACE_APLEXER,
+            SESSION_APLEXER,
+            "J02_VISIBLE_APLEXER_A_AGAIN",
+        )
+        JourneyScreenshots.capture("12-switch-A-again", JOURNEY)
+    }
+
     // --- helpers ----------------------------------------------------------
 
     /** Taps the seeded host and waits for the workspaces listing. */
     private fun openWorkspaces() {
         compose.openQuietHost(hostId, TIMEOUT_MS)
-        awaitTag(workspaceRowTag(WORKSPACE_MAIN))
+        compose.waitUntil(TIMEOUT_MS) {
+            if (compose.onAllNodesWithTag(HOST_WORKSPACES_LIST_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+            ) {
+                runCatching { scrollToWorkspace(WORKSPACE_MAIN) }
+            }
+            compose.onAllNodesWithTag(workspaceRowTag(WORKSPACE_MAIN))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    /** The Quiet list is intentionally roomy; bring lower workspace rows into the viewport. */
+    private fun scrollToWorkspace(path: String) {
+        compose.onNodeWithTag(HOST_WORKSPACES_LIST_TAG)
+            .performScrollToNode(hasTestTag(workspaceRowTag(path)))
+    }
+
+    private fun openQuietSessionAndAssert(session: String, workspace: String, marker: String) {
+        compose.openQuietSession(hostId, session, workspace, TIMEOUT_MS)
+        awaitTag(SESSION_SCREEN_TAG)
+        awaitText(session)
+        compose.onNodeWithTag(SESSION_TITLE_TAG).assertIsDisplayed()
+        awaitRenderedTerminal(session)
+        typeMarker(marker)
+    }
+
+    private fun backToWorkspace() {
+        compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+    }
+
+    private fun backToHost() {
+        compose.onNodeWithTag(com.pocketshell.next.workspaces.WORKSPACE_BACK_TAG).performClick()
+        awaitTag(HOST_WORKSPACES_TAG)
+        awaitTag(HOST_WORKSPACES_LIST_TAG)
+    }
+
+    private fun openSessionFromCurrentWorkspace(session: String, marker: String) {
+        awaitTag(com.pocketshell.next.workspaces.WORKSPACE_LIST_TAG)
+        compose.onNodeWithTag(com.pocketshell.next.workspaces.WORKSPACE_LIST_TAG)
+            .performScrollToNode(hasTestTag(sessionRowTag(session)))
+        awaitTag(sessionRowTag(session))
+        compose.onNodeWithTag(sessionRowTag(session)).performClick()
+        awaitTag(SESSION_SCREEN_TAG)
+        awaitText(session)
+        awaitRenderedTerminal(session)
+        typeMarker(marker)
+    }
+
+    private fun openWorkspaceAndSession(workspace: String, session: String, marker: String) {
+        scrollToWorkspace(workspace)
+        compose.onNodeWithTag(workspaceRowTag(workspace)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        openSessionFromCurrentWorkspace(session, marker)
+    }
+
+    private fun assertWorkspaceOrder(first: String, second: String) {
+        val firstBounds = compose.onNodeWithTag(
+            com.pocketshell.next.workspaces.reorderWorkspaceTag(first),
+        ).fetchSemanticsNode().boundsInRoot
+        val secondBounds = compose.onNodeWithTag(
+            com.pocketshell.next.workspaces.reorderWorkspaceTag(second),
+        ).fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "expected $first before $second, got ${firstBounds.top} and ${secondBounds.top}",
+            firstBounds.top < secondBounds.top,
+        )
     }
 
     /**
@@ -327,6 +518,65 @@ class J02SessionTreeListJourney {
         }
     }
 
+    /** Waits for the actual terminal grid before a switching screenshot is captured. */
+    private fun awaitRenderedTerminal(session: String) {
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var transcript = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.awaitIdle("terminal transcript for $session")
+            transcript = renderedTerminalTranscript()
+            if (transcript.isNotBlank()) return
+            SystemClock.sleep(100)
+        }
+        throw AssertionError(
+            "terminal for $session did not render within ${TIMEOUT_MS}ms; " +
+                "last transcript was:\n$transcript",
+        )
+    }
+
+    /** Writes a session-specific line through the real terminal input path. */
+    private fun typeMarker(marker: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        compose.awaitIdle("before typing terminal marker $marker")
+        instrumentation.runOnMainSync {
+            val view = findTerminalView(compose.activity.window.decorView)
+            checkNotNull(view) { "no TerminalView on screen to type into" }
+            view.requestFocus()
+        }
+        instrumentation.waitForIdleSync()
+        instrumentation.sendStringSync("printf '$marker\\n'")
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER)
+        instrumentation.waitForIdleSync()
+
+        val deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS
+        var transcript = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.awaitIdle("terminal marker $marker")
+            transcript = renderedTerminalTranscript()
+            if (transcript.contains(marker)) return
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("terminal marker $marker did not render; transcript was:\n$transcript")
+    }
+
+    private fun renderedTerminalTranscript(): String {
+        var transcript = ""
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            findTerminalView(compose.activity.window.decorView)
+                ?.let { transcript = it.mEmulator?.screen?.transcriptText.orEmpty() }
+        }
+        return transcript
+    }
+
+    private fun findTerminalView(view: View): TerminalView? {
+        if (view is TerminalView) return view
+        if (view !is ViewGroup) return null
+        for (index in 0 until view.childCount) {
+            findTerminalView(view.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
     private companion object {
         const val TIMEOUT_MS = 60_000L
         const val JOURNEY = "j02-session-tree"
@@ -353,6 +603,9 @@ class J02SessionTreeListJourney {
             "aPartialListingRaisesTheMissingSessionsBannerAndStillShowsTheRest" to 9_203L,
             "tappingBackOnTheTreeReturnsToHosts" to 9_204L,
             "searchingAndAddingAWorkspaceUsesTheProductionQuietControls" to 9_205L,
+            "rootActionsStartAtTheRootAndOpenTheCreateSheet" to 9_206L,
+            "reorderPageShowsPersistentRootAndWorkspaceControls" to 9_207L,
+            "switchingBetweenLiveSessionsLeavesTheCorrectTerminalVisible" to 9_208L,
         )
     }
 }

@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SentMessageDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
@@ -33,6 +34,7 @@ interface AppGraph {
     fun hostDao(): HostDao
     fun sshKeyDao(): SshKeyDao
     fun portRemappingDao(): PortRemappingDao
+    fun projectRootDao(): ProjectRootDao
     fun connectionsRegistry(): ConnectionsRegistry
     fun forwardingController(): ForwardingController
 

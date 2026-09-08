@@ -982,6 +982,7 @@ class SessionTreeViewModelTest {
         registry = stack.registry,
         // The production binding, verbatim (see AppModule.provideHostCliClientFactory).
         clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
+        hostDao = stack.db.hostDao(),
         projectRootDao = stack.db.projectRootDao(),
     )
 

@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,13 +78,13 @@ fun ListRow(
     onClick: (() -> Unit)? = null,
     titleMaxLines: Int = 1,
     subtitleMaxLines: Int = 1,
+    titleStyle: TextStyle = PocketShellType.body,
+    subtitleStyle: TextStyle = PocketShellType.metadata,
+    titleWeight: FontWeight? = null,
 ) {
-    // Visual paint floor is the compact 44dp row height; when the row is
-    // tappable the floor is raised to the 48dp a11y touch floor. Baking the
-    // floor in here is the contract: screens consuming ListRow cannot drop the
-    // hit area below 48dp.
-    val minHeight =
-        if (onClick != null) PocketShellDensity.tapTargetMin else PocketShellDensity.rowMinHeight
+    // Every standard row is a 72dp minimum hit target. WorkspaceRow raises
+    // this to the separate 88dp workspace navigation target.
+    val minHeight = PocketShellDensity.rowMinHeight
 
     Row(
         modifier = modifier
@@ -116,8 +117,8 @@ fun ListRow(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Medium,
+                style = titleStyle,
+                fontWeight = titleWeight,
                 maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -126,7 +127,7 @@ fun ListRow(
                 Text(
                     text = subtitle,
                     color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyMono,
+                    style = subtitleStyle,
                     maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )

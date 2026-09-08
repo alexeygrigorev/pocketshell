@@ -2,6 +2,8 @@ package com.pocketshell.next.workspaces
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -58,7 +60,8 @@ class QuietWorkspaceScreenTest {
             .assertCountEquals(1)
         composeRule.onNodeWithTag(workspaceRowTag(path)).assertIsDisplayed().performClick()
         assertEquals(listOf(path), opened)
-        composeRule.onNodeWithText("~/git/pocketshell", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("~/git/pocketshell", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("No sessions").assertIsDisplayed()
     }
 
     @Test
@@ -192,6 +195,97 @@ class QuietWorkspaceScreenTest {
     }
 
     @Test
+    fun `root label opens its action sheet`() {
+        val rootPath = "/home/alexey/git"
+        setHostContent(
+            state = HostWorkspacesUiState(
+                hostLabel = "hetzner",
+                loaded = true,
+                roots = listOf(
+                    WorkspaceRootProjection(
+                        key = rootPath,
+                        label = "Git",
+                        displayPath = "~/git",
+                        path = rootPath,
+                        registeredRootId = 12L,
+                        workspaces = emptyList(),
+                        rootSessions = emptyList(),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithTag(workspaceRootActionsTag(rootPath)).performClick()
+        composeRule.onNodeWithText("Start session here").assertIsDisplayed()
+    }
+
+    @Test
+    fun `root action content starts a session at the root path`() {
+        val rootPath = "/home/alexey/git"
+        val opened = mutableListOf<String>()
+        composeRule.setContent {
+            PocketShellTheme {
+                RootActionsSheetContent(
+                    root = WorkspaceRootProjection(
+                        key = rootPath,
+                        label = "Git",
+                        displayPath = "~/git",
+                        path = rootPath,
+                        registeredRootId = 12L,
+                        workspaces = emptyList(),
+                        rootSessions = emptyList(),
+                    ),
+                    onAddWorkspace = {},
+                    onCreateFolder = {},
+                    onStartSession = { opened += rootPath },
+                    onCopyPath = {},
+                    onBrowse = {},
+                    onRemove = {},
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(HOST_WORKSPACES_ROOT_START_SESSION_TAG).assert(hasClickAction())
+        composeRule.onNodeWithTag(HOST_WORKSPACES_ROOT_START_SESSION_TAG).performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(listOf(rootPath), opened)
+    }
+
+    @Test
+    fun `synthetic Other bucket has no add workspace action`() {
+        val otherKey = "::quiet-other::"
+        setHostContent(
+            state = HostWorkspacesUiState(
+                hostLabel = "hetzner",
+                loaded = true,
+                roots = listOf(
+                    WorkspaceRootProjection(
+                        key = otherKey,
+                        label = "Other",
+                        displayPath = "Other",
+                        path = null,
+                        workspaces = listOf(
+                            WorkspaceProjection(
+                                path = "/tmp/project",
+                                label = "project",
+                                displayPath = "/tmp/project",
+                                sessions = emptyList(),
+                                durable = false,
+                            ),
+                        ),
+                        rootSessions = emptyList(),
+                        other = true,
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithTag(workspaceRootTag(otherKey)).assertIsDisplayed()
+        composeRule.onAllNodesWithTag(workspaceRootAddTag(otherKey)).assertCountEquals(0)
+    }
+
+    @Test
     fun `offline host reports status unavailable`() {
         setHostContent(
             state = HostWorkspacesUiState(
@@ -250,6 +344,23 @@ class QuietWorkspaceScreenTest {
         composeRule.onAllNodesWithTag(WORKSPACE_NEW_SESSION_TAG).assertCountEquals(1)
     }
 
+    @Test
+    fun `workspace actions expose folder creation and removal`() {
+        val openedCreate = mutableListOf<Boolean>()
+        setWorkspaceContent(
+            state = SessionTreeUiState(
+                hostId = 7,
+                workspacePath = "/home/alexey/git/empty",
+                loaded = true,
+            ),
+            onOpenCreateFolder = { openedCreate += true },
+        )
+
+        composeRule.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
+        composeRule.onNodeWithTag(WORKSPACE_CREATE_FOLDER_TAG).performClick()
+        assertEquals(listOf(true), openedCreate)
+    }
+
     private fun setHostContent(
         state: HostWorkspacesUiState,
         onOpenWorkspace: (String) -> Unit = {},
@@ -270,6 +381,7 @@ class QuietWorkspaceScreenTest {
     private fun setWorkspaceContent(
         state: SessionTreeUiState,
         onOpenSession: (String) -> Unit = {},
+        onOpenCreateFolder: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -277,6 +389,7 @@ class QuietWorkspaceScreenTest {
                     state = state,
                     onRefresh = {},
                     onOpenSession = onOpenSession,
+                    onOpenCreateFolder = onOpenCreateFolder,
                 )
             }
         }

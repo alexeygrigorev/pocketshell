@@ -570,7 +570,7 @@ internal fun UpdateScreen(
                         Text(
                             text = "Contacting GitHub releases.",
                             color = PocketShellColors.TextSecondary,
-                            style = PocketShellType.bodyDense,
+                            style = PocketShellType.body,
                         )
                     }
                 }
@@ -686,12 +686,12 @@ private fun SettingsDescription(title: String, description: String) {
         Text(
             text = title,
             color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.body,
         )
         Text(
             text = description,
             color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.body,
         )
     }
 }
@@ -718,13 +718,13 @@ private fun SettingsSlider(
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, color = PocketShellColors.Text, style = PocketShellType.bodyDense)
-                Text(text = description, color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+                Text(text = title, color = PocketShellColors.Text, style = PocketShellType.body)
+                Text(text = description, color = PocketShellColors.TextSecondary, style = PocketShellType.body)
             }
             Text(
                 text = valueLabel,
                 color = PocketShellColors.Text,
-                style = PocketShellType.labelMono,
+                style = PocketShellType.metadata,
                 modifier = Modifier.testTag(valueTestTag),
             )
         }

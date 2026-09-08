@@ -1,10 +1,12 @@
 package com.pocketshell.next.ports
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor.ConnectionState
 import com.pocketshell.core.portfwd.TunnelInfo
@@ -47,6 +49,8 @@ class ServicesScreenTest {
         )
 
         composeRule.onNodeWithTag(servicesRowTag(5173)).performClick()
+        composeRule.onNodeWithTag("$SERVICES_SCREEN_TAG-list")
+            .performScrollToNode(hasTestTag(servicesRowTag(8000)))
         composeRule.onNodeWithTag(servicesRowTag(8000)).performClick()
 
         assertEquals(listOf(5173), opened)

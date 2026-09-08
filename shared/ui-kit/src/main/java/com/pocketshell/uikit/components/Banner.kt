@@ -121,7 +121,7 @@ fun Banner(
         Text(
             text = text,
             color = foreground,
-            style = PocketShellType.bodyDense,
+            style = PocketShellType.metadata,
             fontWeight = FontWeight.Medium,
             maxLines = maxLines,
             overflow = TextOverflow.Ellipsis,

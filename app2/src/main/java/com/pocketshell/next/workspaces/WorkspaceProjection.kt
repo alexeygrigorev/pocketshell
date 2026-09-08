@@ -8,6 +8,10 @@ data class RegisteredWorkspaceRoot(
     val path: String,
     val label: String,
     val createdAt: Long = 0L,
+    /** Room identity, when this projection came from a saved root shortcut. */
+    val id: Long = 0L,
+    /** User-controlled placement; old callers fall back to creation order. */
+    val sortOrder: Long = createdAt,
 )
 
 /** One host root section in the Quiet workspace projection. */
@@ -19,6 +23,10 @@ data class WorkspaceRootProjection(
     val workspaces: List<WorkspaceProjection>,
     val rootSessions: List<SessionRow>,
     val other: Boolean = false,
+    /** Saved root row identity; null for inferred and Other sections. */
+    val registeredRootId: Long? = null,
+    /** Stable saved-root order. Live refreshes must not use activity to reorder it. */
+    val order: Long = Long.MAX_VALUE,
 ) {
     val sessionCount: Int
         get() = rootSessions.size + workspaces.sumOf { it.sessions.size }
@@ -37,6 +45,47 @@ data class WorkspaceProjection(
     val durable: Boolean,
 )
 
+/**
+ * The quiet one-line summary shown under a workspace name. A workspace row is
+ * already scoped by its root, so repeating its full path spends the secondary
+ * line on information the user has already seen. The useful distinction here
+ * is what kind of terminals are inside it.
+ */
+fun workspaceSessionSummary(sessions: List<SessionRow>): String {
+    if (sessions.isEmpty()) return "No sessions"
+    val counts = linkedMapOf<String, Int>()
+    sessions.forEach { session ->
+        val kind = sessionKindLabel(session)
+        counts[kind] = (counts[kind] ?: 0) + 1
+    }
+    val visible = counts.entries.take(3).map { (kind, count) ->
+        if (count == 1) kind else "$kind ×$count"
+    }
+    val hidden = counts.size - visible.size
+    return if (hidden > 0) {
+        visible.joinToString(" · ") + " · +$hidden more kinds"
+    } else {
+        visible.joinToString(" · ")
+    }
+}
+
+/** Maps host metadata to the readable, neutral session vocabulary in the kit. */
+fun sessionKindLabel(session: SessionRow): String = when (
+    session.agent?.trim()?.lowercase()
+) {
+    "claude" -> "Claude"
+    "codex" -> "Codex"
+    "opencode", "open_code", "open-code" -> "OpenCode"
+    "grok" -> "Grok"
+    "shell" -> "Terminal"
+    null, "", "unknown" -> "Terminal"
+    else -> session.agent.orEmpty().replace('_', ' ').replace('-', ' ')
+        .split(' ')
+        .filter(String::isNotBlank)
+        .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
+        .ifBlank { "Terminal" }
+}
+
 /** The label used for sessions that do not belong to a known root. */
 const val OTHER_WORKSPACE_ROOT_LABEL: String = "Other"
 
@@ -54,6 +103,7 @@ fun projectWorkspaceRoots(
     memberships: List<WorkspaceMembership>,
     registeredRoots: List<RegisteredWorkspaceRoot> = emptyList(),
     home: String? = null,
+    workspaceOrders: Map<String, List<String>> = emptyMap(),
 ): List<WorkspaceRootProjection> {
     val sourcePaths = buildList {
         addAll(memberships.map { it.path })
@@ -61,6 +111,11 @@ fun projectWorkspaceRoots(
         addAll(registeredRoots.map { it.path })
     }
     val resolvedHome = canonicalRemotePath(home) ?: inferRemoteHome(sourcePaths)
+    val canonicalWorkspaceOrders = workspaceOrders.mapKeys { (path, _) ->
+        canonicalRemotePath(path, resolvedHome) ?: path
+    }.mapValues { (_, paths) ->
+        paths.mapNotNull { canonicalRemotePath(it, resolvedHome) ?: it }
+    }
 
     val rootSpecs = linkedMapOf<String, RootSpec>()
     val configured = registeredRoots
@@ -69,8 +124,9 @@ fun projectWorkspaceRoots(
             RootSpec(
                 path = path,
                 label = root.label.trim().ifEmpty { pathLabel(path, resolvedHome) },
-                order = root.createdAt,
+                order = root.sortOrder,
                 configured = true,
+                registeredRootId = root.id.takeIf { it > 0L },
             )
         }
         .sortedWith(compareBy<RootSpec> { it.order }.thenBy { it.path })
@@ -161,9 +217,19 @@ fun projectWorkspaceRoots(
     return rootBuckets.values
         .filter { it.rootSpec.path != null || it.workspaces.isNotEmpty() || it.rootSessions.isNotEmpty() }
         .map { bucket ->
+            val explicitOrder = canonicalWorkspaceOrders[bucket.rootSpec.key]
+                .orEmpty()
+                .withIndex()
+                .associate { it.value to it.index }
             val workspaces = disambiguateWorkspaceLabels(
                 bucket.workspaces.values
-                    .sortedWith(compareBy<MutableWorkspace> { workspaceCreated(it.sessions) }.thenBy { it.path })
+                    .sortedWith(
+                        compareBy<MutableWorkspace> {
+                            explicitOrder[it.path] ?: Int.MAX_VALUE
+                        }
+                            .thenBy { workspaceCreated(it.sessions) }
+                            .thenBy { it.path },
+                    )
                     .map { workspace ->
                         WorkspaceProjection(
                             path = workspace.path,
@@ -183,6 +249,8 @@ fun projectWorkspaceRoots(
                 workspaces = workspaces,
                 rootSessions = bucket.rootSessions.sortedWith(SESSION_ORDER),
                 other = bucket.rootSpec.key == OTHER_WORKSPACE_ROOT_KEY,
+                registeredRootId = bucket.rootSpec.registeredRootId,
+                order = bucket.rootSpec.order,
             )
         }
         .sortedWith(ROOT_ORDER)
@@ -226,6 +294,7 @@ private data class RootSpec(
     val label: String,
     val order: Long,
     val configured: Boolean,
+    val registeredRootId: Long? = null,
 ) {
     val key: String get() = path ?: OTHER_WORKSPACE_ROOT_KEY
 }
@@ -249,6 +318,7 @@ private val SESSION_ORDER: Comparator<SessionRow> =
 
 private val ROOT_ORDER: Comparator<WorkspaceRootProjection> =
     compareBy<WorkspaceRootProjection> { it.other }
+        .thenBy { it.order }
         .thenBy { it.label.lowercase() }
 
 private fun otherBucket(

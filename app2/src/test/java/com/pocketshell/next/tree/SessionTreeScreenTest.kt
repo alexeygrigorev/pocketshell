@@ -2,11 +2,14 @@ package com.pocketshell.next.tree
 
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.AgentStateSource
@@ -58,9 +61,15 @@ class SessionTreeScreenTest {
         composeRule.onNodeWithTag(folderHeaderTag("~/git/aplexer")).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed()
         composeRule.onNodeWithTag(sessionRowTag("codex")).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TREE_LIST_TAG)
+            .performScrollToNode(hasTestTag(sessionRowTag("aplexer-follow:yolo")))
         composeRule.onNodeWithTag(sessionRowTag("aplexer-follow:yolo")).assertIsDisplayed()
-        composeRule.onNodeWithText("pocketshell").assertIsDisplayed()
-        composeRule.onNodeWithText("aplexer").assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/pocketshell"))
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(folderHeaderTag("~/git/aplexer"))
+            .performScrollTo()
+            .assertIsDisplayed()
 
         // Header counts the whole listing. Both folders sit under one root.
         composeRule.onNodeWithText("3 sessions · 1 root").assertIsDisplayed()

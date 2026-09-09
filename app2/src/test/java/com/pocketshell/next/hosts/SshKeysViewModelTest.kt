@@ -65,10 +65,19 @@ class SshKeysViewModelTest {
         // IllegalStateException (issue #2623). runTest advances the shared
         // scheduler while the body waits, so both parks drain.
         Dispatchers.setMain(main)
+        // Room gets DIRECT executors so its suspend/Flow work also runs inline
+        // on the calling thread: Room's own pooled executors are real threads
+        // no test scheduler drives, which left the same park-forever hole as
+        // the second dispatcher above (issue #2623 — the class still hung one
+        // method in three once the schedulers were unified).
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
-        ).allowMainThreadQueries().build()
+        )
+            .allowMainThreadQueries()
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
+            .build()
         keyStore = SshKeyStore(
             File(temporaryFolder.root, "ssh-keys"),
             db.sshKeyDao(),

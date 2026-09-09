@@ -175,11 +175,20 @@ fun WorkspaceRootsScreen(
                 contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
             ) {
                 items(items = state.roots, key = { it.id }) { root ->
+                    val path = displayRemotePath(root.path) ?: root.path
+                    val count = "${root.workspaceCount} " +
+                        if (root.workspaceCount == 1) "workspace" else "workspaces"
                     ListRow(
-                        title = displayRemotePath(root.path) ?: root.path,
-                        subtitle = "${root.workspaceCount} " +
-                            if (root.workspaceCount == 1) "workspace" else "workspaces",
+                        title = root.label.ifBlank { path },
+                        subtitle = path,
                         subtitleStyle = PocketShellType.metadata,
+                        trailing = {
+                            Text(
+                                text = count,
+                                color = PocketShellColors.TextSecondary,
+                                style = PocketShellType.metadata,
+                            )
+                        },
                         modifier = Modifier.testTag(workspaceRootRowTag(root.id)),
                         onClick = { activeRoot = root },
                     )

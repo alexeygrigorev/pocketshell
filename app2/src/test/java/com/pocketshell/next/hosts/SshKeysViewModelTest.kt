@@ -43,6 +43,8 @@ class SshKeysViewModelTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
+    /** One scheduler for Main, the store and every runTest body (issue #2623). */
+    private val main = UnconfinedTestDispatcher()
     private lateinit var db: AppDatabase
     private lateinit var keyStore: SshKeyStore
     private lateinit var viewModel: SshKeysViewModel
@@ -55,7 +57,14 @@ class SshKeysViewModelTest {
 
     @Before
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        // ONE UnconfinedTestDispatcher for everything Main-driven AND the
+        // store: two instances mean two schedulers, and work the store resumes
+        // onto its own scheduler is never advanced by runTest — the ViewModel
+        // job parks until runTest's 60s UncompletedCoroutinesError, and the
+        // parked coroutine then trips the next tearDown's resetMain with an
+        // IllegalStateException (issue #2623). runTest advances the shared
+        // scheduler while the body waits, so both parks drain.
+        Dispatchers.setMain(main)
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
@@ -63,7 +72,7 @@ class SshKeysViewModelTest {
         keyStore = SshKeyStore(
             File(temporaryFolder.root, "ssh-keys"),
             db.sshKeyDao(),
-            UnconfinedTestDispatcher(),
+            main,
         )
         val created = SshKeysViewModel(db.sshKeyDao(), keyStore, unlocker)
         viewModel = ViewModelProvider(
@@ -83,7 +92,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `generating a key adds it to the list with a usable file on disk`() = runTest {
+    fun `generating a key adds it to the list with a usable file on disk`() = runTest(main) {
         viewModel.generate("laptop").join()
 
         val state = viewModel.state.first {
@@ -98,7 +107,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `generating without a name still produces a named key`() = runTest {
+    fun `generating without a name still produces a named key`() = runTest(main) {
         viewModel.generate("   ").join()
 
         val state = viewModel.state.first { it.keys.isNotEmpty() }
@@ -106,7 +115,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `importing a pasted key adds it`() = runTest {
+    fun `importing a pasted key adds it`() = runTest(main) {
         viewModel.import("id_ed25519", UNENCRYPTED_PEM).join()
 
         val state = viewModel.state.first { it.message == "Added id_ed25519" && it.keys.any { key -> key.name == "id_ed25519" } }
@@ -115,7 +124,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `loading an unencrypted detail asynchronously exposes the complete public key`() = runTest {
+    fun `loading an unencrypted detail asynchronously exposes the complete public key`() = runTest(main) {
         viewModel.import("id_ed25519", UNENCRYPTED_PEM).join()
         val row = viewModel.state.first { it.keys.isNotEmpty() }.keys.single()
 
@@ -128,7 +137,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `loading a missing detail file leaves loading and reports a useful error`() = runTest {
+    fun `loading a missing detail file leaves loading and reports a useful error`() = runTest(main) {
         val id = db.sshKeyDao().insert(
             com.pocketshell.core.storage.entity.SshKeyEntity(
                 name = "missing",
@@ -148,7 +157,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `an encrypted key is added and defers passphrase entry until needed`() = runTest {
+    fun `an encrypted key is added and defers passphrase entry until needed`() = runTest(main) {
         viewModel.import("locked", ENCRYPTED_PEM).join()
 
         val state = viewModel.state.first { it.message != null }
@@ -159,7 +168,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `passphrase fallback rejects a non-empty but invalid passphrase`() = runTest {
+    fun `passphrase fallback rejects a non-empty but invalid passphrase`() = runTest(main) {
         viewModel.import("locked", ENCRYPTED_PEM).join()
         val row = viewModel.state.first { it.keys.isNotEmpty() }.keys.single()
         var success = true
@@ -175,7 +184,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `text that is not a key surfaces the store's explanation`() = runTest {
+    fun `text that is not a key surfaces the store's explanation`() = runTest(main) {
         viewModel.import("notes", "hello").join()
 
         val state = viewModel.state.first { it.message != null }
@@ -184,7 +193,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `deleting a key removes the row and its file`() = runTest {
+    fun `deleting a key removes the row and its file`() = runTest(main) {
         viewModel.generate("doomed").join()
         val row = viewModel.state.first { it.keys.isNotEmpty() }.keys.single()
         val path = db.sshKeyDao().getById(row.id)!!.privateKeyPath
@@ -198,7 +207,7 @@ class SshKeysViewModelTest {
     }
 
     @Test
-    fun `dismissing the message clears it`() = runTest {
+    fun `dismissing the message clears it`() = runTest(main) {
         viewModel.import("notes", "hello").join()
         viewModel.state.first { it.message != null }
 

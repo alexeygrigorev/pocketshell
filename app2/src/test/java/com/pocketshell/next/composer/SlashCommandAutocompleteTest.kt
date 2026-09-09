@@ -91,6 +91,31 @@ class SlashCommandAutocompleteTest {
         assertEquals("/clearexisting", result.text)
     }
 
+    @Test
+    fun `unknown or missing agent has no invented commands`() {
+        assertTrue(SlashCommandAutocomplete.commandsFor(null).isEmpty())
+        assertTrue(SlashCommandAutocomplete.commandsFor("mystery-9").isEmpty())
+        assertTrue(SlashCommandAutocomplete.commandsFor("shell").isEmpty())
+    }
+
+    @Test
+    fun `known agent catalog is scoped to that agent`() {
+        val claude = SlashCommandAutocomplete.commandsFor("claude").map { it.command }
+        val opencode = SlashCommandAutocomplete.commandsFor("opencode").map { it.command }
+        assertTrue("/goal" in claude)
+        assertTrue("/goal" !in opencode)
+        assertTrue("/sessions" in opencode)
+    }
+
+    @Test
+    fun `filter accepts selected session capabilities`() {
+        val commands = SlashCommandAutocomplete.commandsFor("codex")
+        assertEquals(
+            listOf("/compact"),
+            SlashCommandAutocomplete.filter("com", commands).map { it.command },
+        )
+    }
+
     private fun field(text: String, caret: Int = text.length) =
         TextFieldValue(text = text, selection = TextRange(caret))
 }

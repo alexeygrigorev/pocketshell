@@ -97,6 +97,23 @@ class ViewerViewModelTest {
         }
 
     @Test
+    fun `binary content disables markdown preview even when the name ends in md`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = {
+                it.seedFile("$DIR/not-really-markdown.md", byteArrayOf(0x00, 0x01, 0x02))
+            }
+            val viewModel = viewer(hostId, "$DIR/not-really-markdown.md")
+
+            viewModel.load()
+            advanceUntilIdle()
+
+            assertEquals(FileKind.BINARY, viewModel.state.value.kind)
+            assertFalse(viewModel.state.value.markdownCapable)
+            assertFalse(viewModel.state.value.renderMarkdown)
+        }
+
+    @Test
     fun `editing and saving writes the buffer back to the same path`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         stack.seedSftp = { it.seedFile(TEXT_PATH, "before\n") }
@@ -327,7 +344,11 @@ class ViewerViewModelTest {
     // --- helpers ----------------------------------------------------------
 
     private fun viewer(hostId: Long, path: String) =
-        ViewerViewModel(savedStateHandle = stack.savedState(hostId, path), registry = stack.registry)
+        ViewerViewModel(
+            savedStateHandle = stack.savedState(hostId, path),
+            registry = stack.registry,
+            hostDao = stack.db.hostDao(),
+        )
 
     private companion object {
         const val DIR = "/home/testuser/git/pocketshell"

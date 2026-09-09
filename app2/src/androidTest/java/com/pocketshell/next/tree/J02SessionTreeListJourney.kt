@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -40,18 +41,20 @@ import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_PARTIAL_BANNER_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_ROOT_START_SESSION_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_ACTIONS_TAG
-import com.pocketshell.next.workspaces.HOST_WORKSPACES_REORDER_TAG
 import com.pocketshell.next.workspaces.REORDER_WORKSPACES_BACK_TAG
 import com.pocketshell.next.workspaces.REORDER_WORKSPACES_SCREEN_TAG
 import com.pocketshell.next.workspaces.REORDER_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_SEARCH_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_ACTIONS_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_REORDER_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRootAddTag
 import com.pocketshell.next.workspaces.workspaceRootActionsTag
 import com.pocketshell.next.workspaces.workspaceRootTag
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import com.pocketshell.next.workspaces.readableSessionName
 import com.termux.view.TerminalView
 import com.pocketshell.next.tree.CREATE_SESSION_SHEET_TAG
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -257,8 +260,8 @@ class J02SessionTreeListJourney {
         // Whether the attach then succeeds is J03's subject, not this test's:
         // the fixture hosts a real attachable aplexer process.
         awaitTag(SESSION_SCREEN_TAG)
-        awaitText(SESSION_APLEXER)
-        compose.onNodeWithText(SESSION_APLEXER).assertIsDisplayed()
+        awaitText(readableSessionName(SESSION_APLEXER))
+        compose.onNodeWithText(readableSessionName(SESSION_APLEXER)).assertIsDisplayed()
         JourneyScreenshots.capture("02-session-opened", JOURNEY)
     }
 
@@ -297,7 +300,6 @@ class J02SessionTreeListJourney {
     fun tappingBackOnTheTreeReturnsToHosts() {
         openWorkspaces()
         compose.onNodeWithTag(HOST_WORKSPACES_BACK_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Back").assertIsDisplayed()
         JourneyScreenshots.capture("04-tree-back", JOURNEY)
 
         compose.onNodeWithTag(HOST_WORKSPACES_BACK_TAG).performClick()
@@ -321,7 +323,8 @@ class J02SessionTreeListJourney {
         compose.onNodeWithTag(workspaceRootAddTag(WORKSPACE_ROOT)).performClick()
         awaitTag(HOST_WORKSPACES_ADD_PATH_TAG)
         compose.onNodeWithTag(HOST_WORKSPACES_ADD_PATH_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithTag(HOST_WORKSPACES_BACK_TAG).performClick()
+        awaitTag(HOST_WORKSPACES_LIST_TAG)
     }
 
     @Test
@@ -333,6 +336,7 @@ class J02SessionTreeListJourney {
         JourneyScreenshots.capture("06-root-actions", JOURNEY)
         compose.onNodeWithTag(HOST_WORKSPACES_ROOT_START_SESSION_TAG).performClick()
         awaitTag(CREATE_SESSION_SHEET_TAG)
+        compose.onNodeWithText("More options").performScrollTo().performClick()
         compose.onNodeWithText("Folder").assertIsDisplayed()
         JourneyScreenshots.capture("07-root-create-session", JOURNEY)
     }
@@ -341,10 +345,10 @@ class J02SessionTreeListJourney {
     fun reorderPageShowsPersistentRootAndWorkspaceControls() {
         openWorkspaces()
 
-        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG)
-            .performClick()
-        compose.onNodeWithTag(HOST_WORKSPACES_REORDER_TAG)
-            .performClick()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        compose.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_REORDER_TAG).performClick()
         awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
         awaitTag(REORDER_WORKSPACES_LIST_TAG)
         JourneyScreenshots.capture("08-reorder-workspaces", JOURNEY)
@@ -372,9 +376,9 @@ class J02SessionTreeListJourney {
         JourneyScreenshots.capture("08-reorder-workspaces-after-move", JOURNEY)
 
         compose.onNodeWithTag(REORDER_WORKSPACES_BACK_TAG).performClick()
-        awaitTag(HOST_WORKSPACES_TAG)
-        compose.onNodeWithTag(HOST_WORKSPACES_ACTIONS_TAG).performClick()
-        compose.onNodeWithTag(HOST_WORKSPACES_REORDER_TAG).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        compose.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_REORDER_TAG).performClick()
         awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
         awaitTag(REORDER_WORKSPACES_LIST_TAG)
         compose.onNodeWithTag(REORDER_WORKSPACES_LIST_TAG)
@@ -440,7 +444,7 @@ class J02SessionTreeListJourney {
     private fun openQuietSessionAndAssert(session: String, workspace: String, marker: String) {
         compose.openQuietSession(hostId, session, workspace, TIMEOUT_MS)
         awaitTag(SESSION_SCREEN_TAG)
-        awaitText(session)
+        awaitText(readableSessionName(session))
         compose.onNodeWithTag(SESSION_TITLE_TAG).assertIsDisplayed()
         awaitRenderedTerminal(session)
         typeMarker(marker)
@@ -464,7 +468,7 @@ class J02SessionTreeListJourney {
         awaitTag(sessionRowTag(session))
         compose.onNodeWithTag(sessionRowTag(session)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
-        awaitText(session)
+        awaitText(readableSessionName(session))
         awaitRenderedTerminal(session)
         typeMarker(marker)
     }

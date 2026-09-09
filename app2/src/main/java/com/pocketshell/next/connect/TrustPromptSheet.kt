@@ -3,9 +3,13 @@ package com.pocketshell.next.connect
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
@@ -18,6 +22,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -50,7 +55,7 @@ const val TRUST_SHEET_REJECT_TAG: String = "trust-sheet-reject"
  * asserts on the SAME strings the screen paints instead of a hand-copied
  * duplicate that can silently drift.
  */
-internal const val UNKNOWN_TITLE = "Trust this host?"
+internal const val UNKNOWN_TITLE = "Verify server"
 internal const val MISMATCH_TITLE = "Host key CHANGED"
 
 internal const val UNKNOWN_EXPLANATION =
@@ -62,7 +67,7 @@ internal const val MISMATCH_EXPLANATION =
         "what an interception attack looks like. Only trust the new key if you " +
         "know why it changed."
 
-internal const val UNKNOWN_TRUST_LABEL = "Trust"
+internal const val UNKNOWN_TRUST_LABEL = "Trust and connect"
 internal const val MISMATCH_TRUST_LABEL = "Trust the new key"
 
 /**
@@ -98,7 +103,10 @@ fun TrustPromptSheet(
     onTrust: () -> Unit,
     onReject: () -> Unit,
     modifier: Modifier = Modifier,
-    sheetState: SheetState = rememberModalBottomSheetState(),
+    // A trust decision can contain two fingerprints and a warning. The action
+    // row must stay reachable when that content is taller than the partial
+    // sheet detent.
+    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     ModalBottomSheet(
         onDismissRequest = onReject,
@@ -112,6 +120,10 @@ fun TrustPromptSheet(
             hostLabel = hostLabel,
             onTrust = onTrust,
             onReject = onReject,
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f)
+                .heightIn(max = 560.dp),
         )
     }
 }
@@ -134,53 +146,62 @@ fun TrustPromptSheetContent(
         modifier = modifier
             .fillMaxWidth()
             .testTag(TRUST_SHEET_TAG)
-            .padding(horizontal = PocketShellSpacing.lg)
-            .padding(bottom = PocketShellSpacing.lg)
             .navigationBarsPadding(),
-        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
-        SheetHeader(
-            title = if (prompt.isMismatch) MISMATCH_TITLE else UNKNOWN_TITLE,
-            subtitle = hostLabel,
-            titleTestTag = TRUST_SHEET_TITLE_TAG,
-        )
-
-        Banner(
-            text = if (prompt.isMismatch) MISMATCH_EXPLANATION else UNKNOWN_EXPLANATION,
-            role = if (prompt.isMismatch) BannerRole.Error else BannerRole.Info,
-            modifier = Modifier.testTag(TRUST_SHEET_EXPLANATION_TAG),
-        )
-
-        Fingerprint(
-            label = if (prompt.isMismatch) "New key presented now" else "Key fingerprint",
-            algorithm = prompt.fingerprintAlgorithm,
-            value = prompt.fingerprintSha256,
-            testTag = TRUST_SHEET_FINGERPRINT_TAG,
-            copyTestTag = TRUST_SHEET_COPY_FINGERPRINT_TAG,
-        )
-
-        // Rendered ONLY for a mismatch, and only because the state carries it:
-        // seeing the old and the new fingerprint together is what lets a user
-        // tell a rebuild from an interception.
-        prompt.previousFingerprintSha256?.let { previous ->
-            Fingerprint(
-                label = "Key you trusted before",
-                algorithm = prompt.previousFingerprintAlgorithm ?: "Fingerprint digest",
-                value = previous,
-                testTag = TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG,
-                copyTestTag = TRUST_SHEET_COPY_PREVIOUS_FINGERPRINT_TAG,
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+        ) {
+            SheetHeader(
+                title = if (prompt.isMismatch) MISMATCH_TITLE else UNKNOWN_TITLE,
+                subtitle = hostLabel,
+                titleTestTag = TRUST_SHEET_TITLE_TAG,
             )
+
+            Banner(
+                text = if (prompt.isMismatch) MISMATCH_EXPLANATION else UNKNOWN_EXPLANATION,
+                role = if (prompt.isMismatch) BannerRole.Error else BannerRole.Info,
+                modifier = Modifier.testTag(TRUST_SHEET_EXPLANATION_TAG),
+            )
+
+            Fingerprint(
+                label = if (prompt.isMismatch) "New key presented now" else "Key fingerprint",
+                algorithm = prompt.fingerprintAlgorithm,
+                value = prompt.fingerprintSha256,
+                testTag = TRUST_SHEET_FINGERPRINT_TAG,
+                copyTestTag = TRUST_SHEET_COPY_FINGERPRINT_TAG,
+            )
+
+            // Rendered ONLY for a mismatch, and only because the state carries it:
+            // seeing the old and the new fingerprint together is what lets a user
+            // tell a rebuild from an interception.
+            prompt.previousFingerprintSha256?.let { previous ->
+                Fingerprint(
+                    label = "Key you trusted before",
+                    algorithm = prompt.previousFingerprintAlgorithm ?: "Fingerprint digest",
+                    value = previous,
+                    testTag = TRUST_SHEET_PREVIOUS_FINGERPRINT_TAG,
+                    copyTestTag = TRUST_SHEET_COPY_PREVIOUS_FINGERPRINT_TAG,
+                )
+            }
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg),
             horizontalArrangement = Arrangement.spacedBy(
                 space = PocketShellSpacing.sm,
                 alignment = Alignment.End,
             ),
         ) {
             PocketShellButton(
-                text = "Reject",
+                text = "Cancel",
                 onClick = onReject,
                 variant = ButtonVariant.Text,
                 modifier = Modifier.testTag(TRUST_SHEET_REJECT_TAG),

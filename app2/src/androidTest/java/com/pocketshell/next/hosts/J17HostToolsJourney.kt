@@ -153,6 +153,15 @@ class J17HostToolsJourney {
                 .isNotEmpty()
         ) {
             pressBack()
+            // The detail page owns the first back event. Wait for its
+            // in-route page state to settle before sending the route-level
+            // back event; otherwise both events can be consumed by the same
+            // BackHandler while Compose is still recomposing.
+            compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
+                compose.onAllNodesWithTag(SSH_KEYS_DETAIL_TAG)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
         }
         pressBack()
         awaitScrollableTag(HOST_LIST_ADD_TAG)

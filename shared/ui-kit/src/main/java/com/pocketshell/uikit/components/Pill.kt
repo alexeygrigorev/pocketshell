@@ -20,32 +20,38 @@ import com.pocketshell.uikit.theme.PocketShellShapes
  *
  * Visual recipe (CSS reference + the #461 token migration that snaps it onto
  * the design ladder, matching the sibling [Badge] in the same pill family):
- * - shape: `PocketShellShapes.small` (8dp) — Pill reads as a small status chip
+ * - shape: `PocketShellShapes.small` (12dp) — Pill reads as a small status chip
  *   (same chip vocabulary as `.chip`/`.key`/[Badge]), NOT a fully-rounded
- *   capsule, so it snaps to the chip rung rather than the CSS's off-ladder 10px.
+ *   capsule.
  * - padding: [PocketShellDensity.chipPadH] (10dp) / [PocketShellDensity.chipPadV]
  *   (6dp) — the shared chip-padding rung, replacing the off-grid 9px/3px so Pill
  *   and [Badge] share one chip footprint.
- * - type: `labelSmall` (11sp Medium) — the nearest type-ladder rung to the CSS's
- *   off-ladder 10px caption. Bold weight + 0.6sp uppercase letter-spacing are
- *   kept as the component's intent on top of the ladder size/family.
+ * - type: `labelSmall` (16sp Medium) — the Quiet metadata/label rung. Bold
+ *   weight + 0.6sp uppercase letter-spacing are kept as the component's intent.
  *
  * Colours come from [kind] — see [PillKind] for the four variants.
  * Background is always a 12%-alpha tint of the foreground (per the CSS
  * `rgba(..., 0.12)` rules), except [PillKind.Error] which uses the
- * surface-elev neutral colour.
+ * surface-elev neutral colour. [neutralBackground] keeps the semantic foreground
+ * while using the neutral surface for routine metadata labels.
  */
 @Composable
 fun Pill(
     label: String,
     kind: PillKind,
     modifier: Modifier = Modifier,
+    neutralBackground: Boolean = false,
 ) {
-    val (textColor: Color, bgColor: Color) = when (kind) {
+    val (textColor: Color, semanticBackground: Color) = when (kind) {
         PillKind.Ok -> PocketShellColors.Green to PocketShellColors.Green.copy(alpha = 0.12f)
         PillKind.Warn -> PocketShellColors.Amber to PocketShellColors.Amber.copy(alpha = 0.12f)
         PillKind.Blocked -> PocketShellColors.Red to PocketShellColors.Red.copy(alpha = 0.12f)
         PillKind.Error -> PocketShellColors.TextMuted to PocketShellColors.SurfaceElev
+    }
+    val background = if (neutralBackground) {
+        PocketShellColors.SurfaceElev
+    } else {
+        semanticBackground
     }
 
     Text(
@@ -55,7 +61,7 @@ fun Pill(
         fontWeight = FontWeight.Bold,
         letterSpacing = 0.6.sp,
         modifier = modifier
-            .background(color = bgColor, shape = PocketShellShapes.small)
+            .background(color = background, shape = PocketShellShapes.small)
             .padding(
                 horizontal = PocketShellDensity.chipPadH,
                 vertical = PocketShellDensity.chipPadV,

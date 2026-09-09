@@ -33,18 +33,18 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.CreateSessionRequest
 import com.pocketshell.next.tree.CreateSessionSheet
+import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
+import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
+import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
 import com.pocketshell.next.tree.SessionTreeUiState
 import com.pocketshell.next.tree.SessionTreeViewModel
 import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_LABEL
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
-import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
-import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_MESSAGE_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.STOP_SESSION_TITLE_TAG
 import com.pocketshell.next.tree.folderHeaderTag
-import com.pocketshell.next.tree.sessionRowMenuTag
 import com.pocketshell.next.tree.sessionRowTag
 import com.pocketshell.next.tree.stopSessionMessage
 import com.pocketshell.next.usage.UsageGlancePillState
@@ -53,12 +53,11 @@ import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
-import com.pocketshell.uikit.components.Kebab
-import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
@@ -240,18 +239,28 @@ fun WorkspaceScreen(
                     modifier = Modifier.testTag(WORKSPACE_EMPTY_TAG),
                 )
 
-                state.isEmptyAndHealthy -> EmptyState(
-                    title = "No sessions",
-                    description = "This workspace is empty. Start a session here.",
-                    action = {
-                        PocketShellButton(
-                            text = WORKSPACE_NEW_SESSION_LABEL,
-                            onClick = onCreateSession,
-                            modifier = Modifier.testTag(WORKSPACE_NEW_SESSION_TAG),
-                        )
-                    },
-                    modifier = Modifier.testTag(WORKSPACE_EMPTY_TAG),
-                )
+                state.isEmptyAndHealthy -> Column(modifier = Modifier.fillMaxSize()) {
+                    EmptyState(
+                        title = "No sessions",
+                        description = "This workspace is empty. Start a session here.",
+                        action = {
+                            PocketShellButton(
+                                text = WORKSPACE_NEW_SESSION_LABEL,
+                                onClick = onCreateSession,
+                                modifier = Modifier.testTag(WORKSPACE_NEW_SESSION_TAG),
+                            )
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag(WORKSPACE_EMPTY_TAG),
+                    )
+                    WorkspaceLinks(
+                        hostLabel = state.hostLabel,
+                        onOpenFiles = onOpenFiles,
+                        onOpenPorts = onOpenPorts,
+                        showServices = false,
+                    )
+                }
 
                 else -> LazyColumn(
                     modifier = Modifier
@@ -267,7 +276,6 @@ fun WorkspaceScreen(
                             session = session,
                             displayName = displayNames[session.name] ?: session.name,
                             onClick = { onOpenSession(session.name) },
-                            onRequestStop = { onRequestStop(session.name) },
                         )
                     }
                     item(key = "workspace-new-session") {
@@ -282,6 +290,13 @@ fun WorkspaceScreen(
                                     vertical = PocketShellSpacing.md,
                                 )
                                 .testTag(WORKSPACE_NEW_SESSION_TAG),
+                        )
+                    }
+                    item(key = "workspace-links") {
+                        WorkspaceLinks(
+                            hostLabel = state.hostLabel,
+                            onOpenFiles = onOpenFiles,
+                            onOpenPorts = onOpenPorts,
                         )
                     }
                 }
@@ -309,6 +324,14 @@ fun WorkspaceScreen(
             onBrowseFiles = {
                 workspaceActionsOpen = false
                 onOpenFiles()
+            },
+            onOpenPorts = {
+                workspaceActionsOpen = false
+                onOpenPorts()
+            },
+            onOpenUsage = {
+                workspaceActionsOpen = false
+                onOpenUsage()
             },
             onCopyPath = {
                 workspaceActionsOpen = false
@@ -404,6 +427,8 @@ fun WorkspaceScreen(
 private fun WorkspaceActionsSheet(
     onNewSession: () -> Unit,
     onBrowseFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onOpenUsage: () -> Unit,
     onCopyPath: () -> Unit,
     onReorder: () -> Unit,
     onCreateFolder: () -> Unit,
@@ -420,6 +445,8 @@ private fun WorkspaceActionsSheet(
         WorkspaceActionsContent(
             onNewSession = onNewSession,
             onBrowseFiles = onBrowseFiles,
+            onOpenPorts = onOpenPorts,
+            onOpenUsage = onOpenUsage,
             onCopyPath = onCopyPath,
             onReorder = onReorder,
             onCreateFolder = onCreateFolder,
@@ -434,6 +461,8 @@ private fun WorkspaceActionsSheet(
 internal fun WorkspaceActionsContent(
     onNewSession: () -> Unit,
     onBrowseFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onOpenUsage: () -> Unit,
     onCopyPath: () -> Unit,
     onReorder: () -> Unit,
     onCreateFolder: () -> Unit,
@@ -476,12 +505,6 @@ internal fun WorkspaceActionsContent(
             modifier = Modifier.testTag(WORKSPACE_REORDER_TAG),
         )
         ListRow(
-            title = "Create folder",
-            subtitle = "Create a child folder here",
-            onClick = onCreateFolder,
-            modifier = Modifier.testTag(WORKSPACE_CREATE_FOLDER_TAG),
-        )
-        ListRow(
             title = "Remove from list",
             subtitle = "Keeps the folder and running sessions",
             onClick = onRemove,
@@ -490,34 +513,46 @@ internal fun WorkspaceActionsContent(
     }
 }
 
+/** Workspace-scoped utilities stay visible below the session list. */
+@Composable
+private fun WorkspaceLinks(
+    hostLabel: String,
+    onOpenFiles: () -> Unit,
+    onOpenPorts: () -> Unit,
+    showServices: Boolean = true,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader(label = "Workspace")
+        ListRow(
+            title = "Browse files",
+            onClick = onOpenFiles,
+            modifier = Modifier.testTag(SESSION_TREE_FILES_TAG),
+        )
+        if (showServices) {
+            ListRow(
+                title = "Services & tunnels",
+                subtitle = hostLabel.takeIf { it.isNotBlank() }?.let { "On $it" },
+                onClick = onOpenPorts,
+                modifier = Modifier.testTag(SESSION_TREE_PORTS_TAG),
+            )
+        }
+    }
+}
+
 @Composable
 private fun WorkspaceSessionRow(
     session: SessionRow,
     displayName: String = session.name,
     onClick: () -> Unit,
-    onRequestStop: () -> Unit,
 ) {
     ListRow(
         title = displayName,
-        subtitle = sessionKindLabel(session),
+        subtitle = sessionKindStatusLabel(session),
         leading = { SessionKindMark(agent = session.agent) },
         titleStyle = com.pocketshell.uikit.theme.PocketShellType.body,
         subtitleStyle = com.pocketshell.uikit.theme.PocketShellType.metadata,
         titleWeight = androidx.compose.ui.text.font.FontWeight.Medium,
         titleMaxLines = 2,
-        trailing = {
-            Kebab(
-                items = listOf(
-                    KebabItem(
-                        label = STOP_SESSION_ITEM_LABEL,
-                        onClick = onRequestStop,
-                        testTag = STOP_SESSION_ITEM_TAG,
-                    ),
-                ),
-                contentDescription = "Actions for ${session.name}",
-                triggerTestTag = sessionRowMenuTag(session.name),
-            )
-        },
         onClick = onClick,
         modifier = Modifier.testTag(sessionRowTag(session.name)),
     )
@@ -530,9 +565,9 @@ private fun workspaceSubtitle(state: SessionTreeUiState): String = when {
     state.failure != null && !state.loaded -> "Status unavailable"
     state.refreshing -> "Reconnecting…"
     !state.loaded -> "Connecting…"
-    else -> listOf(
-        state.workspacePath.orEmpty(),
-        "${state.workspaceSessions.size} " +
-            if (state.workspaceSessions.size == 1) "session" else "sessions",
-    ).filter(String::isNotBlank).joinToString(" · ")
+    state.failure != null -> "Status unavailable"
+    else -> listOfNotNull(
+        state.hostLabel.takeIf { it.isNotBlank() },
+        displayRemotePath(state.workspacePath),
+    ).joinToString(" · ").ifBlank { "Connected" }
 }

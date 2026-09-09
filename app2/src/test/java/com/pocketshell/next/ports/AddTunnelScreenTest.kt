@@ -9,6 +9,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.click
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
 import androidx.compose.ui.platform.LocalDensity
@@ -89,6 +91,28 @@ class AddTunnelScreenTest {
         composeRule.onNodeWithTag(ADD_TUNNEL_SUBMIT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithText("Local port 35173 is already used by Fixture HTTP")
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun `more options discloses the safe remote address and exposure warning`() {
+        setContent(remote = "5173", local = "35173", valid = true)
+
+        composeRule.onNodeWithTag(ADD_TUNNEL_REMOTE_ADDRESS_CONTAINER_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(ADD_TUNNEL_FORM_SCROLL_TAG)
+            .performScrollToNode(hasTestTag(ADD_TUNNEL_OPTIONS_TAG))
+        composeRule.onNodeWithTag(
+            ADD_TUNNEL_OPTIONS_TAG,
+            useUnmergedTree = true,
+        ).performTouchInput { click() }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(ADD_TUNNEL_REMOTE_ADDRESS_CONTAINER_TAG).performScrollTo()
+        composeRule.onNodeWithTag(ADD_TUNNEL_REMOTE_ADDRESS_CONTAINER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Remote address").assertIsDisplayed()
+        composeRule.onNodeWithText("127.0.0.1").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Changing the local bind address can expose this service to other devices. " +
+                "PocketShell keeps this tunnel on 127.0.0.1.",
+        ).assertIsDisplayed()
     }
 
     private fun setContent(

@@ -64,6 +64,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setAgentSubmitEnterDelayMs(delayMs: Int) = repository.setAgentSubmitEnterDelayMs(delayMs)
 
+    fun setShowCommonKeys(show: Boolean) = repository.setShowCommonKeys(show)
+
+    fun setReconnectWhenReturn(enabled: Boolean) = repository.setReconnectWhenReturn(enabled)
+
     fun setDefaultHostId(hostId: Long?) = repository.setDefaultHostId(hostId)
 
     fun resetAdvancedDefaults() = repository.resetAdvancedDefaults()

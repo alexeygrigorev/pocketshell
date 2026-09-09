@@ -85,7 +85,7 @@ class QuietWorkspaceNavigationTest {
                     navController = controller,
                     hostsScreen = { Text("Hosts") },
                     connectViewModel = { stack.viewModel },
-                    workspacesScreen = { hostId, onOpenWorkspace, _, _, _, _, onBack, _ ->
+                    workspacesScreen = { hostId, onOpenWorkspace, _, _, _, _, onBack, _, _ ->
                         Column {
                             Text("Workspaces $hostId")
                             Button(
@@ -111,7 +111,7 @@ class QuietWorkspaceNavigationTest {
                             ) { Text("Back to workspaces") }
                         }
                     },
-                    sessionScreen = { _, _, onBack, _, _, _, _ ->
+                    sessionScreen = { _, _, _, onBack, _, _, _, _ ->
                         Column {
                             Button(
                                 onClick = onBack,

@@ -2,17 +2,18 @@ package com.pocketshell.next.tree
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -20,12 +21,12 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.ImeAction
@@ -41,6 +42,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -59,10 +61,9 @@ const val CREATE_SESSION_SUBMIT_TAG: String = "create-session-submit"
 const val CREATE_SESSION_CANCEL_TAG: String = "create-session-cancel"
 const val CREATE_SESSION_ERROR_TAG: String = "create-session-error"
 const val CREATE_SESSION_TYPE_SHELL_TAG: String = "create-session-type-shell"
-const val CREATE_SESSION_TYPE_AGENT_TAG: String = "create-session-type-agent"
 const val CREATE_SESSION_ENGINE_TAG_PREFIX: String = "create-session-engine-"
 const val CREATE_SESSION_PROFILE_TAG: String = "create-session-profile"
-const val CREATE_SESSION_NO_ENGINES_TAG: String = "create-session-no-engines"
+const val CREATE_SESSION_OPTIONS_TAG: String = "create-session-options"
 const val CREATE_SESSION_UNAVAILABLE_TAG: String = "create-session-unavailable"
 
 fun createSessionEngineTag(engineId: String): String = "$CREATE_SESSION_ENGINE_TAG_PREFIX$engineId"
@@ -72,27 +73,75 @@ fun createSessionProfileTag(profileName: String): String = "$CREATE_SESSION_PROF
 internal const val CREATE_SESSION_TITLE = "New session"
 internal const val CREATE_SESSION_FOLDER_LABEL = "Folder"
 internal const val CREATE_SESSION_NAME_LABEL = "Session name"
-internal const val CREATE_SESSION_SUBMIT_LABEL = "Create"
-internal const val CREATE_SESSION_CANCEL_LABEL = "Cancel"
-internal const val CREATE_SESSION_HINT =
-    "The session starts detached in this folder. Leave the folder blank to use " +
-        "the host's default."
-internal const val CREATE_SESSION_TYPE_LABEL = "Session type"
-internal const val CREATE_SESSION_ENGINE_LABEL = "Agent engine"
+internal const val CREATE_SESSION_SUBMIT_LABEL = "Start"
 internal const val CREATE_SESSION_PROFILE_LABEL = "Profile"
-internal const val CREATE_SESSION_NO_ENGINES =
-    "No agent engines are available on this host."
-internal const val CREATE_SESSION_ENGINE_HINT =
-    "The engine will auto-start in the new pane."
-internal const val CREATE_SESSION_LOADING_ENGINES = "Loading engines…"
 
-private val CREATE_SESSION_TYPE_LABELS = listOf("Shell", "Agent")
 private val PICKER_SEGMENT_HEIGHT = 48.dp
 private const val CREATE_SESSION_HEIGHT_FRACTION = 0.85f
 private val CREATE_SESSION_MAX_HEIGHT = 560.dp
 
 /** Shell (plain pane) vs Agent (host starts an engine in the new session). */
 enum class CreateSessionKind { Shell, Agent }
+
+/** The five programs exposed by the New session sheet. */
+private data class DirectSessionProgram(
+    val id: String,
+    val label: String,
+    val description: String,
+    val engineIds: Set<String> = setOf(id),
+)
+
+private val DIRECT_SESSION_PROGRAMS = listOf(
+    DirectSessionProgram(
+        id = "shell",
+        label = "Shell",
+        description = "A plain terminal",
+    ),
+    DirectSessionProgram(
+        id = "claude",
+        label = "Claude Code",
+        description = "Ready on this host",
+    ),
+    DirectSessionProgram(
+        id = "codex",
+        label = "Codex",
+        description = "Ready on this host",
+    ),
+    DirectSessionProgram(
+        id = "opencode",
+        label = "OpenCode",
+        description = "Ready on this host",
+        engineIds = setOf("opencode", "open_code", "open-code"),
+    ),
+    DirectSessionProgram(
+        id = "grok",
+        label = "Grok",
+        description = "Ready on this host",
+        engineIds = setOf("grok", "grok-build"),
+    ),
+)
+
+private fun directProgramId(engineId: String): String? =
+    DIRECT_SESSION_PROGRAMS.firstOrNull { engineId.trim().lowercase() in it.engineIds }?.id
+
+private fun engineForProgram(
+    program: DirectSessionProgram,
+    engines: List<EngineInfo>,
+): EngineInfo? = engines.firstOrNull { it.id.trim().lowercase() in program.engineIds }
+
+private fun isCreateable(engine: EngineInfo?): Boolean =
+    engine != null && availableEnginesForCreate(listOf(engine)).isNotEmpty()
+
+private fun selectedDirectProgram(
+    form: CreateSessionFormState,
+    resolvedEngineId: String? = form.engineId,
+): DirectSessionProgram =
+    if (form.kind == CreateSessionKind.Shell) {
+        DIRECT_SESSION_PROGRAMS.first()
+    } else {
+        DIRECT_SESSION_PROGRAMS.firstOrNull { it.id == resolvedEngineId?.let(::directProgramId) }
+            ?: DIRECT_SESSION_PROGRAMS.first()
+    }
 
 /**
  * What the sheet asks `sessions create` to do. Optional flags are `null`
@@ -107,10 +156,10 @@ data class CreateSessionRequest(
 )
 
 /**
- * The only rows the Agent engine picker may offer: enabled AND available AND
- * the host's own `available_for_create` verdict. Disabled, missing-harness,
- * and not-createable rows stay off the chips (issue #2439 / #2522). Aplexer's
- * `shell` engine is never an agent, even if a host listed it as createable.
+ * The only provider rows that may be started: enabled AND available AND the
+ * host's own `available_for_create` verdict. Disabled, missing-harness, and
+ * not-createable rows remain visible as unavailable recovery choices, while
+ * the host's verdict still gates the request (issue #2439 / #2522).
  */
 fun availableEnginesForCreate(engines: List<EngineInfo>): List<EngineInfo> =
     engines.filter { engine ->
@@ -174,8 +223,9 @@ fun collisionSafeSessionName(folder: String, existingNames: Collection<String>):
  * that the field is theirs and a later folder edit leaves it alone. Silently
  * overwriting a typed name would be the worse behaviour of the two.
  *
- * Kind defaults to [CreateSessionKind.Shell] so a one-tap create (journey J04)
- * is still a plain shell session; Agent is an explicit pick.
+ * Kind defaults to [CreateSessionKind.Shell] until host capabilities arrive.
+ * The sheet promotes the first createable direct program (Claude Code when
+ * present) after that read; an explicit user choice always wins.
  */
 @Stable
 class CreateSessionFormState(
@@ -204,6 +254,9 @@ class CreateSessionFormState(
     var profileName: String? by mutableStateOf(null)
         private set
 
+    /** True once the user has chosen a program in the direct picker. */
+    private var programEdited: Boolean = false
+
     fun onFolderChange(value: String) {
         folder = value
         if (!nameEdited) name = collisionSafeSessionName(value, existingSessionNames)
@@ -215,10 +268,12 @@ class CreateSessionFormState(
     }
 
     fun onKindChange(value: CreateSessionKind) {
+        programEdited = true
         kind = value
     }
 
     fun onEngineChange(value: String?) {
+        programEdited = true
         engineId = value
         profileName = null
     }
@@ -229,6 +284,21 @@ class CreateSessionFormState(
 
     /** The host requires a name, so a blank one can never be submitted. */
     val canSubmit: Boolean get() = name.isNotBlank()
+
+    /**
+     * Selects the design-kit default once host capabilities are known. This is
+     * deliberately a no-op after an explicit tap, so a refresh cannot replace
+     * the user's program choice underneath them.
+     */
+    fun selectDefaultProgram(available: List<EngineInfo>) {
+        if (programEdited || kind != CreateSessionKind.Shell || engineId != null) return
+        val preferred = available.firstOrNull { directProgramId(it.id) == "claude" }
+            ?: available.firstOrNull { directProgramId(it.id) != null }
+            ?: return
+        kind = CreateSessionKind.Agent
+        engineId = preferred.id
+        profileName = null
+    }
 
     /** What `sessions create` is asked for: `NAME`. */
     val submittedName: String get() = name.trim()
@@ -272,8 +342,9 @@ class CreateSessionFormState(
 /**
  * The create-session bottom sheet (rewrite task U-6, journey J04, issue #2522).
  *
- * Folder + name, plus the v0.4.47 create interaction restored: Shell vs Agent,
- * an engine/profile picker fed by the host registry.
+ * Direct program choices from the design-kit, with advanced folder/name/profile
+ * fields behind More options. Provider rows are fed by the host registry; the
+ * request sent to the host remains [CreateSessionRequest].
  *
  * Dismissing the sheet (scrim tap / back / drag-down) routes to [onCancel],
  * so backing out can never be mistaken for a create.
@@ -344,12 +415,21 @@ fun CreateSessionSheetContent(
         cursorColor = PocketShellColors.Accent,
     )
     val available = availableEnginesForCreate(state.engines)
-    var unavailableEngine by remember { mutableStateOf<EngineInfo?>(null) }
+    LaunchedEffect(available.map { it.id }) {
+        form.selectDefaultProgram(available)
+    }
+    var unavailableProgram by remember { mutableStateOf<DirectSessionProgram?>(null) }
+    val enginesByProgram = remember(state.engines) {
+        DIRECT_SESSION_PROGRAMS.associateWith { program ->
+            engineForProgram(program, state.engines)
+        }
+    }
     val selectedEngine = if (form.kind == CreateSessionKind.Agent) {
-        available.firstOrNull { it.id == form.engineId } ?: available.firstOrNull()
+        available.firstOrNull { it.id == form.engineId }
     } else {
         null
     }
+    val selectedProgram = selectedDirectProgram(form, selectedEngine?.id)
     val engineProfiles = profilesForEngine(state.profiles, selectedEngine?.id)
     val selectedProfileIndex = engineProfiles
         .indexOfFirst { it.name == form.profileName }
@@ -375,21 +455,17 @@ fun CreateSessionSheetContent(
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
             SheetHeader(
-                title = unavailableEngine?.let { "${it.label} unavailable" }
+                title = unavailableProgram?.let { "${it.label} is not available" }
                     ?: if (optionsOpen) "Session options" else CREATE_SESSION_TITLE,
-                subtitle = if (unavailableEngine != null) {
-                    "Choose another program to continue."
-                } else if (optionsOpen) {
-                    "Name, folder and profile for this session."
-                } else {
-                    form.folder.ifBlank { "Host default folder" }
-                },
                 titleTestTag = CREATE_SESSION_TITLE_TAG,
+                closeTestTag = CREATE_SESSION_CANCEL_TAG,
                 onClose = {
-                    when {
-                        unavailableEngine != null -> unavailableEngine = null
-                        optionsOpen -> optionsOpen = false
-                        else -> onCancel()
+                    if (!state.submitting) {
+                        when {
+                            unavailableProgram != null -> unavailableProgram = null
+                            optionsOpen -> optionsOpen = false
+                            else -> onCancel()
+                        }
                     }
                 },
             )
@@ -406,18 +482,19 @@ fun CreateSessionSheetContent(
                 )
             }
 
-            if (unavailableEngine != null) {
-                val engine = unavailableEngine!!
+            if (unavailableProgram != null) {
+                val program = unavailableProgram!!
+                val engine = enginesByProgram[program]
                 Text(
-                    text = "PocketShell could not find a usable ${engine.label} installation on the host.",
+                    text = "PocketShell could not find a usable ${program.label} installation on the host.",
                     color = PocketShellColors.TextSecondary,
                     style = PocketShellType.body,
+                    modifier = Modifier.testTag(CREATE_SESSION_UNAVAILABLE_TAG),
                 )
                 PocketShellButton(
                     text = "Choose another program",
                     onClick = {
-                        unavailableEngine = null
-                        form.onKindChange(CreateSessionKind.Shell)
+                        unavailableProgram = null
                     },
                     variant = ButtonVariant.Primary,
                     modifier = Modifier.fillMaxWidth(),
@@ -425,14 +502,14 @@ fun CreateSessionSheetContent(
                 PocketShellButton(
                     text = if (state.enginesLoading) "Checking…" else "Re-check",
                     onClick = {
-                        unavailableEngine = null
+                        unavailableProgram = null
                         onRefreshEngines()
                     },
                     variant = ButtonVariant.Secondary,
                     enabled = !state.enginesLoading,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                var technicalDetailsOpen by remember(engine.id) { mutableStateOf(false) }
+                var technicalDetailsOpen by remember(program.id) { mutableStateOf(false) }
                 ListRow(
                     title = "Technical details",
                     subtitle = if (technicalDetailsOpen) "Hide details" else "Show host capability details",
@@ -440,8 +517,9 @@ fun CreateSessionSheetContent(
                 )
                 if (technicalDetailsOpen) {
                     Text(
-                        text = "Executable unavailable\nHost engine: ${engine.id}\n" +
-                            (engine.unavailableReason ?: "The host did not report an installation."),
+                        text = "Executable unavailable\nHost engine: ${engine?.id ?: program.id}\n" +
+                            (engine?.unavailableReason
+                                ?: "The host did not report a usable installation."),
                         color = PocketShellColors.TextSecondary,
                         style = PocketShellType.bodyMono,
                     )
@@ -500,165 +578,97 @@ fun CreateSessionSheetContent(
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-                    SectionHeader(label = "Program")
-                    ListRow(
-                        title = "Terminal",
-                        subtitle = "A plain terminal in this workspace",
-                        leading = { SessionKindMark(agent = "shell") },
-                        onClick = { if (!state.submitting) form.onKindChange(CreateSessionKind.Shell) },
-                        modifier = Modifier.testTag(CREATE_SESSION_TYPE_SHELL_TAG),
+                    Text(
+                        text = "In ${defaultSessionName(form.folder).ifBlank { "current workspace" }}",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
                     )
-                    ListRow(
-                        title = "Agent",
-                        subtitle = if (available.isEmpty()) "No agent is ready on this host" else "Choose an available agent",
-                        onClick = { if (!state.submitting) form.onKindChange(CreateSessionKind.Agent) },
-                        modifier = Modifier.testTag(CREATE_SESSION_TYPE_AGENT_TAG),
-                    )
-                    if (form.kind == CreateSessionKind.Agent) {
-                        if (state.enginesLoading && available.isEmpty()) {
-                            Text(
-                                text = CREATE_SESSION_LOADING_ENGINES,
-                                color = PocketShellColors.TextMuted,
-                                style = PocketShellType.labelMono,
-                            )
+                    DIRECT_SESSION_PROGRAMS.forEach { program ->
+                        val engine = enginesByProgram[program]
+                        val createable = program.id == "shell" || isCreateable(engine)
+                        val checking = program.id != "shell" &&
+                            state.enginesLoading && engine == null
+                        val blockedByFailure = program.id != "shell" &&
+                            state.enginesFailure != null && engine == null
+                        val selected = selectedProgram.id == program.id
+                        val subtitle = when {
+                            program.id == "shell" -> program.description
+                            checking -> "Checking availability…"
+                            blockedByFailure -> "Availability could not be checked"
+                            createable -> program.description
+                            else -> "Not available"
                         }
-                        available.forEach { engine ->
-                            ListRow(
-                                title = engine.label,
-                                subtitle = if (engine.id == selectedEngine?.id) "Selected agent" else "Ready on host",
-                                leading = { SessionKindMark(agent = engine.id) },
-                                onClick = { if (!state.submitting) form.onEngineChange(engine.id) },
-                                modifier = Modifier.testTag(createSessionEngineTag(engine.id)),
-                            )
-                        }
-                        state.engines.filter { engine ->
-                            engine.id != "shell" && engine !in available
-                        }.forEach { engine ->
-                            ListRow(
-                                title = engine.label,
-                                subtitle = "Not available${engine.unavailableReason?.let { reason -> " · $reason" }.orEmpty()}",
-                                leading = { SessionKindMark(agent = engine.id) },
-                                onClick = {
-                                    if (!state.submitting) {
+                        ListRow(
+                            title = program.label,
+                            subtitle = subtitle,
+                            leading = {
+                                SessionKindMark(
+                                    agent = program.id,
+                                    showShell = true,
+                                )
+                            },
+                            trailing = if (selected) {
+                                {
+                                    Icon(
+                                        imageVector = PocketShellIcons.Check,
+                                        contentDescription = "Selected",
+                                        tint = PocketShellColors.Accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onClick = when {
+                                state.submitting || checking || blockedByFailure -> null
+                                program.id == "shell" -> {
+                                    { form.onKindChange(CreateSessionKind.Shell) }
+                                }
+                                createable && engine != null -> {
+                                    {
                                         form.onKindChange(CreateSessionKind.Agent)
-                                        unavailableEngine = engine
+                                        form.onEngineChange(engine.id)
                                     }
+                                }
+                                else -> { { unavailableProgram = program } }
+                            },
+                            modifier = Modifier.testTag(
+                                if (program.id == "shell") {
+                                    CREATE_SESSION_TYPE_SHELL_TAG
+                                } else {
+                                    createSessionEngineTag(program.id)
                                 },
-                                modifier = Modifier.testTag(createSessionEngineTag(engine.id)),
-                            )
-                        }
-                        if (!state.enginesLoading && state.engines.isEmpty()) {
-                            Text(
-                                text = state.enginesFailure ?: CREATE_SESSION_NO_ENGINES,
-                                color = PocketShellColors.TextMuted,
-                                style = PocketShellType.labelMono,
-                                modifier = Modifier.testTag(CREATE_SESSION_NO_ENGINES_TAG),
-                            )
-                        }
-                        unavailableEngine?.let { engine ->
-                            Banner(
-                                text = "${engine.label} is not available${engine.unavailableReason?.let { reason -> ": $reason" }.orEmpty()}",
-                                role = BannerRole.Warning,
-                                maxLines = 4,
-                                modifier = Modifier.testTag(CREATE_SESSION_UNAVAILABLE_TAG),
-                            )
-                        }
+                            ),
+                        )
                     }
                     ListRow(
                         title = "More options",
-                        subtitle = "Name, folder and profile",
-                        onClick = { optionsOpen = true },
+                        subtitle = "Name and profile",
+                        onClick = { if (!state.submitting) optionsOpen = true },
+                        modifier = Modifier.testTag(CREATE_SESSION_OPTIONS_TAG),
                     )
                 }
             }
 
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = PocketShellSpacing.lg)
-                .padding(bottom = PocketShellSpacing.lg),
-            horizontalArrangement = Arrangement.spacedBy(
-                space = PocketShellSpacing.sm,
-                alignment = Alignment.End,
-            ),
-        ) {
+        if (unavailableProgram == null) {
             PocketShellButton(
-                text = if (unavailableEngine != null) "Close" else CREATE_SESSION_CANCEL_LABEL,
-                onClick = if (unavailableEngine != null) {
-                    { unavailableEngine = null }
-                } else {
-                    onCancel
+                text = when {
+                    state.submitting -> "Starting…"
+                    optionsOpen -> "Apply options"
+                    else -> "$CREATE_SESSION_SUBMIT_LABEL ${selectedProgram.label}"
                 },
-                variant = ButtonVariant.Text,
-                enabled = !state.submitting,
-                modifier = Modifier.testTag(CREATE_SESSION_CANCEL_TAG),
-            )
-            PocketShellButton(
-                text = if (state.submitting) "Creating…" else CREATE_SESSION_SUBMIT_LABEL,
                 onClick = { onSubmit(form.toRequest(state.engines, state.profiles)) },
                 variant = ButtonVariant.Primary,
-                enabled = unavailableEngine == null && form.canSubmitWith(available) && !state.submitting,
-                modifier = Modifier.testTag(CREATE_SESSION_SUBMIT_TAG),
-            )
-        }
-    }
-}
-
-@Composable
-private fun AgentEnginePicker(
-    available: List<EngineInfo>,
-    unavailable: List<EngineInfo>,
-    selectedEngineId: String?,
-    loading: Boolean,
-    failure: String?,
-    enabled: Boolean,
-    onSelect: (String) -> Unit,
-    onUnavailable: (EngineInfo) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-        when {
-            loading -> Text(
-                text = CREATE_SESSION_LOADING_ENGINES,
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-            )
-            available.isEmpty() -> Text(
-                text = failure ?: CREATE_SESSION_NO_ENGINES,
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.labelMono,
-                modifier = Modifier.testTag(CREATE_SESSION_NO_ENGINES_TAG),
-            )
-            else -> {
-                SectionHeader(label = CREATE_SESSION_ENGINE_LABEL)
-                SegmentedToggle(
-                    labels = available.map { it.label },
-                    selectedIndex = available
-                        .indexOfFirst { it.id == selectedEngineId }
-                        .coerceAtLeast(0),
-                    onSelected = { index ->
-                        if (enabled) onSelect(available[index].id)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = PICKER_SEGMENT_HEIGHT),
-                    fillSegments = true,
-                    segmentTag = { index -> createSessionEngineTag(available[index].id) },
-                )
-                Text(
-                    text = CREATE_SESSION_ENGINE_HINT,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                )
-            }
-        }
-        unavailable.forEach { engine ->
-            ListRow(
-                title = engine.label,
-                subtitle = "Not available${engine.unavailableReason?.let { reason -> " · $reason" }.orEmpty()}",
-                onClick = { if (enabled) onUnavailable(engine) },
-                modifier = Modifier.testTag(createSessionEngineTag(engine.id)),
+                enabled = unavailableProgram == null &&
+                    form.canSubmitWith(available) &&
+                    !state.submitting,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PocketShellSpacing.lg)
+                    .padding(bottom = PocketShellSpacing.lg)
+                    .testTag(CREATE_SESSION_SUBMIT_TAG),
             )
         }
     }

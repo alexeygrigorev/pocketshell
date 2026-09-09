@@ -2,9 +2,12 @@ package com.pocketshell.next.workspaces
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.verticalScroll
@@ -14,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
@@ -31,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
 import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
@@ -43,14 +50,17 @@ import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.WorkspaceRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import com.pocketshell.uikit.icons.PocketShellIcons
 
 const val HOST_WORKSPACES_TAG: String = "host-workspaces"
 const val HOST_WORKSPACES_LIST_TAG: String = "host-workspaces-list"
@@ -67,6 +77,7 @@ const val HOST_WORKSPACES_SEARCH_TAG: String = "host-workspaces-search"
 const val HOST_WORKSPACES_ADD_PATH_TAG: String = "host-workspaces-add-path"
 const val HOST_WORKSPACES_ADD_CONFIRM_TAG: String = "host-workspaces-add-confirm"
 const val HOST_WORKSPACES_ADD_BROWSE_TAG: String = "host-workspaces-add-browse"
+const val HOST_WORKSPACES_ADD_LOCATION_TAG: String = "host-workspaces-add-location"
 const val HOST_WORKSPACES_FOLDER_BROWSER_TAG: String = "host-workspaces-folder-browser"
 const val HOST_WORKSPACES_FOLDER_BROWSER_USE_TAG: String = "host-workspaces-folder-browser-use"
 const val HOST_WORKSPACES_CREATE_FOLDER_NAME_TAG: String = "host-workspaces-create-folder-name"
@@ -112,11 +123,20 @@ fun HostWorkspacesRoute(
     onOpenProjectRoots: () -> Unit = {},
     onOpenConnectionDetails: () -> Unit = {},
     onDisconnect: () -> Unit = {},
+    initialRootPath: String? = null,
+    initialRootAction: String? = null,
     modifier: Modifier = Modifier,
     viewModel: HostWorkspacesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LaunchedEffect(initialRootPath, initialRootAction) {
+        val root = initialRootPath?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        when (initialRootAction) {
+            "add-workspace" -> viewModel.openAddWorkspace(root)
+            "create-folder" -> viewModel.openCreateFolder(root)
+        }
+    }
     LaunchedEffect(state.openWorkspacePath) {
         val path = viewModel.consumeOpenWorkspace() ?: return@LaunchedEffect
         onOpenWorkspace(path)
@@ -193,6 +213,44 @@ fun HostWorkspacesScreen(
     var rootPendingRemoval by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
     var hostToolsVisible by remember { mutableStateOf(false) }
     var connectionDetailsVisible by remember { mutableStateOf(false) }
+
+    // These are full navigation surfaces in the Android handoff. They are
+    // state-backed here so returning from the folder browser keeps the typed
+    // path and the selected root without stacking two modal windows.
+    if (state.addWorkspaceBrowserVisible) {
+        WorkspaceFolderBrowserPage(
+            state = state,
+            existingWorkspacePaths = state.roots
+                .flatMap { root -> root.workspaces }
+                .map { workspace -> workspace.path }
+                .toSet(),
+            onBrowse = onBrowseWorkspaceFolder,
+            onChoose = onChooseWorkspaceFolder,
+            onCreateFolder = { onOpenCreateFolder(state.addWorkspaceBrowsePath) },
+            onCreateFolderNameChange = onCreateFolderNameChange,
+            onConfirmCreateFolder = onConfirmCreateFolder,
+            onDismissCreateFolder = onDismissCreateFolder,
+            onDismiss = onDismissWorkspaceBrowser,
+            modifier = modifier,
+        )
+        return
+    }
+    if (state.addWorkspaceVisible) {
+        AddWorkspacePage(
+            state = state,
+            onBrowse = onOpenWorkspaceBrowser,
+            onSelectFolder = onChooseWorkspaceFolder,
+            onCreateFolder = { onOpenCreateFolder(state.addWorkspaceRootPath) },
+            onStartSession = { onStartSessionAtPath(state.addWorkspaceRootPath) },
+            onCreateFolderNameChange = onCreateFolderNameChange,
+            onConfirmCreateFolder = onConfirmCreateFolder,
+            onDismissCreateFolder = onDismissCreateFolder,
+            onDismiss = onDismissAddWorkspace,
+            modifier = modifier,
+        )
+        return
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -215,12 +273,33 @@ fun HostWorkspacesScreen(
         OutlinedTextField(
             value = state.searchQuery,
             onValueChange = onSearchQueryChange,
-            label = { Text("Search workspaces") },
+            placeholder = { Text("Find a workspace") },
+            leadingIcon = {
+                Icon(
+                    imageVector = PocketShellIcons.Search,
+                    contentDescription = null,
+                )
+            },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.xs)
+                .heightIn(min = 56.dp)
+                .padding(
+                    start = PocketShellSpacing.xl,
+                    end = PocketShellSpacing.xl,
+                    bottom = PocketShellSpacing.md,
+                )
                 .testTag(HOST_WORKSPACES_SEARCH_TAG),
+            shape = PocketShellShapes.medium,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = PocketShellColors.Surface,
+                unfocusedContainerColor = PocketShellColors.Surface,
+                focusedTextColor = PocketShellColors.Text,
+                unfocusedTextColor = PocketShellColors.Text,
+                focusedBorderColor = PocketShellColors.Accent,
+                unfocusedBorderColor = PocketShellColors.Border,
+                cursorColor = PocketShellColors.Accent,
+            ),
         )
 
         if (state.errors.isNotEmpty()) {
@@ -238,7 +317,12 @@ fun HostWorkspacesScreen(
 
         state.failure?.let { failure ->
             Banner(
-                text = failure,
+                text = if (state.statusUnavailable) {
+                    "Cannot reach ${state.hostLabel.ifBlank { "this host" }}. " +
+                        "Saved workspaces are shown; session status is unavailable."
+                } else {
+                    failure
+                },
                 role = BannerRole.Error,
                 maxLines = 4,
                 trailingContent = {
@@ -296,8 +380,8 @@ fun HostWorkspacesScreen(
                 )
 
                 state.isEmptyAndHealthy -> EmptyState(
-                    title = "No workspaces",
-                    description = "Durable workspaces on this host will appear here.",
+                    title = "No workspaces yet",
+                    description = "Add an existing folder or create a new one inside this root.",
                     modifier = Modifier.testTag(HOST_WORKSPACES_EMPTY_TAG),
                 )
 
@@ -328,48 +412,9 @@ fun HostWorkspacesScreen(
         }
     }
 
-    if (state.addWorkspaceVisible) {
-        FormDialog(
-            title = "Add workspace",
-            confirmLabel = if (state.addingWorkspace) "Adding…" else "Add workspace",
-            onConfirm = onConfirmAddWorkspace,
-            onDismiss = onDismissAddWorkspace,
-            confirmEnabled = state.addWorkspacePath.isNotBlank() && !state.addingWorkspace,
-            confirmTestTag = HOST_WORKSPACES_ADD_CONFIRM_TAG,
-        ) {
-            Text(
-                text = "Root: ${state.addWorkspaceRootPath}",
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.metadata,
-            )
-            OutlinedTextField(
-                value = state.addWorkspacePath,
-                onValueChange = onAddWorkspacePathChange,
-                label = { Text("Remote folder") },
-                placeholder = { Text("~/git/project") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(HOST_WORKSPACES_ADD_PATH_TAG),
-            )
-            PocketShellButton(
-                text = "Browse folders",
-                onClick = onOpenWorkspaceBrowser,
-                variant = ButtonVariant.Text,
-                modifier = Modifier.testTag(HOST_WORKSPACES_ADD_BROWSE_TAG),
-            )
-            state.addWorkspaceFailure?.let { message ->
-                Text(
-                    text = message,
-                    color = PocketShellColors.Red,
-                    style = PocketShellType.metadata,
-                )
-            }
-        }
-    }
-
     if (hostToolsVisible) {
         HostToolsSheet(
+            hostLabel = state.hostLabel,
             onOpenFiles = {
                 hostToolsVisible = false
                 onOpenFiles()
@@ -414,19 +459,6 @@ fun HostWorkspacesScreen(
                 onOpenConnectionDetails()
             },
             onDismiss = { connectionDetailsVisible = false },
-        )
-    }
-
-    if (state.addWorkspaceBrowserVisible) {
-        WorkspaceFolderBrowserSheet(
-            state = state,
-            existingWorkspacePaths = state.roots
-                .flatMap { root -> root.workspaces }
-                .map { workspace -> workspace.path }
-                .toSet(),
-            onBrowse = onBrowseWorkspaceFolder,
-            onChoose = onChooseWorkspaceFolder,
-            onDismiss = onDismissWorkspaceBrowser,
         )
     }
 
@@ -511,6 +543,379 @@ fun HostWorkspacesScreen(
     }
 }
 
+@Composable
+private fun AddWorkspacePage(
+    state: HostWorkspacesUiState,
+    onBrowse: () -> Unit,
+    onSelectFolder: (String) -> Unit,
+    onCreateFolder: () -> Unit,
+    onStartSession: () -> Unit,
+    onCreateFolderNameChange: (String) -> Unit,
+    onConfirmCreateFolder: () -> Unit,
+    onDismissCreateFolder: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var query by remember { mutableStateOf("") }
+    val visibleRootFolders = state.addWorkspaceRootFolders.filter { folder ->
+        query.isBlank() || folder.name.contains(query, ignoreCase = true) ||
+            folder.path.contains(query, ignoreCase = true)
+    }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag(HOST_WORKSPACES_TAG),
+    ) {
+        ScreenHeader(
+            title = "Add workspace",
+            onBack = onDismiss,
+            backTestTag = HOST_WORKSPACES_BACK_TAG,
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = PocketShellSpacing.xl, vertical = PocketShellSpacing.lg),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(
+                PocketShellSpacing.md,
+            ),
+        ) {
+            RemoteLocationRow(
+                path = displayRemotePath(state.addWorkspaceRootPath) ?: state.addWorkspaceRootPath,
+                action = "Change",
+                onClick = onBrowse,
+                modifier = Modifier.testTag(HOST_WORKSPACES_ADD_LOCATION_TAG),
+            )
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text("Find a folder") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(HOST_WORKSPACES_ADD_PATH_TAG),
+                shape = PocketShellShapes.medium,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = PocketShellColors.Surface,
+                    unfocusedContainerColor = PocketShellColors.Surface,
+                    focusedTextColor = PocketShellColors.Text,
+                    unfocusedTextColor = PocketShellColors.Text,
+                    focusedBorderColor = PocketShellColors.Accent,
+                    unfocusedBorderColor = PocketShellColors.Border,
+                    cursorColor = PocketShellColors.Accent,
+                ),
+            )
+            ListRow(
+                title = "Create folder",
+                leading = {
+                    Icon(
+                        imageVector = PocketShellIcons.Plus,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                onClick = onCreateFolder,
+                modifier = Modifier.testTag(HOST_WORKSPACES_CREATE_FOLDER_TAG),
+            )
+            Text(
+                text = "Folders",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.label,
+            )
+            when {
+                state.addWorkspaceRootFoldersLoading -> Text(
+                    text = "Reading folders…",
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.metadata,
+                )
+                state.addWorkspaceRootFoldersFailure != null -> Text(
+                    text = state.addWorkspaceRootFoldersFailure.orEmpty(),
+                    color = PocketShellColors.Red,
+                    style = PocketShellType.metadata,
+                )
+                state.addWorkspaceRootFolders.isEmpty() -> Text(
+                    text = "No folders in this root",
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.metadata,
+                )
+                else -> visibleRootFolders.forEach { folder ->
+                    val alreadyAdded = state.roots
+                        .flatMap { root -> root.workspaces }
+                        .any { workspace -> canonicalRemotePath(workspace.path) == canonicalRemotePath(folder.path) }
+                    ListRow(
+                        title = folder.name,
+                        subtitle = "Already added".takeIf { alreadyAdded },
+                        onClick = { onSelectFolder(folder.path) },
+                    )
+                }
+            }
+            ListRow(
+                title = "Browse subfolders",
+                leading = {
+                    Icon(
+                        imageVector = PocketShellIcons.Folder,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                onClick = onBrowse,
+                modifier = Modifier.testTag(HOST_WORKSPACES_ADD_BROWSE_TAG),
+            )
+            ListRow(
+                title = "Start session in ${state.addWorkspaceRootPath}",
+                subtitle = "Use the root itself",
+                leading = {
+                    Icon(
+                        imageVector = PocketShellIcons.Terminal,
+                        contentDescription = null,
+                        tint = PocketShellColors.TextSecondary,
+                    )
+                },
+                onClick = onStartSession,
+            )
+            state.addWorkspaceFailure?.let { message ->
+                Text(
+                    text = message,
+                    color = PocketShellColors.Red,
+                    style = PocketShellType.metadata,
+                )
+            }
+        }
+    }
+    CreateFolderFormDialog(
+        state = state,
+        onNameChange = onCreateFolderNameChange,
+        onConfirm = onConfirmCreateFolder,
+        onDismiss = onDismissCreateFolder,
+    )
+}
+
+/** Compact path/action row used by the folder pickers in the design catalog. */
+@Composable
+private fun RemoteLocationRow(
+    path: String,
+    action: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = path,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.metadata,
+            modifier = Modifier.weight(1f),
+        )
+        if (action.isNotBlank()) {
+            TextButton(onClick = onClick) {
+                Text(
+                    text = action,
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.label,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceFolderBrowserPage(
+    state: HostWorkspacesUiState,
+    existingWorkspacePaths: Set<String>,
+    onBrowse: (String) -> Unit,
+    onChoose: (String) -> Unit,
+    onCreateFolder: () -> Unit,
+    onCreateFolderNameChange: (String) -> Unit,
+    onConfirmCreateFolder: () -> Unit,
+    onDismissCreateFolder: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val currentPath = state.addWorkspaceBrowsePath
+    val rootPath = canonicalRemotePath(state.addWorkspaceRootPath)
+    val existingCanonicalPaths = existingWorkspacePaths.mapNotNull(::canonicalRemotePath).toSet()
+    var query by remember(currentPath) { mutableStateOf("") }
+    val visibleFolders = state.addWorkspaceFolders.filter { folder ->
+        query.isBlank() || folder.name.contains(query, ignoreCase = true) ||
+            folder.path.contains(query, ignoreCase = true)
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag(HOST_WORKSPACES_FOLDER_BROWSER_TAG),
+    ) {
+        ScreenHeader(
+            title = "Choose folder",
+            onBack = onDismiss,
+            backTestTag = HOST_WORKSPACES_BACK_TAG,
+        )
+        val parent = currentPath
+            .takeIf { rootPath != null && it != rootPath }
+            ?.let(::parentPath)
+            ?.takeIf { rootPath == null || isPathWithin(it, rootPath) }
+        RemoteLocationRow(
+            path = displayRemotePath(currentPath) ?: currentPath,
+            action = "Up".takeIf { parent != null }.orEmpty(),
+            onClick = { parent?.let(onBrowse) },
+            modifier = Modifier.padding(horizontal = PocketShellSpacing.xl),
+        )
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text("Find a folder") },
+            leadingIcon = {
+                Icon(imageVector = PocketShellIcons.Search, contentDescription = null)
+            },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = PocketShellSpacing.xl, vertical = PocketShellSpacing.sm),
+            shape = PocketShellShapes.medium,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = PocketShellColors.Surface,
+                unfocusedContainerColor = PocketShellColors.Surface,
+                focusedTextColor = PocketShellColors.Text,
+                unfocusedTextColor = PocketShellColors.Text,
+                focusedBorderColor = PocketShellColors.Accent,
+                unfocusedBorderColor = PocketShellColors.Border,
+                cursorColor = PocketShellColors.Accent,
+            ),
+        )
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
+        ) {
+            if (state.addWorkspaceBrowseLoading) {
+                item {
+                    Text(
+                        text = "Reading folders…",
+                        color = PocketShellColors.TextMuted,
+                        style = PocketShellType.metadata,
+                        modifier = Modifier.padding(horizontal = PocketShellSpacing.xl),
+                    )
+                }
+            } else {
+                if (visibleFolders.isEmpty()) {
+                    item {
+                        Text(
+                            text = if (query.isBlank()) "No subfolders" else "No matching folders",
+                            color = PocketShellColors.TextMuted,
+                            style = PocketShellType.metadata,
+                            modifier = Modifier.padding(horizontal = PocketShellSpacing.xl),
+                        )
+                    }
+                } else {
+                    items(
+                        items = visibleFolders,
+                        key = { folder -> folder.path },
+                    ) { folder ->
+                        val alreadyAdded = canonicalRemotePath(folder.path) in existingCanonicalPaths
+                        ListRow(
+                            title = folder.name,
+                            subtitle = if (alreadyAdded) {
+                                "Already added · ${folder.path}"
+                            } else {
+                                folder.path
+                            },
+                            onClick = { onBrowse(folder.path) },
+                        )
+                    }
+                }
+                item {
+                    ListRow(
+                        title = "Create folder here",
+                        subtitle = "Create and add a workspace",
+                        onClick = onCreateFolder,
+                        modifier = Modifier.testTag(HOST_WORKSPACES_CREATE_FOLDER_TAG),
+                    )
+                }
+            }
+            state.addWorkspaceBrowseFailure?.let { message ->
+                item {
+                    Text(
+                        text = message,
+                        color = PocketShellColors.Red,
+                        style = PocketShellType.metadata,
+                        modifier = Modifier.padding(horizontal = PocketShellSpacing.xl),
+                    )
+                }
+            }
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = PocketShellSpacing.xl, vertical = PocketShellSpacing.sm),
+        ) {
+            PocketShellButton(
+                text = "Use this folder",
+                onClick = { onChoose(currentPath) },
+                variant = ButtonVariant.Primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(HOST_WORKSPACES_FOLDER_BROWSER_USE_TAG),
+            )
+        }
+        CreateFolderFormDialog(
+            state = state,
+            onNameChange = onCreateFolderNameChange,
+            onConfirm = onConfirmCreateFolder,
+            onDismiss = onDismissCreateFolder,
+        )
+    }
+}
+
+@Composable
+private fun CreateFolderFormDialog(
+    state: HostWorkspacesUiState,
+    onNameChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    if (!state.createFolderVisible) return
+    FormDialog(
+        title = "Create folder",
+        confirmLabel = if (state.creatingFolder) "Creating…" else "Create folder",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+        confirmEnabled = state.createFolderName.isNotBlank() && !state.creatingFolder,
+        confirmTestTag = HOST_WORKSPACES_CREATE_FOLDER_CONFIRM_TAG,
+    ) {
+        Text(
+            text = "Creates a workspace folder inside ${state.createFolderParentPath}.",
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.metadata,
+        )
+        OutlinedTextField(
+            value = state.createFolderName,
+            onValueChange = onNameChange,
+            label = { Text("Folder name") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(HOST_WORKSPACES_CREATE_FOLDER_NAME_TAG),
+        )
+        state.createFolderFailure?.let { message ->
+            Text(
+                text = message,
+                color = PocketShellColors.Red,
+                style = PocketShellType.metadata,
+                modifier = Modifier.testTag(HOST_WORKSPACES_CREATE_FOLDER_TAG),
+            )
+        }
+    }
+}
+
 private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     root: WorkspaceRootProjection,
     sessionsUnavailable: Boolean,
@@ -521,8 +926,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
 ) {
     item(key = "root-header:${root.key}") {
         SectionHeader(
-            label = root.label,
-            count = root.sessionCount.takeIf { it > 0 },
+            label = root.displayPath.ifBlank { root.label },
             onLabelClick = root.path?.let { { onOpenRootActions() } },
             labelTestTag = root.path?.let { workspaceRootActionsTag(root.key) },
             trailing = root.path?.let { path ->
@@ -537,16 +941,6 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
                 }
             },
             modifier = Modifier.testTag(workspaceRootTag(root.key)),
-        )
-        Text(
-            text = root.displayPath,
-            color = PocketShellColors.TextMuted,
-            style = PocketShellType.metadata,
-            modifier = Modifier.padding(
-                start = PocketShellSpacing.lg,
-                end = PocketShellSpacing.lg,
-                bottom = PocketShellSpacing.xs,
-            ),
         )
     }
 
@@ -565,6 +959,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
             WorkspaceSessionRow(
                 session = session,
                 displayName = displayNames[session.name] ?: session.name,
+                statusUnavailable = sessionsUnavailable,
                 onClick = { onOpenSession(session) },
             )
         }
@@ -602,11 +997,12 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
 private fun WorkspaceSessionRow(
     session: SessionRow,
     displayName: String = session.name,
+    statusUnavailable: Boolean = false,
     onClick: () -> Unit,
 ) {
     ListRow(
         title = displayName,
-        subtitle = sessionKindLabel(session),
+        subtitle = if (statusUnavailable) "Status unavailable" else sessionKindLabel(session),
         leading = { SessionKindMark(agent = session.agent) },
         titleStyle = PocketShellType.body,
         subtitleStyle = PocketShellType.metadata,
@@ -638,11 +1034,11 @@ private fun filteredRoots(state: HostWorkspacesUiState): List<WorkspaceRootProje
 }
 
 private fun hostWorkspacesSubtitle(state: HostWorkspacesUiState): String = when {
-    state.failure != null && !state.loaded -> "Status unavailable"
     state.refreshing -> "Reconnecting…"
+    state.failure != null && state.statusUnavailable -> "Offline · Saved list"
+    state.failure != null -> "Offline"
     !state.loaded -> "Connecting…"
-    else -> "${state.workspaceCount} " + plural(state.workspaceCount, "workspace") +
-        " · ${state.sessionCount} " + plural(state.sessionCount, "session")
+    else -> "Connected"
 }
 
 private fun plural(count: Int, noun: String): String = if (count == 1) noun else "${noun}s"
@@ -725,12 +1121,6 @@ internal fun RootActionsSheetContent(
             testTag = HOST_WORKSPACES_ROOT_START_SESSION_TAG,
         )
         RootActionRow(
-            title = "Copy path",
-            subtitle = "Copy ${root.displayPath}",
-            onClick = onCopyPath,
-            testTag = HOST_WORKSPACES_ROOT_COPY_PATH_TAG,
-        )
-        RootActionRow(
             title = "Browse root",
             subtitle = "Open files at ${root.displayPath}",
             onClick = onBrowse,
@@ -765,6 +1155,7 @@ private fun RootActionRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HostToolsSheet(
+    hostLabel: String,
     onOpenFiles: () -> Unit,
     onOpenPorts: () -> Unit,
     onOpenUsage: () -> Unit,
@@ -780,27 +1171,28 @@ private fun HostToolsSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
         containerColor = PocketShellColors.Surface,
-        modifier = Modifier.testTag(HOST_WORKSPACES_HOST_TOOLS_TAG),
     ) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = PocketShellSpacing.lg),
+                .heightIn(max = 560.dp)
+                .testTag(HOST_WORKSPACES_HOST_TOOLS_TAG),
+            contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
         ) {
-            SheetHeader(
-                title = "Host tools",
-                subtitle = "Utilities for this host",
-                onClose = onDismiss,
-                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-            )
-            HostToolRow("Browse host files", onOpenFiles, SESSION_TREE_FILES_TAG)
-            HostToolRow("Services & tunnels", onOpenPorts, SESSION_TREE_PORTS_TAG)
-            HostToolRow("Usage", onOpenUsage, SESSION_TREE_USAGE_TAG)
-            HostToolRow("Project roots", onOpenProjectRoots, HOST_WORKSPACES_PROJECT_ROOTS_TAG)
-            HostToolRow("Connection details", onOpenConnectionDetails, HOST_WORKSPACES_CONNECTION_DETAILS_TAG)
-            HostToolRow("Refresh workspaces", onRefresh, HOST_WORKSPACES_REFRESH_TAG)
-            HostToolRow("Reorder workspaces", onReorder, HOST_WORKSPACES_REORDER_TAG)
-            HostToolRow("Disconnect", onDisconnect, HOST_WORKSPACES_DISCONNECT_TAG)
+            item {
+                SheetHeader(
+                    title = hostLabel.ifBlank { "Host" },
+                    onClose = onDismiss,
+                    modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
+                )
+            }
+            item { HostToolRow("Browse host files", PocketShellIcons.File, onOpenFiles, SESSION_TREE_FILES_TAG) }
+            item { HostToolRow("Services & tunnels", PocketShellIcons.Ports, onOpenPorts, SESSION_TREE_PORTS_TAG) }
+            item { HostToolRow("Usage", PocketShellIcons.Chart, onOpenUsage, SESSION_TREE_USAGE_TAG) }
+            item { HostToolRow("Project roots", PocketShellIcons.Folder, onOpenProjectRoots, HOST_WORKSPACES_PROJECT_ROOTS_TAG) }
+            item { HostToolRow("Refresh workspaces", PocketShellIcons.Refresh, onRefresh, HOST_WORKSPACES_REFRESH_TAG) }
+            item { HostToolRow("Connection details", PocketShellIcons.Info, onOpenConnectionDetails, HOST_WORKSPACES_CONNECTION_DETAILS_TAG) }
+            item { HostToolRow("Disconnect", PocketShellIcons.Close, onDisconnect, HOST_WORKSPACES_DISCONNECT_TAG) }
         }
     }
 }
@@ -808,11 +1200,27 @@ private fun HostToolsSheet(
 @Composable
 private fun HostToolRow(
     title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     onClick: () -> Unit,
     testTag: String,
 ) {
     ListRow(
         title = title,
+        leading = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = PocketShellColors.TextSecondary,
+                modifier = Modifier.padding(2.dp),
+            )
+        },
+        trailing = {
+            Icon(
+                imageVector = PocketShellIcons.Chevron,
+                contentDescription = null,
+                tint = PocketShellColors.TextMuted,
+            )
+        },
         onClick = onClick,
         modifier = Modifier.testTag(testTag),
     )
@@ -851,109 +1259,6 @@ private fun HostConnectionDetailsSheet(
                 variant = ButtonVariant.Text,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun WorkspaceFolderBrowserSheet(
-    state: HostWorkspacesUiState,
-    existingWorkspacePaths: Set<String>,
-    onBrowse: (String) -> Unit,
-    onChoose: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val currentPath = state.addWorkspaceBrowsePath
-    val rootPath = canonicalRemotePath(state.addWorkspaceRootPath)
-    val canonicalCurrentPath = canonicalRemotePath(currentPath)
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        shape = com.pocketshell.uikit.theme.PocketShellShapes.large,
-        containerColor = PocketShellColors.Surface,
-        modifier = Modifier.testTag(HOST_WORKSPACES_FOLDER_BROWSER_TAG),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(androidx.compose.foundation.rememberScrollState())
-                .padding(bottom = PocketShellSpacing.lg),
-        ) {
-            SheetHeader(
-                title = "Choose folder",
-                subtitle = "Browse a workspace folder",
-                onClose = onDismiss,
-                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-            )
-            Text(
-                text = currentPath,
-                color = PocketShellColors.TextMuted,
-                style = PocketShellType.metadata,
-                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-            )
-            PocketShellButton(
-                text = if (canonicalCurrentPath != null && canonicalCurrentPath in existingWorkspacePaths) {
-                    "Open this workspace"
-                } else {
-                    "Use this folder"
-                },
-                onClick = { onChoose(currentPath) },
-                variant = ButtonVariant.Primary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm)
-                    .testTag(HOST_WORKSPACES_FOLDER_BROWSER_USE_TAG),
-            )
-            state.addWorkspaceBrowseFailure?.let { message ->
-                Text(
-                    text = message,
-                    color = PocketShellColors.Red,
-                    style = PocketShellType.metadata,
-                    modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-                )
-            }
-            if (state.addWorkspaceBrowseLoading) {
-                Text(
-                    text = "Reading folders…",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.metadata,
-                    modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-                )
-            } else {
-                val parent = currentPath
-                    .takeIf { rootPath != null && it != rootPath }
-                    ?.let(::parentPath)
-                    ?.takeIf { rootPath == null || isPathWithin(it, rootPath) }
-                if (parent != null) {
-                    ListRow(
-                        title = "Up",
-                        subtitle = parent,
-                        onClick = { onBrowse(parent) },
-                    )
-                }
-                if (state.addWorkspaceFolders.isEmpty()) {
-                    Text(
-                        text = "No subfolders",
-                        color = PocketShellColors.TextMuted,
-                        style = PocketShellType.metadata,
-                        modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
-                    )
-                } else {
-                    state.addWorkspaceFolders.forEach { folder ->
-                        val alreadyAdded = canonicalRemotePath(folder.path) in existingWorkspacePaths
-                        ListRow(
-                            title = folder.name,
-                            subtitle = if (alreadyAdded) {
-                                "Already added · ${folder.path}"
-                            } else {
-                                folder.path
-                            },
-                            onClick = { onBrowse(folder.path) },
-                        )
-                    }
-                }
-            }
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.pocketshell.next.workspaces
 
+import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.core.hostapi.WorkspaceMembership
 
@@ -75,11 +76,11 @@ fun workspaceSessionSummary(sessions: List<SessionRow>): String {
 fun sessionKindLabel(session: SessionRow): String = when (
     session.agent?.trim()?.lowercase()
 ) {
-    "claude" -> "Claude"
+    "claude" -> "Claude Code"
     "codex" -> "Codex"
     "opencode", "open_code", "open-code" -> "OpenCode"
     "grok" -> "Grok"
-    "shell" -> "Terminal"
+    "shell" -> "Shell"
     null, "", "unknown" -> "Terminal"
     else -> session.agent.orEmpty().replace('_', ' ').replace('-', ' ')
         .split(' ')
@@ -87,6 +88,17 @@ fun sessionKindLabel(session: SessionRow): String = when (
         .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
         .ifBlank { "Terminal" }
 }
+
+/** Server-reported session state shown as muted metadata in workspace rows. */
+fun sessionStatusLabel(session: SessionRow): String = when (session.agentState) {
+    AgentState.WORKING -> "Working"
+    AgentState.WAITING -> "Waiting for input"
+    AgentState.IDLE -> "Idle"
+    null -> "Running"
+}
+
+fun sessionKindStatusLabel(session: SessionRow): String =
+    "${sessionKindLabel(session)} · ${sessionStatusLabel(session)}"
 
 /**
  * Chooses a readable row label without changing the host identity used for
@@ -395,6 +407,16 @@ private fun pathLabel(path: String, home: String?): String {
             "~/${canonical.removePrefix("$canonicalHome/")}"
         else -> canonical
     }
+}
+
+/**
+ * Returns the short path spelling used in screen subtitles.  The host API
+ * keeps canonical absolute paths for identity; the UI can still use `~/...`
+ * when the home directory is inferable from the path.
+ */
+fun displayRemotePath(path: String?): String? {
+    val canonical = canonicalRemotePath(path) ?: return path?.takeIf { it.isNotBlank() }
+    return pathLabel(canonical, inferRemoteHome(listOf(canonical)))
 }
 
 private fun basename(displayPath: String, canonicalPath: String): String {

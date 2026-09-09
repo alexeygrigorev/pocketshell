@@ -3,7 +3,7 @@ package com.pocketshell.next.settings
 /**
  * Every user-tunable preference app2 has (rewrite task P-6).
  *
- * ## Seven fields, not sixteen
+ * ## Nine fields, not sixteen
  *
  * The old client's `AppSettings` carried sixteen. Most of them configured
  * machinery the rewrite deleted, so porting them would have shipped a settings
@@ -44,7 +44,9 @@ data class AppSettings(
      * density-independent pixels and is wrong about its own code (see
      * `TERMINAL_TEXT_SIZE_RAW_PX`). Storing sp here and converting at the view
      * would silently change the shipped default from 28 px to ~42 px on an
-     * xxhdpi phone, i.e. a visual regression dressed up as a unit fix.
+     * xxhdpi phone, i.e. a visual regression dressed up as a unit fix. The
+     * Settings page exposes a user-facing SP value and converts it back to this
+     * raw-pixel contract before persistence.
      */
     val terminalTextSizePx: Int = DEFAULT_TERMINAL_TEXT_SIZE_PX,
     /**
@@ -88,6 +90,10 @@ data class AppSettings(
      * (same lesson as #2488). Delay only — no capture-pane ACK gating (#869).
      */
     val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+    /** Whether the terminal launcher exposes the common-key sheet. */
+    val showCommonKeys: Boolean = DEFAULT_SHOW_COMMON_KEYS,
+    /** Whether a dropped session should retry automatically when the app returns. */
+    val reconnectWhenReturn: Boolean = DEFAULT_RECONNECT_WHEN_RETURN,
 ) {
     companion object {
 
@@ -111,6 +117,11 @@ data class AppSettings(
         const val MIN_TERMINAL_TEXT_SIZE_PX: Int = 16
         const val MAX_TERMINAL_TEXT_SIZE_PX: Int = 48
         const val TERMINAL_TEXT_SIZE_STEP_PX: Int = 2
+
+        /** User-facing range from the Terminal settings design. */
+        const val MIN_TERMINAL_TEXT_SIZE_SP: Float = 12f
+        const val MAX_TERMINAL_TEXT_SIZE_SP: Float = 24f
+        const val TERMINAL_TEXT_SIZE_STEP_SP: Float = 1f
 
         /** "No language hint" — the recognizer detects it. */
         const val VOICE_LANGUAGE_AUTO: String = "auto"
@@ -177,6 +188,8 @@ data class AppSettings(
         const val MIN_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 0
         const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
         const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
+        const val DEFAULT_SHOW_COMMON_KEYS: Boolean = true
+        const val DEFAULT_RECONNECT_WHEN_RETURN: Boolean = true
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
 
         /**

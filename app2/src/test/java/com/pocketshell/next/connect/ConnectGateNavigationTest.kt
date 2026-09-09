@@ -79,6 +79,26 @@ class ConnectGateNavigationTest {
     }
 
     @Test
+    fun `cold-start default host uses the gate trust flow before landing on the tree`() {
+        stack = TestConnectStack(presentedFingerprint = PRESENTED)
+        val hostId = stack.seedHost(name = "startup-fixture")
+        val nav = setContent(
+            startupHostId = hostId,
+            startupHostExists = { stack.db.hostDao().getById(it) != null },
+        )
+
+        awaitTag(TRUST_SHEET_FINGERPRINT_TAG)
+        assertEquals(Destination.Hosts.pattern, nav.currentBackStackEntry?.destination?.route)
+        composeRule.onNodeWithText(PRESENTED).assertExists()
+
+        composeRule.onNodeWithTag(TRUST_SHEET_TRUST_TAG).performClick()
+
+        awaitText("Tree(hostId=$hostId)")
+        assertEquals(Destination.Workspaces.pattern, nav.currentBackStackEntry?.destination?.route)
+        assertEquals(PRESENTED, stack.storedFingerprint(hostId))
+    }
+
+    @Test
     fun `rejecting the trust prompt stores no key and stays on the host list`() {
         stack = TestConnectStack(presentedFingerprint = PRESENTED)
         val hostId = stack.seedHost(name = "fixture")
@@ -138,13 +158,18 @@ class ConnectGateNavigationTest {
         }
     }
 
-    private fun setContent(): NavHostController {
+    private fun setContent(
+        startupHostId: Long? = null,
+        startupHostExists: suspend (Long) -> Boolean = { true },
+    ): NavHostController {
         val hostListViewModel = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
             AppNavHost(
                 navController = controller,
+                startupHostId = startupHostId,
+                startupHostExists = startupHostExists,
                 // Both ViewModels are constructed explicitly: a Robolectric
                 // `createComposeRule()` composition has no Hilt-managed
                 // Activity to resolve `hiltViewModel()` against. Everything
@@ -165,7 +190,7 @@ class ConnectGateNavigationTest {
                 // through `hiltViewModel()`. This suite is about the connect
                 // gate's navigation edge, so the destination is a stand-in that
                 // echoes the argument the route delivered.
-                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
             )
         }
         composeRule.waitForIdle()

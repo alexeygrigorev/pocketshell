@@ -154,6 +154,18 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
     }
 
+    fun setShowCommonKeys(show: Boolean) {
+        if (_settings.value.showCommonKeys == show) return
+        write { putBoolean(KEY_SHOW_COMMON_KEYS, show) }
+        _settings.value = _settings.value.copy(showCommonKeys = show)
+    }
+
+    fun setReconnectWhenReturn(enabled: Boolean) {
+        if (_settings.value.reconnectWhenReturn == enabled) return
+        write { putBoolean(KEY_RECONNECT_WHEN_RETURN, enabled) }
+        _settings.value = _settings.value.copy(reconnectWhenReturn = enabled)
+    }
+
     /**
      * Restore the controls grouped under Settings → Advanced in one atomic
      * snapshot. Terminal size, language, and connection grace are deliberately
@@ -211,6 +223,14 @@ class SettingsRepository @Inject constructor(
                 KEY_AGENT_SUBMIT_ENTER_DELAY_MS,
                 AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
             ),
+        ),
+        showCommonKeys = prefs.safeBoolean(
+            KEY_SHOW_COMMON_KEYS,
+            AppSettings.DEFAULT_SHOW_COMMON_KEYS,
+        ),
+        reconnectWhenReturn = prefs.safeBoolean(
+            KEY_RECONNECT_WHEN_RETURN,
+            AppSettings.DEFAULT_RECONNECT_WHEN_RETURN,
         ),
     )
 
@@ -332,6 +352,9 @@ class SettingsRepository @Inject constructor(
     private fun SharedPreferences.safeString(key: String, default: String): String =
         runCatching { getString(key, default) ?: default }.getOrElse { drop(key); default }
 
+    private fun SharedPreferences.safeBoolean(key: String, default: Boolean): Boolean =
+        runCatching { getBoolean(key, default) }.getOrElse { drop(key); default }
+
     private fun SharedPreferences.drop(key: String) {
         runCatching { edit().remove(key).apply() }
     }
@@ -353,5 +376,7 @@ class SettingsRepository @Inject constructor(
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
         const val KEY_DEFAULT_HOST_ID = "default_host_id"
+        const val KEY_SHOW_COMMON_KEYS = "show_common_keys"
+        const val KEY_RECONNECT_WHEN_RETURN = "reconnect_when_return"
     }
 }

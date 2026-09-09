@@ -71,10 +71,24 @@ fun ConnectGate(
     onConnected: (Long) -> Unit,
     viewModel: ConnectViewModel,
     modifier: Modifier = Modifier,
+    /** A validated cold-start host to dial through this gate. */
+    initialHostId: Long? = null,
+    /** Clears the one-shot cold-start request after it has been consumed. */
+    onInitialHostConsumed: () -> Unit = {},
     content: @Composable (onOpenHost: (Long) -> Unit) -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     var navigationInFlight by remember { mutableStateOf(false) }
+
+    // Startup resume must use the same dial/trust/error state machine as a
+    // host-row tap. The caller validates the saved id before handing it here;
+    // consuming the request after starting the dial keeps a live preference
+    // update from becoming a second startup request.
+    LaunchedEffect(initialHostId) {
+        val hostId = initialHostId ?: return@LaunchedEffect
+        if (hostId > 0L) viewModel.connect(hostId)
+        onInitialHostConsumed()
+    }
 
     // NavHost keeps the previous destination composed while the new one is
     // handed its lifecycle. A successful dial must hide this route's stale

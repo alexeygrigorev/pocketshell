@@ -1,6 +1,7 @@
 package com.pocketshell.next.workspaces
 
 import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.WorkspaceMembership
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -114,7 +115,7 @@ class WorkspaceProjectionTest {
         )
 
         assertEquals(
-            "Claude ×2 · Codex · Terminal",
+            "Claude Code ×2 · Codex · Terminal",
             workspaceSessionSummary(sessions),
         )
     }
@@ -129,8 +130,25 @@ class WorkspaceProjectionTest {
         )
 
         assertEquals(
-            "Claude · Codex · Grok · +1 more kinds",
+            "Claude Code · Codex · Grok · +1 more kinds",
             workspaceSessionSummary(sessions),
+        )
+    }
+
+    @Test
+    fun `workspace session metadata uses the server reported status`() {
+        assertEquals(
+            "Claude Code · Working",
+            sessionKindStatusLabel(
+                session("claude", "/home/x/git/app").copy(
+                    agent = "claude",
+                    agentState = AgentState.WORKING,
+                ),
+            ),
+        )
+        assertEquals(
+            "Shell · Running",
+            sessionKindStatusLabel(session("shell", "/home/x/git/app").copy(agent = "shell")),
         )
     }
 

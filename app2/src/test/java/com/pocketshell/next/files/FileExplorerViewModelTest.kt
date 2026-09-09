@@ -72,6 +72,7 @@ class FileExplorerViewModelTest {
         val state = viewModel.state.value
         assertTrue("a successful listing must mark the screen loaded", state.loaded)
         assertNull(state.failure)
+        assertEquals("fixture", state.hostName)
         assertEquals(WORKSPACE, state.path)
         assertEquals(
             listOf("Assets", "src", "README.md", "zebra.txt"),
@@ -461,6 +462,7 @@ class FileExplorerViewModelTest {
 
     private fun explorer(hostId: Long, path: String?) = FileExplorerViewModel(
         savedStateHandle = stack.savedState(hostId, path),
+        hostDao = stack.db.hostDao(),
         registry = stack.registry,
         dispatcher = dispatcher,
     )

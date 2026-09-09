@@ -20,6 +20,8 @@ class AppSettingsTest {
         assertEquals(80, settings.usageWarnThresholdPercent)
         assertEquals(90_000L, settings.backgroundGraceMillis)
         assertEquals(150, settings.agentSubmitEnterDelayMs)
+        assertEquals(true, settings.showCommonKeys)
+        assertEquals(true, settings.reconnectWhenReturn)
     }
 
     /**

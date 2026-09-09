@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import java.util.Locale
 
 /** Test tags for the staged-attachment strip. */
@@ -36,6 +38,9 @@ const val COMPOSER_ATTACHMENTS_TAG: String = "composer-attachments"
 fun composerAttachmentTileTag(remotePath: String): String = "composer-attachment:$remotePath"
 
 fun composerAttachmentRemoveTag(remotePath: String): String = "composer-attachment-remove:$remotePath"
+
+fun composerAttachmentDestinationTag(remotePath: String): String =
+    "composer-attachment-destination:$remotePath"
 
 /**
  * The staged-attachment tiles above the draft field (rewrite task P-1, ported
@@ -61,14 +66,29 @@ internal fun AttachmentTiles(
     onRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    FlowRow(
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .testTag(COMPOSER_ATTACHMENTS_TAG),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        attachments.forEach { attachment -> AttachmentTile(attachment, onRemove) }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            attachments.forEach { attachment -> AttachmentTile(attachment, onRemove) }
+        }
+        attachments.forEach { attachment ->
+            Text(
+                text = "Uploaded to ${attachment.remotePath}",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.metadata,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(composerAttachmentDestinationTag(attachment.remotePath)),
+            )
+        }
     }
 }
 
@@ -156,6 +176,5 @@ private val REMOVE_TOUCH_SIZE = 48.dp
 private val REMOVE_SIZE = 22.dp
 private val REMOVE_SHAPE = RoundedCornerShape(11.dp)
 
-// The caption sits inside a 64dp square; the 11sp label rung clips common
-// attachment names, so this micro-label size stays named here.
-private val LABEL_FONT_SIZE = 9.sp
+// The caption sits inside a 64dp square; keep it on the Quiet caption rung.
+private val LABEL_FONT_SIZE = 11.sp

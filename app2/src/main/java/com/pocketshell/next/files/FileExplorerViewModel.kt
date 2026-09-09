@@ -3,6 +3,7 @@ package com.pocketshell.next.files
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.core.transport.SftpChannel
@@ -126,6 +127,8 @@ data class DeleteFileUiState(
 /** Everything the file explorer renders. */
 data class FileExplorerUiState(
     val hostId: Long = 0,
+    /** Display name for the host context kept in file and transfer headers. */
+    val hostName: String = "",
     /** The directory on screen. Blank until the first listing resolves it. */
     val path: String = "",
     /** Directories first, then files, each group by name — see [sortEntries]. */
@@ -210,6 +213,7 @@ data class FileExplorerUiState(
 @HiltViewModel
 class FileExplorerViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
+    private val hostDao: HostDao,
     private val registry: ConnectionsRegistry,
     @IoDispatcher private val dispatcher: CoroutineDispatcher,
 ) : ViewModel() {
@@ -233,6 +237,15 @@ class FileExplorerViewModel @Inject constructor(
     private var mutationJob: Job? = null
     private var nextTransferId: Long = 1L
     private val retryActions = mutableMapOf<Long, () -> Unit>()
+
+    init {
+        viewModelScope.launch {
+            val displayName = withContext(dispatcher) {
+                hostDao.getById(hostId)?.name
+            } ?: "Host $hostId"
+            _state.update { it.copy(hostName = displayName) }
+        }
+    }
 
     /**
      * Lists the directory currently on screen (or resolves the start directory

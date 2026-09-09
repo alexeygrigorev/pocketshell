@@ -81,6 +81,96 @@ class ViewerScreenTest {
     }
 
     @Test
+    fun `the file action surface exposes every supported action and keeps callbacks live`() {
+        var previews = 0
+        var edits = 0
+        var downloads = 0
+        var copied = 0
+        var renames = 0
+        var deletes = 0
+        composeRule.setContent {
+            PocketShellTheme {
+                ViewerActionsSheetContent(
+                    state = state(
+                        path = "/w/README.md",
+                        loaded = true,
+                        markdownCapable = true,
+                        content = ViewerContent.Text("# README"),
+                    ),
+                    onPreview = { previews += 1 },
+                    onEdit = { edits += 1 },
+                    onDownload = { downloads += 1 },
+                    onCopyPath = { copied += 1 },
+                    onRename = { renames += 1 },
+                    onDelete = { deletes += 1 },
+                    onToggleMarkdown = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(VIEWER_PREVIEW_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_EDIT_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_DOWNLOAD_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_COPY_PATH_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_RENAME_ACTION_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_DELETE_ACTION_TAG).performClick()
+
+        assertEquals(1, previews)
+        assertEquals(1, edits)
+        assertEquals(1, downloads)
+        assertEquals(1, copied)
+        assertEquals(1, renames)
+        assertEquals(1, deletes)
+    }
+
+    @Test
+    fun `binary files keep file operations but hide unsupported actions`() {
+        composeRule.setContent {
+            PocketShellTheme {
+                ViewerActionsSheetContent(
+                    state = state(
+                        path = "/w/archive.bin",
+                        loaded = true,
+                        kind = FileKind.BINARY,
+                        content = ViewerContent.Binary(byteArrayOf(0, 1, 2)),
+                    ),
+                    onPreview = {},
+                    onEdit = {},
+                    onDownload = {},
+                    onCopyPath = {},
+                    onRename = {},
+                    onDelete = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(VIEWER_PREVIEW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(VIEWER_DOWNLOAD_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_COPY_PATH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_RENAME_ACTION_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_DELETE_ACTION_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_EDIT_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun `the viewer opens actions for a loaded binary file`() {
+        setContent(
+            state(
+                path = "/w/archive.bin",
+                loaded = true,
+                kind = FileKind.BINARY,
+                content = ViewerContent.Binary(byteArrayOf(0, 1, 2)),
+            ),
+        )
+
+        composeRule.onNodeWithTag(VIEWER_ACTIONS_TAG).performClick()
+        composeRule.onNodeWithTag(VIEWER_ACTIONS_SHEET_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Preview").assertDoesNotExist()
+        composeRule.onNodeWithText("Download").assertIsDisplayed()
+        composeRule.onNodeWithTag(VIEWER_EDIT_TAG).assertDoesNotExist()
+    }
+
+    @Test
     fun `an undecodable file falls back to a hex dump with an explanation`() {
         val bytes = byteArrayOf(0x1F, 0x8B.toByte(), 0x08, 0x00, 0x41, 0x42)
         setContent(state(loaded = true, kind = FileKind.BINARY, content = ViewerContent.Binary(bytes)))

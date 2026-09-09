@@ -1,8 +1,12 @@
 package com.pocketshell.next
 
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -54,6 +58,54 @@ class AppNavHostTest {
         setContentWithNav()
 
         composeRule.onNodeWithText("Hosts").assertExists()
+    }
+
+    @Test
+    fun `a removed resume host falls back to the hosts route`() {
+        composeRule.setContent {
+            AppNavHost(
+                startupHostId = 7L,
+                startupHostExists = { false },
+                hostsScreen = { Text("Hosts") },
+                connectViewModel = { stack.viewModel },
+                workspacesScreen = { _, _, _, _, _, _, _, _, _ -> Text("Tree") },
+            )
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Hosts").assertExists()
+        check(composeRule.onAllNodesWithText("Tree").fetchSemanticsNodes().isEmpty()) {
+            "a resume id for a deleted host must not open an empty workspace route"
+        }
+    }
+
+    @Test
+    fun `opening a host does not turn the live resume preference into navigation`() {
+        val startupHostId = mutableStateOf<Long?>(null)
+
+        composeRule.setContent {
+            AppNavHost(
+                startupHostId = startupHostId.value,
+                onHostOpened = { startupHostId.value = it },
+                hostsScreen = { actions ->
+                    Button(onClick = { actions.onOpenHost(7) }) {
+                        Text("Open host")
+                    }
+                },
+                connectViewModel = { stack.viewModel },
+                workspacesScreen = { _, _, _, _, _, _, _, _, _ -> Text("Tree") },
+            )
+        }
+
+        composeRule.onNodeWithText("Open host").performClick()
+        composeRule.waitForIdle()
+
+        // Host 7 is deliberately not in the fake database, so the connect
+        // gate cannot navigate on its own. A Tree here proves that the
+        // preference update incorrectly triggered the cold-launch effect.
+        check(composeRule.onAllNodesWithText("Tree").fetchSemanticsNodes().isEmpty()) {
+            "a live default-host preference update must not navigate to Tree"
+        }
     }
 
     @Test
@@ -218,7 +270,7 @@ class AppNavHostTest {
                 // resolves its ViewModel through `hiltViewModel()`. The
                 // stand-in echoes the argument the route actually delivered, so
                 // this suite still pins the Tree pattern's Long argument.
-                workspacesScreen = { hostId, _, onOpenSession, _, _, _, _, _ ->
+                workspacesScreen = { hostId, _, onOpenSession, _, _, _, _, _, _ ->
                     openSession = onOpenSession
                     Text("Tree(hostId=$hostId)")
                 },
@@ -227,7 +279,7 @@ class AppNavHostTest {
                 // dials a host. The stand-in echoes both route arguments, which
                 // is what this suite is pinning — that a session name with a
                 // space and a `:` survives the encode/decode round trip.
-                sessionScreen = { hostId, sessionName, _, _, _, onOpenSession, _ ->
+                sessionScreen = { hostId, sessionName, _, _, _, _, onOpenSession, _ ->
                     switchSession = onOpenSession
                     Text("Session(hostId=$hostId, name=$sessionName)")
                 },

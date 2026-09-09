@@ -1,6 +1,7 @@
 package com.pocketshell.next.hosts
 
 import androidx.compose.material3.Text
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -8,7 +9,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
-import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.SavedStateHandle
 import androidx.navigation.NavHostController
@@ -192,9 +192,11 @@ class AddEditHostNavigationTest {
         }
     }
 
-    /** Scrolls the form's CTA into view and taps it. */
+    /** The CTA is pinned outside the independently scrolling form body. */
     private fun save() {
-        composeRule.onNodeWithTag(HOST_FORM_SAVE_TAG).performScrollTo().performClick()
+        composeRule.onNodeWithTag(HOST_FORM_SAVE_TAG)
+            .assertIsDisplayed()
+            .performClick()
     }
 
     /** Opens the key menu and picks the one seeded key. */
@@ -237,7 +239,7 @@ class AddEditHostNavigationTest {
                     )
                 },
                 connectViewModel = { stack.viewModel },
-                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 hostFormScreen = { hostId, onDone, onAddKey, onTestConnection ->
                     AddEditHostRoute(
                         hostId = hostId,

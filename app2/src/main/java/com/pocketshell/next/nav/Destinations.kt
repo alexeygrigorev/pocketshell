@@ -107,6 +107,14 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "workspaces/$hostId"
     }
 
+    /** Host workspace screen with one root action opened on entry. */
+    data object WorkspaceRootAction : Destination(
+        "workspaces-action/{$ARG_HOST_ID}?$ARG_ROOT_PATH={$ARG_ROOT_PATH}&$ARG_ROOT_ACTION={$ARG_ROOT_ACTION}",
+    ) {
+        fun route(hostId: Long, rootPath: String, action: String): String =
+            "workspaces-action/$hostId?$ARG_ROOT_PATH=${encodeSegment(rootPath)}&$ARG_ROOT_ACTION=${encodeSegment(action)}"
+    }
+
     /**
      * One persistent workspace on a host. The canonical absolute path is a
      * query argument because it contains `/`; route restoration therefore
@@ -258,6 +266,11 @@ sealed class Destination(val pattern: String) {
         fun route(hostId: Long): String = "workspace-roots/$hostId"
     }
 
+    /** Focused form for registering one project root on a host. */
+    data object AddWorkspaceRoot : Destination("add-workspace-root/{$ARG_HOST_ID}") {
+        fun route(hostId: Long): String = "add-workspace-root/$hostId"
+    }
+
     companion object {
         const val ARG_HOST_ID: String = "hostId"
         const val ARG_REPORT_ID: String = "reportId"
@@ -281,6 +294,8 @@ sealed class Destination(val pattern: String) {
         val CrashReports: Diagnostics
             get() = Diagnostics
         const val ARG_WORKSPACE_PATH: String = "workspacePath"
+        const val ARG_ROOT_PATH: String = "rootPath"
+        const val ARG_ROOT_ACTION: String = "rootAction"
 
         /**
          * Every destination, in graph order.
@@ -301,7 +316,8 @@ sealed class Destination(val pattern: String) {
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
                 About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,
-                HostForm, SshKeys, QrScan, WorkspaceRoots, WorkspaceStart, ReorderWorkspaces,
+                HostForm, SshKeys, QrScan, WorkspaceRoots, AddWorkspaceRoot,
+                WorkspaceStart, ReorderWorkspaces, WorkspaceRootAction,
             )
 
         /** The graph's start destination. Getter, for the same reason as [all]. */

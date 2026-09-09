@@ -1,31 +1,28 @@
 package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -68,10 +65,9 @@ data class KebabItem(
  * inline action buttons). Generalises the merged-#455 host-card kebab so every
  * screen's row overflow renders identically.
  *
- * - The trigger is a 48dp circular [PocketShellColors.SurfaceElev] container
- *   with a 1dp [PocketShellColors.BorderSoft] hairline border (design-system §8
- *   "always-visible affordance"), holding the Quiet registry's `more` vector.
- *   so the visible control itself satisfies the 48dp touch floor.
+ * - The trigger is a quiet 48dp [IconButton] holding the Quiet registry's `more`
+ *   vector. It keeps the accessibility floor without painting a raised surface
+ *   or border around the icon.
  * - The menu opens on [PocketShellColors.SurfaceElev] (the
  *   `surfaceContainerHigh`-equivalent raw token in our single dark scheme) with
  *   each row at [PocketShellType.bodyDense]`(13)` + an optional leading icon.
@@ -156,8 +152,8 @@ fun Kebab(
 /**
  * Shared visible overflow trigger for callers whose actions are not rendered by
  * [DropdownMenu] directly, for example rows that open a bottom sheet. This keeps
- * the glyph, circular chrome, semantics, and test-tag behavior identical to
- * [Kebab] while letting the caller own the action surface.
+ * the glyph, quiet icon-button treatment, semantics, and test-tag behavior
+ * identical to [Kebab] while letting the caller own the action surface.
  */
 @Composable
 fun KebabTrigger(
@@ -167,21 +163,19 @@ fun KebabTrigger(
     triggerTestTag: String = KEBAB_BUTTON_TAG,
     triggerSize: Dp = 48.dp,
 ) {
-    Box(
+    val accessibleTriggerSize = maxOf(triggerSize, PocketShellDensity.tapTargetMin)
+    IconButton(
+        onClick = onClick,
         modifier = modifier
-            .size(triggerSize)
-            .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
-            .clickable(role = Role.Button, onClick = onClick)
+            .size(accessibleTriggerSize)
             .semantics { this.contentDescription = contentDescription }
             .testTag(triggerTestTag),
-        contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = PocketShellIcons.More,
             contentDescription = null,
             tint = PocketShellColors.TextSecondary,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(24.dp),
         )
     }
 }

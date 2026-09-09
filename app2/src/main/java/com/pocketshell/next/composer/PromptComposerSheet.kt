@@ -78,6 +78,7 @@ fun PromptComposerSheet(
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
     onOpenHotkeys: () -> Unit = {},
+    availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     val context = LocalContext.current
     val permissionGranted: () -> Boolean = hasRecordAudioPermission ?: {
@@ -131,6 +132,7 @@ fun PromptComposerSheet(
             deliveryEnabled = deliveryEnabled,
             deliveryDisabledMessage = deliveryDisabledMessage,
             onOpenHotkeys = onOpenHotkeys,
+            availableSlashCommands = availableSlashCommands,
         )
     }
 }
@@ -160,6 +162,7 @@ fun PromptComposerContent(
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
     onOpenHotkeys: () -> Unit = {},
+    availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     val title = targetLabel.trim().takeIf { it.isNotEmpty() }?.let { "Input to $it" }
         ?: COMPOSER_SHEET_TITLE
@@ -187,6 +190,7 @@ fun PromptComposerContent(
             deliveryEnabled = deliveryEnabled,
             deliveryDisabledMessage = deliveryDisabledMessage,
             onOpenHotkeys = onOpenHotkeys,
+            availableSlashCommands = availableSlashCommands,
         )
     }
 }

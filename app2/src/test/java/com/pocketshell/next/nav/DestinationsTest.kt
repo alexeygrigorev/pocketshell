@@ -44,7 +44,7 @@ class DestinationsTest {
         // The aggregate includes both Quiet workspace routes and the
         // categorized Settings/support plus Services routes. Deprecated aliases
         // (Tree and CrashReports) intentionally do not add duplicate patterns.
-        assertEquals(28, patterns.size)
+        assertEquals(30, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -109,11 +109,28 @@ class DestinationsTest {
             Destination.WorkspaceRoots.pattern,
             Destination.WorkspaceRoots.route(hostId = 7),
         )
+        assertMatchesPattern(
+            Destination.AddWorkspaceRoot.pattern,
+            Destination.AddWorkspaceRoot.route(hostId = 7),
+        )
+        assertMatchesPattern(
+            Destination.WorkspaceRootAction.pattern,
+            Destination.WorkspaceRootAction.route(
+                hostId = 7,
+                rootPath = "/home/alexey/git",
+                action = "add-workspace",
+            ),
+        )
     }
 
     @Test
     fun `workspace roots route carries the host id as a path segment`() {
         assertEquals("workspace-roots/42", Destination.WorkspaceRoots.route(hostId = 42))
+    }
+
+    @Test
+    fun `add project root route carries the host id as a path segment`() {
+        assertEquals("add-workspace-root/42", Destination.AddWorkspaceRoot.route(hostId = 42))
     }
 
     /**

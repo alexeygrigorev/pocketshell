@@ -91,9 +91,9 @@ fun sessionRowMenuTag(name: String): String = "session-row-menu-$name"
 fun rootHeaderTag(key: String): String = "root-header-$key"
 
 /** Overflow item and confirmation copy for ending a session (issue #2535). */
-const val STOP_SESSION_ITEM_LABEL: String = "End session"
-const val STOP_SESSION_TITLE: String = "End session?"
-const val STOP_SESSION_CONFIRM_LABEL: String = "End"
+const val STOP_SESSION_ITEM_LABEL: String = "End session…"
+const val STOP_SESSION_TITLE: String = "End Terminal?"
+const val STOP_SESSION_CONFIRM_LABEL: String = "End session"
 const val STOP_SESSION_ITEM_TAG: String = "session-stop-item"
 const val STOP_SESSION_CONFIRM_TAG: String = "session-stop-confirm"
 const val STOP_SESSION_CANCEL_TAG: String = "session-stop-cancel"
@@ -320,6 +320,7 @@ fun SessionTreeScreen(
                 host = "host #${state.hostId}",
             ),
             confirmLabel = STOP_SESSION_CONFIRM_LABEL,
+            dismissLabel = "Keep running",
             destructive = true,
             onConfirm = onConfirmStop,
             onDismiss = onCancelStop,

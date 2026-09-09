@@ -49,6 +49,8 @@ import kotlinx.coroutines.launch
  */
 data class SessionTreeUiState(
     val hostId: Long = 0,
+    /** Friendly host identity for workspace and terminal subtitles. */
+    val hostLabel: String = "",
     /** First load, nothing to paint yet. */
     val loading: Boolean = false,
     /** A refresh over content that is already on screen. */
@@ -643,6 +645,11 @@ class SessionTreeViewModel @Inject constructor(
     }
 
     private suspend fun load() {
+        hostDao.getById(hostId)?.let { host ->
+            _state.update {
+                it.copy(hostLabel = host.name.ifBlank { host.hostname })
+            }
+        }
         when (val outcome = resolveConnection()) {
             is ConnectionOutcome.Ready -> applyListing(outcome.connection)
             is ConnectionOutcome.Unavailable -> fail(outcome.message)

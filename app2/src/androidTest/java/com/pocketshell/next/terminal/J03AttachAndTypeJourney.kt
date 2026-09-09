@@ -9,6 +9,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -33,7 +35,10 @@ import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.idleWedgeNote
 import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
+import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
@@ -247,43 +252,66 @@ class J03AttachAndTypeJourney {
     /**
      * The non-happy host: the tree listed a session that has since died.
      *
-     * `pocketshell sessions attach` exits 3, and the screen must SAY so rather
-     * than sit on "Attaching…" forever or show an empty black terminal. There
-     * is deliberately no retry (task U-7 owns reconnect) — the one affordance
-     * is the way back.
+     * `pocketshell sessions attach` exits 3, and the screen must show the
+     * designed Session ended page rather than sit on "Attaching…" forever or
+     * show an empty black terminal. There is deliberately no retry (an ended
+     * process cannot be fixed by a generic retry) — the way back is the only
+     * action here.
      */
     @Test
     fun attachingToAVanishedSessionSaysSoInsteadOfHangingOnAttaching() {
+        // The session is nested under its workspace in the Quiet hierarchy.
         // The row has to EXIST to be tapped, and the session has to be GONE by
         // the time the attach runs — which is the real race the maintainer hits
         // (the tree is a snapshot, sessions end). Killing it here rather than in
         // `seed()` is what produces that ordering; killing it earlier just
         // removes the row and tests nothing.
         openTree()
-        awaitTag(workspaceSessionRowTag(SESSION))
-        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
-        compose.onNodeWithTag(workspaceSessionRowTag(SESSION)).performClick()
+        val rootSessionTag = workspaceSessionRowTag(SESSION)
+        val workspaceTag = workspaceRowTag(WORKSPACE)
+        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
+            compose.onAllNodesWithTag(rootSessionTag).fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithTag(workspaceTag).fetchSemanticsNodes().isNotEmpty()
+        }
+        if (compose.onAllNodesWithTag(rootSessionTag).fetchSemanticsNodes().isNotEmpty()) {
+            AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
+            compose.onNodeWithTag(rootSessionTag)
+                .assertIsDisplayed()
+                .assert(hasClickAction())
+                .performClick()
+        } else {
+            compose.onNodeWithTag(workspaceTag).performClick()
+            awaitTag(WORKSPACE_SCREEN_TAG)
+            val nestedSessionTag = sessionRowTag(SESSION)
+            awaitTag(nestedSessionTag)
+            AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
+            compose.onNodeWithTag(nestedSessionTag)
+                .assertIsDisplayed()
+                .assert(hasClickAction())
+                .performClick()
+        }
         awaitTag(SESSION_SCREEN_TAG)
 
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(SESSION_ERROR_BANNER_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(SESSION_ENDED_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         capture("03-vanished-session")
-        compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertIsDisplayed()
-        // WHY it failed has to survive to the screen, not just THAT it failed:
-        // exit 3 is `pocketshell sessions attach`'s "no session named ...", and
-        // a message that dropped it would read identically to a clean detach.
-        compose.onNode(hasText("exit 3", substring = true)).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_ENDED_TAG).assertIsDisplayed()
+        // WHY it ended has to survive to the page, not just THAT it ended:
+        // exit 3 is `pocketshell sessions attach`'s "no session named ...".
+        compose.onNodeWithText("Exit code: 3").assertIsDisplayed()
         // Not stuck on the attaching state, and no terminal pretending to work.
         compose.onNodeWithTag(SESSION_CONNECTING_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SESSION_TERMINAL_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
 
         // Back is the way out, and it works.
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithTag(WORKSPACE_SCREEN_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(HOST_WORKSPACES_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_SCREEN_TAG).assertDoesNotExist()
     }
 
     /**

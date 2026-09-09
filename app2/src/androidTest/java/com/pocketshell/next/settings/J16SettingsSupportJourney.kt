@@ -13,14 +13,17 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.next.MainActivity
-import com.pocketshell.next.crash.CRASH_REPORTS_SHARE_ALL_TAG
+import com.pocketshell.next.crash.CRASH_REPORT_SHARE_TAG
 import com.pocketshell.next.crash.CrashReportMetadata
 import com.pocketshell.next.crash.CrashReporter
 import com.pocketshell.next.crash.DIAGNOSTICS_PAGE_TAG
+import com.pocketshell.next.crash.DIAGNOSTIC_REPORT_PAGE_TAG
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.hosts.HOST_LIST_SETTINGS_TAG
+import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import java.io.File
@@ -58,6 +61,21 @@ class J16SettingsSupportJourney {
         graph.connectionsRegistry().closeAll()
         graph.hostDao().getAll().first().forEach { graph.hostDao().deleteById(it.id) }
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
+        val keyId = graph.sshKeyDao().insert(
+            SshKeyEntity(
+                name = "j16-unused-key",
+                privateKeyPath = "/tmp/j16-unused-key",
+            ),
+        )
+        graph.hostDao().insert(
+            HostEntity(
+                id = 9_601L,
+                name = "settings-host",
+                hostname = "settings.example.invalid",
+                username = "testuser",
+                keyId = keyId,
+            ),
+        )
 
         val settings = graph.settingsRepository()
         settings.setTerminalTextSizePx(AppSettings.DEFAULT_TERMINAL_TEXT_SIZE_PX)
@@ -127,13 +145,15 @@ class J16SettingsSupportJourney {
         compose.onNodeWithTag(settingsCategoryTag("diagnostics")).performClick()
         awaitTag(DIAGNOSTICS_PAGE_TAG)
         compose.onNodeWithText("j2610 support handoff", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("Share all (1)").assertIsDisplayed().assertIsEnabled()
+        compose.onNodeWithText("Export latest report").assertIsDisplayed().assertIsEnabled()
         capture("05-diagnostics")
 
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        compose.onNodeWithTag(CRASH_REPORTS_SHARE_ALL_TAG).performClick()
+        compose.onNodeWithText("Export latest report").performClick()
+        awaitTag(DIAGNOSTIC_REPORT_PAGE_TAG)
+        compose.onNodeWithTag(CRASH_REPORT_SHARE_TAG).performClick()
         assertTrue(
-            "Share all must hand the real archive to Android's native chooser",
+            "Share report must hand the redacted report to Android's native chooser",
             waitForNativeChooser(instrumentation),
         )
         capture("06-share-chooser")

@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
@@ -24,6 +25,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.DisclosureIcon
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -37,6 +40,9 @@ const val ADD_TUNNEL_FORM_SCROLL_TAG = "add_tunnel_form_scroll"
 const val ADD_TUNNEL_NAME_TAG = "add_tunnel_name"
 const val ADD_TUNNEL_REMOTE_TAG = "add_tunnel_remote_port"
 const val ADD_TUNNEL_LOCAL_TAG = "add_tunnel_local_port"
+const val ADD_TUNNEL_OPTIONS_TAG = "add_tunnel_more_options"
+const val ADD_TUNNEL_REMOTE_ADDRESS_TAG = "add_tunnel_remote_address"
+const val ADD_TUNNEL_REMOTE_ADDRESS_CONTAINER_TAG = "add_tunnel_remote_address_container"
 const val ADD_TUNNEL_SUBMIT_TAG = "add_tunnel_submit"
 
 @Composable
@@ -138,6 +144,8 @@ fun AddTunnelScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var moreOptionsExpanded by remember { mutableStateOf(false) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -196,6 +204,40 @@ fun AddTunnelScreen(
                 color = PocketShellColors.TextSecondary,
                 style = PocketShellType.body,
             )
+            ListRow(
+                title = "More options",
+                subtitle = "Remote target and exposure",
+                onClick = { moreOptionsExpanded = !moreOptionsExpanded },
+                trailing = { DisclosureIcon(expanded = moreOptionsExpanded) },
+                modifier = Modifier.testTag(ADD_TUNNEL_OPTIONS_TAG),
+            )
+            if (moreOptionsExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(ADD_TUNNEL_REMOTE_ADDRESS_CONTAINER_TAG)
+                        .padding(horizontal = PocketShellSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+                ) {
+                    OutlinedTextField(
+                        value = "127.0.0.1",
+                        onValueChange = {},
+                        label = { Text("Remote address") },
+                        supportingText = { Text("Fixed to the host loopback target by the current forwarding backend") },
+                        readOnly = true,
+                        enabled = false,
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(ADD_TUNNEL_REMOTE_ADDRESS_TAG),
+                    )
+                    Text(
+                        text = "Changing the local bind address can expose this service to other devices. PocketShell keeps this tunnel on 127.0.0.1.",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.metadata,
+                    )
+                }
+            }
             Text(
                 text = "Valid ports are 1–65535.",
                 color = PocketShellColors.TextMuted,

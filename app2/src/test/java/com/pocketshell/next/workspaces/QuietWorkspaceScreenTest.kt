@@ -11,9 +11,13 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.core.hostapi.AgentState
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.SessionTreeUiState
+import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
+import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
 import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.tree.sessionRowMenuTag
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -59,6 +63,8 @@ class QuietWorkspaceScreenTest {
 
         composeRule.onAllNodesWithTag(workspaceRootTag("/home/alexey/git"))
             .assertCountEquals(1)
+        composeRule.onNodeWithText("~/git").assertIsDisplayed()
+        composeRule.onNodeWithText("Git").assertDoesNotExist()
         composeRule.onNodeWithTag(workspaceRowTag(path)).assertIsDisplayed().performClick()
         assertEquals(listOf(path), opened)
         composeRule.onNodeWithText("~/git/pocketshell", substring = true).assertDoesNotExist()
@@ -218,7 +224,7 @@ class QuietWorkspaceScreenTest {
             ),
         )
 
-        composeRule.onNodeWithText("Work").assertIsDisplayed()
+        composeRule.onNodeWithText("~/work").assertIsDisplayed()
         composeRule.onNodeWithTag(HOST_WORKSPACES_ROOT_EMPTY_TAG).assertIsDisplayed()
     }
 
@@ -322,7 +328,34 @@ class QuietWorkspaceScreenTest {
             ),
         )
         composeRule.onNodeWithTag(HOST_WORKSPACES_EMPTY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Offline").assertIsDisplayed()
         composeRule.onNodeWithText("No workspaces").assertDoesNotExist()
+    }
+
+    @Test
+    fun `stale root sessions use the unavailable status vocabulary`() {
+        setHostContent(
+            state = HostWorkspacesUiState(
+                hostLabel = "hetzner",
+                loaded = true,
+                failure = "connection lost",
+                statusUnavailable = true,
+                roots = listOf(
+                    WorkspaceRootProjection(
+                        key = "/home/alexey/git",
+                        label = "Git",
+                        displayPath = "~/git",
+                        path = "/home/alexey/git",
+                        workspaces = emptyList(),
+                        rootSessions = listOf(session("root-shell", "/home/alexey/git")),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithText("Offline · Saved list").assertIsDisplayed()
+        composeRule.onNodeWithText("Status unavailable").assertIsDisplayed()
+        composeRule.onNodeWithText("Terminal").assertDoesNotExist()
     }
 
     @Test
@@ -333,12 +366,17 @@ class QuietWorkspaceScreenTest {
                 hostId = 7,
                 workspacePath = "/home/alexey/git/pocketshell",
                 loaded = true,
-                workspaceSessions = listOf(session("claude-main", "/home/alexey/git/pocketshell")),
+                workspaceSessions = listOf(
+                    session("claude-main", "/home/alexey/git/pocketshell")
+                        .copy(agent = "claude", agentState = AgentState.WORKING),
+                ),
             ),
             onOpenSession = { opened += it },
         )
 
         composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Claude Code · Working").assertIsDisplayed()
+        composeRule.onAllNodesWithTag(sessionRowMenuTag("claude-main")).assertCountEquals(0)
         assertEquals(listOf("claude-main"), opened)
     }
 
@@ -370,27 +408,58 @@ class QuietWorkspaceScreenTest {
         )
         composeRule.onNodeWithText("No sessions").assertIsDisplayed()
         composeRule.onAllNodesWithTag(WORKSPACE_NEW_SESSION_TAG).assertCountEquals(1)
+        composeRule.onNodeWithText("Workspace").assertIsDisplayed()
+        composeRule.onNodeWithText("Browse files").assertIsDisplayed()
+        composeRule.onNodeWithText("Services & tunnels").assertDoesNotExist()
     }
 
     @Test
-    fun `workspace actions expose folder creation and removal`() {
-        val openedCreate = mutableListOf<Boolean>()
+    fun `workspace actions keep only the catalog actions`() {
         composeRule.setContent {
             PocketShellTheme {
                 WorkspaceActionsContent(
                     onNewSession = {},
                     onBrowseFiles = {},
+                    onOpenPorts = {},
+                    onOpenUsage = {},
                     onCopyPath = {},
                     onReorder = {},
-                    onCreateFolder = { openedCreate += true },
+                    onCreateFolder = {},
                     onRemove = {},
                     onDismiss = {},
                 )
             }
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag(WORKSPACE_CREATE_FOLDER_TAG).performScrollTo().performClick()
-        assertEquals(listOf(true), openedCreate)
+        composeRule.onNodeWithText("New session").assertIsDisplayed()
+        composeRule.onNodeWithText("Browse files").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy folder path").assertIsDisplayed()
+        composeRule.onNodeWithText("Reorder workspaces").assertIsDisplayed()
+        composeRule.onNodeWithText("Remove from list").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Services & tunnels").assertDoesNotExist()
+        composeRule.onNodeWithText("Usage").assertDoesNotExist()
+        composeRule.onNodeWithText("Create folder").assertDoesNotExist()
+    }
+
+    @Test
+    fun `workspace utility rows keep their real navigation callbacks`() {
+        var files = 0
+        var ports = 0
+        setWorkspaceContent(
+            state = SessionTreeUiState(
+                hostId = 7,
+                workspacePath = "/home/alexey/git/pocketshell",
+                loaded = true,
+                workspaceSessions = listOf(session("shell", "/home/alexey/git/pocketshell")),
+            ),
+            onOpenFiles = { files += 1 },
+            onOpenPorts = { ports += 1 },
+        )
+
+        composeRule.onNodeWithTag(SESSION_TREE_FILES_TAG).performClick()
+        composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).performClick()
+        assertEquals(1, files)
+        assertEquals(1, ports)
     }
 
     private fun setHostContent(
@@ -415,6 +484,8 @@ class QuietWorkspaceScreenTest {
         state: SessionTreeUiState,
         onOpenSession: (String) -> Unit = {},
         onOpenCreateFolder: () -> Unit = {},
+        onOpenFiles: () -> Unit = {},
+        onOpenPorts: () -> Unit = {},
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -422,6 +493,8 @@ class QuietWorkspaceScreenTest {
                     state = state,
                     onRefresh = {},
                     onOpenSession = onOpenSession,
+                    onOpenFiles = onOpenFiles,
+                    onOpenPorts = onOpenPorts,
                     onOpenCreateFolder = onOpenCreateFolder,
                 )
             }

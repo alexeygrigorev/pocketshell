@@ -5,6 +5,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -155,7 +156,7 @@ class J10FilesBrowseEditJourney {
         compose.onNodeWithTag(FILE_EXPLORER_TRANSFERS_TAG).performClick()
         awaitTag(TRANSFERS_SCREEN_TAG)
         capture("01b-transfers")
-        compose.onNodeWithText("Back").performClick()
+        compose.onNodeWithContentDescription("Back").performClick()
         awaitTag(FILE_EXPLORER_TAG)
 
         // Everything the host has in this directory has a row on screen. The
@@ -174,6 +175,8 @@ class J10FilesBrowseEditJourney {
         scrollTo(fileRowTag("nested"))
         compose.onNodeWithTag(fileRowTag("nested")).performClick()
         awaitTag(fileRowTag("deep.txt"))
+        compose.onNodeWithTag(FILE_EXPLORER_ACTIONS_TAG).performClick()
+        awaitTag(FILE_EXPLORER_TOOLS_SHEET_TAG)
         compose.onNodeWithTag(FILE_EXPLORER_UP_TAG).performClick()
         awaitTag(fileRowTag(TEXT_FILE))
 
@@ -188,6 +191,8 @@ class J10FilesBrowseEditJourney {
         capture("02-viewer")
 
         // Edit and save.
+        compose.onNodeWithTag(VIEWER_ACTIONS_TAG).performClick()
+        awaitTag(VIEWER_ACTIONS_SHEET_TAG)
         compose.onNodeWithTag(VIEWER_EDIT_TAG).performClick()
         awaitTag(VIEWER_EDITOR_TAG)
         compose.onNodeWithTag(VIEWER_EDITOR_TAG).performTextReplacement(EDITED_TEXT)
@@ -205,7 +210,7 @@ class J10FilesBrowseEditJourney {
 
         // And the app agrees on a fresh read: back to the explorer, re-open,
         // and the new text — not the old one — is what renders.
-        compose.onNodeWithText("Back").performClick()
+        compose.onNodeWithContentDescription("Back").performClick()
         awaitTag(fileRowTag(TEXT_FILE))
         scrollTo(fileRowTag(TEXT_FILE))
         compose.onNodeWithTag(fileRowTag(TEXT_FILE)).performClick()
@@ -236,7 +241,7 @@ class J10FilesBrowseEditJourney {
         compose.onNodeWithText("cargo build --release").assertIsDisplayed()
         compose.onNodeWithTag(VIEWER_TEXT_TAG).assertDoesNotExist()
 
-        compose.onNodeWithTag(VIEWER_MARKDOWN_TOGGLE_TAG).performClick()
+        compose.onNodeWithText("Source").performClick()
 
         awaitTag(VIEWER_TEXT_TAG)
         compose.onNodeWithTag(MARKDOWN_VIEW_TAG).assertDoesNotExist()

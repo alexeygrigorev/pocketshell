@@ -164,7 +164,13 @@ private fun HostPicker(state: ShareUiState, onPickHost: (Long) -> Unit, modifier
                         // moving rows around under a finger already reaching for
                         // one is how a share lands on the wrong machine.
                         trailing = if (host.connected) {
-                            { Pill(label = "connected", kind = PillKind.Ok) }
+                            {
+                                Pill(
+                                    label = "connected",
+                                    kind = PillKind.Ok,
+                                    neutralBackground = true,
+                                )
+                            }
                         } else {
                             null
                         },

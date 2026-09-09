@@ -49,6 +49,9 @@ data class HostWorkspacesUiState(
     val addWorkspaceFolders: List<WorkspaceFolderEntry> = emptyList(),
     val addWorkspaceBrowseLoading: Boolean = false,
     val addWorkspaceBrowseFailure: String? = null,
+    val addWorkspaceRootFolders: List<WorkspaceFolderEntry> = emptyList(),
+    val addWorkspaceRootFoldersLoading: Boolean = false,
+    val addWorkspaceRootFoldersFailure: String? = null,
     /** Set after a successful add so the selected folder opens immediately. */
     val openWorkspacePath: String? = null,
     val createFolderVisible: Boolean = false,
@@ -100,6 +103,7 @@ class HostWorkspacesViewModel @Inject constructor(
     private var inFlight: Job? = null
     private var browseInFlight: Job? = null
     private var folderInFlight: Job? = null
+    private var rootFoldersInFlight: Job? = null
 
     fun refresh() {
         if (inFlight?.isActive == true) return
@@ -184,12 +188,17 @@ class HostWorkspacesViewModel @Inject constructor(
                 addWorkspaceBrowsePath = "",
                 addWorkspaceFolders = emptyList(),
                 addWorkspaceBrowseFailure = null,
+                addWorkspaceRootFolders = emptyList(),
+                addWorkspaceRootFoldersLoading = true,
+                addWorkspaceRootFoldersFailure = null,
             )
         }
+        loadAddWorkspaceRootFolders(rootPath)
     }
 
     fun dismissAddWorkspace() {
         if (_state.value.addingWorkspace) return
+        rootFoldersInFlight?.cancel()
         _state.update {
             it.copy(
                 addWorkspaceVisible = false,
@@ -199,7 +208,52 @@ class HostWorkspacesViewModel @Inject constructor(
                 addWorkspaceBrowsePath = "",
                 addWorkspaceFolders = emptyList(),
                 addWorkspaceBrowseFailure = null,
+                addWorkspaceRootFolders = emptyList(),
+                addWorkspaceRootFoldersLoading = false,
+                addWorkspaceRootFoldersFailure = null,
             )
+        }
+    }
+
+    private fun loadAddWorkspaceRootFolders(rootPath: String) {
+        rootFoldersInFlight?.cancel()
+        rootFoldersInFlight = viewModelScope.launch {
+            val connection = resolveConnection()
+            if (connection == null) {
+                _state.update {
+                    it.copy(
+                        addWorkspaceRootFoldersLoading = false,
+                        addWorkspaceRootFoldersFailure = "Could not connect to browse this root.",
+                    )
+                }
+                return@launch
+            }
+            runCatching { connection.sftp().list(rootPath) }
+                .fold(
+                    onSuccess = { entries ->
+                        _state.update {
+                            it.copy(
+                                addWorkspaceRootFoldersLoading = false,
+                                addWorkspaceRootFolders = entries
+                                    .filter(SftpEntry::isDirectory)
+                                    .sortedBy { entry -> entry.name.lowercase() }
+                                    .map { entry -> WorkspaceFolderEntry(entry.name, entry.path) },
+                                addWorkspaceRootFoldersFailure = null,
+                            )
+                        }
+                    },
+                    onFailure = { error ->
+                        _state.update {
+                            it.copy(
+                                addWorkspaceRootFoldersLoading = false,
+                                addWorkspaceRootFoldersFailure = userMessage(
+                                    error,
+                                    "Could not read this root: ",
+                                ),
+                            )
+                        }
+                    },
+                )
         }
     }
 
@@ -219,6 +273,7 @@ class HostWorkspacesViewModel @Inject constructor(
         browseInFlight?.cancel()
         _state.update {
             it.copy(
+                addWorkspaceVisible = false,
                 addWorkspaceBrowserVisible = true,
                 addWorkspaceBrowsePath = target,
                 addWorkspaceFolders = emptyList(),
@@ -227,7 +282,14 @@ class HostWorkspacesViewModel @Inject constructor(
             )
         }
         browseInFlight = viewModelScope.launch {
-            val connection = resolveConnection() ?: return@launch
+            val connection = resolveConnection { message ->
+                _state.update {
+                    it.copy(
+                        addWorkspaceBrowseLoading = false,
+                        addWorkspaceBrowseFailure = message,
+                    )
+                }
+            } ?: return@launch
             runCatching { connection.sftp().list(target) }
                 .fold(
                     onSuccess = { entries ->
@@ -259,17 +321,32 @@ class HostWorkspacesViewModel @Inject constructor(
 
     fun dismissWorkspaceBrowser() {
         browseInFlight?.cancel()
-        _state.update { it.copy(addWorkspaceBrowserVisible = false, addWorkspaceBrowseFailure = null) }
-    }
-
-    fun chooseWorkspaceFolder(path: String) {
+        rootFoldersInFlight?.cancel()
         _state.update {
             it.copy(
-                addWorkspacePath = path,
+                addWorkspaceVisible = true,
                 addWorkspaceBrowserVisible = false,
                 addWorkspaceBrowseFailure = null,
             )
         }
+    }
+
+    fun chooseWorkspaceFolder(path: String) {
+        rootFoldersInFlight?.cancel()
+        val canonical = canonicalRemotePath(path)
+        val alreadyAdded = canonical != null && _state.value.roots
+            .flatMap { root -> root.workspaces }
+            .any { workspace -> canonicalRemotePath(workspace.path) == canonical }
+        _state.update {
+            it.copy(
+                addWorkspacePath = path,
+                addWorkspaceVisible = !alreadyAdded,
+                addWorkspaceBrowserVisible = false,
+                addWorkspaceBrowseFailure = null,
+                openWorkspacePath = canonical.takeIf { alreadyAdded },
+            )
+        }
+        if (!alreadyAdded) addWorkspace()
     }
 
     fun openCreateFolder(parentPath: String) {
@@ -351,6 +428,7 @@ class HostWorkspacesViewModel @Inject constructor(
                     _state.update {
                         it.copy(
                             addWorkspaceVisible = false,
+                            addWorkspaceBrowserVisible = false,
                             addingWorkspace = false,
                             addWorkspaceRootPath = "",
                             addWorkspacePath = "",
@@ -393,8 +471,7 @@ class HostWorkspacesViewModel @Inject constructor(
                 finishFolder("This host is no longer saved on this device.")
                 return@launch
             }
-            val connection = resolveConnection() ?: run {
-                finishFolder("Could not connect to this host.")
+            val connection = resolveConnection(::finishFolder) ?: run {
                 return@launch
             }
             val path = childPath(parent, name)
@@ -426,6 +503,11 @@ class HostWorkspacesViewModel @Inject constructor(
                                     createFolderParentPath = "",
                                     createFolderName = "",
                                     createFolderFailure = null,
+                                    addWorkspaceVisible = false,
+                                    addWorkspaceBrowserVisible = false,
+                                    addWorkspaceRootPath = "",
+                                    addWorkspacePath = "",
+                                    openWorkspacePath = path,
                                 )
                             }
                             refresh()
@@ -482,19 +564,15 @@ class HostWorkspacesViewModel @Inject constructor(
         applyListing(connection, host.treeIdentity)
     }
 
-    private suspend fun resolveConnection(): HostConnection? {
+    private suspend fun resolveConnection(onFailure: (String) -> Unit = {}): HostConnection? {
         return when (val outcome = registry.getOrConnect(hostId)) {
             is ConnectResult.Connected -> outcome.connection
             is ConnectResult.NeedsTrust -> {
-                _state.update {
-                    it.copy(addWorkspaceBrowseLoading = false, addWorkspaceBrowseFailure = "Confirm this host's key from the host list first.")
-                }
+                onFailure("Confirm this host's key from the host list first.")
                 null
             }
             is ConnectResult.Failed -> {
-                _state.update {
-                    it.copy(addWorkspaceBrowseLoading = false, addWorkspaceBrowseFailure = outcome.message)
-                }
+                onFailure(outcome.message)
                 null
             }
         }

@@ -10,6 +10,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.platform.testTag
@@ -64,6 +66,7 @@ fun SectionHeader(
             modifier = Modifier
                 .weight(if (trailing == null) 1f else 1f)
                 .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+                .semantics { heading() }
                 .then(
                     if (onLabelClick != null) {
                         Modifier

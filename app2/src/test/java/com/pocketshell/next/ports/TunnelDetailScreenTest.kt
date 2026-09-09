@@ -25,6 +25,7 @@ class TunnelDetailScreenTest {
         var stops = 0
         setContent(manual = true, onStop = { stops++ })
 
+        composeRule.onNodeWithText("127.0.0.1:22").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Manual tunnel").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(TUNNEL_STOP_TAG).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Remove tunnel").assertIsDisplayed()

@@ -71,7 +71,7 @@ fun MessageHistorySheet(
                 .testTag(COMPOSER_HISTORY_SHEET_TAG),
         ) {
             SheetHeader(
-                title = "Recent messages",
+                title = "Recent prompts",
                 subtitle = "Tap one to put it back in the composer.",
                 onClose = onDismiss,
             )
@@ -100,7 +100,13 @@ fun MessageHistorySheet(
                         trailing = if (message.delivered) {
                             null
                         } else {
-                            { Pill(label = "not delivered", kind = PillKind.Warn) }
+                            {
+                                Pill(
+                                    label = "not delivered",
+                                    kind = PillKind.Warn,
+                                    neutralBackground = true,
+                                )
+                            }
                         },
                         modifier = Modifier.testTag(composerHistoryRowTag(message.id)),
                     )

@@ -191,6 +191,17 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `input and reconnect toggles persist`() {
+        val repo = repository()
+
+        repo.setShowCommonKeys(false)
+        repo.setReconnectWhenReturn(false)
+
+        assertEquals(false, repository().settings.value.showCommonKeys)
+        assertEquals(false, repository().settings.value.reconnectWhenReturn)
+    }
+
+    @Test
     fun `resetAdvancedDefaults restores every advanced control and leaves other pages alone`() {
         val repo = repository()
         repo.setTerminalTextSizePx(40)

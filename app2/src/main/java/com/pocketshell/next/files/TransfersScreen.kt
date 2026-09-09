@@ -56,7 +56,7 @@ fun TransfersScreen(
     ) {
         ScreenHeader(
             title = "Transfers",
-            subtitle = "Remote file transfers",
+            subtitle = fileLocationSubtitle(state.hostName, state.path),
             onBack = onBack,
         )
 

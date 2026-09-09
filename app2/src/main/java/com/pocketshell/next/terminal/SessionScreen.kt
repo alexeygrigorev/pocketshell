@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,11 +31,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.next.composer.ComposerViewModel
+import com.pocketshell.next.composer.DeliveryUncertainReview
 import com.pocketshell.next.composer.MessageHistorySheet
 import com.pocketshell.next.composer.PromptComposerContent
 import com.pocketshell.next.composer.PromptComposerSheet
 import com.pocketshell.next.composer.SentMessage
 import com.pocketshell.next.composer.SessionSink
+import com.pocketshell.next.composer.SlashCommandAutocomplete
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.STOP_SESSION_CANCEL_TAG
 import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_LABEL
@@ -46,8 +49,11 @@ import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.STOP_SESSION_TITLE_TAG
 import com.pocketshell.next.tree.stopSessionMessage
 import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.UsageGlancePill
 import com.pocketshell.next.usage.UsageGlanceViewModel
+import com.pocketshell.next.settings.LocalAppSettings
 import com.pocketshell.next.workspaces.readableSessionName
+import com.pocketshell.next.workspaces.sessionStatusLabel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -59,6 +65,7 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SessionLauncherBar
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -79,6 +86,7 @@ const val SESSION_HEADER_KEBAB_TAG: String = "session-header-kebab"
 const val SESSION_STOP_FAILURE_TAG: String = "session-stop-failure"
 const val SESSION_ACTIONS_ITEM_TAG: String = "session-actions-item"
 const val SESSION_ENDED_TAG: String = "session-ended"
+const val SESSION_CONTEXT_BAR_TAG: String = "session-context-bar"
 
 /**
  * Route-level entry point for `session/{hostId}/{sessionName}` (rewrite tasks
@@ -108,6 +116,7 @@ fun SessionRoute(
     onOpenFiles: () -> Unit = {},
     onOpenSession: (SessionRow) -> Unit = {},
     onOpenNewSession: () -> Unit = {},
+    workspacePath: String? = null,
     modifier: Modifier = Modifier,
     viewModel: SessionViewModel = hiltViewModel(),
     composerViewModel: ComposerViewModel = hiltViewModel(),
@@ -115,6 +124,7 @@ fun SessionRoute(
     sessionSwitcherViewModel: SessionSwitcherViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val appSettings = LocalAppSettings.current
     val composerState by composerViewModel.state.collectAsState()
     val usagePillState by usageGlanceViewModel.state.collectAsState()
     val sessionSwitcherState by sessionSwitcherViewModel.state.collectAsState()
@@ -122,6 +132,9 @@ fun SessionRoute(
     val stopFailure by viewModel.stopFailure.collectAsState()
 
     LaunchedEffect(hostId, sessionName) { viewModel.open(hostId, sessionName) }
+    LaunchedEffect(appSettings.reconnectWhenReturn) {
+        viewModel.setAutomaticReconnectEnabled(appSettings.reconnectWhenReturn)
+    }
     // Issue #2579: the pill on THIS screen is about THIS session's agent, so
     // the refresh names the session. The tree's Usage affordance keeps calling
     // the no-argument overload and keeps the cross-provider meaning.
@@ -164,6 +177,8 @@ fun SessionRoute(
         onOpenSession = onOpenSession,
         onOpenNewSession = onOpenNewSession,
         sessionSwitcherState = sessionSwitcherState,
+        workspacePath = workspacePath,
+        showCommonKeys = appSettings.showCommonKeys,
         onResized = viewModel::onResized,
         onRetry = viewModel::retryNow,
         onStopSession = viewModel::stopSession,
@@ -242,6 +257,8 @@ fun SessionScreen(
     onPermissionDenied: () -> Unit = {},
     sessionSwitcherState: SessionSwitcherUiState = SessionSwitcherUiState(),
     sessionLabel: String = readableSessionName(sessionName),
+    workspacePath: String? = null,
+    showCommonKeys: Boolean = true,
     modifier: Modifier = Modifier,
     cellMetrics: TerminalCellMetrics = rememberTerminalCellMetrics(),
     initiallyShowComposer: Boolean = false,
@@ -260,6 +277,32 @@ fun SessionScreen(
     var pendingStop by remember { mutableStateOf(false) }
     var copyTerminalSelection by remember { mutableStateOf<(() -> Boolean)?>(null) }
     val sessionEnded = (state as? SessionUiState.Failed)?.message?.looksLikeEndedSession() == true
+    val deliveryReviewVisible = composerState.deliveryUncertain
+    var deliveryReviewDraft by remember { mutableStateOf(composerState.draft) }
+    LaunchedEffect(deliveryReviewVisible, composerState.draft) {
+        if (deliveryReviewVisible) deliveryReviewDraft = composerState.draft
+    }
+    val handleBack: () -> Unit = {
+        if (deliveryReviewVisible) {
+            onDraftChange(deliveryReviewDraft)
+            onDismissNotice()
+        }
+        onBack()
+    }
+    val selectedSessionAgent = sessionSwitcherState.sessions
+        .firstOrNull { it.name == sessionName }
+        ?.agent
+    val availableSlashCommands = remember(selectedSessionAgent) {
+        SlashCommandAutocomplete.commandsFor(selectedSessionAgent)
+    }
+    val currentSession = sessionSwitcherState.sessions
+        .firstOrNull { it.name == sessionName }
+    val visibleWorkspacePath = workspacePath ?: currentSession?.workspace
+    val terminalTitle = workspaceLabelForTerminal(visibleWorkspacePath).ifBlank { sessionLabel }
+    val terminalSubtitle = terminalHeaderSubtitle(
+        state = state,
+        hostLabel = sessionSwitcherState.hostLabel,
+    )
 
     Column(
         modifier = modifier
@@ -267,22 +310,69 @@ fun SessionScreen(
             .testTag(SESSION_SCREEN_TAG),
     ) {
         ScreenHeader(
-            title = if (sessionEnded) "Session ended" else sessionLabel,
-            subtitle = if (sessionEnded) sessionLabel else statusLine(state),
+            title = when {
+                deliveryReviewVisible -> "Review before resending"
+                sessionEnded -> "Session ended"
+                else -> terminalTitle
+            },
+            subtitle = when {
+                deliveryReviewVisible -> null
+                sessionEnded -> sessionLabel
+                else -> terminalSubtitle
+            },
             titleMaxLines = 2,
             subtitleMaxLines = 2,
             titleTestTag = SESSION_TITLE_TAG,
-            onBack = onBack,
+            onBack = handleBack,
             backTestTag = SESSION_BACK_TAG,
-            trailing = {
-                KebabTrigger(
-                    onClick = { terminalActionsOpen = true },
-                    contentDescription = "Terminal actions",
-                    triggerTestTag = SESSION_HEADER_KEBAB_TAG,
-                )
+            trailing = if (deliveryReviewVisible) {
+                null
+            } else {
+                {
+                    if (usagePillState != null) {
+                        UsageGlancePill(
+                            state = usagePillState,
+                            onClick = onOpenUsage,
+                        )
+                    } else {
+                        PocketShellButton(
+                            text = "Usage",
+                            onClick = onOpenUsage,
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                            modifier = Modifier.testTag(SESSION_USAGE_TAG),
+                        )
+                    }
+                    KebabTrigger(
+                        onClick = { terminalActionsOpen = true },
+                        contentDescription = "Terminal actions",
+                        triggerTestTag = SESSION_HEADER_KEBAB_TAG,
+                    )
+                }
             },
         )
 
+        if (!sessionEnded && !deliveryReviewVisible) {
+            SessionContextBar(
+                sessionLabel = sessionLabel,
+                session = currentSession,
+                sessionCount = sessionSwitcherState.sessions.size.coerceAtLeast(1),
+                onClick = { sessionSwitcherOpen = true },
+            )
+        }
+
+        if (deliveryReviewVisible) {
+            DeliveryUncertainReview(
+                draft = deliveryReviewDraft,
+                onDraftChange = { deliveryReviewDraft = it },
+                onReconnectAndInspect = {
+                    onDraftChange(deliveryReviewDraft)
+                    onDismissNotice()
+                    onRetry()
+                },
+                modifier = Modifier.weight(1f),
+            )
+        } else {
         stopFailure?.let { message ->
             Banner(
                 text = message,
@@ -332,7 +422,7 @@ fun SessionScreen(
                     Banner(
                         text = reconnectingMessage(state),
                         role = BannerRole.Warning,
-                        maxLines = 2,
+                        maxLines = 3,
                         trailingContent = if (sessionEnded) {
                             null
                         } else {
@@ -410,7 +500,7 @@ fun SessionScreen(
                     hotkeysOpen = false
                     composerOpen = true
                 },
-                onOpenHotkeys = if (state is SessionUiState.Failed) {
+                onOpenHotkeys = if (!showCommonKeys || state is SessionUiState.Failed) {
                     null
                 } else {
                     {
@@ -420,9 +510,10 @@ fun SessionScreen(
                 },
             )
         }
+        }
     }
 
-    if (composerOpen && !sessionEnded) {
+    if (composerOpen && !sessionEnded && !deliveryReviewVisible) {
         val sendAndMaybeDismiss: () -> Unit = {
             if (!sessionEnded && onSend()) composerOpen = false
         }
@@ -450,10 +541,13 @@ fun SessionScreen(
                 onDismissNotice = onDismissNotice,
                 onDiscard = onDiscardDraft,
                 onPermissionDenied = onPermissionDenied,
+                deliveryEnabled = state is SessionUiState.Live,
+                deliveryDisabledMessage = reconnectingComposerMessage(state),
                 onOpenHotkeys = {
                     composerOpen = false
                     hotkeysOpen = true
                 },
+                availableSlashCommands = availableSlashCommands,
             )
         } else {
             PromptComposerContent(
@@ -474,10 +568,13 @@ fun SessionScreen(
                 onRemoveAttachment = onRemoveAttachment,
                 onDismissNotice = onDismissNotice,
                 onDiscard = onDiscardDraft,
+                deliveryEnabled = state is SessionUiState.Live,
+                deliveryDisabledMessage = reconnectingComposerMessage(state),
                 onOpenHotkeys = {
                     composerOpen = false
                     hotkeysOpen = true
                 },
+                availableSlashCommands = availableSlashCommands,
             )
         }
     }
@@ -558,6 +655,7 @@ fun SessionScreen(
                 host = "this host",
             ),
             confirmLabel = STOP_SESSION_CONFIRM_LABEL,
+            dismissLabel = "Keep running",
             destructive = true,
             onConfirm = {
                 pendingStop = false
@@ -692,16 +790,95 @@ private fun Terminal(
 
 private fun reconnectingMessage(state: SessionUiState.Reconnecting): String {
     val attempt = state.attempt + 1
-    if (state.retryInMs <= 0) return "Reconnecting… attempt $attempt · retrying now"
-    val seconds = (state.retryInMs + 999) / 1000
-    return "Reconnecting… attempt $attempt · retrying in ${seconds}s"
+    val countdown = if (state.retryInMs <= 0) {
+        "retrying now"
+    } else {
+        val seconds = (state.retryInMs + 999) / 1000
+        "retrying in ${seconds}s"
+    }
+    return "Connection lost\nLast output is shown. Reconnecting… attempt $attempt · $countdown"
 }
+
+private fun reconnectingComposerMessage(state: SessionUiState): String? =
+    if (state is SessionUiState.Reconnecting) {
+        "Connection lost. Your draft stays local while PocketShell reconnects."
+    } else {
+        null
+    }
 
 private fun statusLine(state: SessionUiState): String = when (state) {
     SessionUiState.Connecting -> "attaching"
     is SessionUiState.Live -> "attached"
     is SessionUiState.Reconnecting -> "reconnecting"
     is SessionUiState.Failed -> if (state.message.looksLikeEndedSession()) "ended" else "not attached"
+}
+
+private fun workspaceLabelForTerminal(path: String?): String =
+    path?.trimEnd('/')?.substringAfterLast('/')?.ifBlank { path }.orEmpty()
+
+private fun terminalHeaderSubtitle(
+    state: SessionUiState,
+    hostLabel: String,
+): String {
+    val transport = when (state) {
+        SessionUiState.Connecting -> "Connecting…"
+        is SessionUiState.Live -> "Connected"
+        is SessionUiState.Reconnecting -> "Reconnecting"
+        is SessionUiState.Failed -> "Offline"
+    }
+    return listOfNotNull(
+        hostLabel.takeIf { it.isNotBlank() },
+        transport,
+    ).joinToString(" · ").ifBlank {
+        // Direct screen tests and previews do not have route metadata. Keep a
+        // useful state label there while production uses the host-scoped copy.
+        statusLine(state)
+    }
+}
+
+@Composable
+private fun SessionContextBar(
+    sessionLabel: String,
+    session: SessionRow?,
+    sessionCount: Int,
+    onClick: () -> Unit,
+) {
+    ListRow(
+        title = sessionLabel,
+        subtitle = session?.let { sessionProgramLabel(it) + " · " + sessionStatusLabel(it) }
+            ?: "Terminal",
+        leading = {
+            Icon(
+                imageVector = PocketShellIcons.Terminal,
+                contentDescription = null,
+                tint = PocketShellColors.TextSecondary,
+            )
+        },
+        trailing = {
+            Text(
+                text = sessionCount.toString(),
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.metadata,
+            )
+            Icon(
+                imageVector = PocketShellIcons.Down,
+                contentDescription = "Switch sessions",
+                tint = PocketShellColors.TextMuted,
+            )
+        },
+        onClick = onClick,
+        modifier = Modifier.testTag(SESSION_CONTEXT_BAR_TAG),
+    )
+}
+
+private fun sessionProgramLabel(session: SessionRow): String = when {
+    session.agent.equals("claude", ignoreCase = true) -> "Claude Code"
+    session.agent.equals("codex", ignoreCase = true) -> "Codex"
+    session.agent.equals("opencode", ignoreCase = true) -> "OpenCode"
+    session.agent.equals("grok", ignoreCase = true) -> "Grok"
+    session.engine.equals("shell", ignoreCase = true) -> "Shell"
+    !session.profile.isNullOrBlank() -> session.profile.orEmpty()
+    else -> "Terminal"
 }
 
 private fun String.looksLikeEndedSession(): Boolean =

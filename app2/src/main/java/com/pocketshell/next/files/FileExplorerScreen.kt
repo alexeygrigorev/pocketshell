@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -45,6 +47,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -72,6 +77,13 @@ import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.flow.collect
 import java.util.concurrent.TimeUnit
+
+/** Header context shared by the file browser and its transfer history. */
+internal fun fileLocationSubtitle(hostName: String, path: String): String? {
+    val host = hostName.trim().takeIf { it.isNotEmpty() }
+    val location = com.pocketshell.next.workspaces.displayRemotePath(path)
+    return listOfNotNull(host, location).joinToString(" · ").takeIf { it.isNotEmpty() }
+}
 
 /** Stable test tags. Rows are keyed by the host's own file names. */
 const val FILE_EXPLORER_TAG: String = "file-explorer"
@@ -327,8 +339,8 @@ fun FileExplorerScreen(
             .testTag(FILE_EXPLORER_TAG),
     ) {
         ScreenHeader(
-            title = state.path.takeIf { it.isNotBlank() }?.let { RemotePath.nameOf(it) } ?: "Files",
-            subtitle = state.path.ifBlank { "Opening…" },
+            title = "Files",
+            subtitle = fileLocationSubtitle(state.hostName, state.path),
             onBack = onBack,
             trailing = {
                 KebabTrigger(
@@ -422,7 +434,10 @@ fun FileExplorerScreen(
     if (state.toolsVisible) {
         FileToolsSheet(
             state = state,
-            onUp = onUp,
+            onUp = {
+                onDismissTools()
+                onUp()
+            },
             onUpload = {
                 onDismissTools()
                 onUpload()
@@ -538,17 +553,31 @@ private fun CrumbBar(crumbs: List<RemotePath.Crumb>, onNavigateTo: (String) -> U
     ) {
         crumbs.forEachIndexed { index, crumb ->
             val isLast = index == crumbs.lastIndex
-            Text(
-                text = crumb.label,
-                color = if (isLast) PocketShellColors.Text else PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyMono,
-                fontWeight = if (isLast) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1,
+            Box(
                 modifier = Modifier
-                    .clickable { onNavigateTo(crumb.path) }
-                    .padding(horizontal = PocketShellSpacing.xs, vertical = PocketShellSpacing.xs)
+                    .sizeIn(
+                        minWidth = PocketShellDensity.tapTargetMin,
+                        minHeight = PocketShellDensity.tapTargetMin,
+                    )
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = "Navigate to ${crumb.path}",
+                        onClick = { onNavigateTo(crumb.path) },
+                    )
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = crumb.label
+                    }
                     .testTag(crumbTag(crumb.path)),
-            )
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = crumb.label,
+                    color = if (isLast) PocketShellColors.Text else PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyMono,
+                    fontWeight = if (isLast) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                )
+            }
             if (!isLast) {
                 Icon(
                     imageVector = PocketShellIcons.Chevron,

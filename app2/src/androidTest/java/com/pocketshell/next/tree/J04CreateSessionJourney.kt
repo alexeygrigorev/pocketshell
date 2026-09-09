@@ -6,12 +6,12 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -30,6 +30,7 @@ import com.pocketshell.next.workspaces.WORKSPACE_ERROR_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_CREATE_NOTICE_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_NEW_SESSION_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
+import com.pocketshell.next.workspaces.readableSessionName
 import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -164,6 +165,8 @@ class J04CreateSessionJourney {
         awaitTag(CREATE_SESSION_SHEET_TAG)
         JourneyScreenshots.capture("01-create-sheet", JOURNEY)
 
+        compose.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performClick()
+        compose.onNodeWithText("More options").performScrollTo().performClick()
         compose.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).performTextReplacement(FOLDER_NEW)
         compose.onNodeWithTag(CREATE_SESSION_NAME_TAG).performTextReplacement(SESSION_NEW_TAG)
         // The name follows the folder, so the common case is one tap. This is
@@ -183,7 +186,7 @@ class J04CreateSessionJourney {
 
         // Landed IN the new session — on the REAL terminal screen (U-4), whose
         // header title is the session identity the route carried.
-        awaitSessionScreen(SESSION_NEW)
+        awaitSessionScreen(SESSION_NEW, FOLDER_NEW)
         JourneyScreenshots.capture("03-session-opened", JOURNEY)
 
         // The HOST's own answer: the session is really there, and it was really
@@ -215,7 +218,7 @@ class J04CreateSessionJourney {
         openWorkspace()
 
         createFromSheet(FOLDER_TWICE)
-        awaitSessionScreen(SESSION_TWICE)
+        awaitSessionScreen(SESSION_TWICE, FOLDER_TWICE)
         pressBack()
         awaitTag(WORKSPACE_SCREEN_TAG)
         assertEquals(
@@ -244,7 +247,7 @@ class J04CreateSessionJourney {
             "Session \"$SESSION_TWICE\" already exists — choose it from the list to open it.",
         ).assertIsDisplayed()
         compose.onNodeWithTag(sessionRowTag(SESSION_TWICE)).performClick()
-        awaitSessionScreen(SESSION_TWICE)
+        awaitSessionScreen(SESSION_TWICE, FOLDER_TWICE)
         JourneyScreenshots.capture("05-existing-session-opened", JOURNEY)
         pressBack()
         awaitTag(WORKSPACE_SCREEN_TAG)
@@ -292,6 +295,8 @@ class J04CreateSessionJourney {
     private fun createFromSheet(folder: String) {
         compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
         awaitTag(CREATE_SESSION_SHEET_TAG)
+        compose.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performClick()
+        compose.onNodeWithText("More options").performScrollTo().performClick()
         compose.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).performTextReplacement(folder)
         // Keep the idempotent path under the same device-level guarantees as
         // the first-create path. Replacing the folder opens the IME and the
@@ -333,13 +338,11 @@ class J04CreateSessionJourney {
     /**
      * The create landed on the SESSION route, and on the session it just made.
      *
-     * The identity check is the header title, not merely "a session screen is
-     * up": that is the assertion that fails if the create navigates to the
-     * wrong session (a stale `openRequest`, the typed name instead of the
-     * host's answer, a dedup that opens a neighbour). Waiting on
-    * [SESSION_SCREEN_TAG] alone would pass for any of those.
+     * The redesigned terminal header uses the workspace label as its title
+     * and keeps the session identity in the context bar. Assert both so a
+     * stale open request or a navigation to a neighbouring session cannot pass.
      */
-    private fun awaitSessionScreen(name: String) {
+    private fun awaitSessionScreen(name: String, workspacePath: String) {
         try {
             awaitTag(SESSION_SCREEN_TAG)
         } catch (failure: Throwable) {
@@ -377,16 +380,21 @@ class J04CreateSessionJourney {
             JourneyScreenshots.capture("failure-session-screen", JOURNEY)
             throw failure
         }
+        val expectedWorkspaceTitle = workspacePath
+            .trimEnd('/')
+            .substringAfterLast('/')
+            .ifBlank { readableSessionName(name) }
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(SESSION_TITLE_TAG)
                 .fetchSemanticsNodes()
                 .any { node ->
                     node.config.getOrNull(SemanticsProperties.Text)
-                        ?.any { it.text == name } == true
+                        ?.any { it.text == expectedWorkspaceTitle } == true
                 }
         }
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TITLE_TAG).assertTextEquals(name)
+        compose.onNodeWithTag(SESSION_TITLE_TAG).assertTextContains(expectedWorkspaceTitle)
+        compose.onNodeWithText(readableSessionName(name)).assertIsDisplayed()
     }
 
     /**

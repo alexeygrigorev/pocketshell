@@ -22,10 +22,11 @@ import com.pocketshell.next.MainActivity
 import com.pocketshell.next.connect.AgentsFixture
 import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
+import com.pocketshell.next.connect.ToxiproxyControl
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.openQuietSession
-import com.pocketshell.next.terminal.SESSION_ERROR_BANNER_TAG
+import com.pocketshell.next.settings.AppSettings
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.termux.view.TerminalView
@@ -65,16 +66,15 @@ import org.junit.runner.RunWith
  * never left; a host-only one could pass with a black screen. Same discipline
  * as J03, for the same D29 reason.
  *
- * ## The non-happy host is a REAL dead session
+ * ## The non-happy host is a REAL dropped link
  *
- * The undelivered case is produced by killing the aplexer session out from under
- * an attached screen, so the composer is asked to send into a genuinely dead
- * pane rather than a flag a test set. That is the state the maintainer hits
- * (the box went to sleep, the session ended), and a fixture that only ever
- * offers a healthy host proves nothing about it.
+ * The uncertain-delivery case cuts the SSH link during the two writes that make
+ * up Send. The remote session remains alive, while the app must keep the draft
+ * and require inspection before a resend. A process that actually exits has a
+ * separate Session ended page with no active composer.
  *
  * Bring the fixture up before running:
- * `docker compose -f tests/docker/docker-compose.yml up -d --build agents`
+ * `docker compose -f tests/docker/docker-compose.yml up -d --build agents network-fault-proxy`
  */
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -89,6 +89,7 @@ class J07ComposerSendJourney {
         .around(compose)
 
     private var hostId: Long = 0
+    private val proxy = ToxiproxyControl()
 
     private suspend fun seed(description: Description) {
         val graph = appGraph()
@@ -96,8 +97,12 @@ class J07ComposerSendJourney {
         graph.hostDao().getAll().first().forEach { graph.hostDao().deleteById(it.id) }
         graph.sshKeyDao().getAll().first().forEach { graph.sshKeyDao().deleteById(it.id) }
 
+        proxy.reset()
+        check(proxy.state().enabled) { "the network-fault proxy did not come up enabled" }
+        graph.settingsRepository().setAgentSubmitEnterDelayMs(AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS)
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
-        println("J07_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
+        val proxyPort = ToxiproxyControl.faultSshPortArg()
+        println("J07_FIXTURE ${AgentsFixture.host}:$proxyPort direct=${AgentsFixture.port} $fingerprint")
 
         seedAplexerSession()
 
@@ -111,7 +116,7 @@ class J07ComposerSendJourney {
                 id = hostId,
                 name = "docker-fixture",
                 hostname = AgentsFixture.host,
-                port = AgentsFixture.port,
+                port = proxyPort,
                 username = AgentsFixture.USER,
                 keyId = keyId,
                 trustedHostKeyAlgorithm = "SHA256",
@@ -189,22 +194,18 @@ class J07ComposerSendJourney {
     }
 
     /**
-     * The other half of the contract: a send that cannot leave keeps the text
-     * and says so.
+     * The other half of the contract: when the link drops between the body and
+     * Enter writes, keep the text and require an explicit inspection before a
+     * resend.
      *
-     * The session is killed while the screen is attached, so this is a real
-     * dead pane — the state the maintainer actually hits.
+     * The proxy is disabled only after Send is enabled and tapped, so the
+     * result is an ambiguous PTY write rather than the ordinary ended-session
+     * page.
      */
     @Test
-    fun aSendIntoADeadSessionKeepsTheDraftAndShowsTheChip() {
+    fun aDroppedLinkKeepsTheDraftForDeliveryReview() {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
-
-        // Kill the session out from under the attached screen. This is the
-        // deterministic version of the host disappearing while the user is
-        // composing, and it leaves the other fixture sessions untouched.
-        AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
-        awaitTag(SESSION_ERROR_BANNER_TAG, "the session-ended banner")
 
         openComposer()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(UNDELIVERED_TEXT)
@@ -215,23 +216,33 @@ class J07ComposerSendJourney {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
             .assertTextContains(UNDELIVERED_TEXT, substring = true)
         compose.onNodeWithTag(COMPOSER_SEND_TAG).assertIsEnabled()
+        // Keep the body/Enter gap open long enough for the proxy cut to land
+        // deterministically. The production default remains 150 ms.
+        appGraph().settingsRepository().setAgentSubmitEnterDelayMs(1_000)
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
+        try {
+            proxy.disable()
 
-        awaitTag(COMPOSER_UNDELIVERED_TAG, "the not-delivered chip")
-        JourneyScreenshots.capture("03-undelivered", JOURNEY)
+            awaitTag(COMPOSER_REVIEW_TAG, "the delivery review page")
+            JourneyScreenshots.capture("03-undelivered", JOURNEY)
 
-        // The chip is on screen, and the text the user typed is still in the
-        // field — both, not either.
-        compose.onNodeWithTag(COMPOSER_UNDELIVERED_TAG).assertIsDisplayed()
-        compose.onNode(hasText(COMPOSER_UNDELIVERED_TEXT)).assertIsDisplayed()
-        compose.onNode(hasText(UNDELIVERED_TEXT)).assertIsDisplayed()
+            // The review page is on screen, and the original text is still in
+            // the editable draft — both, not either.
+            compose.onNodeWithTag(COMPOSER_REVIEW_DRAFT_TAG)
+                .assertTextContains(UNDELIVERED_TEXT, substring = true)
 
-        // And it was logged as not delivered, so it is recoverable later.
-        val logged = runBlocking {
-            appGraph().sentMessageDao().recentOnce("$hostId/$SESSION", limit = 10)
+            // An uncertain send is kept separate from a confirmed delivery.
+            // The history row records the initial PTY write as delivered
+            // because the app cannot prove whether those bytes reached the
+            // terminal.
+            val logged = runBlocking {
+                appGraph().sentMessageDao().recentOnce("$hostId/$SESSION", limit = 10)
+            }
+            assertEquals(listOf(UNDELIVERED_TEXT), logged.map { it.body })
+            assertEquals(true, logged.single().delivered)
+        } finally {
+            proxy.enable()
         }
-        assertEquals(listOf(UNDELIVERED_TEXT), logged.map { it.body })
-        assertEquals(false, logged.single().delivered)
     }
 
     /** "Don't make me retype what I already sent": the log, and the tap that restores it. */
@@ -248,8 +259,7 @@ class J07ComposerSendJourney {
 
         // Live Send dismisses the sheet (#695). Re-open to tap history.
         openComposer()
-        compose.onNodeWithTag(COMPOSER_HISTORY_TAG).performClick()
-        awaitTag(COMPOSER_HISTORY_SHEET_TAG, "the history sheet")
+        openHistory()
         JourneyScreenshots.capture("04-history", JOURNEY)
 
         compose.onNode(hasText(HISTORY_TEXT)).performClick()
@@ -321,6 +331,13 @@ class J07ComposerSendJourney {
         awaitTag(SESSION_COMPOSER_LAUNCHER_TAG, "the Prompt Composer launcher")
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).performClick()
         awaitTag(COMPOSER_TAG, "the Prompt Composer sheet")
+    }
+
+    private fun openHistory() {
+        compose.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+        awaitTag(COMPOSER_TOOLS_TAG, "the input tools sheet")
+        compose.onNodeWithTag(COMPOSER_HISTORY_TAG).performClick()
+        awaitTag(COMPOSER_HISTORY_SHEET_TAG, "the history sheet")
     }
 
     /**
@@ -431,7 +448,7 @@ class J07ComposerSendJourney {
 
         val HOST_IDS: Map<String, Long> = mapOf(
             "composingAndSendingReachesTheRealSessionAndClearsTheDraft" to 9_701L,
-            "aSendIntoADeadSessionKeepsTheDraftAndShowsTheChip" to 9_702L,
+            "aDroppedLinkKeepsTheDraftForDeliveryReview" to 9_702L,
             "aSentMessageComesBackFromTheHistory" to 9_703L,
             "anAttachmentUploadsOverSftpAndItsRemotePathGoesIntoTheMessage" to 9_704L,
         )

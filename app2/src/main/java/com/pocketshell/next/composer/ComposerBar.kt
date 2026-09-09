@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,7 +22,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,6 +60,7 @@ import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /** Stable test tags for the composer surface. */
@@ -76,7 +81,7 @@ const val COMPOSER_DELIVERY_UNCERTAIN_TAG: String = "composer-delivery-uncertain
 const val COMPOSER_SESSION_ENDED_TAG: String = "composer-session-ended"
 const val COMPOSER_NOTICE_TAG: String = "composer-notice"
 const val COMPOSER_STAGING_TAG: String = "composer-staging"
-const val COMPOSER_SLASH_TAG: String = "composer-slash"
+const val COMPOSER_SLASH_TAG: String = "composer-slash-sheet"
 const val COMPOSER_SLASH_TRIGGER_TAG: String = "composer-slash-trigger"
 const val COMPOSER_TIMER_TAG: String = "composer-timer"
 const val COMPOSER_WAVEFORM_TAG: String = "composer-waveform"
@@ -84,6 +89,12 @@ const val COMPOSER_TRANSCRIBING_TAG: String = "composer-transcribing"
 const val COMPOSER_CONTROLS_ROW_TAG: String = "composer-controls-row"
 const val COMPOSER_TOOLS_TAG: String = "composer-tools"
 const val COMPOSER_TOOLS_TRIGGER_TAG: String = "composer-tools-trigger"
+const val COMPOSER_REVIEW_TAG: String = "composer-delivery-review"
+const val COMPOSER_REVIEW_DRAFT_TAG: String = "composer-delivery-review-draft"
+const val COMPOSER_REVIEW_ACTION_TAG: String = "composer-delivery-review-action"
+const val COMPOSER_DELIVERY_REVIEW_TITLE: String = "Delivery could not be confirmed"
+const val COMPOSER_DELIVERY_REVIEW_TEXT: String =
+    "The connection dropped while input was being sent. It may have reached the terminal. Your draft was kept."
 
 fun composerSlashRowTag(command: String): String = "composer-slash-row:$command"
 
@@ -123,6 +134,7 @@ internal const val COMPOSER_PLACEHOLDER: String = "Compose a message…"
  * so Send reads an empty draft and does nothing).
  */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ComposerBar(
     state: ComposerUiState,
     onDraftChange: (String) -> Unit,
@@ -140,9 +152,12 @@ fun ComposerBar(
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
     onOpenHotkeys: () -> Unit = {},
+    availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     var field by remember { mutableStateOf(TextFieldValue(state.draft, TextRange(state.draft.length))) }
     var toolsOpen by remember { mutableStateOf(false) }
+    var slashSheetOpen by remember { mutableStateOf(false) }
+    var slashDraftBeforeSheet by remember { mutableStateOf<TextFieldValue?>(null) }
     // Re-seed only when the ViewModel's draft CHANGES to something the editor
     // did not produce: a send clearing it, a history tap replacing it,
     // dictation rewriting it. Keyed on `state.draft`, so a keystroke (which
@@ -158,9 +173,6 @@ fun ComposerBar(
             field = TextFieldValue(state.draft, TextRange(state.draft.length))
         }
     }
-
-    val slashQuery = SlashCommandAutocomplete.queryFor(field)
-    val slashRows = slashQuery?.let { SlashCommandAutocomplete.filter(it) }.orEmpty()
 
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -206,17 +218,6 @@ fun ComposerBar(
             AttachmentTiles(attachments = state.attachments, onRemove = onRemoveAttachment)
         }
 
-        if (slashRows.isNotEmpty()) {
-            SlashCommandDropdown(
-                commands = slashRows,
-                onPick = { command ->
-                    val inserted = SlashCommandAutocomplete.insert(field, command)
-                    field = inserted
-                    onDraftChange(inserted.text)
-                },
-            )
-        }
-
         when (state.recording) {
             RecordingState.Recording -> RecordingSurface(
                 elapsedLabel = recordingElapsedLabel(),
@@ -248,9 +249,27 @@ fun ComposerBar(
             }
         }
 
-        if (toolsOpen && state.recording == RecordingState.Idle) {
+        ControlsRow(
+            state = state,
+            onSend = commitSend,
+            deliveryEnabled = deliveryEnabled,
+            onInsert = onInsert,
+            onOpenTools = { toolsOpen = !toolsOpen },
+            onMicTap = onMicTap,
+            onCancelRecording = onCancelRecording,
+        )
+    }
+
+    if (toolsOpen && state.recording == RecordingState.Idle) {
+        ModalBottomSheet(
+            onDismissRequest = { toolsOpen = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = PocketShellColors.Surface,
+            shape = PocketShellShapes.large,
+        ) {
             ComposerToolsPanel(
                 state = state,
+                slashCommandsAvailable = availableSlashCommands.isNotEmpty(),
                 onDismiss = { toolsOpen = false },
                 onAttach = {
                     toolsOpen = false
@@ -262,9 +281,11 @@ fun ComposerBar(
                 },
                 onSlash = {
                     toolsOpen = false
+                    slashDraftBeforeSheet = field
                     val seeded = SlashCommandAutocomplete.insertText(field, "/")
                     field = seeded
                     onDraftChange(seeded.text)
+                    slashSheetOpen = true
                 },
                 onHotkeys = {
                     toolsOpen = false
@@ -276,15 +297,104 @@ fun ComposerBar(
                 },
             )
         }
+    }
 
-        ControlsRow(
-            state = state,
-            onSend = commitSend,
-            deliveryEnabled = deliveryEnabled,
-            onInsert = onInsert,
-            onOpenTools = { toolsOpen = !toolsOpen },
-            onMicTap = onMicTap,
-            onCancelRecording = onCancelRecording,
+    if (slashSheetOpen && availableSlashCommands.isNotEmpty()) {
+        SlashCommandSheet(
+            commands = availableSlashCommands,
+            onPick = { command ->
+                val inserted = SlashCommandAutocomplete.insert(field, command)
+                field = inserted
+                slashDraftBeforeSheet = null
+                onDraftChange(inserted.text)
+                slashSheetOpen = false
+            },
+            onDismiss = {
+                slashDraftBeforeSheet?.let { original ->
+                    field = original
+                    onDraftChange(original.text)
+                }
+                slashDraftBeforeSheet = null
+                slashSheetOpen = false
+            },
+        )
+    }
+}
+
+/**
+ * The page shown when a PTY write completed without a trustworthy delivery
+ * result. It keeps the draft locally editable, but makes reconnect-and-inspect
+ * the only primary action so a user cannot accidentally execute the same input
+ * twice after a connection drop.
+ */
+@Composable
+fun DeliveryUncertainReview(
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onReconnectAndInspect: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var field by remember(draft) {
+        mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
+    }
+
+    LaunchedEffect(draft) {
+        if (draft != field.text) {
+            field = TextFieldValue(draft, TextRange(draft.length))
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
+            .testTag(COMPOSER_REVIEW_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+    ) {
+        Banner(
+            text = "$COMPOSER_DELIVERY_REVIEW_TITLE\n$COMPOSER_DELIVERY_REVIEW_TEXT",
+            role = BannerRole.Warning,
+            maxLines = 5,
+        )
+        Text(
+            text = "Draft",
+            color = PocketShellColors.Text,
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.SurfaceElev, DRAFT_SHAPE)
+                .border(1.dp, PocketShellColors.Border, DRAFT_SHAPE)
+                .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
+        ) {
+            BasicTextField(
+                value = field,
+                onValueChange = { updated ->
+                    field = updated
+                    onDraftChange(updated.text)
+                },
+                textStyle = TextStyle(color = PocketShellColors.Text, fontSize = ComposerDraftFontSize),
+                cursorBrush = SolidColor(PocketShellColors.Accent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = DRAFT_MIN_HEIGHT, max = DRAFT_MAX_HEIGHT)
+                    .testTag(COMPOSER_REVIEW_DRAFT_TAG),
+            )
+        }
+        Text(
+            text = "Reconnect and inspect the terminal before sending again.",
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        PocketShellButton(
+            text = "Reconnect and inspect",
+            onClick = onReconnectAndInspect,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(COMPOSER_REVIEW_ACTION_TAG),
+            variant = ButtonVariant.Primary,
         )
     }
 }
@@ -504,6 +614,7 @@ private fun ComposerToolsTrigger(
 @Composable
 private fun ComposerToolsPanel(
     state: ComposerUiState,
+    slashCommandsAvailable: Boolean,
     onDismiss: () -> Unit,
     onAttach: () -> Unit,
     onHistory: () -> Unit,
@@ -515,6 +626,9 @@ private fun ComposerToolsPanel(
         modifier = Modifier
             .fillMaxWidth()
             .background(PocketShellColors.SurfaceElev)
+            .navigationBarsPadding()
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
             .testTag(COMPOSER_TOOLS_TAG),
     ) {
         SheetHeader(
@@ -535,13 +649,15 @@ private fun ComposerToolsPanel(
             onClick = onHistory,
             testTag = COMPOSER_HISTORY_TAG,
         )
-        ComposerToolRow(
-            title = "Slash commands",
-            subtitle = "Insert a supported command into the draft",
-            icon = PocketShellIcons.Code,
-            onClick = onSlash,
-            testTag = COMPOSER_SLASH_TRIGGER_TAG,
-        )
+        if (slashCommandsAvailable) {
+            ComposerToolRow(
+                title = "Slash commands",
+                subtitle = "Insert a supported command into the draft",
+                icon = PocketShellIcons.Code,
+                onClick = onSlash,
+                testTag = COMPOSER_SLASH_TRIGGER_TAG,
+            )
+        }
         ComposerToolRow(
             title = "Terminal keys",
             subtitle = "Send special keys to the current terminal",
@@ -745,63 +861,16 @@ private fun MicTriggerButton(
     )
 }
 
-/** v0.4.47 tools-pill radius — between medium (14) and large (20) is too small; 22 matches the old chrome. */
-private val ComposerActionPillRadius = 22.dp
+/** Quiet field/button radius for composer controls. */
+private val ComposerActionPillRadius = 12.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
-/** Draft sits between bodyMedium (14) and titleMedium (16); the old field used 15. */
-private val ComposerDraftFontSize = 15.sp
+/** Quiet metadata/label rung for readable composer draft text. */
+private val ComposerDraftFontSize = 16.sp
 private val ComposerIdlePillHeight = 48.dp
 private val ComposerRecordingPillHeight = 48.dp
 private val COMPOSER_ACTION_ICON_BUTTON_SIZE = 48.dp
 private val COMPOSER_STOP_GLYPH_SIZE = 15.dp
 
-/**
- * The `/`-command list, rendered above the field so it never sits under the
- * keyboard. See [SlashCommandAutocomplete] for when it is open.
- */
-@Composable
-private fun SlashCommandDropdown(commands: List<SlashCommand>, onPick: (SlashCommand) -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = SLASH_MAX_HEIGHT)
-            .verticalScroll(rememberScrollState())
-            .background(color = PocketShellColors.SurfaceElev, shape = DRAFT_SHAPE)
-            .border(width = 1.dp, color = PocketShellColors.Border, shape = DRAFT_SHAPE)
-            .testTag(COMPOSER_SLASH_TAG),
-    ) {
-        commands.forEach { command ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(composerSlashRowTag(command.command)),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                PocketShellButton(
-                    onClick = { onPick(command) },
-                    variant = ButtonVariant.Text,
-                    compact = true,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        text = command.command,
-                        color = PocketShellColors.Accent,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
-                    Text(
-                        text = command.description,
-                        color = PocketShellColors.TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                    )
-                }
-            }
-        }
-    }
-}
-
 private val DRAFT_SHAPE = RoundedCornerShape(PocketShellSpacing.md)
 private val DRAFT_MIN_HEIGHT = 40.dp
 private val DRAFT_MAX_HEIGHT = 168.dp
-private val SLASH_MAX_HEIGHT = 168.dp

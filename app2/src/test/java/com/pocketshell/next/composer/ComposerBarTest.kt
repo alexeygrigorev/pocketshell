@@ -24,7 +24,7 @@ import org.robolectric.annotation.Config
  * `J07ComposerSendJourney` proves the send really reaches a real host; this
  * suite pins the chrome rules around it — the ones a device journey would only
  * notice by screenshot: that the undelivered chip is a distinct, visible thing,
- * that Send is gated on having something to send, that the slash dropdown opens
+ * that Send is gated on having something to send, that the slash sheet opens
  * only when it should, and that a staged attachment is visible with a way to
  * remove it.
  */
@@ -167,25 +167,27 @@ class ComposerBarTest {
     }
 
     @Test
-    fun `typing a slash opens the command dropdown`() {
+    fun `typing a slash does not render an inline command dropdown`() {
         setContent(ComposerUiState())
 
         composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("/")
 
-        composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).assertDoesNotExist()
     }
 
     @Test
-    fun `picking a command puts it in the draft`() {
+    fun `the slash tool opens the native command sheet`() {
         var draft = ""
         setContent(ComposerUiState(), onDraftChange = { draft = it })
-        composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("/cl")
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).performClick()
 
-        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).performClick()
-
-        assertEquals("/clear", draft)
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_SEARCH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).assertIsDisplayed()
+        assertEquals("/", draft)
     }
 
     @Test
@@ -361,7 +363,7 @@ class ComposerBarTest {
     }
 
     @Test
-    fun `the slash trigger seeds a leading slash and opens autocomplete`() {
+    fun `the slash trigger seeds a leading slash and opens the native sheet`() {
         var draft = ""
         setContent(ComposerUiState(), onDraftChange = { draft = it })
 
@@ -370,7 +372,23 @@ class ComposerBarTest {
 
         assertEquals("/", draft)
         composeRule.onNodeWithTag(COMPOSER_SLASH_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(composerSlashRowTag("/clear")).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_SEARCH_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun `remote delivery controls are disabled while the draft remains editable`() {
+        val drafts = mutableListOf<String>()
+        setContent(
+            ComposerUiState(draft = "local draft"),
+            onDraftChange = { drafts += it },
+            deliveryEnabled = false,
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
+
+        assertEquals("local draft more", drafts.last())
     }
 
     // --------------------------------------------------------------- helpers
@@ -386,6 +404,7 @@ class ComposerBarTest {
         onToggleHistory: () -> Unit = {},
         onMicTap: () -> Unit = {},
         onCancelRecording: () -> Unit = {},
+        deliveryEnabled: Boolean = true,
     ) {
         composeRule.setContent {
             PocketShellTheme {
@@ -402,6 +421,7 @@ class ComposerBarTest {
                     onRemoveAttachment = onRemoveAttachment,
                     onDismissNotice = {},
                     onDiscard = {},
+                    deliveryEnabled = deliveryEnabled,
                 )
             }
         }

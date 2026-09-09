@@ -18,8 +18,14 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -58,6 +64,7 @@ import com.pocketshell.next.settings.SettingsViewModel
 import com.pocketshell.next.settings.TerminalSettingsRoute
 import com.pocketshell.next.settings.UpdateRoute
 import com.pocketshell.next.settings.VoiceSettingsRoute
+import com.pocketshell.next.settings.AddWorkspaceRootRoute
 import com.pocketshell.next.settings.WorkspaceRootsRoute
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.terminal.SessionRoute
@@ -67,6 +74,7 @@ import com.pocketshell.next.workspaces.HostWorkspacesRoute
 import com.pocketshell.next.workspaces.ReorderWorkspacesRoute
 import com.pocketshell.next.workspaces.WorkspaceRoute
 import com.pocketshell.core.hostapi.SessionRow
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -100,6 +108,9 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var connections: ConnectionsRegistry
+
+    @Inject
+    lateinit var hostDao: HostDao
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -155,6 +166,7 @@ class MainActivity : FragmentActivity() {
                                 modifier = Modifier.windowInsetsPadding(WindowInsets.systemBars),
                                 connections = connections,
                                 startupHostId = appSettings.defaultHostId,
+                                startupHostExists = { hostDao.getById(it) != null },
                                 onHostOpened = settingsViewModel::setDefaultHostId,
                             )
                     }
@@ -220,6 +232,11 @@ private fun NavHostController.openSession(
  * still exercise the real navigation edge — the production defaults are the
  * real ones.
  */
+data class WorkspaceScreenLaunch(
+    val initialRootPath: String? = null,
+    val initialRootAction: String? = null,
+)
+
 @Composable
 fun AppNavHost(
     navController: NavHostController = rememberNavController(),
@@ -227,6 +244,8 @@ fun AppNavHost(
     connections: ConnectionsRegistry? = null,
     /** Last host to resume; null keeps the Hosts landing screen. */
     startupHostId: Long? = null,
+    /** Drops a stale resume id when the host was removed since the last launch. */
+    startupHostExists: suspend (Long) -> Boolean = { true },
     /** Persists the host selection without making the host list own settings. */
     onHostOpened: (Long) -> Unit = {},
     hostsScreen: @Composable (HostListActions) -> Unit = { actions ->
@@ -250,7 +269,8 @@ fun AppNavHost(
         onOpenPorts: () -> Unit,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
-    ) -> Unit = { hostId, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenFilesAtPath, onOpenPorts, onBack, onOpenUsage ->
+        launch: WorkspaceScreenLaunch,
+    ) -> Unit = { hostId, onOpenWorkspace, onOpenSession, onOpenFiles, onOpenFilesAtPath, onOpenPorts, onBack, onOpenUsage, launch ->
         val scope = rememberCoroutineScope()
         HostWorkspacesRoute(
             onOpenWorkspace = onOpenWorkspace,
@@ -272,6 +292,8 @@ fun AppNavHost(
             onStartSessionAtPath = { path ->
                 navController.navigate(Destination.WorkspaceStart.route(hostId, path))
             },
+            initialRootPath = launch.initialRootPath,
+            initialRootAction = launch.initialRootAction,
         )
     },
     workspaceScreen: @Composable (
@@ -295,15 +317,17 @@ fun AppNavHost(
     sessionScreen: @Composable (
         hostId: Long,
         sessionName: String,
+        workspacePath: String?,
         onBack: () -> Unit,
         onOpenUsage: () -> Unit,
         onOpenFiles: () -> Unit,
         onOpenSession: (SessionRow) -> Unit,
         onOpenNewSession: () -> Unit,
-    ) -> Unit = { hostId, sessionName, onBack, onOpenUsage, onOpenFiles, onOpenSession, onOpenNewSession ->
+    ) -> Unit = { hostId, sessionName, workspacePath, onBack, onOpenUsage, onOpenFiles, onOpenSession, onOpenNewSession ->
         SessionRoute(
             hostId = hostId,
             sessionName = sessionName,
+            workspacePath = workspacePath,
             onBack = onBack,
             onOpenUsage = onOpenUsage,
             onOpenFiles = onOpenFiles,
@@ -409,7 +433,37 @@ fun AppNavHost(
         UpdateRoute(onBack = onBack)
     },
     workspaceRootsScreen: @Composable (hostId: Long, onBack: () -> Unit) -> Unit =
-        { _, onBack -> WorkspaceRootsRoute(onBack = onBack) },
+        { hostId, onBack ->
+            WorkspaceRootsRoute(
+                onBack = onBack,
+                onOpenAddRoot = { navController.navigate(Destination.AddWorkspaceRoot.route(hostId)) },
+                onRootAction = { root, action ->
+                    when (action) {
+                        com.pocketshell.next.settings.WorkspaceRootMenuAction.ADD_WORKSPACE,
+                        com.pocketshell.next.settings.WorkspaceRootMenuAction.CREATE_FOLDER,
+                        -> navController.navigate(
+                            Destination.WorkspaceRootAction.route(
+                                hostId = hostId,
+                                rootPath = root.path,
+                                action = action.name.lowercase().replace('_', '-'),
+                            ),
+                        )
+                        com.pocketshell.next.settings.WorkspaceRootMenuAction.START_SESSION ->
+                            navController.navigate(Destination.WorkspaceStart.route(hostId, root.path))
+                        com.pocketshell.next.settings.WorkspaceRootMenuAction.BROWSE_ROOT ->
+                            navController.navigate(Destination.Files.route(hostId, root.path))
+                        com.pocketshell.next.settings.WorkspaceRootMenuAction.REMOVE_ROOT -> Unit
+                    }
+                },
+            )
+        },
+    workspaceRootAddScreen: @Composable (
+        hostId: Long,
+        onBack: () -> Unit,
+        onAdded: () -> Unit,
+    ) -> Unit = { _, onBack, onAdded ->
+        AddWorkspaceRootRoute(onBack = onBack, onAdded = onAdded)
+    },
     usageScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         UsageRoute(onBack = onBack)
     },
@@ -417,6 +471,11 @@ fun AppNavHost(
         UsageRoute(onBack = onBack, selectedHostId = hostId)
     },
 ) {
+    // The startup id is resolved once per Activity. A host-row tap updates the
+    // live preference, but that update must never become another startup dial.
+    val initialStartupHostId = remember { startupHostId }
+    val startupHostToConnect = remember { mutableStateOf<Long?>(null) }
+
     NavHost(
         navController = navController,
         startDestination = Destination.start.pattern,
@@ -439,6 +498,8 @@ fun AppNavHost(
             ConnectGate(
                 onConnected = { hostId -> navController.navigate(Destination.Workspaces.route(hostId)) },
                 viewModel = connectViewModel(),
+                initialHostId = startupHostToConnect.value,
+                onInitialHostConsumed = { startupHostToConnect.value = null },
             ) { onOpenHost ->
                 hostsScreen(
                     HostListActions(
@@ -549,6 +610,33 @@ fun AppNavHost(
                 onOpenPorts,
                 onBack,
                 onOpenUsage,
+                WorkspaceScreenLaunch(),
+            )
+        }
+        composable(
+            route = Destination.WorkspaceRootAction.pattern,
+            arguments = listOf(
+                navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType },
+                navArgument(Destination.ARG_ROOT_PATH) { type = NavType.StringType },
+                navArgument(Destination.ARG_ROOT_ACTION) { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            val rootPath = entry.arguments?.getString(Destination.ARG_ROOT_PATH).orEmpty()
+            val action = entry.arguments?.getString(Destination.ARG_ROOT_ACTION).orEmpty()
+            val onOpenSession: (SessionRow) -> Unit = { session ->
+                navController.openSession(hostId, session.name, session.workspace)
+            }
+            workspacesScreen(
+                hostId,
+                { path -> navController.navigate(Destination.Workspace.route(hostId, path)) },
+                onOpenSession,
+                { navController.navigate(Destination.Files.route(hostId)) },
+                { path -> navController.navigate(Destination.Files.route(hostId, path)) },
+                { navController.navigate(Destination.Ports.route(hostId)) },
+                { navController.popBackStack() },
+                { navController.navigate(Destination.HostUsage.route(hostId)) },
+                WorkspaceScreenLaunch(rootPath, action),
             )
         }
         composable(
@@ -625,6 +713,7 @@ fun AppNavHost(
             sessionScreen(
                 hostId,
                 name,
+                workspacePath,
                 { navController.popBackStack() },
                 // Task P-5: the top bar's usage glance pill navigates here.
                 { navController.navigate(Destination.HostUsage.route(hostId)) },
@@ -780,6 +869,17 @@ fun AppNavHost(
             val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
             workspaceRootsScreen(hostId) { navController.popBackStack() }
         }
+        composable(
+            route = Destination.AddWorkspaceRoot.pattern,
+            arguments = listOf(navArgument(Destination.ARG_HOST_ID) { type = NavType.LongType }),
+        ) { entry ->
+            val hostId = entry.arguments?.getLong(Destination.ARG_HOST_ID) ?: 0L
+            workspaceRootAddScreen(
+                hostId,
+                { navController.popBackStack() },
+                { navController.popBackStack() },
+            )
+        }
         composable(Destination.Usage.pattern) {
             // Task P-5: the real usage/quota panel.
             usageScreen { navController.popBackStack() }
@@ -793,11 +893,39 @@ fun AppNavHost(
         }
     }
 
-    LaunchedEffect(startupHostId) {
-        val hostId = startupHostId ?: return@LaunchedEffect
-        if (hostId <= 0L || navController.currentDestination?.route != Destination.Hosts.pattern) {
-            return@LaunchedEffect
+    // This is a cold-launch handoff, not a live observer. The Hosts row writes
+    // the last opened host immediately when it is tapped; reacting to that
+    // write here would start a second startup dial while the trust sheet is
+    // still waiting for the user's decision.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner, initialStartupHostId) {
+        var startupAttempted = false
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            // `repeatOnLifecycle` is only the readiness gate here. The resume
+            // handoff is a cold-start action and must run at most once: if the
+            // user backs out to Hosts during this Activity, repeating it would
+            // immediately send them back to the workspace and can leave a
+            // NavBackStackEntry below CREATED during teardown.
+            if (startupAttempted) return@repeatOnLifecycle
+            startupAttempted = true
+            val hostId = initialStartupHostId ?: return@repeatOnLifecycle
+            // Let NavHost finish attaching the start entry before adding a
+            // second entry. Without this frame boundary a very fast activity
+            // teardown can destroy the new entry while it is still INITIALIZED.
+            withFrameNanos { }
+            if (
+                hostId <= 0L ||
+                navController.currentDestination?.route != Destination.Hosts.pattern
+            ) {
+                return@repeatOnLifecycle
+            }
+            if (!startupHostExists(hostId)) return@repeatOnLifecycle
+            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                return@repeatOnLifecycle
+            }
+            // ConnectGate owns the dial, trust prompt, retry, and success
+            // navigation. This handoff supplies only the validated id.
+            startupHostToConnect.value = hostId
         }
-        navController.navigate(Destination.Workspaces.route(hostId))
     }
 }

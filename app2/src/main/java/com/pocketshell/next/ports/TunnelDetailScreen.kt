@@ -125,7 +125,9 @@ fun TunnelDetailScreen(
                 .padding(PocketShellSpacing.lg),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
-            TunnelDetailRow("Remote", "${hostName}:${tunnel.remotePort}")
+            // The forwarder targets the service's loopback listener on the host;
+            // printing the host label here would imply a different remote bind.
+            TunnelDetailRow("Remote", "127.0.0.1:${tunnel.remotePort}")
             TunnelDetailRow("On this phone", "127.0.0.1:${tunnel.localPort}")
             if (manual) {
                 TunnelDetailRow("Name", manualName?.ifBlank { "Port ${tunnel.remotePort}" } ?: "Port ${tunnel.remotePort}")
@@ -133,6 +135,16 @@ fun TunnelDetailScreen(
             }
             TunnelDetailRow("State", tunnel.status.detailLabel)
             TunnelDetailRow("Traffic", "${formatBytes(tunnel.bytesIn + tunnel.bytesOut)} total")
+            if (verifiedUrl != null) {
+                PocketShellButton(
+                    text = "Open in browser",
+                    onClick = { onOpenBrowser(verifiedUrl) },
+                    variant = ButtonVariant.Primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(TUNNEL_OPEN_BROWSER_TAG),
+                )
+            }
             PocketShellButton(
                 text = "Copy local address",
                 onClick = { onCopyAddress(tunnel.localPort) },
@@ -141,16 +153,6 @@ fun TunnelDetailScreen(
                     .fillMaxWidth()
                     .testTag(TUNNEL_COPY_ADDRESS_TAG),
             )
-            if (verifiedUrl != null) {
-                PocketShellButton(
-                    text = "Open in browser",
-                    onClick = { onOpenBrowser(verifiedUrl) },
-                    variant = ButtonVariant.Secondary,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(TUNNEL_OPEN_BROWSER_TAG),
-                )
-            }
             PocketShellButton(
                 text = if (manual) "Remove tunnel" else "Stop tunnel",
                 onClick = onStop,

@@ -94,9 +94,10 @@ class CreateSessionFormStateTest {
     }
 
     /**
-     * Issue #2439 / #2522: the Agent chips are enabled+available only.
-     * A dropped-row regression (hiding a working engine) or a shown-row
-     * regression (offering a disabled/missing one) both redden here.
+     * Issue #2439 / #2522: a provider may be started only when the host says it
+     * is enabled, available, and createable. A dropped-row regression (hiding a
+     * working engine) or a shown-row regression (offering a disabled one) both
+     * redden here.
      */
     @Test
     fun `disabled and unavailable engines are hidden, enabled plus available is shown`() {

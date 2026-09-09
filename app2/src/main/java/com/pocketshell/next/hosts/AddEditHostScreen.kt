@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -14,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -42,6 +46,7 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /** Stable test tags for the form. */
 const val HOST_FORM_NAME_TAG: String = "host-form-name"
@@ -53,6 +58,8 @@ const val HOST_FORM_OPTIONS_TAG: String = "host-form-options"
 const val HOST_FORM_USAGE_COMMAND_TAG: String = "host-form-usage-command"
 const val HOST_FORM_TEST_TAG: String = "host-form-test"
 const val HOST_FORM_SAVE_TAG: String = "host-form-save"
+const val HOST_FORM_CONTENT_TAG: String = "host-form-content"
+const val HOST_FORM_ACTIONS_TAG: String = "host-form-actions"
 
 /**
  * Route-level entry point for the add/edit host form.
@@ -152,111 +159,149 @@ fun AddEditHostScreen(
         )
 
         if (state.loading) {
-            LoadingIndicator.Spinner(label = "Loading host…")
-            return@Column
-        }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                LoadingIndicator.Spinner(label = "Loading host…")
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .testTag(HOST_FORM_CONTENT_TAG)
+                    .padding(horizontal = PocketShellSpacing.xl)
+                    .padding(vertical = PocketShellSpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+            ) {
+                FormField(
+                    label = "Name",
+                    value = state.name,
+                    error = state.errors.name,
+                    testTag = HOST_FORM_NAME_TAG,
+                    onValueChange = { value -> onChange { it.copy(name = value) } },
+                )
+                FormField(
+                    label = "Address",
+                    value = state.hostname,
+                    error = state.errors.hostname,
+                    testTag = HOST_FORM_HOSTNAME_TAG,
+                    onValueChange = { value -> onChange { it.copy(hostname = value) } },
+                )
+                FormField(
+                    label = "Username",
+                    value = state.username,
+                    error = state.errors.username,
+                    testTag = HOST_FORM_USERNAME_TAG,
+                    onValueChange = { value -> onChange { it.copy(username = value) } },
+                )
 
+                KeyPicker(
+                    keys = keys,
+                    selectedKeyId = state.selectedKeyId,
+                    error = state.errors.key,
+                    onSelect = { keyId -> onChange { it.copy(selectedKeyId = keyId) } },
+                    onAddKey = onAddKey,
+                )
+
+                if (keys.isEmpty()) {
+                    // A precondition, not a field error: there is nothing the user
+                    // can type into this form to fix it.
+                    Banner(
+                        text = "Add an SSH key before saving a host.",
+                        role = BannerRole.Warning,
+                        trailingContent = {
+                            PocketShellButton(
+                                text = "Add key",
+                                onClick = onAddKey,
+                                variant = ButtonVariant.Text,
+                                compact = true,
+                            )
+                        },
+                    )
+                }
+
+                ConnectionOptions(
+                    expanded = showConnectionOptions,
+                    onToggle = { showConnectionOptions = !showConnectionOptions },
+                )
+
+                if (showConnectionOptions) {
+                    FormField(
+                        label = "Port",
+                        value = state.port,
+                        error = state.errors.port,
+                        testTag = HOST_FORM_PORT_TAG,
+                        keyboardType = KeyboardType.Number,
+                        onValueChange = { value -> onChange { it.copy(port = value) } },
+                    )
+                    FormField(
+                        label = "Usage command",
+                        value = state.usageCommand,
+                        error = null,
+                        testTag = HOST_FORM_USAGE_COMMAND_TAG,
+                        onValueChange = { value -> onChange { it.copy(usageCommand = value) } },
+                        placeholder = "Use host default",
+                    )
+                }
+            }
+
+            HostFormActions(
+                editing = state.editing,
+                testingConnection = state.testingConnection,
+                onSave = onSave,
+                onTestConnection = onTestConnection,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HostFormActions(
+    editing: Boolean,
+    testingConnection: Boolean,
+    onSave: () -> Unit,
+    onTestConnection: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Background)
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(horizontal = PocketShellSpacing.xl)
+            .padding(top = PocketShellSpacing.sm, bottom = PocketShellSpacing.sm),
+    ) {
+        HorizontalDivider(color = PocketShellColors.BorderSoft)
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(PocketShellSpacing.lg),
-            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
+                .fillMaxWidth()
+                .testTag(HOST_FORM_ACTIONS_TAG),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
-            FormField(
-                label = "Name",
-                value = state.name,
-                error = state.errors.name,
-                testTag = HOST_FORM_NAME_TAG,
-                onValueChange = { value -> onChange { it.copy(name = value) } },
+            PocketShellButton(
+                text = if (testingConnection) "Preparing connection…" else "Test connection",
+                onClick = onTestConnection,
+                variant = ButtonVariant.Primary,
+                enabled = !testingConnection,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(HOST_FORM_TEST_TAG),
             )
-            FormField(
-                label = "Address",
-                value = state.hostname,
-                error = state.errors.hostname,
-                testTag = HOST_FORM_HOSTNAME_TAG,
-                onValueChange = { value -> onChange { it.copy(hostname = value) } },
+            PocketShellButton(
+                text = if (editing) "Save changes" else "Save without testing",
+                onClick = onSave,
+                variant = ButtonVariant.Text,
+                enabled = !testingConnection,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(HOST_FORM_SAVE_TAG),
             )
-            FormField(
-                label = "Username",
-                value = state.username,
-                error = state.errors.username,
-                testTag = HOST_FORM_USERNAME_TAG,
-                onValueChange = { value -> onChange { it.copy(username = value) } },
-            )
-
-            KeyPicker(
-                keys = keys,
-                selectedKeyId = state.selectedKeyId,
-                error = state.errors.key,
-                onSelect = { keyId -> onChange { it.copy(selectedKeyId = keyId) } },
-                onAddKey = onAddKey,
-            )
-
-            if (keys.isEmpty()) {
-                // A precondition, not a field error: there is nothing the user
-                // can type into this form to fix it.
-                Banner(
-                    text = "Add an SSH key before saving a host.",
-                    role = BannerRole.Warning,
-                    trailingContent = {
-                        PocketShellButton(
-                            text = "Add key",
-                            onClick = onAddKey,
-                            variant = ButtonVariant.Text,
-                            compact = true,
-                        )
-                    },
-                )
-            }
-
-            ConnectionOptions(
-                expanded = showConnectionOptions,
-                onToggle = { showConnectionOptions = !showConnectionOptions },
-            )
-
-            if (showConnectionOptions) {
-                FormField(
-                    label = "Port",
-                    value = state.port,
-                    error = state.errors.port,
-                    testTag = HOST_FORM_PORT_TAG,
-                    keyboardType = KeyboardType.Number,
-                    onValueChange = { value -> onChange { it.copy(port = value) } },
-                )
-                FormField(
-                    label = "Usage command",
-                    value = state.usageCommand,
-                    error = null,
-                    testTag = HOST_FORM_USAGE_COMMAND_TAG,
-                    onValueChange = { value -> onChange { it.copy(usageCommand = value) } },
-                    placeholder = "Use host default",
-                )
-            }
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-            ) {
-                PocketShellButton(
-                    text = if (state.testingConnection) "Preparing connection…" else "Test connection",
-                    onClick = onTestConnection,
-                    variant = ButtonVariant.Primary,
-                    enabled = !state.testingConnection,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(HOST_FORM_TEST_TAG),
-                )
-                PocketShellButton(
-                    text = if (state.editing) "Save changes" else "Save without testing",
-                    onClick = onSave,
-                    variant = ButtonVariant.Text,
-                    enabled = !state.testingConnection,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(HOST_FORM_SAVE_TAG),
-                )
-            }
         }
     }
 }
@@ -278,25 +323,34 @@ private fun FormField(
     keyboardType: KeyboardType = KeyboardType.Text,
     placeholder: String? = null,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.label,
+        )
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
-            label = { Text(label) },
+            textStyle = PocketShellType.body,
             placeholder = placeholder?.let { { Text(it) } },
             singleLine = true,
             isError = error != null,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
             modifier = Modifier
                 .fillMaxWidth()
+                .semantics { contentDescription = label }
                 .testTag(testTag),
         )
         if (error != null) {
             Text(
                 text = error,
                 color = PocketShellColors.Red,
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = PocketShellSpacing.md, top = PocketShellSpacing.xs),
+                style = PocketShellType.metadata,
+                modifier = Modifier.padding(start = PocketShellSpacing.md),
             )
         }
     }
@@ -349,7 +403,15 @@ private fun KeyPicker(
     var expanded by remember { mutableStateOf(false) }
     val selectedName = keys.firstOrNull { it.id == selectedKeyId }?.name
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+    ) {
+        Text(
+            text = "SSH key",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.label,
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -358,12 +420,12 @@ private fun KeyPicker(
                 value = selectedName ?: "",
                 onValueChange = {},
                 readOnly = true,
-                label = { Text("SSH key") },
                 placeholder = { Text("Choose a key") },
                 singleLine = true,
                 isError = error != null,
                 modifier = Modifier
                     .weight(1f)
+                    .semantics { contentDescription = "SSH key" }
                     .testTag(HOST_FORM_KEY_TAG),
             )
             PocketShellButton(
@@ -396,8 +458,8 @@ private fun KeyPicker(
             Text(
                 text = error,
                 color = PocketShellColors.Red,
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = PocketShellSpacing.md, top = PocketShellSpacing.xs),
+                style = PocketShellType.metadata,
+                modifier = Modifier.padding(start = PocketShellSpacing.md),
             )
         }
     }

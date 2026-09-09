@@ -1,5 +1,7 @@
 package com.pocketshell.next.connect
 
+import android.os.SystemClock
+import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -8,6 +10,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
+import com.pocketshell.next.hosts.HOST_LIST_TAG
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.tree.sessionRowTag
@@ -19,6 +22,9 @@ import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 
 /**
  * Device-test navigation for the Quiet host → workspace → session hierarchy.
@@ -29,6 +35,7 @@ import com.pocketshell.next.workspaces.workspaceSessionRowTag
  * here makes every terminal/composer journey assert the same real route.
  */
 fun ComposeTestRule.openQuietHost(hostId: Long, timeoutMillis: Long = 60_000L) {
+    returnToHostListIfNeeded(hostId, timeoutMillis)
     awaitQuietTag(hostRowTag(hostId), timeoutMillis)
     onNodeWithTag(hostRowTag(hostId)).performClick()
     awaitQuietTag(HOST_WORKSPACES_TAG, timeoutMillis)
@@ -39,6 +46,36 @@ fun ComposeTestRule.openQuietHost(hostId: Long, timeoutMillis: Long = 60_000L) {
             HOST_WORKSPACES_ERROR_TAG,
             HOST_WORKSPACES_LOADING_TAG,
         ).any { onAllNodesWithTag(it).fetchSemanticsNodes().isNotEmpty() }
+    }
+}
+
+/**
+ * A journey class keeps one Activity instance for all of its test methods,
+ * while its seed rule deliberately replaces the host row between methods.
+ * Return through the real back stack before looking for the newly seeded row;
+ * otherwise the next method remains on the previous host's workspace route
+ * and the failure is reported as a missing host instead of a navigation bug.
+ */
+private fun ComposeTestRule.returnToHostListIfNeeded(hostId: Long, timeoutMillis: Long) {
+    val rowTag = hostRowTag(hostId)
+    fun has(tag: String): Boolean = onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+
+    runCatching {
+        waitUntil(minOf(timeoutMillis, 1_000L)) { has(rowTag) || has(HOST_LIST_TAG) }
+    }
+    if (has(rowTag) || has(HOST_LIST_TAG)) return
+
+    repeat(6) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val resumed = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED)
+                .firstOrNull()
+            (resumed as? ComponentActivity)?.onBackPressedDispatcher?.onBackPressed()
+                ?: resumed?.onBackPressed()
+        }
+        waitForIdle()
+        SystemClock.sleep(100)
+        if (has(rowTag) || has(HOST_LIST_TAG)) return
     }
 }
 

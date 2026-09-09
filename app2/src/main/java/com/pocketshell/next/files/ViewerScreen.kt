@@ -2,18 +2,28 @@
 
 package com.pocketshell.next.files
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -24,7 +34,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -32,15 +48,19 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /** Stable test tags for the viewer shell. */
 const val VIEWER_TAG: String = "file-viewer"
@@ -61,6 +81,16 @@ const val VIEWER_CONFLICT_RELOAD_TAG: String = "file-viewer-conflict-reload"
 const val VIEWER_CONFLICT_KEEP_TAG: String = "file-viewer-conflict-keep"
 const val VIEWER_ACTIONS_TAG: String = "file-viewer-actions"
 const val VIEWER_ACTIONS_SHEET_TAG: String = "file-viewer-actions-sheet"
+const val VIEWER_PREVIEW_TAG: String = "file-viewer-preview"
+const val VIEWER_DOWNLOAD_TAG: String = "file-viewer-download"
+const val VIEWER_COPY_PATH_TAG: String = "file-viewer-copy-path"
+const val VIEWER_RENAME_ACTION_TAG: String = "file-viewer-rename-action"
+const val VIEWER_DELETE_ACTION_TAG: String = "file-viewer-delete-action"
+const val VIEWER_RENAME_SHEET_TAG: String = "file-viewer-rename-sheet"
+const val VIEWER_RENAME_NAME_TAG: String = "file-viewer-rename-name"
+const val VIEWER_RENAME_CONFIRM_TAG: String = "file-viewer-rename-confirm"
+const val VIEWER_DELETE_TAG: String = "file-viewer-delete"
+const val VIEWER_DELETE_CONFIRM_TAG: String = "file-viewer-delete-confirm"
 
 /**
  * Route-level entry point: binds the Hilt-provided [ViewerViewModel] to the
@@ -78,6 +108,20 @@ fun ViewerRoute(
     viewModel: ViewerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+
+    val downloadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.download { bytes ->
+                val stream = context.contentResolver.openOutputStream(uri)
+                    ?: throw java.io.IOException("could not open the chosen destination")
+                stream.use { it.write(bytes) }
+            }
+        }
+    }
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.load() }
 
@@ -107,6 +151,19 @@ fun ViewerRoute(
         onSaveAsCopy = viewModel::saveAsCopy,
         onReloadRemote = viewModel::reloadRemoteVersion,
         onConflictKeepEditing = viewModel::keepEditing,
+        onPreview = viewModel::showPreview,
+        onDownload = { downloadLauncher.launch(state.name) },
+        onCopyPath = { path ->
+            clipboard.setText(AnnotatedString(path))
+            viewModel.showMessage("File path copied")
+        },
+        onOpenRename = viewModel::openRename,
+        onRenameNameChange = viewModel::setRenameName,
+        onConfirmRename = { viewModel.renameFile(onBack) },
+        onDismissRename = viewModel::dismissRename,
+        onRequestDelete = viewModel::requestDelete,
+        onConfirmDelete = { viewModel.confirmDelete(onBack) },
+        onDismissDelete = viewModel::dismissDelete,
         modifier = modifier,
     )
 }
@@ -155,6 +212,16 @@ fun ViewerScreen(
     onSaveAsCopy: () -> Unit = {},
     onReloadRemote: () -> Unit = {},
     onConflictKeepEditing: () -> Unit = onKeepEditing,
+    onPreview: () -> Unit = {},
+    onDownload: () -> Unit = {},
+    onCopyPath: (String) -> Unit = {},
+    onOpenRename: () -> Unit = {},
+    onRenameNameChange: (String) -> Unit = {},
+    onConfirmRename: () -> Unit = {},
+    onDismissRename: () -> Unit = {},
+    onRequestDelete: () -> Unit = {},
+    onConfirmDelete: () -> Unit = {},
+    onDismissDelete: () -> Unit = {},
 ) {
     var actionsOpen by remember { mutableStateOf(false) }
 
@@ -168,13 +235,19 @@ fun ViewerScreen(
             .testTag(VIEWER_TAG),
     ) {
         ScreenHeader(
-            title = state.name.ifBlank { "File" },
-            subtitle = state.path,
+            title = when {
+                state.editing && state.name.isNotBlank() -> "Edit ${state.name}"
+                else -> state.name.ifBlank { "File" }
+            },
+            subtitle = fileLocationSubtitle(
+                state.hostName,
+                RemotePath.parent(state.path),
+            ),
             onBack = onBack,
             trailing = {
                 when {
                     state.editing && state.conflict == null -> PocketShellButton(
-                        text = if (state.saving) "Saving…" else "Save",
+                        text = if (state.saving) "Saving…" else "Save to host",
                         onClick = onSave,
                         variant = ButtonVariant.Primary,
                         compact = true,
@@ -182,7 +255,7 @@ fun ViewerScreen(
                         modifier = Modifier.testTag(VIEWER_SAVE_TAG),
                     )
 
-                    state.conflict == null && (state.markdownCapable || state.editable) ->
+                    state.conflict == null && state.loaded ->
                         KebabTrigger(
                             contentDescription = "File actions",
                             onClick = { actionsOpen = true },
@@ -191,6 +264,25 @@ fun ViewerScreen(
                 }
             },
         )
+
+        if (state.markdownCapable && state.loaded && !state.editing) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm)
+                    .clickable(role = Role.Tab, onClick = onToggleMarkdown)
+                    .testTag(VIEWER_MARKDOWN_TOGGLE_TAG),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                SegmentedToggle(
+                    labels = listOf("Preview", "Source"),
+                    selectedIndex = if (state.renderMarkdown) 0 else 1,
+                    onSelected = { index ->
+                        if ((index == 0) != state.renderMarkdown) onToggleMarkdown()
+                    },
+                )
+            }
+        }
 
         state.savedMessage?.let { saved ->
             Banner(
@@ -249,13 +341,50 @@ fun ViewerScreen(
         )
     }
 
+    if (state.renameFile.visible) {
+        ViewerRenameSheet(
+            state = state,
+            onNameChange = onRenameNameChange,
+            onRename = onConfirmRename,
+            onDismiss = onDismissRename,
+        )
+    }
+
+    if (state.deleteFile.visible) {
+        ViewerDeleteDialog(
+            state = state,
+            onConfirm = onConfirmDelete,
+            onDismiss = onDismissDelete,
+        )
+    }
+
     if (actionsOpen) {
         ViewerActionsSheet(
             state = state,
             onDismiss = { actionsOpen = false },
+            onPreview = {
+                actionsOpen = false
+                onPreview()
+            },
             onEdit = {
                 actionsOpen = false
                 onEdit()
+            },
+            onDownload = {
+                actionsOpen = false
+                onDownload()
+            },
+            onCopyPath = {
+                actionsOpen = false
+                onCopyPath(state.path)
+            },
+            onRename = {
+                actionsOpen = false
+                onOpenRename()
+            },
+            onDelete = {
+                actionsOpen = false
+                onRequestDelete()
             },
             onToggleMarkdown = {
                 actionsOpen = false
@@ -327,7 +456,12 @@ private fun ViewerBody(
 private fun ViewerActionsSheet(
     state: ViewerUiState,
     onDismiss: () -> Unit,
+    onPreview: () -> Unit,
     onEdit: () -> Unit,
+    onDownload: () -> Unit,
+    onCopyPath: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
     onToggleMarkdown: () -> Unit,
 ) {
     ModalBottomSheet(
@@ -337,30 +471,219 @@ private fun ViewerActionsSheet(
         containerColor = PocketShellColors.Surface,
         modifier = Modifier.testTag(VIEWER_ACTIONS_SHEET_TAG),
     ) {
+        ViewerActionsSheetContent(
+            state = state,
+            onPreview = onPreview,
+            onEdit = onEdit,
+            onDownload = onDownload,
+            onCopyPath = onCopyPath,
+            onRename = onRename,
+            onDelete = onDelete,
+            onToggleMarkdown = onToggleMarkdown,
+            onDismiss = onDismiss,
+        )
+    }
+}
+
+/**
+ * Content-only version of the viewer action sheet used by the host-JVM tests
+ * and design renders. The file actions mirror the explorer's frame-55 surface;
+ * unsupported actions are omitted for files that cannot perform them.
+ */
+@Composable
+internal fun ViewerActionsSheetContent(
+    state: ViewerUiState,
+    onPreview: () -> Unit,
+    onEdit: () -> Unit,
+    onDownload: () -> Unit,
+    onCopyPath: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onToggleMarkdown: () -> Unit = {},
+    onDismiss: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = 560.dp)
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .padding(bottom = PocketShellSpacing.lg),
+    ) {
+        SheetHeader(
+            title = state.name.ifBlank { "File" },
+            subtitle = state.path.takeIf { it.isNotBlank() },
+            modifier = Modifier.padding(
+                horizontal = PocketShellSpacing.lg,
+                vertical = PocketShellSpacing.sm,
+            ),
+            onClose = onDismiss,
+        )
+        if (state.markdownCapable) {
+            ViewerActionRow(
+                title = "Preview",
+                icon = PocketShellIcons.Eye,
+                onClick = onPreview,
+                testTag = VIEWER_PREVIEW_TAG,
+            )
+        }
+        if (state.editable) {
+            ViewerActionRow(
+                title = "Edit",
+                icon = PocketShellIcons.Edit,
+                onClick = onEdit,
+                testTag = VIEWER_EDIT_TAG,
+            )
+        }
+        ViewerActionRow(
+            title = "Download",
+            icon = PocketShellIcons.Download,
+            onClick = onDownload,
+            testTag = VIEWER_DOWNLOAD_TAG,
+        )
+        ViewerActionRow(
+            title = "Copy path",
+            icon = PocketShellIcons.Copy,
+            onClick = onCopyPath,
+            testTag = VIEWER_COPY_PATH_TAG,
+        )
+        ViewerActionRow(
+            title = "Rename",
+            icon = PocketShellIcons.Edit,
+            onClick = onRename,
+            testTag = VIEWER_RENAME_ACTION_TAG,
+        )
+        ViewerActionRow(
+            title = "Delete…",
+            icon = PocketShellIcons.Trash,
+            onClick = onDelete,
+            testTag = VIEWER_DELETE_ACTION_TAG,
+        )
+    }
+}
+
+@Composable
+private fun ViewerActionRow(
+    title: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    ListRow(
+        title = title,
+        onClick = onClick,
+        leading = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = PocketShellColors.TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        },
+        modifier = Modifier.testTag(testTag),
+    )
+}
+
+/** Rename form opened by the viewer's file action sheet (design-kit frame 61). */
+@Composable
+private fun ViewerRenameSheet(
+    state: ViewerUiState,
+    onNameChange: (String) -> Unit,
+    onRename: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val rename = state.renameFile
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = PocketShellColors.Text,
+        unfocusedTextColor = PocketShellColors.Text,
+        focusedBorderColor = PocketShellColors.Accent,
+        unfocusedBorderColor = PocketShellColors.BorderSoft,
+        focusedLabelColor = PocketShellColors.Accent,
+        unfocusedLabelColor = PocketShellColors.TextSecondary,
+        cursorColor = PocketShellColors.Accent,
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
+        modifier = Modifier.testTag(VIEWER_RENAME_SHEET_TAG),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
-            SheetHeader(title = "File actions", onClose = onDismiss)
-            if (state.markdownCapable) {
-                ListRow(
-                    title = if (state.renderMarkdown) "Show source" else "Show rendered",
-                    onClick = onToggleMarkdown,
-                    modifier = Modifier.testTag(VIEWER_MARKDOWN_TOGGLE_TAG),
-                )
+            SheetHeader(title = "Rename file", onClose = onDismiss)
+            rename.failure?.let { failure ->
+                Banner(text = failure, role = BannerRole.Error, maxLines = 4)
             }
-            if (state.editable) {
-                ListRow(
-                    title = "Edit",
-                    onClick = onEdit,
-                    modifier = Modifier.testTag(VIEWER_EDIT_TAG),
+            OutlinedTextField(
+                value = rename.name,
+                onValueChange = onNameChange,
+                label = { Text("File name") },
+                singleLine = true,
+                enabled = !rename.submitting,
+                colors = fieldColors,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(VIEWER_RENAME_NAME_TAG),
+            )
+            Text(
+                text = "In ${RemotePath.parent(state.path)}",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.metadata,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Text,
+                    enabled = !rename.submitting,
+                )
+                PocketShellButton(
+                    text = if (rename.submitting) "Renaming…" else "Rename",
+                    onClick = onRename,
+                    variant = ButtonVariant.Primary,
+                    enabled = !rename.submitting,
+                    modifier = Modifier.testTag(VIEWER_RENAME_CONFIRM_TAG),
                 )
             }
         }
     }
+}
+
+/** Explicit destructive confirmation for the viewer's current remote file. */
+@Composable
+private fun ViewerDeleteDialog(
+    state: ViewerUiState,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val parent = RemotePath.parent(state.path)
+    val message = buildString {
+        append("This permanently deletes ${state.name} from $parent on the host. ")
+        append("There is no undo.")
+        state.deleteFile.failure?.let { failure -> append("\n\n$failure") }
+    }
+    ConfirmDialog(
+        title = "Delete ${state.name}?",
+        message = message,
+        confirmLabel = if (state.deleteFile.submitting) "Deleting…" else "Delete file",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+        destructive = true,
+        confirmTestTag = VIEWER_DELETE_CONFIRM_TAG,
+        modifier = Modifier.testTag(VIEWER_DELETE_TAG),
+    )
 }
 
 /** The explicit state/action surface for a remote metadata conflict. */

@@ -773,6 +773,31 @@ class SessionViewModelTest {
     }
 
     @Test
+    fun `disabled automatic reconnect stays parked when the app returns`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        livePty()
+        val viewModel = viewModel()
+
+        viewModel.open(hostId, SESSION)
+        settle()
+        viewModel.setAutomaticReconnectEnabled(false)
+        foreground.background()
+        dropLink()
+        settle()
+
+        assertTrue(viewModel.uiState.value is SessionUiState.Reconnecting)
+        assertEquals(1, stack.factory.dialCount)
+
+        foreground.foreground()
+        settleFor(1_000)
+
+        assertTrue(viewModel.uiState.value is SessionUiState.Reconnecting)
+        assertEquals("disabled reconnect must not dial on foreground return", 1, stack.factory.dialCount)
+
+        clear()
+    }
+
+    @Test
     fun `sendBytes after a failure does not throw and does not resurrect the screen`() =
         runTest(dispatcher) {
             val hostId = stack.seedHost()

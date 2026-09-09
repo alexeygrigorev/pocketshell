@@ -136,6 +136,25 @@ class HostWorkspacesViewModelTest {
         assertTrue(viewModel.state.value.createFolderFailure!!.contains("connect"))
     }
 
+    @Test
+    fun `workspace browser replaces the add form and restores it when dismissed`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            val viewModel = viewModel(hostId)
+
+            viewModel.openAddWorkspace("/home/testuser/git")
+            assertTrue(viewModel.state.value.addWorkspaceVisible)
+            assertFalse(viewModel.state.value.addWorkspaceBrowserVisible)
+
+            viewModel.browseWorkspaceFolder("/home/testuser/git")
+            assertFalse(viewModel.state.value.addWorkspaceVisible)
+            assertTrue(viewModel.state.value.addWorkspaceBrowserVisible)
+
+            viewModel.dismissWorkspaceBrowser()
+            assertTrue(viewModel.state.value.addWorkspaceVisible)
+            assertFalse(viewModel.state.value.addWorkspaceBrowserVisible)
+        }
+
     private fun viewModel(hostId: Long) = HostWorkspacesViewModel(
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
         registry = stack.registry,

@@ -77,25 +77,11 @@ internal fun DiagnosticsScreen(
     modifier: Modifier = Modifier,
     viewModel: CrashReportsViewModel = hiltViewModel(),
 ) {
-    val context = LocalContext.current
     val reports by viewModel.reports.collectAsStateWithLifecycle()
     val loadState by viewModel.loadState.collectAsStateWithLifecycle()
-    val shareAllState by viewModel.shareAllState.collectAsStateWithLifecycle()
     var confirmDeleteAll by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.reload() }
-
-    fun launchPreparedShare(archive: java.io.File) {
-        runCatching { shareReportsArchive(context, archive) }
-            .fold(
-                onSuccess = { viewModel.markShareAllLaunched() },
-                onFailure = { error ->
-                    viewModel.shareAllLaunchFailed(
-                        error.message ?: "Could not open the Android share sheet.",
-                    )
-                },
-            )
-    }
 
     Column(
         modifier = modifier
@@ -189,15 +175,6 @@ internal fun DiagnosticsScreen(
                         }
                     }
                     item {
-                        DiagnosticsActions(
-                            reportCount = reports.size,
-                            shareAllState = shareAllState,
-                            onShareAll = {
-                                viewModel.shareAll(::launchPreparedShare)
-                            },
-                        )
-                    }
-                    item {
                         ListRow(
                             title = "Clear local reports…",
                             subtitle = "Remove saved diagnostics from this device",
@@ -220,24 +197,6 @@ internal fun DiagnosticsScreen(
                             },
                             modifier = Modifier.testTag(CRASH_REPORTS_CLEAR_TAG),
                         )
-                    }
-                    if (shareAllState is ShareAllState.Failed) {
-                        item {
-                            Banner(
-                                text = "Share failed: ${(shareAllState as ShareAllState.Failed).message}",
-                                role = BannerRole.Error,
-                                leadingIcon = PocketShellIcons.Warning,
-                                trailingContent = {
-                                    PocketShellButton(
-                                        text = "Dismiss",
-                                        onClick = viewModel::clearShareAllState,
-                                        variant = ButtonVariant.Text,
-                                        compact = true,
-                                    )
-                                },
-                                modifier = Modifier.padding(horizontal = PocketShellDensity.rowPadH),
-                            )
-                        }
                     }
                 }
             }
@@ -460,30 +419,6 @@ private fun DiagnosticsIntro(reportCount: Int) {
             },
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
-        )
-    }
-}
-
-@Composable
-private fun DiagnosticsActions(
-    reportCount: Int,
-    shareAllState: ShareAllState,
-    onShareAll: () -> Unit,
-) {
-    val preparing = shareAllState is ShareAllState.Preparing
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = PocketShellDensity.rowPadH),
-        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-    ) {
-        SectionHeader(label = "Sharing")
-        PocketShellButton(
-            text = if (preparing) "Preparing…" else "Share all ($reportCount)",
-            onClick = onShareAll,
-            enabled = reportCount > 0 && !preparing,
-            variant = ButtonVariant.Secondary,
-            modifier = Modifier.testTag(CRASH_REPORTS_SHARE_ALL_TAG),
         )
     }
 }

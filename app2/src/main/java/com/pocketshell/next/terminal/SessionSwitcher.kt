@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -28,9 +29,12 @@ import com.pocketshell.next.tree.STOP_SESSION_ITEM_LABEL
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.workspaces.canonicalRemotePath
 import com.pocketshell.next.workspaces.sessionDisplayNames
+import com.pocketshell.next.workspaces.sessionKindLabel
+import com.pocketshell.next.workspaces.sessionStatusLabel
 import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -56,6 +60,8 @@ data class SessionSwitcherUiState(
     val loading: Boolean = false,
     val sessions: List<SessionRow> = emptyList(),
     val failure: String? = null,
+    val hostLabel: String = "",
+    val workspacePath: String? = null,
 )
 
 /** Reads the same host-owned session list as the workspace screen for the terminal switcher. */
@@ -64,6 +70,7 @@ class SessionSwitcherViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val registry: ConnectionsRegistry,
     private val clients: HostCliClientFactory,
+    private val hostDao: com.pocketshell.core.storage.dao.HostDao,
 ) : ViewModel() {
 
     private val hostId: Long = requireNotNull(savedStateHandle.get<Long>(Destination.ARG_HOST_ID))
@@ -79,6 +86,9 @@ class SessionSwitcherViewModel @Inject constructor(
         if (job?.isActive == true) return
         _state.update { it.copy(loading = true, failure = null) }
         job = viewModelScope.launch {
+            val hostLabel = hostDao.getById(hostId)?.let { host ->
+                host.name.ifBlank { host.hostname }
+            }.orEmpty()
             when (val result = registry.getOrConnect(hostId)) {
                 is ConnectResult.Connected -> clients.create(result.connection).listSessions().fold(
                     onSuccess = { listing ->
@@ -87,20 +97,28 @@ class SessionSwitcherViewModel @Inject constructor(
                         } ?: listing.sessions
                         _state.value = SessionSwitcherUiState(
                             sessions = visible,
+                            hostLabel = hostLabel,
+                            workspacePath = workspacePath,
                             failure = listing.errors.takeIf { it.isNotEmpty() }
                                 ?.joinToString("; ") { it.message },
                         )
                     },
                     onFailure = { error ->
                         _state.value = SessionSwitcherUiState(
+                            hostLabel = hostLabel,
+                            workspacePath = workspacePath,
                             failure = error.message ?: "Could not list sessions.",
                         )
                     },
                 )
                 is ConnectResult.NeedsTrust -> _state.value = SessionSwitcherUiState(
+                    hostLabel = hostLabel,
+                    workspacePath = workspacePath,
                     failure = "Confirm this host's key from the host list first.",
                 )
                 is ConnectResult.Failed -> _state.value = SessionSwitcherUiState(
+                    hostLabel = hostLabel,
+                    workspacePath = workspacePath,
                     failure = result.message,
                 )
             }
@@ -144,6 +162,13 @@ fun SessionSwitcherSheet(
                 ListRow(
                     title = "New session",
                     subtitle = "Start another terminal here.",
+                    leading = {
+                        Icon(
+                            imageVector = PocketShellIcons.Plus,
+                            contentDescription = null,
+                            tint = PocketShellColors.TextSecondary,
+                        )
+                    },
                     onClick = onNewSession,
                     modifier = Modifier.testTag(SESSION_SWITCHER_NEW_TAG),
                 )
@@ -174,10 +199,24 @@ fun SessionSwitcherSheet(
                 else -> items(state.sessions, key = { "${it.workspace}:${it.name}" }) { session ->
                     ListRow(
                         title = displayNames[session.name] ?: "Terminal",
-                        subtitle = if (session.name == currentSessionName) {
-                            "Current session"
+                        subtitle = sessionSwitcherSubtitle(session),
+                        leading = {
+                            Icon(
+                                imageVector = PocketShellIcons.Terminal,
+                                contentDescription = null,
+                                tint = PocketShellColors.TextSecondary,
+                            )
+                        },
+                        trailing = if (session.name == currentSessionName) {
+                            {
+                                Text(
+                                    text = "Current",
+                                    color = PocketShellColors.TextSecondary,
+                                    style = com.pocketshell.uikit.theme.PocketShellType.metadata,
+                                )
+                            }
                         } else {
-                            sessionSwitcherSubtitle(session)
+                            null
                         },
                         onClick = { onOpenSession(session) },
                         modifier = Modifier.testTag(sessionSwitcherRowTag(session.name)),
@@ -189,9 +228,19 @@ fun SessionSwitcherSheet(
 }
 
 private fun sessionSwitcherSubtitle(session: SessionRow): String = listOfNotNull(
-    session.agent?.replaceFirstChar { it.uppercase() },
-    session.profile,
-).ifEmpty { listOf("Terminal") }.joinToString(" · ")
+    sessionProgramLabel(session),
+    sessionStatusLabel(session),
+).joinToString(" · ")
+
+private fun sessionProgramLabel(session: SessionRow): String = when {
+    session.agent.equals("claude", ignoreCase = true) -> "Claude Code"
+    session.agent.equals("codex", ignoreCase = true) -> "Codex"
+    session.agent.equals("opencode", ignoreCase = true) -> "OpenCode"
+    session.agent.equals("grok", ignoreCase = true) -> "Grok"
+    session.engine.equals("shell", ignoreCase = true) -> "Shell"
+    !session.profile.isNullOrBlank() -> session.profile.orEmpty()
+    else -> sessionKindLabel(session)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -226,7 +275,6 @@ fun TerminalActionsSheet(
             ) {
                 item { TerminalActionRow("Sessions in workspace", onSessions, TERMINAL_ACTIONS_SESSIONS_TAG) }
                 item { TerminalActionRow("Browse workspace files", onBrowseFiles, TERMINAL_ACTIONS_FILES_TAG) }
-                item { TerminalActionRow("Usage", onOpenUsage, TERMINAL_ACTIONS_USAGE_TAG) }
                 item { TerminalActionRow("Copy selection", onCopySelection, TERMINAL_ACTIONS_COPY_TAG) }
                 item { TerminalActionRow("Detach and keep running", onDetach, TERMINAL_ACTIONS_DETACH_TAG) }
                 item { TerminalActionRow(STOP_SESSION_ITEM_LABEL, onEndSession, STOP_SESSION_ITEM_TAG) }

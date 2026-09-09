@@ -194,6 +194,7 @@ class SessionViewModel @Inject constructor(
     private var reconnectJob: Job? = null
     private var watchJob: Job? = null
     private var stopJob: Job? = null
+    private var automaticReconnectEnabled: Boolean = true
     private var bridge: TerminalPtyBridge? = null
     private var channel: PtyChannel? = null
 
@@ -262,7 +263,9 @@ class SessionViewModel @Inject constructor(
         // however long the phone was in a pocket.
         viewModelScope.launch {
             foreground.isForeground.drop(1).filter { it }.collect {
-                if (_uiState.value is SessionUiState.Reconnecting) restartLadder()
+                if (automaticReconnectEnabled && _uiState.value is SessionUiState.Reconnecting) {
+                    restartLadder()
+                }
             }
         }
     }
@@ -344,6 +347,17 @@ class SessionViewModel @Inject constructor(
         when (_uiState.value) {
             is SessionUiState.Reconnecting, is SessionUiState.Failed -> restartLadder()
             SessionUiState.Connecting, is SessionUiState.Live -> Unit
+        }
+    }
+
+    /** Applies Settings → Connections without making the setting a dead control. */
+    fun setAutomaticReconnectEnabled(enabled: Boolean) {
+        automaticReconnectEnabled = enabled
+        if (!enabled) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+        } else if (_uiState.value is SessionUiState.Reconnecting && reconnectJob == null) {
+            restartLadder()
         }
     }
 
@@ -664,7 +678,7 @@ class SessionViewModel @Inject constructor(
         // Said immediately, before the first rung, so a user coming back to the
         // screen never sees a stale "attached" over a dead session.
         _uiState.value = SessionUiState.Reconnecting(attempt = 0, retryInMs = 0, terminal = emulator)
-        restartLadder()
+        if (automaticReconnectEnabled) restartLadder()
     }
 
     /**

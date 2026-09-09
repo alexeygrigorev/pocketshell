@@ -7,8 +7,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -54,6 +60,29 @@ class UiKitPrimitivesTest {
         composeRule.onNodeWithText("Hosts").assertIsDisplayed()
         composeRule.onNodeWithText("4 hosts · 7 sessions").assertIsDisplayed()
         composeRule.onNodeWithText("live").assertIsDisplayed()
+    }
+
+    @Test
+    fun screenHeader_wrapsLongTitleAndKeepsSubtitle() {
+        composeRule.setContent {
+            PocketShellTheme {
+                ScreenHeader(
+                    title = "A very long workspace name that should wrap",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(HEADER_TAG),
+                    subtitle = "host.example · 2 sessions",
+                    titleTestTag = HEADER_TITLE_TAG,
+                    subtitleTestTag = HEADER_SUBTITLE_TAG,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(HEADER_TITLE_TAG)
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(60.dp)
+            .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
+        composeRule.onNodeWithTag(HEADER_SUBTITLE_TAG).assertIsDisplayed()
     }
 
     @Test
@@ -153,6 +182,26 @@ class UiKitPrimitivesTest {
     }
 
     @Test
+    fun kebabTrigger_keepsAccessibleHitTargetAndSemantics() {
+        composeRule.setContent {
+            PocketShellTheme {
+                KebabTrigger(
+                    contentDescription = "File actions",
+                    onClick = {},
+                    triggerSize = 40.dp,
+                    triggerTestTag = KEBAB_BUTTON_TAG,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(KEBAB_BUTTON_TAG)
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+            .assertContentDescriptionEquals("File actions")
+            .assertHasClickAction()
+    }
+
+    @Test
     fun sectionHeader_rendersTitleCaseLabelWithInlineCount() {
         composeRule.setContent {
             PocketShellTheme {
@@ -163,6 +212,21 @@ class UiKitPrimitivesTest {
         // right-aligned count pill.
         composeRule.onNodeWithText("Sessions").assertIsDisplayed()
         composeRule.onNodeWithText(" · 3").assertIsDisplayed()
+    }
+
+    @Test
+    fun sectionHeader_labelIsHeading() {
+        composeRule.setContent {
+            PocketShellTheme {
+                SectionHeader(
+                    label = "Sessions",
+                    labelTestTag = SECTION_LABEL_TAG,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(SECTION_LABEL_TAG)
+            .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
     }
 
     /**
@@ -226,6 +290,10 @@ class UiKitPrimitivesTest {
     private companion object {
         const val ROW_TAG = "test:list-row"
         const val CAPTURE_TAG = "test:primitives-capture"
+        const val HEADER_TAG = "test:screen-header"
+        const val HEADER_TITLE_TAG = "test:screen-header-title"
+        const val HEADER_SUBTITLE_TAG = "test:screen-header-subtitle"
+        const val SECTION_LABEL_TAG = "test:section-header-label"
     }
 }
 

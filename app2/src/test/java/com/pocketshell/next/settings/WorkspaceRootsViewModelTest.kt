@@ -3,12 +3,16 @@ package com.pocketshell.next.settings
 import androidx.lifecycle.SavedStateHandle
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.core.hostapi.HostCliClient
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.transport.ExecResult
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.connect.FakeHostConnectionFactory
 import com.pocketshell.next.connect.RoomTrustStore
+import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,6 +54,7 @@ class WorkspaceRootsViewModelTest {
         val factory = FakeHostConnectionFactory()
         factory.script = { connection ->
             val sftp = connection.sftpFixture()
+            connection.onExec("pwd", ExecResult(0, "/home/alexey\n", "", timedOut = false))
             listOf(
                 "/home/alexey/git/pocketshell",
                 "/a",
@@ -81,6 +86,7 @@ class WorkspaceRootsViewModelTest {
         projectRootDao = db.projectRootDao(),
         hostDao = db.hostDao(),
         registry = registry,
+        clients = HostCliClientFactory { connection -> HostCliClient(connection.asRemoteExec()) },
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to id)),
         dispatcher = UnconfinedTestDispatcher(),
     )
@@ -127,6 +133,18 @@ class WorkspaceRootsViewModelTest {
 
         val root = vm.state.first { it.roots.isNotEmpty() }.roots.single()
         assertEquals("/home/alexey/git/pocketshell", root.path)
+    }
+
+    @Test
+    fun `a home-relative root resolves against the host home before it is saved`() = runTest {
+        val vm = viewModel()
+        vm.state.first { it.loaded }
+
+        vm.addRoot("Projects", "~/proj")
+
+        val root = vm.state.first { it.roots.isNotEmpty() }.roots.single()
+        assertEquals("/home/alexey/proj", root.path)
+        assertEquals("/home/alexey/proj", db.projectRootDao().getByHostId(hostId).first().single().path)
     }
 
     @Test

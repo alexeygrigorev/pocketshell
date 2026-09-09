@@ -15,6 +15,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -116,8 +118,10 @@ fun ScreenHeader(
                 color = PocketShellColors.Text,
                 style = titleStyle,
                 maxLines = titleMaxLines,
-                overflow = TextOverflow.Ellipsis,
-                modifier = if (titleTestTag != null) Modifier.testTag(titleTestTag) else Modifier,
+                overflow = TextOverflow.Clip,
+                modifier = Modifier
+                    .semantics { heading() }
+                    .let { base -> if (titleTestTag == null) base else base.testTag(titleTestTag) },
             )
             if (subtitle != null) {
                 Spacer(modifier = Modifier.size(2.dp))

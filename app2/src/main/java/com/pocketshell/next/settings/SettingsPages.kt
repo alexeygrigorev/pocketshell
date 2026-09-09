@@ -2,6 +2,7 @@ package com.pocketshell.next.settings
 
 import android.content.Context
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,7 +30,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketshell.next.release.ReleaseCheckResult
@@ -64,6 +69,7 @@ internal fun TerminalSettingsRoute(
         settings = settings,
         onBack = onBack,
         onTerminalTextSizeChange = viewModel::setTerminalTextSizePx,
+        onShowCommonKeysChange = viewModel::setShowCommonKeys,
         modifier = modifier,
     )
 }
@@ -114,6 +120,7 @@ internal fun ConnectionSettingsRoute(
         hosts = hosts,
         onBack = onBack,
         onOpenGrace = onOpenGrace,
+        onReconnectWhenReturnChange = viewModel::setReconnectWhenReturn,
         onOpenWorkspaceRoots = onOpenWorkspaceRoots,
         modifier = modifier,
     )
@@ -168,6 +175,13 @@ internal fun AboutRoute(
         updateCheckState = settingsUpdateCheckState(checking, lastResult),
         onBack = onBack,
         onOpenUpdate = onOpenUpdate,
+        onOpenLicenses = {
+            Toast.makeText(
+                context,
+                "Open licenses in the Android implementation",
+                Toast.LENGTH_LONG,
+            ).show()
+        },
         modifier = modifier,
     )
 }
@@ -203,8 +217,11 @@ internal fun TerminalSettingsScreen(
     settings: AppSettings,
     onBack: () -> Unit,
     onTerminalTextSizeChange: (Int) -> Unit,
+    onShowCommonKeysChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val density = LocalDensity.current
+    val terminalTextSizeSp = terminalTextSizeSpFromPx(settings.terminalTextSizePx, density)
     SettingsPageScaffold(
         title = "Terminal",
         pageTag = SETTINGS_TERMINAL_PAGE_TAG,
@@ -215,28 +232,22 @@ internal fun TerminalSettingsScreen(
         item {
             SettingsSlider(
                 title = "Terminal text size",
-                description = "Controls the terminal grid text size in pixels.",
-                value = settings.terminalTextSizePx.toFloat(),
-                valueLabel = "${settings.terminalTextSizePx} px",
-                min = AppSettings.MIN_TERMINAL_TEXT_SIZE_PX.toFloat(),
-                max = AppSettings.MAX_TERMINAL_TEXT_SIZE_PX.toFloat(),
-                step = AppSettings.TERMINAL_TEXT_SIZE_STEP_PX.toFloat(),
-                onChange = { onTerminalTextSizeChange(it.roundToInt()) },
+                description = "Adjust the terminal text size for comfortable reading.",
+                value = terminalTextSizeSp,
+                valueLabel = "${terminalTextSizeSp.roundToInt()} sp",
+                min = AppSettings.MIN_TERMINAL_TEXT_SIZE_SP,
+                max = AppSettings.MAX_TERMINAL_TEXT_SIZE_SP,
+                step = AppSettings.TERMINAL_TEXT_SIZE_STEP_SP,
+                onChange = { onTerminalTextSizeChange(terminalTextSizePxFromSp(it, density)) },
                 sliderTestTag = SETTINGS_TERMINAL_SIZE_SLIDER_TAG,
                 valueTestTag = SETTINGS_TERMINAL_SIZE_VALUE_TAG,
-            )
-        }
-        item {
-            SettingsDescription(
-                title = "Text and input",
-                description = "App text follows your Android font-size setting.",
             )
         }
         item {
             Text(
                 text = "\$ git status\nOn branch main\nWorking tree clean",
                 color = PocketShellColors.TermText,
-                style = PocketShellType.bodyMono,
+                style = PocketShellType.bodyMono.copy(fontSize = terminalTextSizeSp.sp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = PocketShellDensity.rowPadH)
@@ -244,6 +255,12 @@ internal fun TerminalSettingsScreen(
                     .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
                     .padding(PocketShellSpacing.md)
                     .testTag(SETTINGS_TERMINAL_SAMPLE_TAG),
+            )
+        }
+        item {
+            SettingsDescription(
+                title = "Text and input",
+                description = "App text follows your Android font-size setting.",
             )
         }
         item { SectionHeader(label = "Input") }
@@ -259,10 +276,9 @@ internal fun TerminalSettingsScreen(
                     )
                 },
                 trailing = {
-                    Text(
-                        text = "Always on",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.metadata,
+                    Switch(
+                        checked = settings.showCommonKeys,
+                        onCheckedChange = onShowCommonKeysChange,
                     )
                 },
                 modifier = Modifier.testTag(SETTINGS_COMMON_KEYS_TAG),
@@ -390,6 +406,7 @@ internal fun ConnectionSettingsScreen(
     hosts: List<SettingsHostRow>,
     onBack: () -> Unit,
     onOpenGrace: () -> Unit,
+    onReconnectWhenReturnChange: (Boolean) -> Unit = {},
     onOpenWorkspaceRoots: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -415,30 +432,23 @@ internal fun ConnectionSettingsScreen(
             )
         }
         item {
-            SettingsDescription(
-                title = "App switching and recovery",
-                description = "This controls the phone’s connection. Remote sessions are not deliberately ended when the app leaves the foreground.",
-            )
-        }
-        item {
             ListRow(
                 title = "Reconnect when I return",
-                subtitle = "Reconnects to a live remote session automatically.",
-                leading = {
-                    androidx.compose.material3.Icon(
-                        PocketShellIcons.Refresh,
-                        contentDescription = null,
-                        tint = PocketShellColors.TextSecondary,
-                    )
-                },
+                subtitle = "Retry a dropped session automatically when PocketShell comes back.",
+                leading = { androidx.compose.material3.Icon(PocketShellIcons.Refresh, null, tint = PocketShellColors.TextSecondary) },
                 trailing = {
-                    Text(
-                        text = "Automatic",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.metadata,
+                    Switch(
+                        checked = settings.reconnectWhenReturn,
+                        onCheckedChange = onReconnectWhenReturnChange,
                     )
                 },
                 modifier = Modifier.testTag(SETTINGS_CONNECTION_RECONNECT_TAG),
+            )
+        }
+        item {
+            SettingsDescription(
+                title = "Connection lifetime",
+                description = "This controls the phone’s connection. Remote sessions are not deliberately ended when the app leaves the foreground.",
             )
         }
         item { SectionHeader(label = "Manage saved hosts") }
@@ -591,6 +601,7 @@ internal fun AboutScreen(
     updateCheckState: SettingsUpdateCheckState,
     onBack: () -> Unit,
     onOpenUpdate: () -> Unit,
+    onOpenLicenses: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     SettingsPageScaffold(
@@ -621,6 +632,14 @@ internal fun AboutScreen(
                 trailing = { NavigationChevron() },
                 onClick = onOpenUpdate,
                 modifier = Modifier.testTag(SETTINGS_UPDATE_CHECK_TAG),
+            )
+        }
+        item {
+            ListRow(
+                title = "Open-source licenses",
+                leading = { androidx.compose.material3.Icon(PocketShellIcons.File, null, tint = PocketShellColors.TextSecondary) },
+                trailing = { NavigationChevron() },
+                onClick = onOpenLicenses,
             )
         }
     }
@@ -869,6 +888,37 @@ private fun graceDescription(millis: Long): String = when (millis) {
     AppSettings.BACKGROUND_GRACE_10_MINUTES_MS -> "Extended recovery window"
     else -> "Custom recovery window"
 }
+
+/**
+ * Converts the renderer's persisted raw pixels into the SP value shown to a
+ * user. The terminal view consumes pixels directly, so this conversion belongs
+ * at the settings boundary rather than in the terminal package.
+ */
+internal fun terminalTextSizeSpFromPx(sizePx: Int, density: Density): Float {
+    val pixelsPerSp = pixelsPerSp(density)
+    return (sizePx / pixelsPerSp)
+        .coerceIn(
+            AppSettings.MIN_TERMINAL_TEXT_SIZE_SP,
+            AppSettings.MAX_TERMINAL_TEXT_SIZE_SP,
+        )
+        .roundToInt()
+        .toFloat()
+}
+
+/** Converts a user-facing SP stop back to the raw pixels stored and rendered. */
+internal fun terminalTextSizePxFromSp(sizeSp: Float, density: Density): Int {
+    val pixels = (sizeSp.coerceIn(
+        AppSettings.MIN_TERMINAL_TEXT_SIZE_SP,
+        AppSettings.MAX_TERMINAL_TEXT_SIZE_SP,
+    ) * pixelsPerSp(density)).roundToInt()
+    return pixels.coerceIn(
+        AppSettings.MIN_TERMINAL_TEXT_SIZE_PX,
+        AppSettings.MAX_TERMINAL_TEXT_SIZE_PX,
+    )
+}
+
+private fun pixelsPerSp(density: Density): Float =
+    (density.density * density.fontScale).takeIf { it.isFinite() && it > 0f } ?: 1f
 
 private fun aboutUpdateSummary(state: SettingsUpdateCheckState): String = when (state) {
     SettingsUpdateCheckState.Idle -> "Check the latest verified release"

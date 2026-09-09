@@ -96,7 +96,7 @@ class SessionTreeNavigationTest {
                     navController = controller,
                     hostsScreen = { Text("Hosts") },
                     connectViewModel = { stack.viewModel },
-                    workspacesScreen = { _, _, _, _, _, onOpenPorts, onBack, onOpenUsage ->
+                    workspacesScreen = { _, _, _, _, _, onOpenPorts, onBack, onOpenUsage, _ ->
                         if (directHostTools) {
                             SessionTreeHostToolsContent(
                                 onOpenFiles = {},

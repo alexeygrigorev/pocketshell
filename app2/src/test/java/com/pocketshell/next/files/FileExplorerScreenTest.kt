@@ -3,6 +3,8 @@ package com.pocketshell.next.files
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -13,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.transport.SftpEntry
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -167,6 +170,37 @@ class FileExplorerScreenTest {
     }
 
     @Test
+    fun `header stays concise while the breadcrumb owns the current remote location`() {
+        setContent(state(path = "/home/alexey/git", hostName = "hetzner", loaded = true))
+
+        composeRule.onNodeWithText("Files").assertIsDisplayed()
+        composeRule.onNodeWithText("hetzner · ~/git").assertIsDisplayed()
+        composeRule.onNodeWithText("/home/alexey/git").assertDoesNotExist()
+        composeRule.onNodeWithText("git").assertIsDisplayed()
+    }
+
+    @Test
+    fun `breadcrumb controls keep their labels and 48dp touch targets`() {
+        setContent(state(path = "/home/alexey/git", loaded = true))
+
+        listOf("/", "/home", "/home/alexey", "/home/alexey/git").forEach { path ->
+            val node = composeRule.onNodeWithTag(crumbTag(path))
+                .assertContentDescriptionEquals(RemotePath.nameOf(path))
+                .assertHasClickAction()
+                .fetchSemanticsNode()
+            val minimumPx = 48f * composeRule.density.density
+            assertTrue(
+                "${RemotePath.nameOf(path)} width was ${node.boundsInRoot.width}px",
+                node.boundsInRoot.width >= minimumPx,
+            )
+            assertTrue(
+                "${RemotePath.nameOf(path)} height was ${node.boundsInRoot.height}px",
+                node.boundsInRoot.height >= minimumPx,
+            )
+        }
+    }
+
+    @Test
     fun `up is disabled at the root, where there is nowhere to go`() {
         setToolsContent(path = "/", canGoUp = false)
         composeRule.onNodeWithTag(FILE_EXPLORER_UP_TAG).assertHasNoClickAction()
@@ -278,6 +312,7 @@ class FileExplorerScreenTest {
 
     private fun state(
         path: String = "/w",
+        hostName: String = "",
         entries: List<SftpEntry> = emptyList(),
         loading: Boolean = false,
         loaded: Boolean = false,
@@ -285,6 +320,7 @@ class FileExplorerScreenTest {
         transfer: TransferState = TransferState.Idle,
     ) = FileExplorerUiState(
         hostId = 1,
+        hostName = hostName,
         path = path,
         entries = entries,
         loading = loading,

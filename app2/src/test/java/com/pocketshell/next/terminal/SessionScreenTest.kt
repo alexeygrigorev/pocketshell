@@ -1,16 +1,22 @@
 package com.pocketshell.next.terminal
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.composer.COMPOSER_INSERT_TAG
+import com.pocketshell.next.composer.COMPOSER_DRAFT_TAG
+import com.pocketshell.next.composer.COMPOSER_REVIEW_ACTION_TAG
+import com.pocketshell.next.composer.COMPOSER_REVIEW_TAG
 import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
@@ -22,12 +28,12 @@ import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.stopSessionMessage
+import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
-import com.pocketshell.next.terminal.TERMINAL_ACTIONS_USAGE_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -61,7 +67,9 @@ class SessionScreenTest {
         // The screen always says WHICH session, because the tree can list
         // several with near-identical names.
         composeRule.onNodeWithTag(SESSION_TITLE_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText(SESSION).assertIsDisplayed()
+        // The Quiet terminal has the session context row as well as the
+        // workspace header, so the session label intentionally appears twice.
+        composeRule.onNodeWithTag(SESSION_TITLE_TAG).assertTextContains(SESSION)
     }
 
     @Test
@@ -87,45 +95,13 @@ class SessionScreenTest {
         assertEquals(1, backs)
     }
 
-    /**
-     * Issue #2532: a failed/empty usage fetch omitted the glance pill, which
-     * was the ONLY way into the usage panel from the terminal. Loading and
-     * error belong on that screen, not as a missing button.
-     */
     @Test
-    fun `usage is reachable from terminal actions`() {
-        var opened = 0
-        setContent(SessionUiState.Connecting, onOpenUsage = { opened += 1 })
+    fun `usage fallback stays promoted out of the terminal actions sheet`() {
+        setContent(SessionUiState.Connecting)
 
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
-        composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).performClick()
-
-        assertEquals(1, opened)
-    }
-
-    @Test
-    fun `usage reading does not add a second header action`() {
-        var opened = 0
-        setContent(
-            SessionUiState.Connecting,
-            usagePillState = UsageGlancePillState(
-                percent = 72,
-                provider = "Codex",
-                window = "7d",
-                kind = PillKind.Warn,
-                stale = false,
-                fetchedClock = "13:40",
-            ),
-            onOpenUsage = { opened += 1 },
-        )
-
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
-        composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).performClick()
-
-        assertEquals(1, opened)
+        composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).assertDoesNotExist()
     }
 
     /**
@@ -150,15 +126,10 @@ class SessionScreenTest {
             ),
         )
 
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertDoesNotExist()
-        // Usage readings stay in the usage page rather than crowding the terminal header.
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
-        // The tokens the old cross-provider pill would have shown must be absent.
-        composeRule.onNodeWithText("Claude").assertDoesNotExist()
-        composeRule.onNodeWithText("38%").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Usage Claude 38%").assertIsDisplayed()
         composeRule.onNodeWithText("Claude 7d").assertDoesNotExist()
-        composeRule.onNodeWithText("7d").assertDoesNotExist()
-        composeRule.onNodeWithText("5h").assertDoesNotExist()
     }
 
     @Test
@@ -201,8 +172,13 @@ class SessionScreenTest {
             ),
         )
 
-        composeRule.onNodeWithTag(SESSION_RECONNECT_BANNER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Reconnecting… attempt 3 · retrying in 5s").assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_RECONNECT_BANNER_TAG)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Connection lost", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Last output is shown. Reconnecting… attempt 3 · retrying in 5s",
+            substring = true,
+        ).assertIsDisplayed()
         // Not the same thing as a failure, and not the same thing as attaching.
         composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_CONNECTING_TAG).assertDoesNotExist()
@@ -222,7 +198,10 @@ class SessionScreenTest {
             ),
         )
 
-        composeRule.onNodeWithText("Reconnecting… attempt 2 · retrying in 1s").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Last output is shown. Reconnecting… attempt 2 · retrying in 1s",
+            substring = true,
+        ).assertIsDisplayed()
     }
 
     /** The ladder's first rung has no wait at all, and says so rather than "in 0s". */
@@ -236,7 +215,10 @@ class SessionScreenTest {
             ),
         )
 
-        composeRule.onNodeWithText("Reconnecting… attempt 1 · retrying now").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Last output is shown. Reconnecting… attempt 1 · retrying now",
+            substring = true,
+        ).assertIsDisplayed()
     }
 
     /**
@@ -271,6 +253,55 @@ class SessionScreenTest {
 
         composeRule.onNodeWithTag(SESSION_RETRY_TAG).performClick()
 
+        assertEquals(1, retries)
+    }
+
+    @Test
+    fun `reconnecting disables remote composer actions but keeps the draft editable`() {
+        val drafts = mutableListOf<String>()
+        setContent(
+            SessionUiState.Reconnecting(
+                attempt = 0,
+                retryInMs = 5_000,
+                terminal = createRemoteTerminalSession(),
+            ),
+            composerState = ComposerUiState(draft = "local draft"),
+            initiallyShowComposer = true,
+            embedComposerInWindow = false,
+            onDraftChange = { drafts += it },
+        )
+
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
+        composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
+
+        assertEquals("local draft more", drafts.last())
+    }
+
+    @Test
+    fun `uncertain delivery opens a review page with reconnect and inspect`() {
+        var retries = 0
+        var dismissed = 0
+        var savedDraft = ""
+        setContent(
+            SessionUiState.Live(createRemoteTerminalSession()),
+            composerState = ComposerUiState(
+                draft = "Run the tests before committing.",
+                notice = ComposerNotice.DeliveryUncertain,
+            ),
+            onRetry = { retries += 1 },
+            onDraftChange = { savedDraft = it },
+            onDismissNotice = { dismissed += 1 },
+        )
+
+        composeRule.onNodeWithText("Review before resending").assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_REVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Delivery could not be confirmed", substring = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_REVIEW_ACTION_TAG).performClick()
+
+        assertEquals("Run the tests before committing.", savedDraft)
+        assertEquals(1, dismissed)
         assertEquals(1, retries)
     }
 
@@ -458,6 +489,8 @@ class SessionScreenTest {
         onHotkeySend: (ByteArray) -> Unit = {},
         usagePillState: UsageGlancePillState? = null,
         onOpenUsage: () -> Unit = {},
+        onDraftChange: (String) -> Unit = {},
+        onDismissNotice: () -> Unit = {},
         onSend: () -> Boolean = { true },
         onInsert: () -> Unit = {},
         initiallyShowComposer: Boolean = false,
@@ -477,7 +510,7 @@ class SessionScreenTest {
                     onRetry = onRetry,
                     onStopSession = onStopSession,
                     onHotkeySend = onHotkeySend,
-                    onDraftChange = {},
+                    onDraftChange = onDraftChange,
                     onSend = onSend,
                     onInsert = onInsert,
                     onAttach = {},
@@ -486,7 +519,7 @@ class SessionScreenTest {
                     onToggleHistory = {},
                     onTogglePreview = {},
                     onRemoveAttachment = {},
-                    onDismissNotice = {},
+                    onDismissNotice = onDismissNotice,
                     onDiscardDraft = {},
                     onUseHistoryEntry = {},
                     initiallyShowComposer = initiallyShowComposer,

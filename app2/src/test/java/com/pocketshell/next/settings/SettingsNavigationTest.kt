@@ -18,11 +18,14 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.AppNavHost
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.crash.CRASH_REPORTS_BACK_TAG
-import com.pocketshell.next.crash.CRASH_REPORTS_SHARE_ALL_TAG
+import com.pocketshell.next.crash.CRASH_REPORTS_EXPORT_LATEST_TAG
 import com.pocketshell.next.crash.CrashReportMetadata
 import com.pocketshell.next.crash.CrashReporter
 import com.pocketshell.next.crash.CrashReportsViewModel
 import com.pocketshell.next.crash.DiagnosticsScreen
+import com.pocketshell.core.hostapi.HostCliClient
+import com.pocketshell.next.hostcli.HostCliClientFactory
+import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -97,13 +100,17 @@ class SettingsNavigationTest {
     }
 
     @Test
-    fun `adding a workspace root through the real screen persists it to Room`() {
+    fun `adding a project root through the focused route persists it to Room`() {
         val nav = setContent()
         navigateToSettings(nav)
         composeRule.onNodeWithTag(settingsCategoryTag("connections")).performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("hetzner").performClick()
         composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag(WORKSPACE_ROOTS_ADD_PROJECT_ROOT_TAG).performClick()
+        composeRule.waitForIdle()
+        assertEquals(Destination.AddWorkspaceRoot.pattern, nav.currentBackStackEntry?.destination?.route)
 
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_PATH_FIELD_TAG).performTextInput("/home/alexey/git/pocketshell")
         composeRule.onNodeWithTag(WORKSPACE_ROOTS_LABEL_FIELD_TAG).performTextInput("Pocketshell")
@@ -157,8 +164,8 @@ class SettingsNavigationTest {
         composeRule.waitForIdle()
 
         assertEquals(Destination.Diagnostics.pattern, nav.currentBackStackEntry?.destination?.route)
-        composeRule.onNodeWithTag(CRASH_REPORTS_SHARE_ALL_TAG).assertExists()
-        composeRule.onNodeWithText("Share all (1)").assertExists()
+        composeRule.onNodeWithTag(CRASH_REPORTS_EXPORT_LATEST_TAG).assertExists()
+        composeRule.onNodeWithText("Export latest report").assertExists()
         assertTrue(
             "the seeded crash ('$summary') is not on the crash-reports screen",
             composeRule.onAllNodesWithText("kaboom-2476", substring = true)
@@ -217,7 +224,7 @@ class SettingsNavigationTest {
                 navController = controller,
                 hostsScreen = { Text("Hosts") },
                 connectViewModel = { stack.viewModel },
-                workspacesScreen = { hostId, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
+                workspacesScreen = { hostId, _, _, _, _, _, _, _, _ -> Text("Tree(hostId=$hostId)") },
                 settingsScreen = { navigation -> SettingsRoute(navigation = navigation) },
                 connectionSettingsScreen = { onBack, onOpenGrace, onOpenWorkspaceRoots ->
                     ConnectionSettingsRoute(
@@ -248,10 +255,32 @@ class SettingsNavigationTest {
                 workspaceRootsScreen = { _, onBack ->
                     WorkspaceRootsRoute(
                         onBack = onBack,
+                        onOpenAddRoot = { controller.navigate(Destination.AddWorkspaceRoot.route(hostId)) },
                         viewModel = WorkspaceRootsViewModel(
                             projectRootDao = stack.db.projectRootDao(),
                             hostDao = stack.db.hostDao(),
                             registry = stack.registry,
+                            clients = HostCliClientFactory { connection ->
+                                HostCliClient(connection.asRemoteExec())
+                            },
+                            savedStateHandle = SavedStateHandle(
+                                mapOf(Destination.ARG_HOST_ID to hostId),
+                            ),
+                            dispatcher = Dispatchers.Unconfined,
+                        ),
+                    )
+                },
+                workspaceRootAddScreen = { _, onBack, onAdded ->
+                    AddWorkspaceRootRoute(
+                        onBack = onBack,
+                        onAdded = onAdded,
+                        viewModel = WorkspaceRootsViewModel(
+                            projectRootDao = stack.db.projectRootDao(),
+                            hostDao = stack.db.hostDao(),
+                            registry = stack.registry,
+                            clients = HostCliClientFactory { connection ->
+                                HostCliClient(connection.asRemoteExec())
+                            },
                             savedStateHandle = SavedStateHandle(
                                 mapOf(Destination.ARG_HOST_ID to hostId),
                             ),

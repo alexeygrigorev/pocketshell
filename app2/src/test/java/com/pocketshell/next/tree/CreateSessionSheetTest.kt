@@ -28,11 +28,11 @@ import org.junit.runner.RunWith
  *
  * Journey J04 proves the sheet creates a real session on a real host; this
  * suite pins the rules a device journey would only catch by accident: that a
- * blank name cannot be submitted at all, that Create carries the form's own
+ * blank name cannot be submitted at all, that Start carries the form's own
  * values (name AND `--cwd`, plus `--engine`/`--profile` when selected), that
- * Cancel creates nothing, that a failed create leaves the sheet standing with
+ * closing creates nothing, that a failed create leaves the sheet standing with
  * the host's words on it instead of closing and losing the user's text, and
- * that a disabled/unavailable engine never becomes a chip.
+ * that disabled/unavailable providers remain gated by host capability data.
  *
  * The sheet's BODY is composed directly ([CreateSessionSheetContent]) rather
  * than through [CreateSessionSheet]'s `ModalBottomSheet`: the container is
@@ -49,27 +49,40 @@ class CreateSessionSheetTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun `the sheet renders both fields, type and both actions`() {
-        setContent(CreateSessionState(visible = true), defaultFolder = "/home/a/git/pocketshell")
+    fun `the sheet renders direct programs, more options and a provider footer`() {
+        setContent(
+            CreateSessionState(
+                visible = true,
+                engines = listOf(
+                    testEngine("claude"),
+                    testEngine("codex"),
+                    testEngine("opencode"),
+                    testEngine("grok"),
+                ),
+            ),
+            defaultFolder = "/home/a/git/pocketshell",
+        )
 
         composeRule.onNodeWithTag(CREATE_SESSION_SHEET_TAG).assertIsDisplayed()
         composeRule.onNodeWithText(CREATE_SESSION_TITLE).assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_TYPE_AGENT_TAG).performScrollTo().assertIsDisplayed()
+        listOf("Shell", "Claude Code", "Codex", "OpenCode", "Grok").forEach { label ->
+            composeRule.onNodeWithText(label).performScrollTo().assertIsDisplayed()
+        }
+        composeRule.onNodeWithText("Agent").assertDoesNotExist()
+        composeRule.onNodeWithText("Terminal").assertDoesNotExist()
+        composeRule.onNodeWithText("Start Claude Code").assertIsDisplayed()
+        composeRule.onNodeWithText("Create").assertDoesNotExist()
         composeRule.onNodeWithText("More options").performScrollTo().performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag(CREATE_SESSION_FOLDER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_NAME_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(CREATE_SESSION_CANCEL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Apply options").assertIsDisplayed()
 
         // The folder prefill is on screen, and so is the name derived from it —
         // the user can create with one tap in the common case.
         composeRule.onNodeWithText("/home/a/git/pocketshell").assertIsDisplayed()
         composeRule.onNodeWithText("pocketshell").assertIsDisplayed()
-
-        // Shell is the default: no engine chips until Agent is picked.
-        composeRule.onNodeWithTag(createSessionEngineTag("claude")).assertDoesNotExist()
 
         // Nothing has failed, so no error banner.
         composeRule.onNodeWithTag(CREATE_SESSION_ERROR_TAG).assertDoesNotExist()
@@ -88,11 +101,11 @@ class CreateSessionSheetTest {
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
 
-        assertEquals("a disabled Create must not reach the host", emptyList<Any>(), submitted)
+        assertEquals("a disabled Start must not reach the host", emptyList<Any>(), submitted)
     }
 
     @Test
-    fun `Create carries the forms own name and folder`() {
+    fun `Start carries the forms own name and folder`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("/home/a/git/pocketshell")
         form.onFolderChange("/srv/reviews")
@@ -114,7 +127,7 @@ class CreateSessionSheetTest {
 
     /** A blank folder means "no `--cwd`", not an empty one. */
     @Test
-    fun `Create sends a null cwd when the folder field is empty`() {
+    fun `Start sends a null cwd when the folder field is empty`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("")
         form.onNameChange("demo")
@@ -179,14 +192,13 @@ class CreateSessionSheetTest {
         )
 
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(CREATE_SESSION_CANCEL_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
         assertEquals("a double tap must not create twice", emptyList<Any>(), submitted)
         assertNull(submitted.firstOrNull())
     }
 
     @Test
-    fun `Agent shows enabled available engines and hides the rest`() {
+    fun `direct programs show provider labels and authoritative availability`() {
         setContent(
             CreateSessionState(
                 visible = true,
@@ -194,26 +206,79 @@ class CreateSessionSheetTest {
                     testEngine("claude"),
                     testEngine("codex"),
                     testEngine("opencode", enabled = true, available = false, availableForCreate = false),
-                    testEngine("disabled", enabled = false, available = true, availableForCreate = false),
+                    testEngine("grok", enabled = false, available = true, availableForCreate = false),
                 ),
             ),
             defaultFolder = "/home/a/git/pocketshell",
         )
 
-        composeRule.onNodeWithTag(CREATE_SESSION_TYPE_AGENT_TAG).performScrollTo().performClick()
-        composeRule.waitForIdle()
-
-        composeRule.onNodeWithTag(createSessionEngineTag("claude")).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(createSessionEngineTag("codex")).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(createSessionEngineTag("opencode")).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag(createSessionEngineTag("disabled")).performScrollTo().assertIsDisplayed()
+        listOf("Shell", "Claude Code", "Codex", "OpenCode", "Grok").forEach { label ->
+            composeRule.onNodeWithText(label).performScrollTo().assertIsDisplayed()
+        }
         composeRule.onAllNodesWithText("Not available", substring = true).assertCountEquals(2)
-        composeRule.onNodeWithText("Claude").assertIsDisplayed()
+        composeRule.onNodeWithTag(createSessionEngineTag("opencode")).assertIsDisplayed()
+        composeRule.onNodeWithTag(createSessionEngineTag("grok")).assertIsDisplayed()
+        composeRule.onNodeWithText("Claude Code").assertIsDisplayed()
         composeRule.onNodeWithText("Codex").assertIsDisplayed()
     }
 
     @Test
-    fun `Create on Agent carries engine and profile`() {
+    fun `selecting a direct provider changes the footer and request mapping`() {
+        val submitted = mutableListOf<CreateSessionRequest>()
+        setContent(
+            CreateSessionState(
+                visible = true,
+                engines = listOf(testEngine("claude"), testEngine("codex")),
+            ),
+            defaultFolder = "/srv/reviews",
+            onSubmit = { submitted += it },
+        )
+
+        composeRule.onNodeWithText("Start Claude Code").assertIsDisplayed()
+        composeRule.onNodeWithTag(createSessionEngineTag("codex"))
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Start Codex").assertIsDisplayed()
+        composeRule.onNodeWithTag(CREATE_SESSION_SUBMIT_TAG).performClick()
+
+        assertEquals(
+            listOf(
+                CreateSessionRequest(
+                    name = "reviews",
+                    cwd = "/srv/reviews",
+                    engine = "codex",
+                ),
+            ),
+            submitted,
+        )
+    }
+
+    @Test
+    fun `unavailable provider opens the exact recovery title`() {
+        setContent(
+            CreateSessionState(
+                visible = true,
+                engines = listOf(
+                    testEngine("claude"),
+                    testEngine("grok", enabled = false, available = false, availableForCreate = false),
+                ),
+            ),
+            defaultFolder = "/srv/reviews",
+        )
+
+        composeRule.onNodeWithTag(createSessionEngineTag("grok"))
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Grok is not available").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "PocketShell could not find a usable Grok installation on the host.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText("Grok unavailable").assertDoesNotExist()
+        composeRule.onNodeWithText("Start Claude Code").assertDoesNotExist()
+    }
+
+    @Test
+    fun `Start on an agent carries engine and profile`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("/srv/reviews")
         form.onKindChange(CreateSessionKind.Agent)
@@ -253,7 +318,7 @@ class CreateSessionSheetTest {
     }
 
     @Test
-    fun `Create on Shell omits engine after switching from Agent`() {
+    fun `Start on Shell omits engine after switching from Agent`() {
         val submitted = mutableListOf<CreateSessionRequest>()
         val form = CreateSessionFormState("/srv/demo")
         form.onNameChange("demo")

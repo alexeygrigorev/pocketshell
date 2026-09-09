@@ -1,9 +1,6 @@
 package com.pocketshell.next.tree
 
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -18,9 +15,9 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.openQuietHost
+import com.pocketshell.next.terminal.SESSION_CONTEXT_BAR_TAG
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.terminal.SESSION_TITLE_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -172,7 +169,7 @@ class J14StopSessionJourney {
         openWorkspace()
         awaitTag(sessionRowTag(SESSION_ATTACHED))
         compose.onNodeWithTag(sessionRowTag(SESSION_ATTACHED)).performClick()
-        awaitSessionScreen(SESSION_ATTACHED)
+        awaitSessionScreen()
 
         compose.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
         compose.onNodeWithTag(STOP_SESSION_ITEM_TAG, useUnmergedTree = true).performClick()
@@ -213,18 +210,13 @@ class J14StopSessionJourney {
 
     private fun displayName(tag: String): String = "pocketshell:$tag"
 
-    private fun awaitSessionScreen(name: String) {
+    private fun awaitSessionScreen() {
         awaitTag(SESSION_SCREEN_TAG)
-        compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(SESSION_TITLE_TAG)
-                .fetchSemanticsNodes()
-                .any { node ->
-                    node.config.getOrNull(SemanticsProperties.Text)
-                        ?.any { it.text == name } == true
-                }
-        }
+        awaitTag(SESSION_CONTEXT_BAR_TAG)
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(SESSION_TITLE_TAG).assertTextEquals(name)
+        // Quiet terminal chrome puts the workspace name in the large header
+        // and the session identity in the compact switcher row below it.
+        compose.onNodeWithTag(SESSION_CONTEXT_BAR_TAG).assertIsDisplayed()
     }
 
     private fun awaitTag(tag: String) {

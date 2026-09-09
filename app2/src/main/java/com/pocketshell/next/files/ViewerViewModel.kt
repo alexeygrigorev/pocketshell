@@ -3,6 +3,7 @@ package com.pocketshell.next.files
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.SftpChannel
 import com.pocketshell.next.connect.ConnectionsRegistry
@@ -10,12 +11,14 @@ import com.pocketshell.next.nav.Destination
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.io.IOException
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * What the viewer got back from the host, in the shape its renderer needs.
@@ -58,9 +61,26 @@ data class ViewerFileConflict(
     val current: RemoteFileMetadata?,
 )
 
+/** State for the rename form opened from the viewer action sheet. */
+data class ViewerRenameUiState(
+    val visible: Boolean = false,
+    val name: String = "",
+    val submitting: Boolean = false,
+    val failure: String? = null,
+)
+
+/** State for the explicit delete confirmation opened from the viewer. */
+data class ViewerDeleteUiState(
+    val visible: Boolean = false,
+    val submitting: Boolean = false,
+    val failure: String? = null,
+)
+
 /** Everything the file viewer renders. */
 data class ViewerUiState(
     val hostId: Long = 0,
+    /** Display name used to keep the remote file context visible in the header. */
+    val hostName: String = "",
     val path: String = "",
     val loading: Boolean = false,
     /** A read has succeeded, so [content] is a real answer. */
@@ -75,15 +95,19 @@ data class ViewerUiState(
     /** The editor buffer. Meaningless unless [editing]. */
     val draft: String = "",
     val saving: Boolean = false,
-    /** Set for one banner after a successful save. */
+    /** One dismissible informational banner for the last completed operation. */
     val savedMessage: String? = null,
     val failure: String? = null,
+    /** True while the remote bytes are being copied to a device document. */
+    val downloading: Boolean = false,
     /** Metadata from the read that populated [content]. */
     val remoteMetadata: RemoteFileMetadata? = null,
     /** True when Back/Cancel opened the dirty-buffer confirmation sheet. */
     val unsavedChangesVisible: Boolean = false,
     /** Set when a save observes newer host metadata. */
     val conflict: ViewerFileConflict? = null,
+    val renameFile: ViewerRenameUiState = ViewerRenameUiState(),
+    val deleteFile: ViewerDeleteUiState = ViewerDeleteUiState(),
 ) {
     val name: String get() = if (path.isBlank()) "" else RemotePath.nameOf(path)
 
@@ -130,13 +154,14 @@ data class ViewerUiState(
 class ViewerViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val registry: ConnectionsRegistry,
+    private val hostDao: HostDao,
 ) : ViewModel() {
 
     private val hostId: Long = requireNotNull(
         savedStateHandle.get<Long>(Destination.ARG_HOST_ID),
     ) { "ViewerViewModel needs a ${Destination.ARG_HOST_ID} argument" }
 
-    private val path: String = RemotePath.normalize(
+    private var path: String = RemotePath.normalize(
         requireNotNull(savedStateHandle.get<String>(Destination.ARG_PATH)) {
             "ViewerViewModel needs a ${Destination.ARG_PATH} argument"
         },
@@ -156,6 +181,14 @@ class ViewerViewModel @Inject constructor(
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
 
     private var job: Job? = null
+    private var actionJob: Job? = null
+
+    init {
+        viewModelScope.launch {
+            val displayName = hostDao.getById(hostId)?.name ?: "Host $hostId"
+            _state.update { it.copy(hostName = displayName) }
+        }
+    }
 
     /**
      * Reads the file. Safe to call from `ON_START`; a call while a read or save
@@ -373,6 +406,183 @@ class ViewerViewModel @Inject constructor(
         _state.update { it.copy(renderMarkdown = !it.renderMarkdown) }
     }
 
+    /** Opens the file in its preview mode when a caller is already on the viewer. */
+    fun showPreview() {
+        if (!_state.value.markdownCapable) return
+        _state.update { it.copy(renderMarkdown = true) }
+    }
+
+    /**
+     * Copies the remote file to a device document selected by the route.
+     *
+     * The sink is intentionally supplied by the screen: Android's scoped
+     * storage requires a user-selected `content://` destination, while the
+     * remote read belongs here beside the existing viewer transport calls.
+     */
+    fun download(sink: (ByteArray) -> Unit) {
+        val current = _state.value
+        if (!current.loaded || current.downloading) return
+        _state.update { it.copy(downloading = true, failure = null, savedMessage = null) }
+        actionJob?.cancel()
+        actionJob = viewModelScope.launch {
+            val outcome = runCatching {
+                val bytes = sftp().read(path, TransferLimits.MAX_DOWNLOAD_BYTES)
+                withContext(Dispatchers.IO) { sink(bytes) }
+                bytes.size.toLong()
+            }
+            outcome.fold(
+                onSuccess = { size ->
+                    _state.update {
+                        it.copy(
+                            downloading = false,
+                            savedMessage = "Saved ${RemotePath.nameOf(path)} (${formatSize(size)}) to your device",
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            downloading = false,
+                            failure = "Download failed: ${message(error)}",
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /** Puts the viewer's remote path into the informational banner after copy. */
+    fun showMessage(message: String) {
+        _state.update { it.copy(savedMessage = message, failure = null) }
+    }
+
+    /** Opens the viewer-scoped rename form for this file. */
+    fun openRename() {
+        val current = _state.value
+        if (!current.loaded || current.downloading) return
+        _state.update {
+            it.copy(
+                renameFile = ViewerRenameUiState(visible = true, name = current.name),
+                deleteFile = ViewerDeleteUiState(),
+                failure = null,
+            )
+        }
+    }
+
+    fun setRenameName(name: String) {
+        if (_state.value.renameFile.submitting) return
+        _state.update { it.copy(renameFile = it.renameFile.copy(name = name, failure = null)) }
+    }
+
+    fun dismissRename() {
+        if (_state.value.renameFile.submitting) return
+        _state.update { it.copy(renameFile = ViewerRenameUiState()) }
+    }
+
+    /** Renames the current remote file, preserving the form on validation/transport failure. */
+    fun renameFile(onSuccess: () -> Unit = {}) {
+        val current = _state.value
+        val rename = current.renameFile
+        if (!rename.visible || rename.submitting) return
+        val name = rename.name.trim()
+        val validation = validateRemoteLeafName(name, "File name")
+        if (validation != null) {
+            _state.update { it.copy(renameFile = it.renameFile.copy(failure = validation)) }
+            return
+        }
+        val target = RemotePath.join(RemotePath.parent(path), name)
+        if (target == path) {
+            dismissRename()
+            return
+        }
+        _state.update { it.copy(renameFile = it.renameFile.copy(submitting = true, failure = null)) }
+        actionJob?.cancel()
+        actionJob = viewModelScope.launch {
+            runCatching {
+                val channel = sftp()
+                if (channel.stat(target) != null) {
+                    throw IOException("already exists: $target")
+                }
+                channel.rename(path, target)
+            }.fold(
+                onSuccess = {
+                    val oldName = RemotePath.nameOf(path)
+                    path = target
+                    _state.update {
+                        it.copy(
+                            path = target,
+                            renameFile = ViewerRenameUiState(),
+                            savedMessage = "Renamed $oldName to $name",
+                        )
+                    }
+                    onSuccess()
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            renameFile = it.renameFile.copy(
+                                submitting = false,
+                                failure = "Could not rename ${current.name}: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /** Opens the explicit destructive delete confirmation for this file. */
+    fun requestDelete() {
+        val current = _state.value
+        if (!current.loaded || current.downloading) return
+        _state.update {
+            it.copy(
+                renameFile = ViewerRenameUiState(),
+                deleteFile = ViewerDeleteUiState(visible = true),
+                failure = null,
+            )
+        }
+    }
+
+    fun dismissDelete() {
+        if (_state.value.deleteFile.submitting) return
+        _state.update { it.copy(deleteFile = ViewerDeleteUiState()) }
+    }
+
+    /** Deletes the current file only after the confirmation sheet calls this method. */
+    fun confirmDelete(onSuccess: () -> Unit = {}) {
+        val current = _state.value
+        val delete = current.deleteFile
+        if (!delete.visible || delete.submitting) return
+        _state.update { it.copy(deleteFile = delete.copy(submitting = true, failure = null)) }
+        actionJob?.cancel()
+        actionJob = viewModelScope.launch {
+            runCatching { sftp().delete(path) }.fold(
+                onSuccess = {
+                    _state.update {
+                        it.copy(
+                            loaded = false,
+                            content = ViewerContent.Empty,
+                            deleteFile = ViewerDeleteUiState(),
+                            savedMessage = "Deleted ${current.name}",
+                        )
+                    }
+                    onSuccess()
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            deleteFile = it.deleteFile.copy(
+                                submitting = false,
+                                failure = "Could not delete ${current.name}: ${message(error)}",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
     /** Clears the "Saved" banner once the user has seen it. */
     fun dismissSavedMessage() {
         _state.update { it.copy(savedMessage = null) }
@@ -394,6 +604,8 @@ class ViewerViewModel @Inject constructor(
                         loading = false,
                         loaded = true,
                         kind = kind,
+                        markdownCapable = kind == FileKind.TEXT && FileKindDetector.isMarkdown(path),
+                        renderMarkdown = kind == FileKind.TEXT && FileKindDetector.isMarkdown(path),
                         content = when (kind) {
                             FileKind.TEXT -> ViewerContent.Text(bytes.toString(Charsets.UTF_8))
                             FileKind.IMAGE -> ViewerContent.Image(bytes)

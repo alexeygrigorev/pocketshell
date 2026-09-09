@@ -114,7 +114,8 @@ internal class PtyChannelImpl private constructor(
             // Transport drop, local close, or cancellation: whatever status the
             // server managed to send is still the best answer below.
         } finally {
-            exitDeferred.complete(runCatching { channel.exitStatus }.getOrNull())
+            val status = runCatching { channel.exitStatus }.getOrNull()
+            exitDeferred.complete(status)
         }
     }
 

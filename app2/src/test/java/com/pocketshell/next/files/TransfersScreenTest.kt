@@ -25,6 +25,7 @@ class TransfersScreenTest {
             PocketShellTheme {
                 TransfersScreen(
                     state = FileExplorerUiState(
+                        hostName = "hetzner",
                         path = "/w",
                         transferRecords = listOf(
                             FileTransferRecord(
@@ -54,6 +55,7 @@ class TransfersScreenTest {
         }
 
         composeRule.onNodeWithTag(TRANSFERS_SCREEN_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("hetzner · /w").assertIsDisplayed()
         composeRule.onNodeWithText("In progress").assertIsDisplayed()
         composeRule.onNodeWithText("Completed").assertDoesNotExist()
         composeRule.onNodeWithText("Failed").assertIsDisplayed()

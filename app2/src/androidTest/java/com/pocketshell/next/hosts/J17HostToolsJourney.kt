@@ -2,7 +2,10 @@ package com.pocketshell.next.hosts
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -13,8 +16,8 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.swipeUp
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.next.MainActivity
@@ -181,18 +184,28 @@ class J17HostToolsJourney {
 
     /**
      * Copy is verified against the real system clipboard, which on API 29+
-     * only answers a read when the calling app holds input focus. A system
-     * dialog can steal that focus around the tap — on a loaded CI emulator
-     * the launcher ANRs mid-suite ("Pixel Launcher isn't responding") and
-     * reads answer null until the dialog dismisses itself. The WRITE always
-     * lands, so one tap plus a bounded read-only poll covers the gap;
-     * re-tapping would keep refreshing the system's clipboard-preview
-     * overlay into the journey's later steps and break those instead (seen
-     * on run 34404229281). The oracle stays the exact key text.
+     * only answers a read when the calling app holds input focus. On loaded
+     * CI emulators the launcher ANRs mid-suite ("Pixel Launcher isn't
+     * responding") and the modal dialog holds focus for minutes — reads
+     * answer null the whole time (runs 34382677524, 34409039305). The WRITE
+     * always lands, so: tap once, then poll reads while DISMISSING the ANR
+     * dialog's "Wait" button through UiAutomator, which Compose test rules
+     * cannot reach. Re-tapping is wrong twice over — the write already
+     * landed, and it refreshes the clipboard-preview overlay into the
+     * journey's later steps (run 34404229281). The oracle stays the exact
+     * key text.
      */
     private fun copyKeyAndAwaitClipboard(expected: String) {
         compose.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        var lastDismissAt = 0L
         compose.waitUntil(timeoutMillis = CLIPBOARD_RETRY_MS) {
+            if (SystemClock.elapsedRealtime() - lastDismissAt >= 5_000) {
+                lastDismissAt = SystemClock.elapsedRealtime()
+                runCatching {
+                    device.findObject(By.textContains("Wait"))?.click()
+                }
+            }
             expected == clipboardText()
         }
         assertEquals(expected, clipboardText())

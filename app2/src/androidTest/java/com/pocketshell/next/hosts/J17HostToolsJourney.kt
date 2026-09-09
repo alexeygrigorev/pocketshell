@@ -184,15 +184,15 @@ class J17HostToolsJourney {
      * only answers a read when the calling app holds input focus. A system
      * dialog can steal that focus around the tap — on a loaded CI emulator
      * the launcher ANRs mid-suite ("Pixel Launcher isn't responding") and
-     * reads answer null until the dialog dismisses itself. Re-tap and
-     * re-read within a bounded window instead of asserting the first read;
-     * the oracle stays the exact key text.
+     * reads answer null until the dialog dismisses itself. The WRITE always
+     * lands, so one tap plus a bounded read-only poll covers the gap;
+     * re-tapping would keep refreshing the system's clipboard-preview
+     * overlay into the journey's later steps and break those instead (seen
+     * on run 34404229281). The oracle stays the exact key text.
      */
     private fun copyKeyAndAwaitClipboard(expected: String) {
+        compose.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
         compose.waitUntil(timeoutMillis = CLIPBOARD_RETRY_MS) {
-            runCatching {
-                compose.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
-            }
             expected == clipboardText()
         }
         assertEquals(expected, clipboardText())

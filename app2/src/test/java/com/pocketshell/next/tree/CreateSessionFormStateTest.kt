@@ -2,6 +2,7 @@ package com.pocketshell.next.tree
 
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.ProfileInfo
+import com.pocketshell.core.hostapi.SessionRow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -174,6 +175,55 @@ class CreateSessionFormStateTest {
         val request = form.toRequest(listOf(testEngine("claude")), emptyList())
         assertNull(request.engine)
         assertNull(request.profile)
+    }
+
+    /**
+     * Schema-3 rows display as `<workspace>:<tag>`, but a create collides on
+     * the TAG alone (the host CLI answers `created=false` for a repeat). Feed
+     * the collision check display names and every bare tag looks free: the
+     * sheet re-proposes the occupied tag and the second default session
+     * silently no-ops.
+     */
+    @Test
+    fun `a schema-3 display name does not hide an occupied tag`() {
+        val row = SessionRow(
+            name = "pocketshell:pocketshell",
+            id = "b1ecbe62-abcd-4321-9f2e-2f37a6f0cd66",
+            workspace = "/home/testuser/git/pocketshell",
+            tag = "pocketshell",
+            engine = "shell",
+            profile = null,
+            agent = null,
+            agentState = null,
+            agentStateSource = null,
+            attached = false,
+            createdEpoch = null,
+            activityEpoch = null,
+        )
+
+        val tags = existingSessionTags(listOf(row))
+        assertEquals("pocketshell", tags.single())
+        assertEquals("pocketshell 2", collisionSafeSessionName("pocketshell", tags))
+    }
+
+    @Test
+    fun `rows without a tag fall back to their raw name for collision`() {
+        val row = SessionRow(
+            name = "bare-name",
+            id = null,
+            workspace = null,
+            tag = null,
+            engine = null,
+            profile = null,
+            agent = null,
+            agentState = null,
+            agentStateSource = null,
+            attached = false,
+            createdEpoch = null,
+            activityEpoch = null,
+        )
+
+        assertEquals("bare-name", existingSessionTags(listOf(row)).single())
     }
 }
 

@@ -33,6 +33,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.CreateSessionRequest
 import com.pocketshell.next.tree.CreateSessionSheet
+import com.pocketshell.next.tree.existingSessionTags
 import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
 import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
 import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
@@ -308,7 +309,7 @@ fun WorkspaceScreen(
         CreateSessionSheet(
             state = state.create,
             defaultFolder = state.suggestedFolder,
-            existingSessionNames = state.workspaceSessions.map { it.name },
+            existingSessionNames = existingSessionTags(state.workspaceSessions),
             onSubmit = onSubmitCreate,
             onCancel = onDismissCreate,
             onRefreshEngines = onRefreshEngines,

@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.pocketshell.core.hostapi.EngineInfo
 import com.pocketshell.core.hostapi.ProfileInfo
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.workspaces.SessionKindMark
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
@@ -208,6 +209,17 @@ fun collisionSafeSessionName(folder: String, existingNames: Collection<String>):
     while ("$base $suffix".lowercase() in occupied) suffix += 1
     return "$base $suffix"
 }
+
+/**
+ * The identities a new session's derived name must avoid, taken from the rows
+ * the host currently lists. A create collides on the TAG — the host CLI is
+ * idempotent per workspace+tag and answers `created=false` for a repeat — so
+ * schema-3 display names (`<workspace>:<tag>`) must not be compared verbatim:
+ * against them every bare tag looks free and the second default session
+ * silently no-ops. Rows the host gave no tag for fall back to their raw name.
+ */
+fun existingSessionTags(rows: List<SessionRow>): List<String> =
+    rows.map { row -> row.tag?.takeIf(String::isNotBlank) ?: row.name }
 
 /**
  * The sheet's editable form, hoisted out of the composition.

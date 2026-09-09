@@ -297,9 +297,9 @@ fun SessionTreeScreen(
         CreateSessionSheet(
             state = state.create,
             defaultFolder = state.suggestedFolder,
-            existingSessionNames = state.roots
-                .flatMap { root -> root.folders.flatMap { folder -> folder.rows } }
-                .map { it.name },
+            existingSessionNames = existingSessionTags(
+                state.roots.flatMap { root -> root.folders.flatMap { folder -> folder.rows } },
+            ),
             onSubmit = onSubmitCreate,
             onCancel = onDismissCreate,
             onRefreshEngines = onRefreshEngines,

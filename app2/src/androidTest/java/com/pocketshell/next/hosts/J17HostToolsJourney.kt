@@ -110,11 +110,7 @@ class J17HostToolsJourney {
         }
         awaitScrollableTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG)
         capture("02-ssh-key-detail")
-        compose.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
-        assertEquals(
-            SshKeyMaterial.publicKeyLine(AgentsFixture.privateKeyPem()),
-            clipboardText(),
-        )
+        copyKeyAndAwaitClipboard(SshKeyMaterial.publicKeyLine(AgentsFixture.privateKeyPem()))
 
         pressBackToHosts()
         compose.onNodeWithTag(HOST_LIST_KEYS_TAG).performScrollTo().performClick()
@@ -183,6 +179,25 @@ class J17HostToolsJourney {
             ?.toString()
     }
 
+    /**
+     * Copy is verified against the real system clipboard, which on API 29+
+     * only answers a read when the calling app holds input focus. A system
+     * dialog can steal that focus around the tap — on a loaded CI emulator
+     * the launcher ANRs mid-suite ("Pixel Launcher isn't responding") and
+     * reads answer null until the dialog dismisses itself. Re-tap and
+     * re-read within a bounded window instead of asserting the first read;
+     * the oracle stays the exact key text.
+     */
+    private fun copyKeyAndAwaitClipboard(expected: String) {
+        compose.waitUntil(timeoutMillis = CLIPBOARD_RETRY_MS) {
+            runCatching {
+                compose.onNodeWithTag(SSH_KEYS_COPY_PUBLIC_KEY_TAG).performClick()
+            }
+            expected == clipboardText()
+        }
+        assertEquals(expected, clipboardText())
+    }
+
     private fun awaitTag(tag: String) {
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
             compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
@@ -234,5 +249,6 @@ class J17HostToolsJourney {
     private companion object {
         const val JOURNEY = "j17-host-tools"
         const val TIMEOUT_MS = 30_000L
+        const val CLIPBOARD_RETRY_MS = 90_000L
     }
 }

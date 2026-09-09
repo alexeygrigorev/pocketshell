@@ -13,12 +13,20 @@ import org.robolectric.annotation.GraphicsMode
  *
  * This is the one hop the codec tests cannot cover — everything else asserts on
  * strings, and a QR that encodes a string the decoder cannot recover is still a
- * broken feature. Robolectric's native graphics mode gives real pixel storage,
- * which is what zxing's `RGBLuminanceSource` reads.
+ * broken feature.
+ *
+ * LEGACY graphics, deliberately: this test checks the DATA path — payload to
+ * matrix to pixel array to zxing — and LEGACY's shadow bitmaps store the int
+ * array verbatim, so the round-trip is byte-identical on every host. NATIVE
+ * routes the bitmap through real Skia, whose premultiply round-trip and CPU-
+ * dispatched code paths differ per machine and intermittently handed zxing a
+ * binarization it could not read (NotFoundException on CI runners only; runs
+ * 34382673852, 34412450162). Real rendering is proven by the J17 journey on
+ * the emulator, not here.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
-@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@GraphicsMode(GraphicsMode.Mode.LEGACY)
 class HostQrCodeTest {
 
     @Test

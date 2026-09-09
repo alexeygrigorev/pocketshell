@@ -6,8 +6,9 @@ set -euo pipefail
 #
 # WHY THIS SCRIPT EXISTS
 #
-# `tests/test_sessions_mem_cap.py::test_real_aplexer_session_cgroup_carries_the_
-# resolved_cap` is the only assertion in the repo that reads `memory.max` back
+# `tests/test_session_cgroup_kernel_proof.py::
+# test_real_aplexer_session_cgroup_carries_the_resolved_cap` is the only
+# assertion in the repo that reads `memory.max` back
 # out of the kernel for a session `pocketshell sessions create` just made. It
 # needs a delegated cgroup-v2 systemd `--user` scope, and NO automated lane we
 # own has one:
@@ -61,7 +62,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_DIR="$ROOT_DIR/tools/pocketshell"
 
-NODE_ID="tests/test_sessions_mem_cap.py::test_real_aplexer_session_cgroup_carries_the_resolved_cap"
+NODE_ID="tests/test_session_cgroup_kernel_proof.py::test_real_aplexer_session_cgroup_carries_the_resolved_cap"
 SELF_TEST_FILTER="missing_capability_skip or required_mode_turns or can_only_be_skipped_through"
 SELF_TEST_EXPECTED=3
 
@@ -129,7 +130,7 @@ run_pytest() {
 if [[ "$MODE" == "self-test" ]]; then
   echo "== cgroup memory-cap proof: self-test of the skip mechanism =="
   set +e
-  run_pytest uv run --frozen pytest -v -rs tests/test_sessions_mem_cap.py -k "$SELF_TEST_FILTER"
+  run_pytest uv run --frozen pytest -v -rs tests/test_session_cgroup_kernel_proof.py -k "$SELF_TEST_FILTER"
   status=$?
   set -e
   assert_counts "$SELF_TEST_EXPECTED" "$status"

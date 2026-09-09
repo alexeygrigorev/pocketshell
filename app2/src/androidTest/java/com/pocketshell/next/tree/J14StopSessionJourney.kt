@@ -33,8 +33,14 @@ import org.junit.runner.RunWith
 import kotlinx.coroutines.flow.first
 
 /**
- * Journey J14 — stop a throwaway session from a workspace (and from the session
- * screen) and prove the HOST no longer lists it (issue #2535).
+ * Journey J14 — stop a throwaway session reached from its workspace and prove
+ * the HOST no longer lists it (issue #2535).
+ *
+ * The Quiet redesign (#2569) made workspace rows navigation-only: a row has no
+ * kebab, and Stop lives in the session screen's header kebab ("End session?"
+ * ConfirmDialog, design-kit frame `end-session`). So every stop here opens the
+ * session from its workspace row first; the third test keeps the attached-
+ * session variant. Stop from the host tree kebab is covered by the tree screen.
  *
  * ## Why this has to be a device journey
  *
@@ -126,15 +132,17 @@ class J14StopSessionJourney {
         )
         awaitTag(sessionRowTag(SESSION_TREE))
 
-        compose.onNodeWithTag(sessionRowMenuTag(SESSION_TREE)).performClick()
+        compose.onNodeWithTag(sessionRowTag(SESSION_TREE)).performClick()
+        awaitSessionScreen()
+        compose.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
         compose.onNodeWithTag(STOP_SESSION_ITEM_TAG, useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithTag(STOP_SESSION_ITEM_TAG, useUnmergedTree = true).performClick()
         compose.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
-        compose.onNodeWithText(stopSessionMessage(SESSION_TREE)).assertIsDisplayed()
         JourneyScreenshots.capture("01-stop-confirm", JOURNEY)
 
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitGone(sessionRowTag(SESSION_TREE))
         compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
         JourneyScreenshots.capture("02-tree-after-stop", JOURNEY)
@@ -149,11 +157,12 @@ class J14StopSessionJourney {
         openWorkspace()
         awaitTag(sessionRowTag(SESSION_CANCEL))
 
-        compose.onNodeWithTag(sessionRowMenuTag(SESSION_CANCEL)).performClick()
+        compose.onNodeWithTag(sessionRowTag(SESSION_CANCEL)).performClick()
+        awaitSessionScreen()
+        compose.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
         compose.onNodeWithTag(STOP_SESSION_ITEM_TAG, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(STOP_SESSION_CANCEL_TAG).performClick()
 
-        compose.onNodeWithTag(sessionRowTag(SESSION_CANCEL)).assertIsDisplayed()
         compose.onNodeWithText(STOP_SESSION_TITLE).assertDoesNotExist()
         JourneyScreenshots.capture("03-cancel-alive", JOURNEY)
 

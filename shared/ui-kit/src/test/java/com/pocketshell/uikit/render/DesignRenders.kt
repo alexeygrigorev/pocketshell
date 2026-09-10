@@ -115,10 +115,33 @@ class DesignRenders {
         SessionTreeDesktopStyleRender()
     }
 
-    /** Issue #2521: closed-session compact launcher (Prompt Composer + ⌨). */
+    /**
+     * Issue #2631: the in-session launcher as a floating overlay over the
+     * terminal (replaces #2521's docked full-width chip row).
+     *
+     * Rendered at three widths because the maintainer's report was about
+     * *position* ("should be right bottom corner, not middle"), and a single
+     * viewport cannot show that the anchor is an edge relationship rather than
+     * a coincidence of one screen size. The class default is the 412dp
+     * Pixel-7 viewport; the two below override the qualifier per method.
+     */
     @Test
-    fun sessionCompactLauncherBar() = render("session-compact-launcher-bar") {
-        SessionCompactLauncherBarRender()
+    fun sessionLauncherOverlay() = render("session-launcher-overlay") {
+        SessionLauncherOverlayRender()
+    }
+
+    /** #2631 corner anchoring on a narrow (360dp) phone. */
+    @Config(qualifiers = "w360dp-h800dp-night-xxhdpi")
+    @Test
+    fun sessionLauncherOverlayNarrow() = render("session-launcher-overlay-360") {
+        SessionLauncherOverlayRender()
+    }
+
+    /** #2631 corner anchoring on a wide (600dp) viewport. */
+    @Config(qualifiers = "w600dp-h915dp-night-xxhdpi")
+    @Test
+    fun sessionLauncherOverlayWide() = render("session-launcher-overlay-600") {
+        SessionLauncherOverlayRender()
     }
 
     /** Issue #2521: Prompt Composer sheet chrome (title, draft, Insert, Send, mic). */

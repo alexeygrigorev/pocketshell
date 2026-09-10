@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -27,7 +28,7 @@ import com.pocketshell.uikit.components.HotkeyLongPressAction
 import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
-import com.pocketshell.uikit.components.SessionLauncherBar
+import com.pocketshell.uikit.components.SessionLauncherOverlay
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.components.TerminalHotkeysPage
@@ -37,27 +38,59 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
+/**
+ * Issue #2631: the launcher floats over the terminal. The terminal fill runs
+ * edge to edge, all the way to the bottom of the slot — there is no docked
+ * strip below it any more; the two round buttons simply paint on top of the
+ * bottom-right corner.
+ *
+ * **This fixture must stay `fillMaxSize()`.** The first version of it pinned a
+ * `height(560.dp)` box, which left ~343dp of dead harness background under the
+ * terminal on the 915dp render viewport and put the buttons ~58% down the PNG.
+ * The code was corner-anchored the whole time, but the *render* read as
+ * "floating in the middle" — which is exactly how the maintainer read it. A
+ * fixture that does not fill its slot cannot answer a question about corner
+ * anchoring, so it does not get to be shorter than the surface.
+ */
 @Composable
-internal fun SessionCompactLauncherBarRender() {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(560.dp)
-                .background(PocketShellColors.Background),
-        ) {
+internal fun SessionLauncherOverlayRender() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PocketShellColors.TermBg),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            SAMPLE_TERMINAL_LINES.forEach { line ->
+                Text(
+                    text = line,
+                    color = PocketShellColors.TermText,
+                    style = PocketShellType.bodyMono,
+                )
+            }
             Text(
-                text = "terminal stays full-size underneath",
-                color = PocketShellColors.TextMuted,
-                modifier = Modifier.padding(16.dp),
+                text = "the terminal now keeps the row the docked bar used to take",
+                color = PocketShellColors.TermComment,
+                style = PocketShellType.bodyMono,
             )
         }
-        SessionLauncherBar(
+        SessionLauncherOverlay(
             onOpenComposer = {},
             onOpenHotkeys = {},
+            modifier = Modifier.align(Alignment.BottomEnd),
         )
     }
 }
+
+private val SAMPLE_TERMINAL_LINES = listOf(
+    "alexey@RMTHZ:~/git/pocketshell$ git status",
+    "On branch main",
+    "Your branch is up to date with 'origin/main'.",
+    "",
+    "nothing to commit, working tree clean",
+    "alexey@RMTHZ:~/git/pocketshell$ ./gradlew :app2:assembleDebug",
+    "BUILD SUCCESSFUL in 42s",
+    "alexey@RMTHZ:~/git/pocketshell$ ",
+)
 
 @Composable
 internal fun TerminalHotkeysPanelRender() {

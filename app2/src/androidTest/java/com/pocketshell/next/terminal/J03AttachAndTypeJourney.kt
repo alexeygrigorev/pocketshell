@@ -11,6 +11,7 @@ import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -42,7 +43,7 @@ import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
-import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_OVERLAY_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
@@ -403,20 +404,34 @@ class J03AttachAndTypeJourney {
 
     /**
      * #2521: the circled always-visible 4-key bar + full composer is gone.
-     * Closed session chrome is the compact Prompt Composer + ⌨ launcher.
+     * #2631: what is left is a floating overlay launcher, not a docked bar —
+     * the terminal keeps the strip the old row occupied, so the launcher's
+     * rectangle must sit INSIDE the terminal's on a real device too.
      */
     @Test
     fun closedChromeIsCompactLauncherOnly() {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
-        compose.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
         compose.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
         compose.onNodeWithText("Ctrl").assertDoesNotExist()
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
+
+        // #2631: the launcher floats over the terminal instead of docking
+        // below it. On the pre-#2631 chrome the terminal stopped short of the
+        // launcher and these bounds were disjoint.
+        val terminal = compose.onNodeWithTag(SESSION_TERMINAL_TAG)
+            .getUnclippedBoundsInRoot()
+        val launcher = compose.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG)
+            .getUnclippedBoundsInRoot()
+        assertTrue(
+            "the launcher must overlay the terminal, got $launcher in $terminal",
+            launcher.top >= terminal.top && launcher.bottom <= terminal.bottom,
+        )
         capture("06-compact-launcher")
     }
 

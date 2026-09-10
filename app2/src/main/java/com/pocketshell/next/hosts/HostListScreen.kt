@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -22,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.next.release.UpdateCheckViewModel
 import com.pocketshell.next.release.launchUpdateUrl
@@ -38,8 +42,10 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -59,6 +65,9 @@ const val HOST_LIST_UPDATE_DISMISS_TAG: String = "host-list-update-dismiss"
 const val HOST_LIST_UPDATE_RETRY_TAG: String = "host-list-update-retry"
 const val HOST_LIST_UPDATE_FAILURE_TAG: String = "host-list-update-failure"
 const val HOST_LIST_KEYS_TAG: String = "host-list-ssh-keys"
+/** The header cog that opens [HostToolsSheet] (SSH keys + Settings) — #2630. */
+const val HOST_LIST_TOOLS_TAG: String = "host-list-tools"
+const val HOST_LIST_TOOLS_SHEET_TAG: String = "host-list-tools-sheet"
 // Keep the pre-Quiet journey tag as the canonical semantics tag. The longer
 // name remains a source-compatible alias for host-list tests and callers.
 const val HOST_LIST_SETTINGS_ROW_TAG: String = HOST_LIST_SETTINGS_TAG
@@ -154,8 +163,14 @@ sealed interface HostListUpdateNotice {
  * literally no way to get a host into the table:
  *
  * - The empty state has one **Add host** action that opens the two real setup
- *   methods. Populated Hosts keeps setup in a full-width footer and puts **SSH
- *   keys** and **Settings** in a separate tools section.
+ *   methods — a first run needs a visible way forward, so that one stays a
+ *   full-size call to action.
+ * - Populated Hosts carries both page actions as compact header icons (#2630):
+ *   a **cog** opening [HostToolsSheet] (SSH keys + Settings) and a **+**
+ *   opening the same Add-host methods. They replace a "Tools" section of
+ *   full-width rows plus a full-width footer button, which spent about a third
+ *   of a phone screen on three affordances used once a month. The host rows
+ *   themselves are unchanged — this is chrome, not the list.
  * - A per-row [Kebab] with Edit / Delete. It sits in the trailing slot the
  *   navigation chevron used to occupy: the row's own tap still dials the host,
  *   and a menu tap does not (an inner clickable consumes it). Share QR was
@@ -182,9 +197,36 @@ fun HostListScreen(
 ) {
     var pendingDelete by remember { mutableStateOf<HostRow?>(null) }
     var showAddHostMethods by remember { mutableStateOf(false) }
+    var showTools by remember { mutableStateOf(false) }
+
+    // Header actions belong to the populated page. A fresh install keeps the
+    // untouched first-run CTA instead, so "Add host" is never two affordances
+    // at once — the empty state's button and the header "+" share one tag and
+    // are mutually exclusive by construction.
+    val showHeaderActions = state.loaded && state.hosts.isNotEmpty()
 
     Column(modifier = modifier.fillMaxSize()) {
-        ScreenHeader(title = "Hosts")
+        ScreenHeader(
+            title = "Hosts",
+            trailing = if (!showHeaderActions) {
+                null
+            } else {
+                {
+                    HeaderIconAction(
+                        icon = PocketShellIcons.Settings,
+                        contentDescription = "Settings and SSH keys",
+                        onClick = { showTools = true },
+                        testTag = HOST_LIST_TOOLS_TAG,
+                    )
+                    HeaderIconAction(
+                        icon = PocketShellIcons.Plus,
+                        contentDescription = "Add host",
+                        onClick = { showAddHostMethods = true },
+                        testTag = HOST_LIST_ADD_TAG,
+                    )
+                }
+            },
+        )
 
         when (val notice = updateNotice) {
             is HostListUpdateNotice.Available -> UpdateAvailableBanner(
@@ -219,61 +261,49 @@ fun HostListScreen(
                 },
             )
 
-            else -> {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag(HOST_LIST_TAG),
-                    contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
-                ) {
-                    item { SectionHeader(label = "Hosts", count = state.hosts.size) }
-                    items(items = state.hosts, key = { it.id }) { host ->
-                        ListRow(
-                            title = host.name,
-                            subtitle = host.subtitle,
-                            trailing = {
-                                Kebab(
-                                    items = listOf(
-                                        KebabItem(label = "Edit", onClick = { onEditHost(host.id) }),
-                                        KebabItem(label = "Delete", onClick = { pendingDelete = host }),
-                                    ),
-                                    triggerTestTag = hostRowMenuTag(host.id),
-                                )
-                            },
-                            onClick = { onOpenHost(host.id) },
-                            modifier = Modifier.testTag(hostRowTag(host.id)),
-                        )
-                    }
-                    item { SectionHeader(label = "Tools") }
-                    item {
-                        ListRow(
-                            title = "SSH keys",
-                            subtitle = "Manage device authentication",
-                            onClick = onOpenSshKeys,
-                            modifier = Modifier.testTag(HOST_LIST_KEYS_TAG),
-                        )
-                    }
-                    item {
-                        ListRow(
-                            title = "Settings",
-                            subtitle = "Connection and app preferences",
-                            onClick = onOpenSettings,
-                            modifier = Modifier.testTag(HOST_LIST_SETTINGS_ROW_TAG),
-                        )
-                    }
-                    item {
-                        PocketShellButton(
-                            text = "Add host",
-                            onClick = { showAddHostMethods = true },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
-                                .testTag(HOST_LIST_ADD_FOOTER_TAG),
-                        )
-                    }
+            // #2630: the page is the host list and nothing else. "Tools" (SSH
+            // keys + Settings) moved into the header cog's sheet and "Add host"
+            // into the header "+", so the only full-width rows left are hosts.
+            else -> LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(HOST_LIST_TAG),
+                contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
+            ) {
+                item { SectionHeader(label = "Hosts", count = state.hosts.size) }
+                items(items = state.hosts, key = { it.id }) { host ->
+                    ListRow(
+                        title = host.name,
+                        subtitle = host.subtitle,
+                        trailing = {
+                            Kebab(
+                                items = listOf(
+                                    KebabItem(label = "Edit", onClick = { onEditHost(host.id) }),
+                                    KebabItem(label = "Delete", onClick = { pendingDelete = host }),
+                                ),
+                                triggerTestTag = hostRowMenuTag(host.id),
+                            )
+                        },
+                        onClick = { onOpenHost(host.id) },
+                        modifier = Modifier.testTag(hostRowTag(host.id)),
+                    )
                 }
             }
         }
+    }
+
+    if (showTools) {
+        HostToolsSheet(
+            onOpenSshKeys = {
+                showTools = false
+                onOpenSshKeys()
+            },
+            onOpenSettings = {
+                showTools = false
+                onOpenSettings()
+            },
+            onDismiss = { showTools = false },
+        )
     }
 
     if (showAddHostMethods) {
@@ -303,6 +333,81 @@ fun HostListScreen(
             },
             onDismiss = { pendingDelete = null },
         )
+    }
+}
+
+/**
+ * A compact page action in [ScreenHeader]'s trailing slot.
+ *
+ * The 48dp `IconButton` is the whole touch target, so the paint can be a small
+ * 20dp glyph without dropping below the a11y floor — that split is the point of
+ * #2630: shrink the ink, never the hit area.
+ */
+@Composable
+private fun HeaderIconAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(PocketShellDensity.tapTargetMin)
+            .testTag(testTag),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+/**
+ * What the header cog opens: the two device-level surfaces that used to be a
+ * full-width "Tools" section on the host list (#2630).
+ *
+ * A sheet rather than a jump straight to Settings, so ONE tap still reveals
+ * both destinations — SSH keys is not a child of Settings, and burying it there
+ * would trade two full-width rows for an extra level of navigation.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HostToolsSheet(
+    onOpenSshKeys: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        shape = PocketShellShapes.large,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(HOST_LIST_TOOLS_SHEET_TAG)
+                .padding(horizontal = PocketShellSpacing.lg)
+                .padding(bottom = PocketShellSpacing.lg)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        ) {
+            SheetHeader(title = "Tools", onClose = onDismiss)
+            ListRow(
+                title = "SSH keys",
+                subtitle = "Manage device authentication",
+                onClick = onOpenSshKeys,
+                modifier = Modifier.testTag(HOST_LIST_KEYS_TAG),
+            )
+            ListRow(
+                title = "Settings",
+                subtitle = "Connection and app preferences",
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag(HOST_LIST_SETTINGS_ROW_TAG),
+            )
+        }
     }
 }
 

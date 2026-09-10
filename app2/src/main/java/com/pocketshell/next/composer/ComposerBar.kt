@@ -214,10 +214,6 @@ fun ComposerBar(
             )
         }
 
-        if (state.attachments.isNotEmpty()) {
-            AttachmentTiles(attachments = state.attachments, onRemove = onRemoveAttachment)
-        }
-
         when (state.recording) {
             RecordingState.Recording -> RecordingSurface(
                 elapsedLabel = recordingElapsedLabel(),
@@ -249,11 +245,20 @@ fun ComposerBar(
             }
         }
 
+        // BELOW the draft field, between the editor and the controls — where
+        // the pre-0.5.0 composer put them (`Issue2057AttachmentTilesBelowDraftProofTest`)
+        // and where #2630's maintainer review asked for them back. Above the
+        // field they pushed the editor down the moment anything was staged.
+        if (state.attachments.isNotEmpty()) {
+            AttachmentTiles(attachments = state.attachments, onRemove = onRemoveAttachment)
+        }
+
         ControlsRow(
             state = state,
             onSend = commitSend,
             deliveryEnabled = deliveryEnabled,
             onInsert = onInsert,
+            onAttach = onAttach,
             onOpenTools = { toolsOpen = !toolsOpen },
             onMicTap = onMicTap,
             onCancelRecording = onCancelRecording,
@@ -271,10 +276,6 @@ fun ComposerBar(
                 state = state,
                 slashCommandsAvailable = availableSlashCommands.isNotEmpty(),
                 onDismiss = { toolsOpen = false },
-                onAttach = {
-                    toolsOpen = false
-                    onAttach()
-                },
                 onHistory = {
                     toolsOpen = false
                     onToggleHistory()
@@ -513,6 +514,7 @@ private fun ControlsRow(
     onSend: () -> Unit,
     deliveryEnabled: Boolean,
     onInsert: () -> Unit,
+    onAttach: () -> Unit,
     onOpenTools: () -> Unit,
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
@@ -525,6 +527,14 @@ private fun ControlsRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (state.recording == RecordingState.Idle) {
+            // Attach is a one-tap paperclip again (#2630). It was the app's
+            // most-used composer action and #2529 buried it two taps deep
+            // behind the "+" sheet; the sheet keeps the genuinely occasional
+            // tools (history / slash / hotkeys / clear).
+            ComposerAttachTrigger(
+                enabled = !state.busy,
+                onClick = onAttach,
+            )
             ComposerToolsTrigger(
                 enabled = !state.busy,
                 onClick = onOpenTools,
@@ -593,9 +603,30 @@ private fun ControlsRow(
 }
 
 /**
- * The composer has one quiet entry point for secondary actions. The expanded
- * panel is rendered inside the existing composer surface, so opening it never
- * stacks a second modal over the draft.
+ * Attach files — a direct control on the composer row, not a menu entry.
+ *
+ * Restored by #2630: "now the attach button is hidden under plus". Attaching a
+ * screenshot or a log is a primary composer action on a phone, so it costs one
+ * tap, like Send and the mic.
+ */
+@Composable
+private fun ComposerAttachTrigger(
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    ToolGlyphButton(
+        icon = PocketShellIcons.Paperclip,
+        contentDescription = "Attach files",
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+    )
+}
+
+/**
+ * The composer's one quiet entry point for the remaining secondary actions
+ * (history, slash commands, terminal keys, clear draft). Attach is deliberately
+ * NOT in here — see [ComposerAttachTrigger].
  */
 @Composable
 private fun ComposerToolsTrigger(
@@ -616,7 +647,6 @@ private fun ComposerToolsPanel(
     state: ComposerUiState,
     slashCommandsAvailable: Boolean,
     onDismiss: () -> Unit,
-    onAttach: () -> Unit,
     onHistory: () -> Unit,
     onSlash: () -> Unit,
     onHotkeys: () -> Unit,
@@ -635,13 +665,6 @@ private fun ComposerToolsPanel(
             title = "Add to input",
             onClose = onDismiss,
             closeContentDescription = "Close input tools",
-        )
-        ComposerToolRow(
-            title = "Attach file",
-            subtitle = "Android document picker",
-            icon = PocketShellIcons.Paperclip,
-            onClick = onAttach,
-            testTag = COMPOSER_ATTACH_TAG,
         )
         ComposerToolRow(
             title = "Recent prompts",

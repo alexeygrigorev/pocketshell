@@ -15,27 +15,37 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
+import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Issue #2529: Prompt Composer as a floating sheet — title, close, draft,
- * and the v0.4.47 single action row: grouped 📎/`{}`/`/` pill, Insert,
- * filled Send, 44dp mic. The real `PromptComposerSheet` lives in app2; this
- * is the ui-kit visual mirror `scripts/render.sh` can actually run.
+ * Prompt Composer as a floating sheet — title, close, draft, and the single
+ * action row. The real `PromptComposerSheet` lives in app2; this is the ui-kit
+ * visual mirror `scripts/render.sh` can actually run.
+ *
+ * Updated for #2630: the action row is [ComposerIdleControlsRow], which now
+ * mirrors app2's real `ControlsRow` rather than the v0.4.47 grouped
+ * 📎/`{}`/`/` pill it had frozen at. A mirror that has drifted from the screen
+ * it mirrors is worse than no mirror — it renders green for a layout that no
+ * longer exists.
  */
 @Composable
 internal fun PromptComposerSheetRender() {
@@ -125,7 +135,19 @@ internal fun ComposerControlsRowRender() {
     }
 }
 
-/** v0.4.47 idle row (#2529): [📎  {}  /] .... [Insert] [Send ➤] [MIC]. */
+/**
+ * The idle controls row as app2's `ComposerBar.ControlsRow` composes it after
+ * #2630:
+ *
+ * ```
+ * [📎] [+] ................ [Paste] [Send ➤] (MIC)
+ * ```
+ *
+ * Attach is a direct one-tap paperclip again (it was hidden inside the "+"
+ * sheet), "+" opens the remaining tools, and every control is on the 48dp
+ * composer action height with the 12dp Quiet pill radius. The mic is the real
+ * shared [MicButton], not a drawn circle.
+ */
 @Composable
 private fun ComposerIdleControlsRow() {
     Row(
@@ -133,46 +155,20 @@ private fun ComposerIdleControlsRow() {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                .padding(horizontal = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-            }
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "{}",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "/",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
+        ComposerGlyphMirror(PocketShellIcons.Paperclip)
+        ComposerGlyphMirror(PocketShellIcons.Plus)
         Spacer(Modifier.weight(1f))
         Box(
             modifier = Modifier
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                .height(COMPOSER_ACTION_HEIGHT)
+                .clip(COMPOSER_PILL_SHAPE)
+                .background(PocketShellColors.SurfaceElev, COMPOSER_PILL_SHAPE)
+                .border(1.dp, PocketShellColors.Border, COMPOSER_PILL_SHAPE)
                 .padding(horizontal = 16.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "Insert",
+                text = "Paste",
                 color = PocketShellColors.Text,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -180,9 +176,9 @@ private fun ComposerIdleControlsRow() {
         }
         Row(
             modifier = Modifier
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                .height(COMPOSER_ACTION_HEIGHT)
+                .clip(COMPOSER_PILL_SHAPE)
+                .background(PocketShellColors.Accent, COMPOSER_PILL_SHAPE)
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -193,19 +189,36 @@ private fun ComposerIdleControlsRow() {
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+            Icon(
+                imageVector = PocketShellIcons.Send,
+                contentDescription = null,
+                tint = PocketShellColors.OnAccent,
+                modifier = Modifier.size(18.dp),
+            )
         }
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(PocketShellColors.Accent, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
-        }
+        MicButton(
+            state = MicButtonState.Idle,
+            onClick = {},
+            modifier = Modifier.size(COMPOSER_ACTION_HEIGHT),
+        )
     }
 }
+
+/** app2's `ToolGlyphButton`: a bare 48dp hit area around an 18dp glyph. */
+@Composable
+private fun ComposerGlyphMirror(icon: ImageVector) {
+    Box(modifier = Modifier.size(COMPOSER_ACTION_HEIGHT), contentAlignment = Alignment.Center) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+private val COMPOSER_ACTION_HEIGHT = 48.dp
+private val COMPOSER_PILL_SHAPE = RoundedCornerShape(12.dp)
 
 @Composable
 internal fun ComposerRecordingControlsRowRender() {
@@ -961,17 +974,24 @@ internal fun ComposerQueueStateRender(failed: Boolean = false, offline: Boolean 
 
 /**
  * Issue #2057: the composer with staged attachment tiles BELOW the draft field —
- * between the editor and the bottom controls row (📎 · `{}` · `/` · Send · mic),
- * which is where the maintainer wants them and where they sat before #1619
- * hoisted them above the field.
+ * between the editor and the bottom controls row — which is where the
+ * maintainer wants them and where they sat before #1619 hoisted them above the
+ * field.
  *
- * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTileGrid`
- * live in the `:app` module, which the ui-kit render harness cannot see, so this
+ * Issue #2630 updated the attachment block itself: staging a file used to say
+ * so three times (a dismissable "Attached N file(s)." banner, the tile, and a
+ * full-width "Uploaded to <full remote path>" line PER file). It is now the
+ * tiles plus ONE destination line for the whole batch, and the controls row is
+ * the shared [ComposerIdleControlsRow] rather than a second, separately
+ * drifting copy.
+ *
+ * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTiles`
+ * live in the app2 module, which the ui-kit render harness cannot see, so this
  * is a hand-written static MIRROR of the arrangement, not the production
- * composable. It is the fast "does the order read right?" check only. The
- * acceptance for the layout itself is
- * `Issue2057AttachmentTilesBelowDraftProofTest` plus the full-device emulator
- * screenshot; a change to the production layout does NOT change this render.
+ * composable. It is the fast "does the order read right?" check only; the
+ * acceptance for the layout itself is `ComposerBarTest` plus the full-device
+ * emulator screenshot, and a change to the production layout does NOT change
+ * this render — keep them in step by hand.
  */
 @Composable
 internal fun ComposerAttachmentsBelowFieldRender() {
@@ -1029,7 +1049,10 @@ internal fun ComposerAttachmentsBelowFieldRender() {
                 fontSize = 14.sp,
             )
         }
-        // 2) THEN the staged attachment tiles, directly under the field.
+        // 2) THEN the staged attachment tiles, directly under the field, and
+        //    NOTHING else — no "Attached 2 files." banner, no per-file
+        //    "Uploaded to <path>" caption, no merged destination line (#2630).
+        //    The tile is the whole signal, as in the pre-0.5.0 composer.
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AttachmentTileMirror(label = "Screenshot_2026…png", type = "PNG")
@@ -1037,67 +1060,7 @@ internal fun ComposerAttachmentsBelowFieldRender() {
         }
         // 3) THEN the controls row.
         Spacer(Modifier.height(12.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-                }
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "{ }",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "/",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Row(
-                modifier = Modifier
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
-                Text(
-                    text = "Send",
-                    color = PocketShellColors.OnAccent,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
-            }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(PocketShellColors.Accent, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
-            }
-        }
+        ComposerIdleControlsRow()
     }
 }
 
@@ -1127,6 +1090,7 @@ private fun AttachmentTileMirror(label: String, type: String) {
             Text(
                 text = label,
                 color = PocketShellColors.TextSecondary,
+                // Matches ComposerAttachmentTiles' 9sp in-tile caption (#2630).
                 fontSize = 9.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

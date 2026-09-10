@@ -22,6 +22,22 @@ Termius-inspired. Built once in the `ui-kit` shared module so both PocketShell a
 - Terminal + inline code: JetBrains Mono or Fira Code
 - Sizes: 11sp captions, 14sp body, 16sp titles, 20sp screen headings — restrained scale
 
+This is the source of truth for the type scale. `Type.kt` implements it and
+`docs/design-system.md`'s token table mirrors it; when they disagree, this
+document wins and the code is the bug (issue #2630 shipped a scale one full rung
+larger than this line while claiming to follow it).
+
+| Rung            | Size | Line height | `PocketShellType` | M3 slot         |
+|-----------------|------|-------------|-------------------|-----------------|
+| Screen heading  | 20sp | 26sp        | `screen`          | `headlineSmall` |
+| Title           | 16sp | 22sp        | `title`           | `titleMedium`   |
+| Body            | 14sp | 20sp        | `body`            | `bodyMedium`    |
+| Caption / label | 11sp | 16sp        | `metadata`/`label`| `labelSmall`    |
+
+Two rungs sit deliberately outside the table and are not part of it:
+`bodyDense`/`bodyMono` (13sp) for dense rows and paths, and `labelMono` (11sp)
+for inline counts and IDs in a mono context.
+
 ## Components (to live in `ui-kit`)
 
 - `HostCard` — avatar circle (first letter), hostname + `user@host:port` subtitle, connection-state dot
@@ -42,6 +58,9 @@ Termius-inspired. Built once in the `ui-kit` shared module so both PocketShell a
 ## Touch targets
 
 - Minimum 48dp tap area everywhere
+- 48dp is a *touch* floor, not a row height. Visual density is set separately:
+  a standard list row is 56dp, a workspace navigation row 64dp. Don't read the
+  tap floor as a design target and inflate rows past it (issue #2630).
 - Long-press = always available alternate action
 - Edge swipes reserved for quick actions (don't block system back gesture)
 

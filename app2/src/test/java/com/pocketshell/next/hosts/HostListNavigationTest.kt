@@ -2,6 +2,7 @@ package com.pocketshell.next.hosts
 
 import androidx.compose.material3.Text
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -150,7 +151,7 @@ class HostListNavigationTest {
      * but nothing could tap into it.
      */
     @Test
-    fun `tapping Settings in the populated tools section navigates to Settings`() {
+    fun `tapping Settings in the header tools sheet navigates to Settings`() {
         val keyId = runBlocking {
             stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
         }
@@ -161,6 +162,11 @@ class HostListNavigationTest {
             composeRule.onAllNodesWithText("hetzner").fetchSemanticsNodes().isNotEmpty()
         }
 
+        // #2630: Tools moved off the page into the header cog's sheet.
+        composeRule.onNodeWithTag(HOST_LIST_TOOLS_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag(HOST_LIST_SETTINGS_ROW_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag(HOST_LIST_SETTINGS_ROW_TAG).performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("Settings").fetchSemanticsNodes().isNotEmpty()
@@ -171,13 +177,18 @@ class HostListNavigationTest {
     }
 
     @Test
-    fun `tapping SSH keys in the populated tools section opens key management`() {
+    fun `tapping SSH keys in the header tools sheet opens key management`() {
         val keyId = runBlocking {
             stack.db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/id_ed25519"))
         }
         runBlocking { insertHost(keyId, "hetzner", "135.181.114.209", "alexey") }
         val nav = setContent()
 
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag(HOST_LIST_TOOLS_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        // #2630: Tools moved off the page into the header cog's sheet.
+        composeRule.onNodeWithTag(HOST_LIST_TOOLS_TAG).performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("SSH keys").fetchSemanticsNodes().isNotEmpty()
         }

@@ -22,6 +22,7 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.hosts.HOST_LIST_SETTINGS_TAG
+import com.pocketshell.next.hosts.HOST_LIST_TOOLS_TAG
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -102,6 +103,9 @@ class J16SettingsSupportJourney {
 
     @Test
     fun settingsCategoriesPersistChoicesAndDiagnosticsUseNativeShare() {
+        // #2630: Settings left the host page for a sheet behind the header cog.
+        awaitTag(HOST_LIST_TOOLS_TAG)
+        compose.onNodeWithTag(HOST_LIST_TOOLS_TAG).performClick()
         awaitTag(HOST_LIST_SETTINGS_TAG)
         compose.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)

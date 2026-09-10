@@ -390,10 +390,12 @@ class ComposerViewModel @Inject constructor(
                 current.copy(
                     attachments = merge(current.attachments, result.uploaded),
                     staging = null,
-                    notice = result.failure?.let(ComposerNotice::Problem)
-                        ?: result.uploaded.takeIf { it.isNotEmpty() }?.let {
-                            ComposerNotice.Info(attachedMessage(it.size))
-                        },
+                    // Success is silent (#2630): the tile that just appeared is
+                    // the confirmation, so an "Attached 1 file." banner with its
+                    // own Dismiss button was a third way of saying it. Only a
+                    // FAILURE still raises a notice — that is the case the tiles
+                    // cannot show, because nothing appears.
+                    notice = result.failure?.let(ComposerNotice::Problem),
                 )
             }
             persistNow()
@@ -649,9 +651,6 @@ class ComposerViewModel @Inject constructor(
             val known = current.mapTo(mutableSetOf()) { it.remotePath }
             return current + added.filter { known.add(it.remotePath) }
         }
-
-        fun attachedMessage(count: Int): String =
-            if (count == 1) "Attached 1 file." else "Attached $count files."
 
         /** Says what just appeared in the draft, so text arriving on its own is not a mystery. */
         fun deliveredMessage(count: Int): String = if (count == 1) {

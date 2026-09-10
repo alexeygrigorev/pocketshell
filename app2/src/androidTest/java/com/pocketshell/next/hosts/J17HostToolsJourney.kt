@@ -101,6 +101,7 @@ class J17HostToolsJourney {
     fun hostToolsReachRealKeyAndQrSurfaces() {
         awaitTag(hostRowTag(9_701L))
 
+        openTools()
         compose.onNodeWithTag(HOST_LIST_KEYS_TAG).performClick()
         awaitTag(sshKeyRowTag(fixtureKeyId))
         capture("01-ssh-keys")
@@ -116,7 +117,8 @@ class J17HostToolsJourney {
         copyKeyAndAwaitClipboard(SshKeyMaterial.publicKeyLine(AgentsFixture.privateKeyPem()))
 
         pressBackToHosts()
-        compose.onNodeWithTag(HOST_LIST_KEYS_TAG).performScrollTo().performClick()
+        openTools()
+        compose.onNodeWithTag(HOST_LIST_KEYS_TAG).performClick()
         awaitTag(sshKeyRowTag(fixtureKeyId))
         compose.onNodeWithTag(SSH_KEYS_GENERATE_TAG).performClick()
         awaitTag(SSH_KEYS_GENERATE_CONFIRM_TAG)
@@ -136,7 +138,7 @@ class J17HostToolsJourney {
         capture("05-ssh-key-imported")
 
         pressBackToHosts()
-        awaitScrollableTag(HOST_LIST_ADD_TAG)
+        awaitTag(HOST_LIST_ADD_TAG)
         compose.onNodeWithTag(HOST_LIST_ADD_TAG).performClick()
         awaitTag(HOST_LIST_ADD_METHODS_TAG)
         capture("06-host-add-methods")
@@ -144,6 +146,16 @@ class J17HostToolsJourney {
         awaitTag(QR_SCANNER_INSTRUCTION_TAG)
         compose.onNodeWithTag(QR_SCANNER_INSTRUCTION_TAG).assertIsDisplayed()
         capture("07-qr-scanner")
+    }
+
+    /**
+     * #2630: SSH keys and Settings left the host page for a sheet behind the
+     * header cog. One tap on the cog, then the rows are on screen.
+     */
+    private fun openTools() {
+        awaitTag(HOST_LIST_TOOLS_TAG)
+        compose.onNodeWithTag(HOST_LIST_TOOLS_TAG).performClick()
+        awaitTag(HOST_LIST_KEYS_TAG)
     }
 
     private fun pressBackToHosts() {
@@ -163,7 +175,7 @@ class J17HostToolsJourney {
             }
         }
         pressBack()
-        awaitScrollableTag(HOST_LIST_ADD_TAG)
+        awaitTag(HOST_LIST_ADD_TAG)
     }
 
     private fun pressBack() {

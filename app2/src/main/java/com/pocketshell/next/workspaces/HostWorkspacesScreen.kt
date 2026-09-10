@@ -206,6 +206,8 @@ fun HostWorkspacesScreen(
     onDismissCreateFolder: () -> Unit = {},
     onRemoveRoot: (WorkspaceRootProjection) -> Unit = {},
     modifier: Modifier = Modifier,
+    /** Clock for the dense workspace row's relative activity label (#2630). */
+    nowSec: Long = System.currentTimeMillis() / 1000,
 ) {
     val clipboard = LocalClipboardManager.current
     var activeRootActions by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
@@ -400,6 +402,7 @@ fun HostWorkspacesScreen(
                         itemContent(
                             root = root,
                             sessionsUnavailable = state.statusUnavailable || state.errors.isNotEmpty(),
+                            nowSec = nowSec,
                             onOpenWorkspace = onOpenWorkspace,
                             onOpenSession = onOpenSession,
                             onOpenAddWorkspace = onOpenAddWorkspace,
@@ -917,6 +920,7 @@ private fun CreateFolderFormDialog(
 private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     root: WorkspaceRootProjection,
     sessionsUnavailable: Boolean,
+    nowSec: Long,
     onOpenWorkspace: (String) -> Unit,
     onOpenSession: (SessionRow) -> Unit,
     onOpenAddWorkspace: (String) -> Unit,
@@ -976,11 +980,17 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
             items = root.workspaces,
             key = { workspace -> "workspace:${workspace.path}" },
         ) { workspace ->
+            // #2630: one information-dense line per workspace — name, session
+            // count, recency — matching PocketShell Desktop's sidebar, instead
+            // of a title row over a wrapped per-kind summary.
             WorkspaceRow(
                 title = workspace.label,
-                subtitleContent = {
-                    SessionKindSummary(
+                dense = true,
+                trailingContent = {
+                    WorkspaceGlance(
+                        path = workspace.path,
                         sessions = workspace.sessions,
+                        nowSec = nowSec,
                         unavailable = sessionsUnavailable,
                     )
                 },

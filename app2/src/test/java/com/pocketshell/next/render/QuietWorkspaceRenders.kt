@@ -65,6 +65,27 @@ class QuietWorkspaceRenders {
         )
     }
 
+    /**
+     * #2630: the dense single-line workspace row, against a POPULATED state.
+     *
+     * The `i2607-*` fixtures above have no sessions and no activity
+     * timestamps, so they render the (correct) silent variant and show nothing
+     * of the shape the maintainer asked for. This one carries real session
+     * counts and recent activity, so the row reads the way PocketShell
+     * Desktop's sidebar does: `pocketshell  4  just now`.
+     */
+    @Test
+    @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
+    fun hostWorkspacesDense() = render("i2630-host-workspaces-dense") {
+        HostWorkspacesScreen(
+            state = denseHostState(),
+            onRefresh = {},
+            onOpenWorkspace = {},
+            onOpenSession = {},
+            nowSec = DENSE_NOW,
+        )
+    }
+
     @Test
     fun emptyWorkspaceDetail() = render("i2607-empty-workspace-detail") {
         WorkspaceScreen(state = workspaceState("/home/alexey/git/empty"), onRefresh = {}, onOpenSession = {})
@@ -133,6 +154,37 @@ class QuietWorkspaceRenders {
         )
     }
 
+    private fun denseHostState(): HostWorkspacesUiState {
+        val sessions = listOf(
+            active("claude-main", "/home/alexey/git/pocketshell", DENSE_NOW - 20),
+            active("codex-ui", "/home/alexey/git/pocketshell", DENSE_NOW - 400),
+            active("shell", "/home/alexey/git/pocketshell", DENSE_NOW - 900),
+            active("build", "/home/alexey/git/pocketshell", DENSE_NOW - 4_000),
+            active("api", "/home/alexey/work/mobile", DENSE_NOW - 7_200),
+            active("root-shell", "/home/alexey/git", DENSE_NOW - 60),
+        )
+        return HostWorkspacesUiState(
+            hostId = 7,
+            hostLabel = "hetzner",
+            loaded = true,
+            roots = projectWorkspaceRoots(
+                sessions = sessions,
+                memberships = listOf(
+                    WorkspaceMembership("/home/alexey/git/pocketshell", "~/git/pocketshell"),
+                    WorkspaceMembership("/home/alexey/git/empty", "~/git/empty"),
+                    WorkspaceMembership("/home/alexey/work/mobile", "~/work/mobile"),
+                ),
+                registeredRoots = listOf(
+                    RegisteredWorkspaceRoot("/home/alexey/git", "Git", 1L),
+                    RegisteredWorkspaceRoot("/home/alexey/work", "Work", 2L),
+                ),
+            ),
+        )
+    }
+
+    private fun active(name: String, workspace: String, activityEpoch: Long): SessionRow =
+        session(name, workspace).copy(activityEpoch = activityEpoch)
+
     private fun session(name: String, workspace: String): SessionRow = SessionRow(
         name = name,
         id = null,
@@ -180,5 +232,10 @@ class QuietWorkspaceRenders {
                 }
             }
         }
+    }
+
+    private companion object {
+        /** Fixed clock so the dense render's relative labels are deterministic. */
+        const val DENSE_NOW: Long = 1_800_000_000L
     }
 }

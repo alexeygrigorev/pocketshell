@@ -68,7 +68,11 @@ class QuietWorkspaceScreenTest {
         composeRule.onNodeWithTag(workspaceRowTag(path)).assertIsDisplayed().performClick()
         assertEquals(listOf(path), opened)
         composeRule.onNodeWithText("~/git/pocketshell", substring = true).assertDoesNotExist()
-        composeRule.onNodeWithText("No sessions").assertIsDisplayed()
+        // #2630: the workspace row is one dense line. An empty workspace is
+        // silent — no count badge, and no "No sessions" subtitle row — rather
+        // than spending a second line saying there is nothing to say.
+        composeRule.onNodeWithText("No sessions").assertDoesNotExist()
+        composeRule.onNodeWithTag(workspaceGlanceCountTag(path)).assertDoesNotExist()
     }
 
     @Test

@@ -38,8 +38,8 @@ import com.pocketshell.uikit.icons.PocketShellIcons
  * └───────────────────────────────────────────────────────┘
  * ```
  *
- * - **Title** uses the Quiet screen style (28sp/34sp) and the optional subtitle
- *   uses the 16sp metadata rung.
+ * - **Title** uses the Quiet screen style (20sp/26sp) and the optional subtitle
+ *   uses the 11sp metadata rung.
  * - **Subtitle** (optional) is the `N x · M y` facet line — muted, dense — the
  *   same count-subtitle vocabulary `ListRow`/`SectionHeader` use. Callers build
  *   the string (e.g. `"4 hosts · 7 sessions"`); this component does not invent
@@ -80,11 +80,15 @@ fun ScreenHeader(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            // #2630: the header used a 16dp top / 20dp bottom band around a
+            // 28sp title, so an otherwise empty screen spent ~74dp on the word
+            // "Hosts". A 12dp band around the reconciled 20sp title keeps the
+            // title block distinct from the first row without the dead band.
             .padding(
                 start = if (onBack != null || leading != null) PocketShellSpacing.md else PocketShellSpacing.xl,
                 end = PocketShellSpacing.md,
-                top = PocketShellSpacing.lg,
-                bottom = PocketShellSpacing.xl,
+                top = PocketShellSpacing.md,
+                bottom = PocketShellSpacing.md,
             ),
         verticalAlignment = Alignment.Top,
     ) {

@@ -20,6 +20,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -44,10 +45,10 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * - **[leading]** (optional) — status dot ([StatusDot]) / avatar / icon. Pass
  *   `null` for a flush-left title (e.g. settings rows).
- * - **title** — the primary scan target, [PocketShellType.body] (18sp) on the
+ * - **title** — the primary scan target, [PocketShellType.body] (14sp) on the
  *   bright text token.
  * - **[subtitle]** (optional) — paths / IDs / `user@host`, rendered
- *   [PocketShellType.metadata] (16sp) on the muted token. The default is a
+ *   [PocketShellType.metadata] (11sp) on the muted token. The default is a
  *   single ellipsised line; callers such as [WorkspaceRow] may opt into a
  *   second line when the label itself is part of navigation.
  * - **[trailing]** (optional) — badge ([Badge]) / count / kebab ([Kebab]). One
@@ -56,8 +57,15 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * ### Density and touch floor
  *
- * Rows use the Quiet 72dp minimum and 20dp screen gutter. The whole row is the
- * tap target when [onClick] is supplied, and wrapped content is allowed to grow.
+ * Rows use the [PocketShellDensity.rowMinHeight] (56dp) minimum and the 20dp
+ * screen gutter — comfortably above the 48dp tap floor, without spending a
+ * phone screen on six items (#2630). The whole row is the tap target when
+ * [onClick] is supplied, and wrapped content is allowed to grow.
+ *
+ * [minHeight] exists for genuinely single-line, information-dense lists that
+ * want the 48dp touch floor itself as their height (the workspace list, #2630).
+ * It is a floor, never a cap — never pass anything below
+ * [PocketShellDensity.tapTargetMin].
  *
  * Colours stay on the always-dark raw tokens (#477 single dark scheme) so the
  * row never flips with the system light setting.
@@ -76,10 +84,8 @@ fun ListRow(
     subtitleStyle: TextStyle = PocketShellType.metadata,
     titleWeight: FontWeight? = null,
     subtitleContent: (@Composable () -> Unit)? = null,
+    minHeight: Dp = PocketShellDensity.rowMinHeight,
 ) {
-    // Every standard row is a 72dp minimum hit target. WorkspaceRow raises
-    // this to the separate 88dp workspace navigation target.
-    val minHeight = PocketShellDensity.rowMinHeight
 
     Column(
         modifier = if (onClick == null) modifier.fillMaxWidth() else Modifier.fillMaxWidth(),

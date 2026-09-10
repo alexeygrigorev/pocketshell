@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -35,6 +36,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.icons.PocketShellIcons
@@ -48,6 +50,16 @@ import com.pocketshell.uikit.theme.PocketShellType
 /** Stable tags so a journey can drive the strip without matching on copy. */
 const val SESSION_TAB_STRIP_TAG: String = "session-tab-strip"
 const val SESSION_TAB_NEW_TAG: String = "session-tab-new"
+
+/**
+ * The label on the "+" affordance, wherever it is painted.
+ *
+ * #2635 D3 hides the strip when there is one session and moves its "+" into
+ * the screen header, so the two paint sites must say the same thing — a "New
+ * session" that becomes "Add" when the strip disappears is the same
+ * three-create-grammars drift the audit found on the adjacent screens.
+ */
+const val SESSION_TAB_NEW_DESCRIPTION: String = "New session"
 const val SESSION_TAB_OVERFLOW_TAG: String = "session-tab-overflow"
 
 /** Per-tab tag, keyed by the caller's stable session identity. */
@@ -183,7 +195,7 @@ fun SessionTabStrip(
                 ) {
                     Icon(
                         imageVector = PocketShellIcons.Plus,
-                        contentDescription = "New session",
+                        contentDescription = SESSION_TAB_NEW_DESCRIPTION,
                         tint = PocketShellColors.TextSecondary,
                     )
                 }
@@ -233,7 +245,10 @@ private fun SessionTabChip(
     val underline = PocketShellColors.Accent
     Row(
         modifier = Modifier
-            .heightIn(min = PocketShellDensity.tapTargetMin)
+            // Paint 40dp; `minimumInteractiveComponentSize` keeps the 48dp hit
+            // area (#2635 D3). Shrink the ink, never the target.
+            .heightIn(min = TAB_PAINT_HEIGHT)
+            .minimumInteractiveComponentSize()
             .widthIn(max = TAB_MAX_WIDTH)
             .clip(PocketShellShapes.medium)
             .background(if (selected) PocketShellColors.SurfaceElev else PocketShellColors.Background)
@@ -262,15 +277,35 @@ private fun SessionTabChip(
         Text(
             text = tab.label,
             color = if (selected) PocketShellColors.Text else PocketShellColors.TextSecondary,
-            style = PocketShellType.metadata,
+            style = SESSION_TAB_LABEL_STYLE,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
     }
 }
 
+/**
+ * The tab label's rung (#2635 D3): `bodyDense` (13sp), NOT `metadata`.
+ *
+ * `metadata` was 16sp when #2632 designed this strip and became 11sp the moment
+ * #2630's reconciled scale merged — Material's caption floor, on the app's
+ * PRIMARY switching control, against the desktop's 13px tabs. That is exactly
+ * the trap the audit named: three issues shipped in parallel against a type
+ * scale a fourth was changing underneath them.
+ *
+ * Named rather than inlined so `SessionTabStripTest` can assert on the rung the
+ * strip actually paints with. Robolectric's text metrics are degenerate (every
+ * glyph measures the same), so a size assertion on the rendered node cannot
+ * tell 11sp from 13sp — this symbol is the only honest oracle available on the
+ * JVM, and re-pointing the label at another rung has to edit it.
+ */
+val SESSION_TAB_LABEL_STYLE: TextStyle = PocketShellType.bodyDense
+
 /** Wide enough for a real workspace tag, short enough that four tabs fit. */
 private val TAB_MAX_WIDTH = 160.dp
+
+/** The strip's painted height; the touch floor stays 48dp. */
+private val TAB_PAINT_HEIGHT = 40.dp
 private val UNDERLINE_THICKNESS = 2.dp
 
 /**

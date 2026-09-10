@@ -8,10 +8,13 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import com.pocketshell.uikit.theme.PocketShellTheme
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -118,6 +121,93 @@ class HostListDensityTest {
         composeRule.onAllNodesWithText("Add host").assertCountEquals(0)
     }
 
+    /**
+     * #2635 2a: a screen with ONE section does not need a section label.
+     *
+     * The page is titled "Hosts" and 40dp below it sat a `SectionHeader` also
+     * saying "Hosts" (Nielsen #8). The count moves into the header subtitle,
+     * and only when there are ≥2 hosts — one host IS its own count.
+     *
+     * Fails on the section header (two "Hosts" nodes, and a 32dp band above
+     * the first row).
+     */
+    @Test
+    fun `a single-section host list has no section header`() {
+        setContent()
+
+        composeRule.onAllNodesWithText("Hosts").assertCountEquals(1)
+        composeRule.onNodeWithTag(HOST_LIST_COUNT_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun `the header subtitle carries the count once there are two hosts`() {
+        setContent(
+            hosts = listOf(
+                HostRow(1, "hetzner", "alexey@135.181.114.209"),
+                HostRow(2, "gpu-box", "alexey@10.0.0.42"),
+            ),
+        )
+
+        composeRule.onAllNodesWithText("Hosts").assertCountEquals(1)
+        composeRule.onNodeWithTag(HOST_LIST_COUNT_TAG).assertTextEquals("2 hosts")
+    }
+
+    /**
+     * #2635 2a: which host is warm, BEFORE tapping it. The desktop's host
+     * picker has had a leading dot since day one; the phone shipped a list with
+     * no status at all. Fails before the dot exists, and the two rows differ
+     * only in their connection state so the dot has to MEAN something.
+     */
+    @Test
+    fun `a host row carries a leading connection dot`() {
+        setContent(
+            hosts = listOf(
+                HostRow(1, "hetzner", "alexey@135.181.114.209", connected = true),
+                HostRow(2, "gpu-box", "alexey@10.0.0.42", connected = false),
+            ),
+        )
+
+        assertEquals(
+            listOf("Connected"),
+            composeRule.onNodeWithTag(hostRowStatusTag(1), useUnmergedTree = true)
+                .fetchSemanticsNode().config[SemanticsProperties.ContentDescription],
+        )
+        assertEquals(
+            listOf("Not connected"),
+            composeRule.onNodeWithTag(hostRowStatusTag(2), useUnmergedTree = true)
+                .fetchSemanticsNode().config[SemanticsProperties.ContentDescription],
+        )
+    }
+
+    /**
+     * #2635 2a: EVERY row lands on 56dp, including the ones with a menu.
+     *
+     * `ListRow` used to pad the ROW, so a row whose trailing slot is a 48dp
+     * kebab could not be 56dp: 48 + 2×8 = 64. The host list therefore read as
+     * "56dp rows, except the ones with a menu, which are 64". Moving `rowPadV`
+     * onto the text column fixes it for every row in the app at once.
+     *
+     * Fails on the row-level padding (the row measures 64dp).
+     */
+    @Test
+    fun `a host row with a kebab is exactly the standard row height`() {
+        setContent()
+
+        val density = composeRule.density.density
+        val height = composeRule.onNodeWithTag(hostRowTag(1))
+            .fetchSemanticsNode().boundsInRoot.height / density
+
+        assertTrue(
+            "a host row must clear the 48dp tap floor, was ${height}dp",
+            height >= 48f,
+        )
+        assertTrue(
+            "#2635: a row carrying a 48dp kebab must still be the 56dp standard " +
+                "row, not 56-plus-two-paddings; was ${height}dp",
+            height <= 57f,
+        )
+    }
+
     /** One tap on the cog reveals BOTH device surfaces, not one of them. */
     @Test
     fun theCogOpensSshKeysAndSettingsTogetherInOneTap() {
@@ -132,14 +222,13 @@ class HostListDensityTest {
         composeRule.onNodeWithTag(HOST_LIST_SETTINGS_ROW_TAG).assertIsDisplayed()
     }
 
-    private fun setContent() {
+    private fun setContent(
+        hosts: List<HostRow> = listOf(HostRow(1, "hetzner", "alexey@135.181.114.209")),
+    ) {
         composeRule.setContent {
             PocketShellTheme {
                 HostListScreen(
-                    state = HostListUiState(
-                        loaded = true,
-                        hosts = listOf(HostRow(1, "hetzner", "alexey@135.181.114.209")),
-                    ),
+                    state = HostListUiState(loaded = true, hosts = hosts),
                     onOpenHost = {},
                     onAddHost = {},
                     onEditHost = {},

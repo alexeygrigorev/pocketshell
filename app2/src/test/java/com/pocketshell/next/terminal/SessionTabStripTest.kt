@@ -2,6 +2,7 @@ package com.pocketshell.next.terminal
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -11,10 +12,13 @@ import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.uikit.components.SESSION_TAB_NEW_TAG
 import com.pocketshell.uikit.components.SESSION_TAB_OVERFLOW_TAG
 import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
+import com.pocketshell.uikit.components.SESSION_TAB_LABEL_STYLE
 import com.pocketshell.uikit.components.SessionTabState
 import com.pocketshell.uikit.components.sessionTabTag
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -114,6 +118,100 @@ class SessionTabStripTest {
         assertEquals(listOf("main", "main 2"), tabs.map { it.label })
     }
 
+    /**
+     * #2635 D3 / `ux-rules.md` rule 6: a strip with ONE item is vertical chrome
+     * without a choice. Session chrome measured ~125dp above the first terminal
+     * row against the desktop's 40px; the strip is 49dp of that, and with a
+     * single session it offers nothing to switch to.
+     *
+     * Its "+" does not disappear with it — it moves into the header — so the
+     * create affordance stays exactly one tap away. Fails on the
+     * unconditionally-rendered strip.
+     */
+    @Test
+    fun `a live session with no siblings hides the strip and keeps a header plus`() {
+        setContent(
+            sessions = listOf(row(CURRENT, AgentState.WORKING)),
+            state = SessionUiState.Live(createRemoteTerminalSession()),
+        )
+
+        composeRule.onNodeWithTag(SESSION_TAB_STRIP_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_TAB_NEW_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_HEADER_NEW_TAG).assertIsDisplayed()
+    }
+
+    /** Two sessions is a choice, so the strip earns its row again. */
+    @Test
+    fun `a second session brings the strip back and the header plus goes away`() {
+        setContent(
+            sessions = listOf(row(CURRENT, AgentState.WORKING), row(OTHER)),
+            state = SessionUiState.Live(createRemoteTerminalSession()),
+        )
+
+        composeRule.onNodeWithTag(SESSION_TAB_STRIP_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_TAB_NEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_HEADER_NEW_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * #2635 D3: the tab label is the app's PRIMARY switching control. It was
+     * `PocketShellType.metadata`, which was 16sp when #2632 designed the strip
+     * and became 11sp once #2630's reconciled scale merged — below the
+     * desktop's 13px tabs and at Material's caption floor.
+     *
+     * The assertion is on the STYLE the strip paints with, not on the rendered
+     * node: Robolectric's text metrics are degenerate (a 6dp box for every
+     * label at every size), so a measured-geometry oracle here would be a
+     * vacuous pass. This reddens if the label is re-pointed at the caption
+     * rung, and it also reddens if `bodyDense` is ever shrunk onto it.
+     */
+    @Test
+    fun `tab labels are not on the caption rung`() {
+        assertEquals(
+            "the tab label must be the dense body rung",
+            PocketShellType.bodyDense.fontSize,
+            SESSION_TAB_LABEL_STYLE.fontSize,
+        )
+        assertTrue(
+            "a primary switching control must not sit on the caption rung " +
+                "(${SESSION_TAB_LABEL_STYLE.fontSize} vs caption " +
+                "${PocketShellType.metadata.fontSize})",
+            SESSION_TAB_LABEL_STYLE.fontSize.value > PocketShellType.metadata.fontSize.value,
+        )
+        assertTrue(
+            "the desktop's tabs are 13px; do not go under that",
+            SESSION_TAB_LABEL_STYLE.fontSize.value >= 13f,
+        )
+    }
+
+    /**
+     * #2635 T2 / D3: the header's steady state is the DOT plus a one-line
+     * title, not a two-line title over "hetzner · Connected".
+     */
+    @Test
+    fun `the live header drops the Connected subtitle for a dot`() {
+        setContent(state = SessionUiState.Live(createRemoteTerminalSession()))
+
+        composeRule.onNodeWithText("hetzner · Connected").assertDoesNotExist()
+        composeRule.onNodeWithText("Connected").assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_STATUS_DOT_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+    }
+
+    /** A non-steady state still spells itself out — a colour cannot say it. */
+    @Test
+    fun `a reconnecting header keeps its words`() {
+        setContent(
+            state = SessionUiState.Reconnecting(
+                attempt = 2,
+                retryInMs = 5_000,
+                terminal = createRemoteTerminalSession(),
+            ),
+        )
+
+        composeRule.onNodeWithText("hetzner · Reconnecting").assertIsDisplayed()
+    }
+
     @Test
     fun `the dot reports the host's agent state`() {
         assertEquals(SessionTabState.Working, sessionTabState(row("x", AgentState.WORKING)))
@@ -126,11 +224,12 @@ class SessionTabStripTest {
         sessions: List<SessionRow> = listOf(row(CURRENT, AgentState.WORKING), row(OTHER)),
         onOpenSession: (SessionRow) -> Unit = {},
         onOpenNewSession: () -> Unit = {},
+        state: SessionUiState = SessionUiState.Connecting,
     ) {
         composeRule.setContent {
             PocketShellTheme {
                 SessionScreen(
-                    state = SessionUiState.Connecting,
+                    state = state,
                     composerState = ComposerUiState(),
                     sessionName = CURRENT,
                     onBack = {},

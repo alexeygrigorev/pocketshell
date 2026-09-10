@@ -161,12 +161,45 @@ class GoogleAuthTest {
 
     /* --- the class --------------------------------------------------------- */
 
+    /**
+     * A placeholder client ID must refuse locally rather than send the user to
+     * a browser that lands on a Google 400 with no way back.
+     *
+     * The placeholder is passed EXPLICITLY. This used to read
+     * `SyncConfig.GOOGLE_ANDROID_CLIENT_ID` and rely on the shipped value being
+     * the placeholder, so it silently changed meaning the moment the real
+     * client was registered (#2635): it stopped testing the refusal and started
+     * asserting that the build is unconfigured, which is the opposite of what
+     * anyone wants. The guard and the shipped value are separate facts and are
+     * now asserted separately.
+     */
     @Test
     fun `refuses to start a sign-in while the client ID is a placeholder`() {
-        val auth = auth(clientId = SyncConfig.GOOGLE_ANDROID_CLIENT_ID, http = RecordingSyncHttpClient.scripted())
+        val placeholder = "${SyncConfig.UNCONFIGURED_CLIENT_ID_MARKER}.apps.googleusercontent.com"
+        val auth = auth(clientId = placeholder, http = RecordingSyncHttpClient.scripted())
         assertFalse(auth.clientConfigured)
         val error = assertThrows(SyncAuthError::class.java) { auth.beginAuthorization() }
         assertTrue(error.message!!.contains("not configured"))
+    }
+
+    /** …and the client this build actually ships is NOT a placeholder (#2635). */
+    @Test
+    fun `the shipped client ID starts a real sign-in`() {
+        val auth = auth(
+            clientId = SyncConfig.GOOGLE_ANDROID_CLIENT_ID,
+            http = RecordingSyncHttpClient.scripted(),
+        )
+
+        assertTrue(
+            "the registered Android OAuth client must be wired in",
+            auth.clientConfigured,
+        )
+        val pending = auth.beginAuthorization()
+        assertTrue(pending.authorizationUrl.startsWith(SyncConfig.AUTH_ENDPOINT))
+        assertTrue(
+            pending.authorizationUrl.contains(SyncConfig.GOOGLE_ANDROID_CLIENT_ID),
+        )
+        assertEquals(SyncConfig.redirectUri(), pending.redirectUri)
     }
 
     @Test

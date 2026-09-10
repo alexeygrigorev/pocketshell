@@ -13,6 +13,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.AppNavHost
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.HostListViewModel
+import com.pocketshell.next.hosts.noLiveHosts
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
@@ -163,7 +164,7 @@ class ConnectGateNavigationTest {
         startupHostId: Long? = null,
         startupHostExists: suspend (Long) -> Boolean = { true },
     ): NavHostController {
-        val hostListViewModel = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
+        val hostListViewModel = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()

@@ -25,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.next.release.UpdateCheckViewModel
@@ -40,9 +42,11 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.HeaderIconAction
 import com.pocketshell.uikit.components.ScreenHeader
-import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -73,13 +77,30 @@ const val HOST_LIST_TOOLS_SHEET_TAG: String = "host-list-tools-sheet"
 // name remains a source-compatible alias for host-list tests and callers.
 const val HOST_LIST_SETTINGS_ROW_TAG: String = HOST_LIST_SETTINGS_TAG
 const val HOST_LIST_ADD_FOOTER_TAG: String = HOST_LIST_ADD_TAG
+/** The header's "N hosts" subtitle — replaces the redundant section header. */
+const val HOST_LIST_COUNT_TAG: String = "host-list-count"
 const val HOST_LIST_ADD_METHODS_TAG: String = "host-list-add-methods"
 const val HOST_LIST_ADD_SCAN_TAG: String = "host-list-add-scan"
 const val HOST_LIST_ADD_DETAILS_TAG: String = "host-list-add-details"
 
 fun hostRowTag(hostId: Long): String = "host-row-$hostId"
 
+/** The row's leading connection dot (#2635 2a). */
+fun hostRowStatusTag(hostId: Long): String = "host-row-status-$hostId"
+
 fun hostRowMenuTag(hostId: Long): String = "host-row-menu-$hostId"
+
+/** The row's dot state (#2635 2a) — one expression, painted and announced. */
+internal fun hostConnectionStatus(host: HostRow): ConnectionStatus =
+    if (host.connected) ConnectionStatus.Connected else ConnectionStatus.Idle
+
+/** What the leading dot announces. */
+internal fun ConnectionStatus.rowLabel(): String = when (this) {
+    ConnectionStatus.Connected -> "Connected"
+    ConnectionStatus.Connecting -> "Connecting"
+    ConnectionStatus.Error -> "Connection failed"
+    ConnectionStatus.Idle -> "Not connected"
+}
 
 /**
  * Route-level entry point: binds the Hilt-provided [HostListViewModel] to the
@@ -219,6 +240,12 @@ fun HostListScreen(
         // two actions only on a populated page.
         ScreenHeader(
             title = "Hosts",
+            // #2635 2a: the count lives here, not in a `SectionHeader` repeated
+            // 40dp under a page titled "Hosts" — a screen with one section
+            // needs no section label (Nielsen #8). One host needs no count
+            // either: the list IS the count when it is one row long.
+            subtitle = if (state.hosts.size >= 2) "${state.hosts.size} hosts" else null,
+            subtitleTestTag = HOST_LIST_COUNT_TAG,
             trailing = if (state.usagePill == null && !showHeaderActions) {
                 null
             } else {
@@ -286,11 +313,27 @@ fun HostListScreen(
                     .testTag(HOST_LIST_TAG),
                 contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
             ) {
-                item { SectionHeader(label = "Hosts", count = state.hosts.size) }
                 items(items = state.hosts, key = { it.id }) { host ->
                     ListRow(
                         title = host.name,
                         subtitle = host.subtitle,
+                        // #2635 2a: which host is warm, before tapping it. The
+                        // desktop's host picker has had this dot since day one;
+                        // the phone shipped a list with no status at all.
+                        leading = {
+                            // The dot's COLOUR and its label come from one
+                            // expression, deliberately: a dot that says
+                            // "Connected" to TalkBack while painting the idle
+                            // grey is a lie no assertion on the words could
+                            // catch (#2635).
+                            val status = hostConnectionStatus(host)
+                            StatusDot(
+                                status = status,
+                                modifier = Modifier
+                                    .semantics { contentDescription = status.rowLabel() }
+                                    .testTag(hostRowStatusTag(host.id)),
+                            )
+                        },
                         trailing = {
                             Kebab(
                                 items = listOf(
@@ -348,35 +391,6 @@ fun HostListScreen(
                 onDeleteHost(host.id)
             },
             onDismiss = { pendingDelete = null },
-        )
-    }
-}
-
-/**
- * A compact page action in [ScreenHeader]'s trailing slot.
- *
- * The 48dp `IconButton` is the whole touch target, so the paint can be a small
- * 20dp glyph without dropping below the a11y floor — that split is the point of
- * #2630: shrink the ink, never the hit area.
- */
-@Composable
-private fun HeaderIconAction(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String,
-    onClick: () -> Unit,
-    testTag: String,
-) {
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier
-            .size(PocketShellDensity.tapTargetMin)
-            .testTag(testTag),
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = PocketShellColors.TextSecondary,
-            modifier = Modifier.size(20.dp),
         )
     }
 }

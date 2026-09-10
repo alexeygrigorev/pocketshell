@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -162,7 +163,10 @@ internal fun extensionLabel(displayName: String): String =
 private val TILE_SIZE = 64.dp
 private val REMOVE_TOUCH_SIZE = 48.dp
 private val REMOVE_SIZE = 22.dp
-private val REMOVE_SHAPE = RoundedCornerShape(11.dp)
+// A circle, not a radius: 11dp was half of REMOVE_SIZE, which read as an
+// off-ladder radius to `check-design-tokens.sh` and would break the moment the
+// badge resized. `CircleShape` says the thing that is actually true (#2635 T1).
+private val REMOVE_SHAPE = CircleShape
 
 // The caption sits inside a 64dp square. 9sp, matching the pre-0.5.0 tile
 // (#2630: "more subtle") — deliberately below the 11sp caption rung, because

@@ -4,6 +4,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.onNodeWithText
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -116,6 +119,156 @@ class WorkspaceListDensityTest {
             .assertDoesNotExist()
     }
 
+    /**
+     * #2635 (D1 remainder): the desktop's row grammar has a LEADING dot that
+     * says "something live is in here". The phone's row had no status at all.
+     *
+     * Fails before the dot exists; the two workspaces below differ only in
+     * whether one of their sessions is attached, so the assertion is about the
+     * dot MEANING something, not merely being drawn.
+     */
+    @Test
+    fun `a workspace with an attached session carries a leading status dot`() {
+        setContent()
+
+        val busy = composeRule
+            .onNodeWithTag(workspaceRowStatusTag(BUSY_PATH), useUnmergedTree = true)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertEquals(
+            listOf("Has an attached session"),
+            busy.config[SemanticsProperties.ContentDescription],
+        )
+
+        val quiet = composeRule
+            .onNodeWithTag(workspaceRowStatusTag(EMPTY_PATH), useUnmergedTree = true)
+            .fetchSemanticsNode()
+        assertEquals(
+            listOf("No attached session"),
+            quiet.config[SemanticsProperties.ContentDescription],
+        )
+
+        // The dot leads the row: it is left of the workspace name.
+        val title = composeRule.onNodeWithTag(workspaceRowTag(BUSY_PATH))
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "the dot must lead the row",
+            busy.boundsInRoot.left >= title.left && busy.boundsInRoot.right < title.right,
+        )
+    }
+
+    /**
+     * #2635 (D1 remainder): the count is a bare muted integer, not a filled
+     * chip. A filled surface on EVERY row is the one bit of chrome a scannable
+     * list does not need, and its 6dp radius was off the token ladder — which
+     * is why `scripts/check-design-tokens.sh` flags it once the allow-list is
+     * the real `{4, 8, 12, 24}` ladder.
+     */
+    @Test
+    fun `the count badge is a bare integer, not a filled chip`() {
+        setContent()
+
+        val count = composeRule
+            .onNodeWithTag(workspaceGlanceCountTag(BUSY_PATH), useUnmergedTree = true)
+            .fetchSemanticsNode()
+        val text = count.config[SemanticsProperties.Text].joinToString("") { it.text }
+        assertEquals("4", text)
+
+        // A filled chip is padded well past the glyph; a bare integer is not.
+        val density = composeRule.density.density
+        val width = count.boundsInRoot.width / density
+        // A bare 11sp mono digit measures ~6.7dp.
+        assertTrue(
+            "the count must be one glyph wide, was ${width}dp",
+            width <= 9f,
+        )
+
+        // The load-bearing oracle is the GAP, not the width: Compose reports a
+        // semantics node's bounds INSIDE its own padding, so a chip's padding
+        // is invisible to a width assertion (it re-appears as extra space
+        // between the count and its neighbour). The glance row is
+        // `Arrangement.spacedBy(sm)` = 8dp; the chip this replaced added 6dp of
+        // horizontal padding on top, so any gap past ~11dp means it came back.
+        val activity = composeRule
+            .onNodeWithTag(workspaceGlanceActivityTag(BUSY_PATH), useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val gap = (activity.left - count.boundsInRoot.right) / density
+        assertTrue(
+            "a bare integer must not be padded into a chip; count-to-recency " +
+                "gap was ${gap}dp, the plain rung is 8dp",
+            gap <= 11f,
+        )
+    }
+
+    /**
+     * #2635 (D1 remainder): no chevron. Every row on this list navigates, so a
+     * per-row glyph repeating that a dozen times is chrome, not affordance.
+     */
+    @Test
+    fun `a workspace row has no navigation chevron`() {
+        setContent()
+
+        // The chevron is an `Icon` with a null contentDescription, so it is
+        // invisible to text/description matchers — the assertion has to be
+        // GEOMETRIC. Everything the row draws inside its trailing area is
+        // tagged (count, recency); a chevron is an extra ~18dp of ink to the
+        // right of the last tagged node, inside the row.
+        val row = composeRule.onNodeWithTag(workspaceRowTag(BUSY_PATH))
+            .fetchSemanticsNode().boundsInRoot
+        val activity = composeRule
+            .onNodeWithTag(workspaceGlanceActivityTag(BUSY_PATH), useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val density = composeRule.density.density
+        val tail = (row.right - activity.right) / density
+        assertTrue(
+            "the recency label must be the LAST thing in the row — a chevron " +
+                "would put ~18dp of glyph plus its gap after it; measured ${tail}dp",
+            tail <= 22f,
+        )
+
+        // Structural: the row's merged text is exactly name + count + recency.
+        composeRule.onNodeWithTag(workspaceRowTag(BUSY_PATH))
+            .assertTextEquals("pocketshell", "4", "just now")
+    }
+
+    /**
+     * #2635 D2: a short workspace list does not pay 68dp of permanent search
+     * chrome. Two workspaces is well under the threshold, so the field is a
+     * header icon that expands it in place.
+     */
+    @Test
+    fun `search is a header icon until the list is long`() {
+        setContent()
+
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TOGGLE_TAG).assertIsDisplayed()
+
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TOGGLE_TAG).performClick()
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TAG).assertIsDisplayed()
+    }
+
+    /** Past the threshold the field is permanent and the icon disappears. */
+    @Test
+    fun `a long workspace list keeps the search field permanently`() {
+        setContent(workspaceCount = WORKSPACE_SEARCH_THRESHOLD + 1)
+
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(HOST_WORKSPACES_SEARCH_TOGGLE_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * #2635 T2: the header's steady state is a DOT, not the word "Connected"
+     * spending a whole subtitle line on every screen forever.
+     */
+    @Test
+    fun `the header shows a status dot instead of the word Connected`() {
+        setContent()
+
+        composeRule.onNodeWithText("Connected").assertDoesNotExist()
+        composeRule.onNodeWithTag(HOST_WORKSPACES_STATUS_DOT_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+    }
+
     @Test
     fun `recency reads the freshest session and is null without timestamps`() {
         assertEquals(
@@ -129,7 +282,16 @@ class WorkspaceListDensityTest {
         assertEquals(null, latestActivityLabel(emptyList(), NOW))
     }
 
-    private fun setContent() {
+    private fun setContent(workspaceCount: Int = 0) {
+        val extras = (1..workspaceCount).map { n ->
+            WorkspaceProjection(
+                path = "/home/alexey/git/w$n",
+                label = "w$n",
+                displayPath = "~/git/w$n",
+                sessions = emptyList(),
+                durable = true,
+            )
+        }
         composeRule.setContent {
             PocketShellTheme {
                 HostWorkspacesScreen(
@@ -158,7 +320,7 @@ class WorkspaceListDensityTest {
                                         sessions = emptyList(),
                                         durable = true,
                                     ),
-                                ),
+                                ) + extras,
                                 rootSessions = emptyList(),
                             ),
                         ),

@@ -65,6 +65,7 @@ import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
@@ -702,7 +703,7 @@ private fun SshKeysListPage(
 
             if (state.keys.isNotEmpty()) {
                 item {
-                    Spacer(modifier = Modifier.height(PocketShellSpacing.section))
+                    Spacer(modifier = Modifier.height(PocketShellDensity.sectionGap))
                 }
             }
             item {

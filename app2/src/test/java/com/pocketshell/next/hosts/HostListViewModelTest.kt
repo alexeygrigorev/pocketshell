@@ -146,7 +146,7 @@ class HostListViewModelTest {
         val cache = usageGlanceCache()
 
         assertNull(
-            HostListViewModel(db.hostDao(), cache, UnconfinedTestDispatcher())
+            HostListViewModel(db.hostDao(), cache, noLiveHosts(), UnconfinedTestDispatcher())
                 .state.first { it.loaded }.usagePill,
         )
 
@@ -162,14 +162,14 @@ class HostListViewModelTest {
             java.time.Instant.now(),
         )
 
-        val pill = HostListViewModel(db.hostDao(), cache, UnconfinedTestDispatcher())
+        val pill = HostListViewModel(db.hostDao(), cache, noLiveHosts(), UnconfinedTestDispatcher())
             .state.first { it.loaded }.usagePill
         assertEquals(63, pill?.percent)
         assertEquals("Claude", pill?.provider)
     }
 
     private fun viewModel(): HostListViewModel =
-        HostListViewModel(db.hostDao(), usageGlanceCache(), UnconfinedTestDispatcher())
+        HostListViewModel(db.hostDao(), usageGlanceCache(), noLiveHosts(), UnconfinedTestDispatcher())
 
     private suspend fun insertHost(
         name: String,

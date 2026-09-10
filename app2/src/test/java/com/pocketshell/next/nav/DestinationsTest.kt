@@ -41,10 +41,14 @@ class DestinationsTest {
         val patterns = Destination.all.map { it.pattern }
         // The fixed routes include the categorized Settings/support routes,
         // host-scoped Usage, and the Quiet Services & tunnels screens.
-        // The aggregate includes both Quiet workspace routes and the
-        // categorized Settings/support plus Services routes. Deprecated aliases
-        // (Tree and CrashReports) intentionally do not add duplicate patterns.
-        assertEquals(31, patterns.size)
+        // Deprecated aliases (Tree and CrashReports) intentionally do not add
+        // duplicate patterns.
+        //
+        // 30, not 31, since #2635 N1 deleted `Destination.Workspace` — the page
+        // between a workspace and its terminal. This count is deliberately
+        // exact so a route cannot be added or removed without someone saying so
+        // here.
+        assertEquals(30, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }
@@ -52,10 +56,6 @@ class DestinationsTest {
     @Test
     fun `built routes match their patterns`() {
         assertMatchesPattern(Destination.Workspaces.pattern, Destination.Workspaces.route(hostId = 7))
-        assertMatchesPattern(
-            Destination.Workspace.pattern,
-            Destination.Workspace.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
-        )
         assertMatchesPattern(
             Destination.WorkspaceStart.pattern,
             Destination.WorkspaceStart.route(hostId = 7, path = "/home/alexey/git/pocketshell"),
@@ -160,15 +160,20 @@ class DestinationsTest {
         assertEquals("workspaces/42", Destination.Tree.route(hostId = 42))
     }
 
+    /**
+     * #2635 N1 deleted `Destination.Workspace`; `WorkspaceStart` inherited the
+     * encoded-path contract, which is the part that has to keep working — a
+     * workspace path contains `/` and can contain spaces.
+     */
     @Test
-    fun `workspace route keeps the canonical path in one encoded query argument`() {
-        val route = Destination.Workspace.route(
+    fun `workspace-start route keeps the canonical path in one encoded query argument`() {
+        val route = Destination.WorkspaceStart.route(
             hostId = 42,
             path = "/home/alexey/git/pocket shell",
         )
 
         assertEquals(
-            "workspace/42?workspacePath=%2Fhome%2Falexey%2Fgit%2Fpocket%20shell",
+            "workspace-start/42?workspacePath=%2Fhome%2Falexey%2Fgit%2Fpocket%20shell",
             route,
         )
         assertEquals(2, route.substringBefore('?').split("/").size)

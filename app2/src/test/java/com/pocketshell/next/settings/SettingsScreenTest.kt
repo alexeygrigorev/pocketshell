@@ -54,6 +54,34 @@ class SettingsScreenTest {
         assertEquals(listOf("about"), opened)
     }
 
+    /**
+     * #2635: no `SectionHeader` on a single-section screen.
+     *
+     * A page titled "Settings" carried a "Preferences" label 32dp under it,
+     * over its ONLY section — the same redundancy the Hosts list had (Nielsen
+     * #8). Fails while the header exists.
+     */
+    @Test
+    fun `the single-section settings index has no section label`() {
+        composeRule.setContent {
+            SettingsScreen(
+                navigation = SettingsNavigation(
+                    onBack = {},
+                    onOpenTerminal = {},
+                    onOpenVoice = {},
+                    onOpenConnections = {},
+                    onOpenAdvanced = {},
+                    onOpenAccount = {},
+                    onOpenDiagnostics = {},
+                    onOpenAbout = {},
+                ),
+            )
+        }
+
+        composeRule.onNodeWithText("Preferences").assertDoesNotExist()
+        composeRule.onNodeWithText("Settings").assertIsDisplayed()
+    }
+
     @Test
     fun `back is an accessible shared button`() {
         var backCount = 0

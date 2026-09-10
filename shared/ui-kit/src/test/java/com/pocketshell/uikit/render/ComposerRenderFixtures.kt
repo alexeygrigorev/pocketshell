@@ -27,7 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.ComposerIdleControls
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
@@ -56,7 +56,7 @@ internal fun PromptComposerSheetRender() {
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
-        SheetHeader(title = "Prompt Composer", onClose = {})
+        SheetHeader(title = COMPOSER_SHEET_TITLE_MIRROR, onClose = {})
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -99,7 +99,7 @@ internal fun ComposerControlsRowRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -140,82 +140,35 @@ internal fun ComposerControlsRowRender() {
  * #2630:
  *
  * ```
- * [📎] [+] ................ [Paste] [Send ➤] (MIC)
+ * [📎] [+] ....................... [Send ➤] (MIC)
  * ```
  *
- * Attach is a direct one-tap paperclip again (it was hidden inside the "+"
- * sheet), "+" opens the remaining tools, and every control is on the 48dp
- * composer action height with the 12dp Quiet pill radius. The mic is the real
- * shared [MicButton], not a drawn circle.
+ * Paste is the long-press of Send since #2635 C3 — five controls did not fit a
+ * 360dp device — and this fixture calls the production
+ * [com.pocketshell.uikit.components.ComposerIdleControls], so it cannot say
+ * otherwise than the app does.
  */
 @Composable
 private fun ComposerIdleControlsRow() {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        ComposerGlyphMirror(PocketShellIcons.Paperclip)
-        ComposerGlyphMirror(PocketShellIcons.Plus)
-        Spacer(Modifier.weight(1f))
-        Box(
-            modifier = Modifier
-                .height(COMPOSER_ACTION_HEIGHT)
-                .clip(COMPOSER_PILL_SHAPE)
-                .background(PocketShellColors.SurfaceElev, COMPOSER_PILL_SHAPE)
-                .border(1.dp, PocketShellColors.Border, COMPOSER_PILL_SHAPE)
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "Paste",
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Row(
-            modifier = Modifier
-                .height(COMPOSER_ACTION_HEIGHT)
-                .clip(COMPOSER_PILL_SHAPE)
-                .background(PocketShellColors.Accent, COMPOSER_PILL_SHAPE)
-                .padding(horizontal = 18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Text(
-                text = "Send",
-                color = PocketShellColors.OnAccent,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Icon(
-                imageVector = PocketShellIcons.Send,
-                contentDescription = null,
-                tint = PocketShellColors.OnAccent,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        MicButton(
-            state = MicButtonState.Idle,
-            onClick = {},
-            modifier = Modifier.size(COMPOSER_ACTION_HEIGHT),
-        )
-    }
+    // #2635: the REAL production component, not a mirror of it. This render is
+    // now evidence about the shipped screen; before, it was evidence about a
+    // hand-kept copy that had already drifted twice this session.
+    ComposerIdleControls(
+        onAttach = {},
+        onOpenTools = {},
+        onSend = {},
+        onPaste = {},
+        onMicTap = {},
+    )
 }
 
-/** app2's `ToolGlyphButton`: a bare 48dp hit area around an 18dp glyph. */
-@Composable
-private fun ComposerGlyphMirror(icon: ImageVector) {
-    Box(modifier = Modifier.size(COMPOSER_ACTION_HEIGHT), contentAlignment = Alignment.Center) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = PocketShellColors.TextSecondary,
-            modifier = Modifier.size(18.dp),
-        )
-    }
-}
+/**
+ * What the production sheet header actually says (`PromptComposerSheet`:
+ * `"Input to $targetLabel"`). The mirrors said "Prompt Composer" — the kit's
+ * own rule is "always name the input target before Send", so a render showing
+ * a generic title was showing a rule being broken that production keeps.
+ */
+private const val COMPOSER_SHEET_TITLE_MIRROR = "Input to claude-main"
 
 private val COMPOSER_ACTION_HEIGHT = 48.dp
 private val COMPOSER_PILL_SHAPE = RoundedCornerShape(12.dp)
@@ -339,7 +292,7 @@ internal fun ComposerLongDraftCaretVisibleRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -448,30 +401,10 @@ internal fun ComposerLongDraftCaretVisibleRender() {
     }
 }
 
-@Composable
-internal fun TerminalBottomChipsWithCompactHotkeysRender() {
-        Spacer(Modifier.height(560.dp))
-        // The reclaimed space: NO full-width bar row here anymore — just the
-        // single chip band below, with the compact `hotkeys` chip inline.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(PocketShellColors.Surface)
-                .border(1.dp, PocketShellColors.Border)
-                .padding(horizontal = 10.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            // The flexible static-chip strip yields/scrolls in production;
-            // the primary cluster (incl. the new compact `hotkeys` chip) is
-            // pinned to the right and always fully visible.
-            CommandChip(label = "clear", onClick = {})
-            Spacer(Modifier.weight(1f))
-            CommandChip(label = "Enter", onClick = {})
-            CommandChip(label = "hotkeys", onClick = {})
-            CommandChip(label = "snippets", onClick = {})
-        }
-}
+// #2635 dead-canon cut: `TerminalBottomChipsWithCompactHotkeysRender` was a
+// static mirror of `:app`'s `BottomChipControls` — a screen the rewrite
+// hard-deleted (#2481) — drawn with `CommandChip`, a ui-kit component with
+// zero app2 consumers. Both are gone (D22).
 
 @Composable
 internal fun ConversationLauncherOnlyBottomRender() {
@@ -552,7 +485,7 @@ internal fun ComposerKeyboardUpNoKeyBarRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -683,7 +616,7 @@ internal fun ComposerSlashAutocompleteRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -981,9 +914,10 @@ internal fun ComposerQueueStateRender(failed: Boolean = false, offline: Boolean 
  * Issue #2630 updated the attachment block itself: staging a file used to say
  * so three times (a dismissable "Attached N file(s)." banner, the tile, and a
  * full-width "Uploaded to <full remote path>" line PER file). It is now the
- * tiles plus ONE destination line for the whole batch, and the controls row is
- * the shared [ComposerIdleControlsRow] rather than a second, separately
- * drifting copy.
+ * tiles and NOTHING else — #2630's second round deleted the merged destination
+ * line too ("the remote path is not actionable inside the composer, it is
+ * injected into the message on send"), and #2635 C2 confirmed this fixture
+ * matches: no banner, no per-file caption, no batch destination line.
  *
  * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTiles`
  * live in the app2 module, which the ui-kit render harness cannot see, so this
@@ -1018,7 +952,7 @@ internal fun ComposerAttachmentsBelowFieldRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,

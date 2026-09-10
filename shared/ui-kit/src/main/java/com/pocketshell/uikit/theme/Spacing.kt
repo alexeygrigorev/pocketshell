@@ -32,8 +32,11 @@ object PocketShellSpacing {
     /** 24 dp — sheet and large surface inset. */
     val xxl = 24.dp
 
-    /** 32 dp — separation between independent content sections. */
-    val section = 32.dp
+    // There is deliberately no 32dp `section` rung (#2635 T3). It existed only
+    // because the kit's prose asked for "32dp section separation"; the app's
+    // actual section separation is [PocketShellDensity.sectionGap] (24dp), and
+    // the rung's single remaining consumer moved to it. A rung nothing uses is
+    // an invitation to reintroduce a second spacing grammar.
 }
 
 /**
@@ -88,4 +91,7 @@ object PocketShellDensity {
 
     /** 48 dp — a11y touch-target floor. Visual density never drops the hit area below this. */
     val tapTargetMin = 48.dp
+
+    /** 56 dp — the minimum height of a text field or a full-width button. */
+    val fieldMinHeight = 56.dp
 }

@@ -34,8 +34,14 @@ object PsTokens {
     val touchMin = 48.dp
     val buttonMin = 56.dp
     val fieldMin = 56.dp
-    val workspaceRowMin = 88.dp
-    val listRowMin = 72.dp
+    val workspaceRowMin = 64.dp
+    val listRowMin = 56.dp
+    val rowPadV = 8.dp
+    val rowPadH = 20.dp
+    val chipPadV = 6.dp
+    val chipPadH = 10.dp
+    val sectionGap = 24.dp
+    val treeIndent = 16.dp
     val icon = 24.dp
     val metadataIcon = 18.dp
     val screenGutter = 20.dp
@@ -47,55 +53,75 @@ object PsTokens {
     val spaceLg = 16.dp
     val spaceXl = 20.dp
     val spaceXxl = 24.dp
-    val spaceSection = 32.dp
+    val badgeRadius = 4.dp
+    val chipRadius = 8.dp
     val fieldRadius = 12.dp
     val buttonRadius = 12.dp
+    val cardRadius = 12.dp
     val sheetRadius = 24.dp
     val screenType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 28.sp, lineHeight = 34.sp,
+        fontSize = 20.sp, lineHeight = 26.sp,
         fontWeight = FontWeight(700),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val workspaceType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 20.sp, lineHeight = 28.sp,
+        fontSize = 16.sp, lineHeight = 22.sp,
         fontWeight = FontWeight(600),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val titleType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 20.sp, lineHeight = 28.sp,
+        fontSize = 16.sp, lineHeight = 22.sp,
         fontWeight = FontWeight(600),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val bodyType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 18.sp, lineHeight = 26.sp,
+        fontSize = 14.sp, lineHeight = 20.sp,
         fontWeight = FontWeight(400),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val metadataType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 16.sp, lineHeight = 22.sp,
+        fontSize = 11.sp, lineHeight = 16.sp,
         fontWeight = FontWeight(400),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val labelType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 16.sp, lineHeight = 22.sp,
+        fontSize = 11.sp, lineHeight = 16.sp,
         fontWeight = FontWeight(500),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val buttonType = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 18.sp, lineHeight = 24.sp,
+        fontSize = 14.sp, lineHeight = 20.sp,
         fontWeight = FontWeight(600),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val terminalType = TextStyle(
         fontFamily = FontFamily.Monospace,
-        fontSize = 16.sp, lineHeight = 22.sp,
+        fontSize = 11.sp, lineHeight = 16.sp,
+        fontWeight = FontWeight(400),
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+    )
+    val bodyDenseType = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontSize = 13.sp, lineHeight = 18.sp,
+        fontWeight = FontWeight(400),
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+    )
+    val bodyMonoType = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp, lineHeight = 18.sp,
+        fontWeight = FontWeight(400),
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+    )
+    val labelMonoType = TextStyle(
+        fontFamily = FontFamily.Monospace,
+        fontSize = 11.sp, lineHeight = 14.sp,
         fontWeight = FontWeight(400),
         platformStyle = PlatformTextStyle(includeFontPadding = false),
     )

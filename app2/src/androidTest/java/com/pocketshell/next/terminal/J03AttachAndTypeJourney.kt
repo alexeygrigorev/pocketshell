@@ -34,12 +34,10 @@ import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.idleWedgeNote
-import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
 import com.pocketshell.next.tree.sessionRowTag
-import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
@@ -60,6 +58,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.Description
 import org.junit.runner.RunWith
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * Journey J03 — attach to a real session on a real host, see it render, type
@@ -281,12 +280,12 @@ class J03AttachAndTypeJourney {
                 .assert(hasClickAction())
                 .performClick()
         } else {
-            compose.onNodeWithTag(workspaceTag).performClick()
-            awaitTag(WORKSPACE_SCREEN_TAG)
-            val nestedSessionTag = sessionRowTag(SESSION)
-            awaitTag(nestedSessionTag)
+            // #2635 N1: the workspace tap IS the session tap now. The
+            // journey's point survives unchanged — the session is killed on
+            // the host between the listing and the attach — but the row that
+            // used to be tapped second no longer exists.
             AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
-            compose.onNodeWithTag(nestedSessionTag)
+            compose.onNodeWithTag(workspaceTag)
                 .assertIsDisplayed()
                 .assert(hasClickAction())
                 .performClick()
@@ -308,9 +307,9 @@ class J03AttachAndTypeJourney {
 
         // Back is the way out, and it works.
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
+        // #2635 N1: Back from a terminal lands on the workspace LIST.
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty() ||
-                compose.onAllNodesWithTag(WORKSPACE_SCREEN_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertDoesNotExist()
     }

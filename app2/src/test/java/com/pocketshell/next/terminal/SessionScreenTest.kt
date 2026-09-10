@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -17,11 +18,9 @@ import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.width
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.next.composer.COMPOSER_INSERT_TAG
 import com.pocketshell.next.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.next.composer.COMPOSER_REVIEW_ACTION_TAG
 import com.pocketshell.next.composer.COMPOSER_REVIEW_TAG
-import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
 import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
@@ -32,6 +31,7 @@ import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.stopSessionMessage
+import com.pocketshell.next.usage.USAGE_GLANCE_EMPTY_LABEL
 import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
@@ -44,6 +44,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * The rendered session screen on the host JVM (Robolectric).
@@ -100,11 +101,22 @@ class SessionScreenTest {
         assertEquals(1, backs)
     }
 
+    /**
+     * #2635 §5: the header must not RESHAPE when the usage number arrives.
+     *
+     * With no reading the header used to swap the pill for a
+     * `PocketShellButton(text = "Usage")` — a text button where every other
+     * screen shows a pill — so the header reflowed the moment the first
+     * reading landed. Now the pill owns the slot in both states and only its
+     * text changes. This fails on the text-button fallback (the pill tag does
+     * not exist without a reading).
+     */
     @Test
-    fun `usage fallback stays promoted out of the terminal actions sheet`() {
+    fun `the usage glance keeps its pill shape before any reading arrives`() {
         setContent(SessionUiState.Connecting)
 
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText(USAGE_GLANCE_EMPTY_LABEL).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
         composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).assertDoesNotExist()
     }
@@ -135,6 +147,8 @@ class SessionScreenTest {
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Usage Claude 38%").assertIsDisplayed()
         composeRule.onNodeWithText("Claude 7d").assertDoesNotExist()
+        // …and the empty-state word is gone once there is a number to show.
+        composeRule.onNodeWithText(USAGE_GLANCE_EMPTY_LABEL).assertDoesNotExist()
     }
 
     @Test
@@ -277,7 +291,6 @@ class SessionScreenTest {
         )
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
 
         assertEquals("local draft more", drafts.last())
@@ -346,7 +359,6 @@ class SessionScreenTest {
         composeRule.onNodeWithText("Enter").assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertDoesNotExist()
     }
 
     /**
@@ -430,7 +442,6 @@ class SessionScreenTest {
 
         composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
     }
@@ -503,7 +514,7 @@ class SessionScreenTest {
     }
 
     @Test
-    fun `insert does not dismiss the composer sheet`() {
+    fun `pasting does not dismiss the composer sheet`() {
         var inserts = 0
         setContent(
             SessionUiState.Live(createRemoteTerminalSession()),
@@ -513,7 +524,8 @@ class SessionScreenTest {
             embedComposerInWindow = false,
         )
 
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+        // #2635 C3: Paste is the long-press of Send.
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performTouchInput { longClick() }
 
         assertEquals(1, inserts)
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()

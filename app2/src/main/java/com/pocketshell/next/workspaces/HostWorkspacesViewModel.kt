@@ -118,6 +118,7 @@ class HostWorkspacesViewModel @Inject constructor(
     private var browseInFlight: Job? = null
     private var folderInFlight: Job? = null
     private var rootFoldersInFlight: Job? = null
+    private var removeInFlight: Job? = null
 
     /**
      * Issue #2632's resume state, deliberately NOT in [HostWorkspacesUiState]:
@@ -611,6 +612,40 @@ class HostWorkspacesViewModel @Inject constructor(
                             )
                         },
                     )
+                },
+            )
+        }
+    }
+
+    /**
+     * Removes a workspace's durable membership of this host's list (#2635 N1).
+     *
+     * Moved here from `WorkspaceScreen`, which the N1 route change deleted: the
+     * action belongs to the ROW now, reached by long-press, because the page
+     * that used to own it no longer exists. The semantics are unchanged and
+     * deliberately narrow — `Remove from list` is visibility only, never a
+     * `rm -rf` and never a session kill (`spec/DesignSystem.md` § State
+     * vocabulary).
+     */
+    fun removeWorkspaceFromList(workspacePath: String) {
+        if (removeInFlight?.isActive == true) return
+        removeInFlight = viewModelScope.launch {
+            val host = hostDao.getById(hostId)
+            if (host == null) {
+                fail("This host is no longer saved on this device.")
+                return@launch
+            }
+            val connection = when (val outcome = registry.getOrConnect(hostId)) {
+                is ConnectResult.Connected -> outcome.connection
+                else -> {
+                    fail("Connect to this host before changing its workspace list.")
+                    return@launch
+                }
+            }
+            clients.create(connection).removeWorkspace(host.treeIdentity, workspacePath).fold(
+                onSuccess = { refresh() },
+                onFailure = { error ->
+                    fail(error.message ?: "Could not remove the workspace from the list.")
                 },
             )
         }

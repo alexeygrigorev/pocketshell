@@ -16,39 +16,59 @@ and the laptop at once.
 Code: `app2/src/main/java/com/pocketshell/next/sync/`. Entry point: Settings →
 **Account & sync**.
 
-## Status: blocked on one Google Cloud Console action
+## Status: wired in, with one Cloud Console follow-up
 
-Everything below is implemented and tested EXCEPT the two live calls to
-Google, which need an OAuth client that does not exist yet.
+The Android OAuth client was registered by the maintainer on 2026-09-10 in
+Google Cloud project `pocketshell-508120` — the same project as the desktop
+client, which is what keeps the server-side email allowlist and the deployed
+API working unchanged. It is an "Android"-type client: a PUBLIC client with no
+`client_secret`, which is why nothing in this package ever sends one.
 
-`SyncConfig.GOOGLE_ANDROID_CLIENT_ID` is a placeholder. Until it is replaced,
-`SyncConfig.isGoogleClientConfigured` is false, the settings screen says so,
-and the sign-in button is disabled rather than opening a browser at a 400.
+`SyncConfig.GOOGLE_ANDROID_CLIENT_ID` and the redirect `<intent-filter>` in
+`app2/src/main/AndroidManifest.xml` both carry the real value, so
+`SyncConfig.isGoogleClientConfigured` is true, the "not configured" banner is
+gone and Sign in is enabled.
 
-To unblock, register an OAuth client of type **Android** (not "Desktop", not
-"Web") in the SAME Google Cloud project as the desktop client's
-`GOOGLE_CLIENT_ID` — reusing the project is what keeps the server-side email
-allowlist and the deployed API working unchanged. It needs:
+### One thing still needs a Cloud Console edit: the SHA-1 is the wrong key
 
-| Field | Value |
-| --- | --- |
-| Package name | `com.pocketshell.app` |
-| Debug signing SHA-1 | `A0:4C:74:33:93:AD:23:1C:54:9E:CB:81:E7:43:FA:D7:D9:63:C4:17` |
+Google authenticates an Android OAuth client by **package name + signing
+certificate**. The client was registered against
 
-(The debug certificate is the committed `debug.keystore`, shared by every
-build on the dev box. A release-signing SHA-1 is a separate, later step.)
+| Field | Value | |
+| --- | --- | --- |
+| Package name | `com.pocketshell.app` | ✅ matches `applicationId` |
+| Signing SHA-1 | `A0:4C:74:33:93:AD:23:1C:54:9E:CB:81:E7:43:FA:D7:D9:63:C4:17` | ❌ wrong key |
 
-Then, in the same change:
+That fingerprint is the developer's personal `~/.android/debug.keystore`.
+PocketShell does not use it. Issue #42 pins every build of this module —
+laptop, CI and release alike — to the `debug.keystore` **committed at the repo
+root** (`app2/build.gradle.kts` → `signingConfigs.debugKeystore`), so that an
+update never trips "signatures do not match". Verified against the actual APK:
 
-1. Put the issued client ID in `SyncConfig.GOOGLE_ANDROID_CLIENT_ID`.
-2. Update the `android:scheme` of the sync redirect `<intent-filter>` in
-   `app2/src/main/AndroidManifest.xml` to the reversed form
-   (`com.googleusercontent.apps.<the-id-without-the-suffix>`).
+```
+$ apksigner verify --print-certs app2/build/outputs/apk/debug/app2-debug.apk
+Signer #1 certificate SHA-1 digest: 6348a01494e006d5050ec6fc617dbc6e6e16e125
+```
 
-Both, or neither. `SyncConfigTest` asks the real `PackageManager` whether the
-manifest resolves the redirect URI this build asks Google for, and fails if
-the two drift — a mismatch is silent at build time and shows up only as a
-sign-in that never comes back.
+So the fingerprint that has to be on the client is
+
+```
+63:48:A0:14:94:E0:06:D5:05:0E:C6:FC:61:7D:BC:6E:6E:16:E1:25
+```
+
+**Action:** add that SHA-1 to the same OAuth client. An Android client accepts
+several fingerprints, so the existing one can stay. Until then sign-in fails at
+the token exchange, and it fails INVISIBLY — the browser returns and nothing
+happens. (This doc previously said "the debug certificate is the committed
+`debug.keystore`" while listing the personal keystore's fingerprint next to it,
+which is how the wrong value reached the Console.)
+
+`SyncConfig.SIGNING_SHA1` records the correct value and `SyncConfigTest` reads
+the keystore and compares, so a future keystore rotation fails a gate — with
+the new fingerprint in the failure message — instead of shipping a dead button.
+
+A release-signing SHA-1 is only a separate step if release builds ever stop
+using this same committed keystore.
 
 ## Why the desktop flow could not be ported as-is
 

@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material3.Text
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
@@ -62,6 +64,13 @@ import com.pocketshell.uikit.theme.PocketShellType
  * phone screen on six items (#2630). The whole row is the tap target when
  * [onClick] is supplied, and wrapped content is allowed to grow.
  *
+ * [PocketShellDensity.rowPadV] is applied to the TEXT column, not to the row
+ * (#2635 2a). Padding the row meant a row whose trailing slot was a 48dp
+ * control could not be 56dp tall: 48 + 2×8 = 64, so the host list read as
+ * "56dp rows, except the ones with a menu, which are 64". With the padding on
+ * the text, a 48dp kebab measures 48 against a 56dp floor and every row in the
+ * app lands on one height, whatever it carries.
+ *
  * [minHeight] exists for genuinely single-line, information-dense lists that
  * want the 48dp touch floor itself as their height (the workspace list, #2630).
  * It is a floor, never a cap — never pass anything below
@@ -70,6 +79,7 @@ import com.pocketshell.uikit.theme.PocketShellType
  * Colours stay on the always-dark raw tokens (#477 single dark scheme) so the
  * row never flips with the system light setting.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ListRow(
     title: String,
@@ -78,6 +88,17 @@ fun ListRow(
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null,
+    /**
+     * The row's alternate action (`design-language.md`: "Long-press = always
+     * available alternate action").
+     *
+     * #2635 N1 made this load-bearing rather than decorative: deleting the
+     * workspace page moved its per-workspace actions (copy path, remove from
+     * list) onto the row itself, and a long-press is where the design language
+     * has always said they go.
+     */
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     titleMaxLines: Int = 1,
     subtitleMaxLines: Int = 1,
     titleStyle: TextStyle = PocketShellType.body,
@@ -95,17 +116,19 @@ fun ListRow(
                 .fillMaxWidth()
                 .defaultMinSize(minHeight = minHeight)
                 .then(
-                    if (onClick != null) {
-                        Modifier.clickable(role = Role.Button, onClick = onClick)
-                    } else {
-                        Modifier
+                    when {
+                        onClick != null && onLongClick != null -> Modifier.combinedClickable(
+                            role = Role.Button,
+                            onClick = onClick,
+                            onLongClick = onLongClick,
+                            onLongClickLabel = onLongClickLabel,
+                        )
+                        onClick != null -> Modifier.clickable(role = Role.Button, onClick = onClick)
+                        else -> Modifier
                     },
                 )
                 .then(if (onClick != null) modifier else Modifier)
-                .padding(
-                    horizontal = PocketShellDensity.rowPadH,
-                    vertical = PocketShellDensity.rowPadV,
-                ),
+                .padding(horizontal = PocketShellDensity.rowPadH),
             verticalAlignment = Alignment.CenterVertically,
         ) {
         if (leading != null) {
@@ -118,7 +141,11 @@ fun ListRow(
             Spacer(modifier = Modifier.width(PocketShellSpacing.md))
         }
 
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = PocketShellDensity.rowPadV),
+        ) {
             Text(
                 text = title,
                 color = PocketShellColors.Text,

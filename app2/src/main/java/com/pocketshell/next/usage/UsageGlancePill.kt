@@ -325,14 +325,23 @@ private data class GlanceCandidate(
         )
 }
 
+/** What the pill reads before any provider has reported a number (#2635 §5). */
+const val USAGE_GLANCE_EMPTY_LABEL: String = "Usage"
+
 /**
  * The usage glance is a neutral text affordance. Quiet keeps usage readable
  * without a colored chip, severity dot, elevated surface, or provider-specific
  * badge in the terminal header.
+ *
+ * A null [state] is the pill's OWN empty state, not "render nothing" (#2635):
+ * the session header used to swap in a `PocketShellButton(text = "Usage")`
+ * while the reading was missing, so the whole header reflowed the moment the
+ * number arrived — a text button where every other screen shows a pill. Same
+ * 48dp box, muted label, same tag, same tap target; only the text changes.
  */
 @Composable
 fun UsageGlancePill(
-    state: UsageGlancePillState,
+    state: UsageGlancePillState?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -340,11 +349,22 @@ fun UsageGlancePill(
         modifier = modifier
             .heightIn(min = 48.dp)
             .clickable(role = Role.Button, onClick = onClick)
-            .semantics { this.contentDescription = state.contentDescription }
+            .semantics {
+                this.contentDescription = state?.contentDescription ?: USAGE_GLANCE_EMPTY_LABEL
+            }
             .testTag(USAGE_GLANCE_PILL_TAG)
             .padding(horizontal = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (state == null) {
+            Text(
+                text = USAGE_GLANCE_EMPTY_LABEL,
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.metadata,
+                maxLines = 1,
+            )
+            return@Row
+        }
         Text(
             text = state.attribution,
             color = PocketShellColors.TextSecondary,

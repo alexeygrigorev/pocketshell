@@ -23,6 +23,13 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * 48dp is the FLOOR, not a shrink below it: the visual height comes down, the
  * hit area does not.
+ *
+ * ## [leadingContent] and [chevron] (#2635, D1 remainder)
+ *
+ * [leadingContent] takes the desktop's "something live is in here" dot. The
+ * [chevron] is opt-out because a chevron is a promise: it means "this opens a
+ * list to choose from". A row that opens its terminal directly must not show
+ * one — a glyph that lies about where a tap goes is worse than no glyph.
  */
 @Composable
 fun WorkspaceRow(
@@ -33,7 +40,11 @@ fun WorkspaceRow(
     testTag: String? = null,
     subtitleContent: (@Composable () -> Unit)? = null,
     dense: Boolean = false,
+    leadingContent: (@Composable () -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     trailingContent: (@Composable () -> Unit)? = null,
+    chevron: Boolean = true,
 ) {
     val minHeight = if (dense) {
         PocketShellDensity.tapTargetMin
@@ -44,13 +55,22 @@ fun WorkspaceRow(
         title = title,
         subtitle = subtitle.takeUnless { dense },
         subtitleContent = subtitleContent.takeUnless { dense },
-        trailing = {
-            if (trailingContent != null) {
-                trailingContent()
+        leading = leadingContent,
+        trailing = if (trailingContent == null && !chevron) {
+            null
+        } else {
+            {
+                if (trailingContent != null) {
+                    trailingContent()
+                }
+                if (chevron) {
+                    NavigationChevron()
+                }
             }
-            NavigationChevron()
         },
         onClick = onClick,
+        onLongClick = onLongClick,
+        onLongClickLabel = onLongClickLabel,
         titleMaxLines = if (dense) 1 else 2,
         subtitleMaxLines = 2,
         titleStyle = PocketShellType.workspace,

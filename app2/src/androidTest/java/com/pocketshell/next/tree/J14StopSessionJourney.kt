@@ -18,7 +18,7 @@ import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
+import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -142,9 +142,11 @@ class J14StopSessionJourney {
 
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        awaitTag(WORKSPACE_SCREEN_TAG)
-        awaitGone(sessionRowTag(SESSION_TREE))
-        compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
+        // #2635 N1: stopping a session pops to the workspace LIST — the page
+        // that used to catch it is gone. The stopped session must be gone from
+        // the host, and the survivor must still be listed under its workspace.
+        awaitTag(HOST_WORKSPACES_LIST_TAG)
+        awaitGone(SESSION_SCREEN_TAG)
         JourneyScreenshots.capture("02-tree-after-stop", JOURNEY)
 
         val names = hostSessionNames()
@@ -185,10 +187,8 @@ class J14StopSessionJourney {
         compose.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        awaitTag(WORKSPACE_SCREEN_TAG)
+        awaitTag(HOST_WORKSPACES_LIST_TAG)
         awaitGone(SESSION_SCREEN_TAG)
-        awaitGone(sessionRowTag(SESSION_ATTACHED))
-        compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
         JourneyScreenshots.capture("04-popped-after-stop", JOURNEY)
 
         val names = hostSessionNames()
@@ -196,12 +196,12 @@ class J14StopSessionJourney {
         assertTrue(CANNED_SESSION in names)
     }
 
+    /** #2635 N1: a workspace tap lands on its terminal, not on a page. */
     private fun openWorkspace() {
         compose.openQuietHost(hostId, TIMEOUT_MS)
         awaitTag(workspaceRowTag(WORKSPACE_MAIN))
         compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
-        awaitTag(WORKSPACE_SCREEN_TAG)
-        awaitTag(sessionRowTag(CANNED_SESSION))
+        awaitTag(SESSION_SCREEN_TAG)
     }
 
     private fun hostSessionNames(): List<String> {

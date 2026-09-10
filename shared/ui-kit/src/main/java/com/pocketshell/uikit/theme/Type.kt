@@ -45,7 +45,7 @@ import androidx.compose.ui.unit.sp
  *
  * Today: system monospace (Roboto Mono on most Android builds). Tomorrow:
  * bundled JetBrains Mono. Kept as a named alias so all downstream call sites
- * — terminal surface, `CommandChip`, inline `<code>` runs — flip in one
+ * — terminal surface, inline `<code>` runs, the hotkeys panel — flip in one
  * place when the bundled font lands.
  */
 val JetBrainsMonoFamily: FontFamily = FontFamily.Monospace

@@ -39,11 +39,8 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
-import com.pocketshell.uikit.components.Breadcrumb
-import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.EmptyState
-import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SpinnerSize
@@ -57,8 +54,6 @@ import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
-import com.pocketshell.uikit.model.Crumb
-import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -626,23 +621,6 @@ class DesignRenders {
     }
 
     /**
-     * One full screen: the host-list dashboard composed from the shared
-     * `ScreenHeader` + a stack of `HostCard`s, exactly how a real screen builds
-     * up from ui-kit primitives. Proves screen-level layout renders faithfully
-     * on the JVM, not just isolated components.
-     */
-    @Test
-    fun hostListScreen() = render("host-list-screen") {
-        HostListScreenRender()
-    }
-
-    /** Quiet A1: existing host/session primitives under the production Quiet theme. */
-    @Test
-    fun quietHostSessionAnchor() = render("quiet-host-session-anchor") {
-        QuietHostSessionAnchorRender()
-    }
-
-    /**
      * Issue #1241: the landing app-bar with the new glanceable usage pill next
      * to the forwarding indicator + Settings gear. The real pill lives in the
      * app module ([com.pocketshell.app.usage.UsageGlancePill]); this fixture
@@ -655,24 +633,6 @@ class DesignRenders {
      * "Claude 63% · cached from 13:40" (Ok) below — so it is clear WHICH provider
      * the number represents. The emulator screenshot is the acceptance.
      */
-    /**
-     * Issue #1239: the host-card one-tap "Resume last session" affordance. The
-     * real row lives in the app module
-     * ([com.pocketshell.app.hosts.HostListScreen]'s `ResumeLastSessionRow`);
-     * this fixture mirrors it with the SAME chrome (accent play glyph, bright
-     * "Resume" label, muted-mono session name, AccentSoft fill + 40%-accent
-     * hairline on the `medium` card shape) so the fast JVM check shows it reads
-     * as a subtle action row under the matching host card — NOT a heavy second
-     * card — while making the exact session it resumes obvious. The top host has
-     * a resume row (the last-attached session); the second host has none (its
-     * snapshot isn't the current one), matching the snapshot-scoped production
-     * behaviour. The emulator screenshot is the acceptance.
-     */
-    @Test
-    fun hostCardResumeAffordance() = render("host-card-resume-affordance") {
-        HostCardResumeAffordanceRender()
-    }
-
     @Test
     fun usageGlancePill() = render("usage-glance-pill") {
         UsageGlancePillRender()
@@ -763,15 +723,6 @@ class DesignRenders {
     @Test
     fun composerLauncherUnsentBadge() = render("composer-launcher-unsent-badge") {
         ComposerLauncherUnsentBadgeRender()
-    }
-
-    /**
-     * Issue #1237: the agent-state chip (idle / working / waiting-for-input) on
-     * host cards + the three standalone chip variants.
-     */
-    @Test
-    fun agentStateChips() = render("agent-state-chips") {
-        AgentStateChipsRender()
     }
 
     /**
@@ -1153,22 +1104,6 @@ class DesignRenders {
      * acceptance.
      */
     /**
-     * Issue #789: the terminal bottom chip row AFTER collapsing the full-width
-     * `⌨ Terminal hotkeys` launcher bar (#784) into a COMPACT chip. The launcher
-     * is now a single `hotkeys` chip inline with `Enter` / `show keyboard` /
-     * `snippets`, so the dedicated full-width bar's row of vertical space is
-     * reclaimed. This is the BEFORE/AFTER fast-render check the maintainer's
-     * "this is taking too much space" feedback motivated.
-     *
-     * Caveat (#555): the real terminal bottom controls / `BottomChipControls`
-     * live in `:app`, which this ui-kit harness cannot import, so this is a
-     * STATIC visual mirror using the real ui-kit [CommandChip] primitive. The
-     * full-device emulator screenshots (keyboard up + down) are the acceptance.
-     */
-    @Test
-    fun terminalBottomChipsWithCompactHotkeys() = render("terminal-bottom-chips-with-compact-hotkeys") { TerminalBottomChipsWithCompactHotkeysRender() }
-
-    /**
      * Issue #786: the Conversation view's bottom band collapses to JUST the `>_`
      * composer launcher — the maintainer circled the full command bar (the #628
      * previous-session toggle `› <project>` pill + the snippets `{}` chip) and
@@ -1526,15 +1461,17 @@ class DesignRenders {
     }
 
     /**
-     * Issue #461 (slice 2, G3): the four primitives migrated off off-ladder raw
+     * Issue #461 (slice 2, G3): the primitives migrated off off-ladder raw
      * literals onto the token layer — [Pill] (status badges), [SegmentedToggle]
-     * (mode switch), [Breadcrumb] (path chrome), and [ProgressBar] (usage fill).
-     * This is the fast visual check that the token migration is a no-/low-op:
-     * Pill + the segment chips snap onto `PocketShellShapes.small` (8dp) and the
-     * chip padding rung; the toggle/crumb labels snap onto the type ladder; the
-     * progress track keeps its deliberate sub-ladder micro radius. The usage
-     * pills/progress and session breadcrumb preserve their original prototype
-     * geometry.
+     * (mode switch) and [ProgressBar] (usage fill). This is the fast visual
+     * check that the token migration is a no-/low-op: Pill + the segment chips
+     * snap onto `PocketShellShapes.small` (8dp) and the chip padding rung; the
+     * toggle labels snap onto the type ladder; the progress track keeps its
+     * deliberate sub-ladder micro radius.
+     *
+     * `Breadcrumb` was in this render until #2635 cut it: it had zero app2
+     * consumers, and the terminal chrome `design-system.md` said should
+     * "converge here" was hard-deleted with the `app` module.
      */
     @Test
     fun migratedPrimitives() = render("migrated-primitives") {
@@ -1564,17 +1501,6 @@ class DesignRenders {
                 onSelected = {},
                 fillSegments = true,
                 modifier = Modifier.fillMaxWidth(),
-            )
-
-            // Breadcrumb — host > session > pane path chrome with the live dot.
-            Breadcrumb(
-                crumbs = listOf(
-                    Crumb(label = "hetzner", isCurrent = false, onClick = {}),
-                    Crumb(label = "agent-main", isCurrent = false, onClick = {}),
-                    Crumb(label = "claude", isCurrent = true, onClick = {}),
-                ),
-                onBack = {},
-                onMore = {},
             )
 
             // ProgressBar — the three usage fill levels.

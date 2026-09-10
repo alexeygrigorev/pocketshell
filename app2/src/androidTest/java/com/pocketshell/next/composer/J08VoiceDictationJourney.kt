@@ -48,6 +48,8 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.Description
 import org.junit.runner.RunWith
+import com.pocketshell.uikit.components.COMPOSER_MIC_TAG
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * Journey J08 — voice dictation lands in the composer draft (rewrite task

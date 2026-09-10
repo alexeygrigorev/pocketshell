@@ -1,10 +1,13 @@
 package com.pocketshell.next.sync
 
 import android.content.Intent
+import java.security.KeyStore
+import java.security.MessageDigest
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -53,18 +56,100 @@ class SyncConfigTest {
         )
     }
 
+    /**
+     * The client is REGISTERED (maintainer, 2026-09-10, Google Cloud project
+     * `pocketshell-508120`), so this build is configured and the settings-sync
+     * screen must offer a working Sign in rather than a "not configured yet"
+     * banner.
+     *
+     * Asserted as a hard `true`, not as a restatement of the implementation:
+     * the whole point is that a revert to the placeholder — a bad merge, a
+     * copy-paste from an older branch — turns sign-in back into a dead button
+     * with nothing in the UI to explain why, and this is what catches it.
+     */
     @Test
-    fun `reports the placeholder client ID as unconfigured`() {
-        // Until the maintainer registers the Android OAuth client, the sign-in
-        // button must say so instead of opening a browser at a 400.
-        assertEquals(
-            !SyncConfig.GOOGLE_ANDROID_CLIENT_ID.contains(SyncConfig.UNCONFIGURED_CLIENT_ID_MARKER),
+    fun `ships a real registered Google client, not the placeholder`() {
+        assertTrue(
+            "#2633/#2635: GOOGLE_ANDROID_CLIENT_ID is back to the placeholder — " +
+                "sign-in would open a browser at a 400",
             SyncConfig.isGoogleClientConfigured,
         )
+        assertFalse(
+            SyncConfig.GOOGLE_ANDROID_CLIENT_ID.contains(SyncConfig.UNCONFIGURED_CLIENT_ID_MARKER),
+        )
+        // The shape Google issues for an installed/public Android client.
         assertTrue(
-            "the placeholder must still be a legal URI scheme, or the manifest cannot declare it",
+            "a Google client ID ends in .apps.googleusercontent.com, was " +
+                SyncConfig.GOOGLE_ANDROID_CLIENT_ID,
+            SyncConfig.GOOGLE_ANDROID_CLIENT_ID.endsWith(".apps.googleusercontent.com"),
+        )
+        assertTrue(
+            "the redirect scheme must be a legal URI scheme, or the manifest cannot declare it",
             SyncConfig.redirectScheme().matches(Regex("[a-zA-Z][a-zA-Z0-9+.-]*")),
         )
+    }
+
+    /**
+     * The fingerprint recorded as "the key that signs this app" must be the one
+     * the build actually signs with (#2635).
+     *
+     * Google authenticates an Android OAuth client by package name PLUS signing
+     * certificate, so this pairing is a live credential, not documentation. It
+     * already went wrong once: the client was registered against
+     * `~/.android/debug.keystore` (`A0:4C:74:…`), while issue #42 pins every
+     * build — laptop, CI and release — to the `debug.keystore` COMMITTED at the
+     * repo root. Sign-in fails for a mismatch, and it fails invisibly: the
+     * browser comes back and nothing happens.
+     *
+     * Reading the keystore rather than restating a constant is the whole point.
+     * A regenerated or rotated keystore is a silent break otherwise; here it is
+     * a red test with the new fingerprint printed in the message, ready to hand
+     * to the Cloud Console.
+     */
+    @Test
+    fun `the recorded signing fingerprint is the key that actually signs the app`() {
+        val keystore = repoFile("debug.keystore")
+        assertTrue(
+            "issue #42's committed debug keystore is missing at ${keystore.absolutePath}",
+            keystore.isFile,
+        )
+
+        val store = KeyStore.getInstance("PKCS12").runCatching {
+            keystore.inputStream().use { load(it, "android".toCharArray()) }
+            this
+        }.recoverCatching {
+            KeyStore.getInstance("JKS").apply {
+                keystore.inputStream().use { load(it, "android".toCharArray()) }
+            }
+        }.getOrThrow()
+
+        val certificate = requireNotNull(store.getCertificate("androiddebugkey")) {
+            "the committed keystore has no `androiddebugkey` alias"
+        }
+        val actual = MessageDigest.getInstance("SHA-1")
+            .digest(certificate.encoded)
+            .joinToString(":") { "%02X".format(it) }
+
+        assertEquals(
+            "the APK's signing certificate changed. Google authenticates this " +
+                "app by package name + certificate, so sign-in is now broken " +
+                "until $actual is added to the OAuth client " +
+                "(${SyncConfig.GOOGLE_ANDROID_CLIENT_ID}) in Google Cloud " +
+                "project pocketshell-508120.",
+            SyncConfig.SIGNING_SHA1,
+            actual,
+        )
+    }
+
+    /** Walks up to the repo root, so the test works from any module dir. */
+    private fun repoFile(relative: String): java.io.File {
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: ".").absoluteFile
+        while (dir != null) {
+            val candidate = java.io.File(dir, relative)
+            if (candidate.isFile) return candidate
+            dir = dir.parentFile
+        }
+        return java.io.File(relative)
     }
 
     /**

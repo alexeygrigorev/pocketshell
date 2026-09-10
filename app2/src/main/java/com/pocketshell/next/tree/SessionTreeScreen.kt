@@ -112,6 +112,25 @@ fun stopSessionMessage(name: String, workspace: String? = null, host: String? = 
 fun folderHeaderTag(key: String): String = "folder-header-$key"
 
 /**
+ * NOT reachable from the nav graph (#2635 audit).
+ *
+ * `SessionTreeRoute`/`SessionTreeScreen` were the pre-#2607 session-tree
+ * surface; `HostWorkspacesScreen` replaced them and `MainActivity` stopped
+ * calling this — #2635 removed the last stale import. The audit's dead-canon
+ * sweep proposed deleting the file outright, and the composables below ARE
+ * dead, but the file is NOT: its ~25 top-level test tags and helpers
+ * (`sessionRowTag` in 8 files, `STOP_SESSION_*` in 5, `stopSessionMessage` in
+ * 4, `SESSION_TREE_FILES_TAG`/`_PORTS_TAG`/`_USAGE_TAG` on the live host
+ * screen) are load-bearing across app2 and its journeys.
+ *
+ * Cutting the composables therefore means RELOCATING those symbols first, which
+ * is a mechanical but cross-cutting refactor of its own size and touches
+ * journeys — deliberately left out of a density pass rather than half-done. It
+ * is filed as the remaining piece of the dead-canon cleanup; the ui-kit half
+ * (`HostCard`, `SessionRow`, `Breadcrumb`, `CommandChip`, `KeyBar` and their
+ * models/renders) is gone in this change.
+ */
+/**
  * Route-level entry point: binds the Hilt-provided [SessionTreeViewModel] to
  * the stateless [SessionTreeScreen] and drives the lifecycle-aware refresh.
  *

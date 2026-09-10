@@ -4,6 +4,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -14,11 +17,17 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import com.pocketshell.uikit.components.COMPOSER_ATTACH_TAG
+import com.pocketshell.uikit.components.COMPOSER_PASTE_LABEL
+import com.pocketshell.uikit.components.COMPOSER_MIC_TAG
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
+import com.pocketshell.uikit.components.COMPOSER_TOOLS_TRIGGER_TAG
 
 /**
  * The rendered composer on the host JVM (Robolectric).
@@ -42,7 +51,6 @@ class ComposerBarTest {
 
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
     }
 
     /**
@@ -68,11 +76,32 @@ class ComposerBarTest {
         setContent(ComposerUiState(draft = "something"))
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsEnabled()
     }
 
+    /**
+     * #2635 C3, reproduce-first: the idle row had FIVE controls — paperclip,
+     * "+", Paste, Send, mic — measuring ~330dp of the 372dp available inside
+     * the 20dp gutters at 412dp. At 360dp (320dp usable) the row does not fit
+     * and Compose clips the trailing mic: a hard failure, not a tight fit.
+     *
+     * This test fails on the five-control row (a `Paste` node exists on the
+     * idle row) and passes once Paste becomes the long-press of Send.
+     */
     @Test
-    fun `insert and send are separate taps`() {
+    fun `paste is not a control on the idle row`() {
+        setContent(ComposerUiState(draft = "something"))
+
+        composeRule.onNodeWithTag(COMPOSER_CONTROLS_ROW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Paste").assertDoesNotExist()
+    }
+
+    /**
+     * #2635 C3: Paste is still REACHABLE, as the long-press of Send. Losing the
+     * verb would be a regression, not a density win — the kit's own spec says
+     * "Paste writes text without Enter; Send explicitly appends Enter".
+     */
+    @Test
+    fun `long pressing send pastes without sending`() {
         var inserts = 0
         var sends = 0
         setContent(
@@ -81,11 +110,64 @@ class ComposerBarTest {
             onSend = { sends += 1 },
         )
 
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performTouchInput { longClick() }
+
+        assertEquals("long-press pastes", 1, inserts)
+        assertEquals("long-press must NOT also send", 0, sends)
+
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
 
         assertEquals(1, inserts)
         assertEquals(1, sends)
+    }
+
+    /**
+     * #2635 C3: a long-press is invisible to TalkBack, so the second verb is
+     * ALSO published as a named accessibility action on the same node.
+     */
+    @Test
+    fun `paste is a named accessibility action on send`() {
+        var inserts = 0
+        setContent(ComposerUiState(draft = "something"), onInsert = { inserts += 1 })
+
+        val actions = composeRule.onNodeWithTag(COMPOSER_SEND_TAG)
+            .fetchSemanticsNode()
+            .config[SemanticsActions.CustomActions]
+        val paste = actions.firstOrNull { it.label == COMPOSER_PASTE_LABEL }
+        assertNotNull("Send must publish a $COMPOSER_PASTE_LABEL action", paste)
+        paste!!.action?.invoke()
+        assertEquals(1, inserts)
+    }
+
+    /**
+     * #2635 C3: and it is DISCOVERABLE — a named row in the "+" tools sheet, so
+     * the verb is not gesture-only (Nielsen #6, recognition over recall).
+     */
+    @Test
+    fun `the tools sheet offers paste without sending`() {
+        var inserts = 0
+        setContent(ComposerUiState(draft = "something"), onInsert = { inserts += 1 })
+
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+
+        assertEquals(1, inserts)
+    }
+
+    /**
+     * #2635 C4: the hotkeys panel had TWO entry points — the floating
+     * launcher's keyboard button and a "Terminal keys" row inside the "+"
+     * sheet. D22 says delete the loser; the launcher wins because `^C` is
+     * something you reach for while the terminal is in front of you.
+     */
+    @Test
+    fun `the tools sheet has no terminal keys row`() {
+        setContent(ComposerUiState(draft = "something"))
+
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+
+        composeRule.onNodeWithText("Terminal keys").assertDoesNotExist()
+        composeRule.onNodeWithTag("composer-tools-hotkeys").assertDoesNotExist()
     }
 
     /** An attachment on its own is a complete message. */
@@ -233,7 +315,6 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
 
@@ -243,8 +324,8 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_PREVIEW_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_DISCARD_TAG).assertDoesNotExist()
 
-        assertSameRow(COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
-        assertSameRow(COMPOSER_TOOLS_TRIGGER_TAG, COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_ATTACH_TAG, COMPOSER_TOOLS_TRIGGER_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
     }
 
     /**
@@ -474,7 +555,6 @@ class ComposerBarTest {
         )
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
 
         assertEquals("local draft more", drafts.last())

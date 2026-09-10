@@ -28,8 +28,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -53,11 +56,15 @@ import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.NavigationChevron
+import com.pocketshell.uikit.components.HeaderIconAction
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.QuietTextField
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.components.WorkspaceRow
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -73,9 +80,22 @@ const val HOST_WORKSPACES_PARTIAL_BANNER_TAG: String = "host-workspaces-partial-
 const val HOST_WORKSPACES_RETRY_TAG: String = "host-workspaces-retry"
 const val HOST_WORKSPACES_BACK_TAG: String = "host-workspaces-back"
 const val HOST_WORKSPACES_ACTIONS_TAG: String = "host-workspaces-actions"
+
+/** The header's transport dot (#2635 T2) — replaces the "Connected" subtitle. */
+const val HOST_WORKSPACES_STATUS_DOT_TAG: String = "host-workspaces-status-dot"
 const val HOST_WORKSPACES_REORDER_TAG: String = "host-workspaces-reorder"
 const val HOST_WORKSPACES_ADD_TAG: String = "host-workspaces-add"
 const val HOST_WORKSPACES_SEARCH_TAG: String = "host-workspaces-search"
+
+/** The header icon that expands the search field on a short list (#2635 D2). */
+const val HOST_WORKSPACES_SEARCH_TOGGLE_TAG: String = "host-workspaces-search-toggle"
+
+/**
+ * Above this many workspaces the search field is permanent chrome; at or below
+ * it, search is a header icon. Eight rows at the dense 48dp pitch is ~384dp —
+ * about half a phone — which is the point where scanning stops beating typing.
+ */
+const val WORKSPACE_SEARCH_THRESHOLD: Int = 8
 const val HOST_WORKSPACES_ADD_PATH_TAG: String = "host-workspaces-add-path"
 const val HOST_WORKSPACES_ADD_CONFIRM_TAG: String = "host-workspaces-add-confirm"
 const val HOST_WORKSPACES_ADD_BROWSE_TAG: String = "host-workspaces-add-browse"
@@ -100,6 +120,19 @@ const val HOST_WORKSPACES_DISCONNECT_TAG: String = "host-workspaces-disconnect"
 
 fun workspaceRowTag(path: String): String = "workspace-row-$path"
 
+/** The workspace row's long-press actions (#2635 N1). */
+const val WORKSPACE_ROW_ACTIONS_TAG: String = "workspace-row-actions"
+const val WORKSPACE_ROW_ACTIONS_LABEL: String = "Workspace actions"
+const val WORKSPACE_ROW_NEW_SESSION_TAG: String = "workspace-row-new-session"
+const val WORKSPACE_ROW_BROWSE_TAG: String = "workspace-row-browse"
+const val WORKSPACE_ROW_COPY_PATH_TAG: String = "workspace-row-copy-path"
+const val WORKSPACE_ROW_REORDER_TAG: String = "workspace-row-reorder"
+const val WORKSPACE_ROW_REMOVE_TAG: String = "workspace-row-remove"
+const val WORKSPACE_ROW_REMOVE_CONFIRM_TAG: String = "workspace-row-remove-confirm"
+
+/** The workspace row's leading "something live is in here" dot (#2635). */
+fun workspaceRowStatusTag(path: String): String = "workspace-row-status-$path"
+
 fun workspaceSessionRowTag(name: String): String = "workspace-session-row-$name"
 
 fun workspaceRootTag(key: String): String = "workspace-root-$key"
@@ -113,8 +146,10 @@ fun workspaceRootBrowseTag(path: String): String = "workspace-root-browse-$path"
 /** Route-level binding for the real host workspace projection. */
 @Composable
 fun HostWorkspacesRoute(
-    onOpenWorkspace: (String) -> Unit,
-    onStartSessionAtPath: (String) -> Unit = onOpenWorkspace,
+    // #2635 N1: there is no `onOpenWorkspace` any more. A workspace tap opens
+    // its terminal ([onOpenSession]) or, when nothing is running, its create
+    // sheet ([onStartSessionAtPath]) — `Destination.Workspace` is deleted.
+    onStartSessionAtPath: (String) -> Unit,
     onOpenReorder: () -> Unit = {},
     onOpenSession: (SessionRow) -> Unit,
     onOpenFiles: () -> Unit,
@@ -161,19 +196,25 @@ fun HostWorkspacesRoute(
     }
     LaunchedEffect(state.openWorkspacePath) {
         val path = viewModel.consumeOpenWorkspace() ?: return@LaunchedEffect
-        // A just-added workspace has no sessions yet, so this deliberately
-        // goes to the workspace screen rather than through the direct entry.
-        onOpenWorkspace(path)
+        // A just-added workspace has no sessions yet, so this goes straight to
+        // the create sheet (#2635 N1) — "I added this folder" is followed by
+        // "start something in it", not by a page listing nothing.
+        onStartSessionAtPath(path)
     }
 
     // Issue #2632 (maintainer follow-up 2026-09-10): "I don't want to have
     // another screen — I want to jump to the last session I opened". A
-    // workspace tap therefore resolves to that workspace's own session and
-    // opens the terminal directly; the workspace screen is what a workspace
-    // with NOTHING running still needs, and only that.
+    // workspace tap resolves to that workspace's own session and opens the
+    // terminal directly.
+    //
+    // #2635 N1 (maintainer-approved route change) finishes it: a workspace with
+    // NOTHING running no longer lands on an intermediate list of zero sessions
+    // either — it goes straight to the create sheet. There is now no state in
+    // which tapping a workspace shows a page whose only content is a button,
+    // which is why `Destination.Workspace` and `WorkspaceScreen` are gone.
     val openWorkspaceDirectly: (String) -> Unit = { path ->
         val entry = viewModel.entrySessionFor(path)
-        if (entry != null) onOpenSession(entry) else onOpenWorkspace(path)
+        if (entry != null) onOpenSession(entry) else onStartSessionAtPath(path)
     }
 
     HostWorkspacesScreen(
@@ -188,6 +229,7 @@ fun HostWorkspacesRoute(
         onOpenWorkspace = openWorkspaceDirectly,
         onStartSessionAtPath = onStartSessionAtPath,
         onOpenReorder = onOpenReorder,
+        onRemoveWorkspaceFromList = viewModel::removeWorkspaceFromList,
         onOpenSession = onOpenSession,
         onOpenFiles = onOpenFiles,
         onOpenFilesAtPath = onOpenFilesAtPath,
@@ -248,6 +290,7 @@ fun HostWorkspacesScreen(
     onOpenWorkspace: (String) -> Unit,
     onStartSessionAtPath: (String) -> Unit = onOpenWorkspace,
     onOpenReorder: () -> Unit = {},
+    onRemoveWorkspaceFromList: (String) -> Unit = {},
     onOpenSession: (SessionRow) -> Unit,
     onOpenFiles: () -> Unit = {},
     onOpenFilesAtPath: (String) -> Unit = { onOpenFiles() },
@@ -278,6 +321,9 @@ fun HostWorkspacesScreen(
 ) {
     val clipboard = LocalClipboardManager.current
     var activeRootActions by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
+    // #2635 N1: the deleted workspace page's actions, reachable from the row.
+    var activeWorkspaceActions by remember { mutableStateOf<WorkspaceProjection?>(null) }
+    var pendingWorkspaceRemoval by remember { mutableStateOf<WorkspaceProjection?>(null) }
     var rootPendingRemoval by remember { mutableStateOf<WorkspaceRootProjection?>(null) }
     var hostToolsVisible by remember { mutableStateOf(false) }
     var connectionDetailsVisible by remember { mutableStateOf(false) }
@@ -319,6 +365,23 @@ fun HostWorkspacesScreen(
         return
     }
 
+    // #2635 D2: search is chrome a short list does not earn. Above the
+    // threshold the field is permanent (a 12-workspace host is where it pays
+    // for itself); below it, the header carries a search icon that expands the
+    // field in place. A live query always keeps it on screen — a field that
+    // disappeared while filtering would strand the list in a filtered state
+    // with nothing to clear.
+    val workspaceCount = state.roots.sumOf { it.workspaces.size }
+    val alwaysShowSearch = workspaceCount > WORKSPACE_SEARCH_THRESHOLD
+    var searchRequested by remember { mutableStateOf(false) }
+    val searchVisible = alwaysShowSearch || searchRequested || state.searchQuery.isNotEmpty()
+    val searchFocus = remember { FocusRequester() }
+    LaunchedEffect(searchRequested) {
+        if (searchRequested && !alwaysShowSearch) {
+            runCatching { searchFocus.requestFocus() }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -327,6 +390,9 @@ fun HostWorkspacesScreen(
         ScreenHeader(
             title = state.hostLabel.ifBlank { "Workspaces" },
             subtitle = hostWorkspacesSubtitle(state),
+            status = hostWorkspacesStatus(state),
+            statusDescription = hostWorkspacesStatusDescription(state),
+            statusTestTag = HOST_WORKSPACES_STATUS_DOT_TAG,
             onBack = onBack,
             backTestTag = HOST_WORKSPACES_BACK_TAG,
             trailing = {
@@ -334,6 +400,14 @@ fun HostWorkspacesScreen(
                 // deep behind the kebab's Host tools sheet.
                 usagePillState?.let { pill ->
                     UsageGlancePill(state = pill, onClick = onOpenUsage)
+                }
+                if (!alwaysShowSearch) {
+                    HeaderIconAction(
+                        icon = PocketShellIcons.Search,
+                        contentDescription = "Find a workspace",
+                        onClick = { searchRequested = !searchRequested },
+                        testTag = HOST_WORKSPACES_SEARCH_TOGGLE_TAG,
+                    )
                 }
                 KebabTrigger(
                     onClick = { hostToolsVisible = true },
@@ -343,37 +417,29 @@ fun HostWorkspacesScreen(
             },
         )
 
-        OutlinedTextField(
-            value = state.searchQuery,
-            onValueChange = onSearchQueryChange,
-            placeholder = { Text("Find a workspace") },
-            leadingIcon = {
-                Icon(
-                    imageVector = PocketShellIcons.Search,
-                    contentDescription = null,
-                )
-            },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .padding(
-                    start = PocketShellSpacing.xl,
-                    end = PocketShellSpacing.xl,
-                    bottom = PocketShellSpacing.md,
-                )
-                .testTag(HOST_WORKSPACES_SEARCH_TAG),
-            shape = PocketShellShapes.medium,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = PocketShellColors.Surface,
-                unfocusedContainerColor = PocketShellColors.Surface,
-                focusedTextColor = PocketShellColors.Text,
-                unfocusedTextColor = PocketShellColors.Text,
-                focusedBorderColor = PocketShellColors.Accent,
-                unfocusedBorderColor = PocketShellColors.Border,
-                cursorColor = PocketShellColors.Accent,
-            ),
-        )
+        // #2635 D2: 68dp of permanent chrome for a filter a short list does not
+        // need. The field renders when the host has more than
+        // [WORKSPACE_SEARCH_THRESHOLD] workspaces, or when the user asked for
+        // it from the header's search icon, or whenever a query is already
+        // typed — a field that vanished while it held text would take the
+        // filter with it.
+        if (searchVisible) {
+            QuietTextField(
+                value = state.searchQuery,
+                onValueChange = onSearchQueryChange,
+                placeholder = "Find a workspace",
+                leadingIcon = PocketShellIcons.Search,
+                focusRequester = searchFocus,
+                testTag = HOST_WORKSPACES_SEARCH_TAG,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        start = PocketShellSpacing.xl,
+                        end = PocketShellSpacing.xl,
+                        bottom = PocketShellSpacing.md,
+                    ),
+            )
+        }
 
         if (state.errors.isNotEmpty()) {
             Banner(
@@ -479,6 +545,7 @@ fun HostWorkspacesScreen(
                             onOpenSession = onOpenSession,
                             onOpenAddWorkspace = onOpenAddWorkspace,
                             onOpenRootActions = { activeRootActions = root },
+                            onOpenWorkspaceActions = { activeWorkspaceActions = it },
                         )
                     }
                 }
@@ -601,6 +668,51 @@ fun HostWorkspacesScreen(
         )
     }
 
+    activeWorkspaceActions?.let { workspace ->
+        WorkspaceRowActionsSheet(
+            workspace = workspace,
+            onNewSession = {
+                onStartSessionAtPath(workspace.path)
+                activeWorkspaceActions = null
+            },
+            onBrowseFiles = {
+                onOpenFilesAtPath(workspace.path)
+                activeWorkspaceActions = null
+            },
+            onCopyPath = {
+                clipboard.setText(AnnotatedString(workspace.path))
+                activeWorkspaceActions = null
+            },
+            onReorder = {
+                onOpenReorder()
+                activeWorkspaceActions = null
+            },
+            onRemove = {
+                pendingWorkspaceRemoval = workspace
+                activeWorkspaceActions = null
+            },
+            onDismiss = { activeWorkspaceActions = null },
+        )
+    }
+
+    pendingWorkspaceRemoval?.let { workspace ->
+        ConfirmDialog(
+            title = "Remove from list?",
+            // The kit's state vocabulary is explicit that this is VISIBILITY
+            // only: "Remove from list: only workspace visibility; never delete
+            // folder or kill session".
+            message = "\"${workspace.label}\" stops showing on this host. The " +
+                "folder and any running sessions are untouched.",
+            confirmLabel = "Remove from list",
+            onConfirm = {
+                onRemoveWorkspaceFromList(workspace.path)
+                pendingWorkspaceRemoval = null
+            },
+            onDismiss = { pendingWorkspaceRemoval = null },
+            confirmTestTag = WORKSPACE_ROW_REMOVE_CONFIRM_TAG,
+        )
+    }
+
     rootPendingRemoval?.let { root ->
         ConfirmDialog(
             title = "Remove root from this host?",
@@ -661,24 +773,13 @@ private fun AddWorkspacePage(
                 onClick = onBrowse,
                 modifier = Modifier.testTag(HOST_WORKSPACES_ADD_LOCATION_TAG),
             )
-            OutlinedTextField(
+            QuietTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("Find a folder") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(HOST_WORKSPACES_ADD_PATH_TAG),
-                shape = PocketShellShapes.medium,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = PocketShellColors.Surface,
-                    unfocusedContainerColor = PocketShellColors.Surface,
-                    focusedTextColor = PocketShellColors.Text,
-                    unfocusedTextColor = PocketShellColors.Text,
-                    focusedBorderColor = PocketShellColors.Accent,
-                    unfocusedBorderColor = PocketShellColors.Border,
-                    cursorColor = PocketShellColors.Accent,
-                ),
+                placeholder = "Find a folder",
+                leadingIcon = PocketShellIcons.Search,
+                testTag = HOST_WORKSPACES_ADD_PATH_TAG,
+                modifier = Modifier.fillMaxWidth(),
             )
             ListRow(
                 title = "Create folder",
@@ -838,28 +939,14 @@ private fun WorkspaceFolderBrowserPage(
             onClick = { parent?.let(onBrowse) },
             modifier = Modifier.padding(horizontal = PocketShellSpacing.xl),
         )
-        OutlinedTextField(
+        QuietTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text("Find a folder") },
-            leadingIcon = {
-                Icon(imageVector = PocketShellIcons.Search, contentDescription = null)
-            },
-            singleLine = true,
+            placeholder = "Find a folder",
+            leadingIcon = PocketShellIcons.Search,
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 56.dp)
                 .padding(horizontal = PocketShellSpacing.xl, vertical = PocketShellSpacing.sm),
-            shape = PocketShellShapes.medium,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = PocketShellColors.Surface,
-                unfocusedContainerColor = PocketShellColors.Surface,
-                focusedTextColor = PocketShellColors.Text,
-                unfocusedTextColor = PocketShellColors.Text,
-                focusedBorderColor = PocketShellColors.Accent,
-                unfocusedBorderColor = PocketShellColors.Border,
-                cursorColor = PocketShellColors.Accent,
-            ),
         )
         LazyColumn(
             modifier = Modifier
@@ -997,6 +1084,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
     onOpenSession: (SessionRow) -> Unit,
     onOpenAddWorkspace: (String) -> Unit,
     onOpenRootActions: () -> Unit,
+    onOpenWorkspaceActions: (WorkspaceProjection) -> Unit,
 ) {
     item(key = "root-header:${root.key}") {
         SectionHeader(
@@ -1055,9 +1143,35 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
             // #2630: one information-dense line per workspace — name, session
             // count, recency — matching PocketShell Desktop's sidebar, instead
             // of a title row over a wrapped per-kind summary.
+            //
+            // #2635 (D1 remainder) finishes the desktop's row grammar: a
+            // leading dot when something in the workspace is ATTACHED (the
+            // desktop's "something live is in here"), and no chevron — every
+            // row on this list navigates, so a per-row glyph repeating that
+            // 12 times is chrome, not affordance.
+            val attached = workspace.sessions.any { it.attached }
             WorkspaceRow(
                 title = workspace.label,
                 dense = true,
+                leadingContent = {
+                    StatusDot(
+                        status = if (attached) {
+                            ConnectionStatus.Connected
+                        } else {
+                            ConnectionStatus.Idle
+                        },
+                        modifier = Modifier
+                            .semantics {
+                                contentDescription = if (attached) {
+                                    "Has an attached session"
+                                } else {
+                                    "No attached session"
+                                }
+                            }
+                            .testTag(workspaceRowStatusTag(workspace.path)),
+                    )
+                },
+                chevron = false,
                 trailingContent = {
                     WorkspaceGlance(
                         path = workspace.path,
@@ -1067,6 +1181,13 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemContent(
                     )
                 },
                 onClick = { onOpenWorkspace(workspace.path) },
+                // #2635 N1: the per-workspace utilities (copy path, browse
+                // files, reorder, remove from list) used to live on the
+                // workspace PAGE. That page is gone, so they live where
+                // `design-language.md` has always said an alternate action
+                // lives — the row's long-press.
+                onLongClick = { onOpenWorkspaceActions(workspace) },
+                onLongClickLabel = WORKSPACE_ROW_ACTIONS_LABEL,
                 testTag = workspaceRowTag(workspace.path),
             )
         }
@@ -1113,15 +1234,108 @@ private fun filteredRoots(state: HostWorkspacesUiState): List<WorkspaceRootProje
     }
 }
 
-private fun hostWorkspacesSubtitle(state: HostWorkspacesUiState): String = when {
+/**
+ * The header's status LINE — words only for the states that need words.
+ *
+ * #2635 T2: the steady state is the dot ([hostWorkspacesStatus]); a subtitle
+ * permanently reading "Connected" spent a whole header line restating what a
+ * green dot says, on every screen, forever. Transitional and failed states keep
+ * their text because "Reconnecting…" and "Offline · Saved list" are not
+ * derivable from a colour.
+ */
+internal fun hostWorkspacesSubtitle(state: HostWorkspacesUiState): String? = when {
     state.refreshing -> "Reconnecting…"
     state.failure != null && state.statusUnavailable -> "Offline · Saved list"
     state.failure != null -> "Offline"
     !state.loaded -> "Connecting…"
-    else -> "Connected"
+    else -> null
 }
 
+/** The header's status DOT — always present, one glyph for every state. */
+internal fun hostWorkspacesStatus(state: HostWorkspacesUiState): ConnectionStatus = when {
+    state.refreshing -> ConnectionStatus.Connecting
+    state.failure != null -> ConnectionStatus.Error
+    !state.loaded -> ConnectionStatus.Connecting
+    else -> ConnectionStatus.Connected
+}
+
+/** TalkBack still hears the word; the dot is only silent visually. */
+internal fun hostWorkspacesStatusDescription(state: HostWorkspacesUiState): String =
+    hostWorkspacesSubtitle(state) ?: "Connected"
+
 private fun plural(count: Int, noun: String): String = if (count == 1) noun else "${noun}s"
+
+/**
+ * The workspace row's alternate actions (#2635 N1).
+ *
+ * These are the rows that used to make up the workspace PAGE's "Workspace
+ * actions" sheet. N1 deleted the page — a tap now opens the terminal — so the
+ * actions moved to the row's long-press rather than being lost with it. Note
+ * what is NOT here: "Sessions in this workspace", which was the page's whole
+ * list and is now the terminal's own tab strip.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WorkspaceRowActionsSheet(
+    workspace: WorkspaceProjection,
+    onNewSession: () -> Unit,
+    onBrowseFiles: () -> Unit,
+    onCopyPath: () -> Unit,
+    onReorder: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = PocketShellShapes.large,
+        containerColor = PocketShellColors.Surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .testTag(WORKSPACE_ROW_ACTIONS_TAG),
+        ) {
+            SheetHeader(
+                title = workspace.label,
+                subtitle = workspace.displayPath.ifBlank { workspace.path },
+                onClose = onDismiss,
+                modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
+            )
+            ListRow(
+                title = "New session",
+                subtitle = "Start another terminal here",
+                onClick = onNewSession,
+                modifier = Modifier.testTag(WORKSPACE_ROW_NEW_SESSION_TAG),
+            )
+            ListRow(
+                title = "Browse files",
+                subtitle = "Open this folder in Files",
+                onClick = onBrowseFiles,
+                modifier = Modifier.testTag(WORKSPACE_ROW_BROWSE_TAG),
+            )
+            ListRow(
+                title = "Copy folder path",
+                subtitle = "Copy the canonical remote path",
+                onClick = onCopyPath,
+                modifier = Modifier.testTag(WORKSPACE_ROW_COPY_PATH_TAG),
+            )
+            ListRow(
+                title = "Reorder workspaces",
+                subtitle = "Change the host list order",
+                onClick = onReorder,
+                modifier = Modifier.testTag(WORKSPACE_ROW_REORDER_TAG),
+            )
+            ListRow(
+                title = "Remove from list",
+                subtitle = "Keeps the folder and running sessions",
+                onClick = onRemove,
+                modifier = Modifier.testTag(WORKSPACE_ROW_REMOVE_TAG),
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1270,6 +1484,10 @@ private fun HostToolsSheet(
             item { HostToolRow("Services & tunnels", PocketShellIcons.Ports, onOpenPorts, SESSION_TREE_PORTS_TAG) }
             item { HostToolRow("Usage", PocketShellIcons.Chart, onOpenUsage, SESSION_TREE_USAGE_TAG) }
             item { HostToolRow("Project roots", PocketShellIcons.Folder, onOpenProjectRoots, HOST_WORKSPACES_PROJECT_ROOTS_TAG) }
+            // #2635 N1: reorder was on the deleted workspace page's sheet. It
+            // is a HOST-list operation, so the host kebab is where it belongs;
+            // the workspace row's long-press keeps a shortcut to it.
+            item { HostToolRow("Reorder workspaces", PocketShellIcons.Sliders, onReorder, HOST_WORKSPACES_REORDER_TAG) }
             item { HostToolRow("Refresh workspaces", PocketShellIcons.Refresh, onRefresh, HOST_WORKSPACES_REFRESH_TAG) }
             item { HostToolRow("Connection details", PocketShellIcons.Info, onOpenConnectionDetails, HOST_WORKSPACES_CONNECTION_DETAILS_TAG) }
             item { HostToolRow("Disconnect", PocketShellIcons.Close, onDisconnect, HOST_WORKSPACES_DISCONNECT_TAG) }

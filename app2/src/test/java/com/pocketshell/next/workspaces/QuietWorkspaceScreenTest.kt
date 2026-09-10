@@ -362,109 +362,17 @@ class QuietWorkspaceScreenTest {
         composeRule.onNodeWithText("Terminal").assertDoesNotExist()
     }
 
-    @Test
-    fun `workspace screen opens a real session`() {
-        val opened = mutableListOf<String>()
-        setWorkspaceContent(
-            state = SessionTreeUiState(
-                hostId = 7,
-                workspacePath = "/home/alexey/git/pocketshell",
-                loaded = true,
-                workspaceSessions = listOf(
-                    session("claude-main", "/home/alexey/git/pocketshell")
-                        .copy(agent = "claude", agentState = AgentState.WORKING),
-                ),
-            ),
-            onOpenSession = { opened += it },
-        )
-
-        composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed().performClick()
-        composeRule.onNodeWithText("Claude Code · Working").assertIsDisplayed()
-        composeRule.onAllNodesWithTag(sessionRowMenuTag("claude-main")).assertCountEquals(0)
-        assertEquals(listOf("claude-main"), opened)
-    }
-
-    @Test
-    fun `populated workspace puts new session after the rows`() {
-        setWorkspaceContent(
-            state = SessionTreeUiState(
-                hostId = 7,
-                workspacePath = "/home/alexey/git/pocketshell",
-                loaded = true,
-                workspaceSessions = listOf(
-                    session("claude-main", "/home/alexey/git/pocketshell"),
-                ),
-            ),
-        )
-
-        composeRule.onNodeWithTag(sessionRowTag("claude-main")).assertIsDisplayed()
-        composeRule.onAllNodesWithTag(WORKSPACE_NEW_SESSION_TAG).assertCountEquals(1)
-    }
-
-    @Test
-    fun `empty workspace offers new session`() {
-        setWorkspaceContent(
-            state = SessionTreeUiState(
-                hostId = 7,
-                workspacePath = "/home/alexey/git/empty",
-                loaded = true,
-            ),
-        )
-        composeRule.onNodeWithText("No sessions").assertIsDisplayed()
-        composeRule.onAllNodesWithTag(WORKSPACE_NEW_SESSION_TAG).assertCountEquals(1)
-        composeRule.onNodeWithText("Workspace").assertIsDisplayed()
-        composeRule.onNodeWithText("Browse files").assertIsDisplayed()
-        composeRule.onNodeWithText("Services & tunnels").assertDoesNotExist()
-    }
-
-    @Test
-    fun `workspace actions keep only the catalog actions`() {
-        composeRule.setContent {
-            PocketShellTheme {
-                WorkspaceActionsContent(
-                    onNewSession = {},
-                    onBrowseFiles = {},
-                    onOpenPorts = {},
-                    onOpenUsage = {},
-                    onCopyPath = {},
-                    onReorder = {},
-                    onCreateFolder = {},
-                    onRemove = {},
-                    onDismiss = {},
-                )
-            }
-        }
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("New session").assertIsDisplayed()
-        composeRule.onNodeWithText("Browse files").assertIsDisplayed()
-        composeRule.onNodeWithText("Copy folder path").assertIsDisplayed()
-        composeRule.onNodeWithText("Reorder workspaces").assertIsDisplayed()
-        composeRule.onNodeWithText("Remove from list").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Services & tunnels").assertDoesNotExist()
-        composeRule.onNodeWithText("Usage").assertDoesNotExist()
-        composeRule.onNodeWithText("Create folder").assertDoesNotExist()
-    }
-
-    @Test
-    fun `workspace utility rows keep their real navigation callbacks`() {
-        var files = 0
-        var ports = 0
-        setWorkspaceContent(
-            state = SessionTreeUiState(
-                hostId = 7,
-                workspacePath = "/home/alexey/git/pocketshell",
-                loaded = true,
-                workspaceSessions = listOf(session("shell", "/home/alexey/git/pocketshell")),
-            ),
-            onOpenFiles = { files += 1 },
-            onOpenPorts = { ports += 1 },
-        )
-
-        composeRule.onNodeWithTag(SESSION_TREE_FILES_TAG).performClick()
-        composeRule.onNodeWithTag(SESSION_TREE_PORTS_TAG).performClick()
-        assertEquals(1, files)
-        assertEquals(1, ports)
-    }
+    // #2635 N1: the five `WorkspaceScreen` tests below this line are gone with
+    // the screen. Their subjects moved rather than disappeared, and each has a
+    // new home that pins the SAME behaviour on the surface that now owns it:
+    //
+    // - "opens a real session"  -> QuietWorkspaceNavigationTest (a workspace tap
+    //   lands on Destination.Session, with no page between).
+    // - "New session"           -> QuietWorkspaceNavigationTest (an empty
+    //   workspace lands on Destination.WorkspaceStart, the create sheet).
+    // - workspace actions sheet -> WorkspaceRowActionsTest (the row long-press).
+    // - "Services & tunnels"    -> WorkspaceRowActionsTest + the terminal's own
+    //   actions sheet, which is where tunnels became reachable at all.
 
     private fun setHostContent(
         state: HostWorkspacesUiState,
@@ -478,28 +386,6 @@ class QuietWorkspaceScreenTest {
                     onRefresh = {},
                     onOpenWorkspace = onOpenWorkspace,
                     onOpenSession = onOpenSession,
-                )
-            }
-        }
-        composeRule.waitForIdle()
-    }
-
-    private fun setWorkspaceContent(
-        state: SessionTreeUiState,
-        onOpenSession: (String) -> Unit = {},
-        onOpenCreateFolder: () -> Unit = {},
-        onOpenFiles: () -> Unit = {},
-        onOpenPorts: () -> Unit = {},
-    ) {
-        composeRule.setContent {
-            PocketShellTheme {
-                WorkspaceScreen(
-                    state = state,
-                    onRefresh = {},
-                    onOpenSession = onOpenSession,
-                    onOpenFiles = onOpenFiles,
-                    onOpenPorts = onOpenPorts,
-                    onOpenCreateFolder = onOpenCreateFolder,
                 )
             }
         }

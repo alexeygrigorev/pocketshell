@@ -96,7 +96,7 @@ class AddEditHostViewModelTest {
         // The acceptance for "add a host on a fresh install → it appears in
         // HostListScreen": the row the form wrote is the row U-1's projection
         // paints, through the unchanged HostListViewModel.
-        val listed = HostListViewModel(db.hostDao(), usageGlanceCache(), UnconfinedTestDispatcher())
+        val listed = HostListViewModel(db.hostDao(), usageGlanceCache(), noLiveHosts(), UnconfinedTestDispatcher())
             .state.first { it.loaded }.hosts
         assertEquals(
             listOf(HostRow(id = rows.single().id, name = "hetzner", subtitle = "alexey@135.181.114.209")),

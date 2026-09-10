@@ -10,7 +10,9 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.core.view.ViewCompat
@@ -29,6 +31,8 @@ import com.pocketshell.next.terminal.SESSION_TITLE_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_ERROR_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_CREATE_NOTICE_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_NEW_SESSION_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_ROW_ACTIONS_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_ROW_NEW_SESSION_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.readableSessionName
 import com.pocketshell.next.workspaces.workspaceRowTag
@@ -161,7 +165,8 @@ class J04CreateSessionJourney {
             SESSION_NEW !in hostSessionNames(),
         )
 
-        compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
+        // #2635 N1: the create sheet opens WITH the page — that is the whole
+        // reason an empty workspace no longer needs an intermediate screen.
         awaitTag(CREATE_SESSION_SHEET_TAG)
         JourneyScreenshots.capture("01-create-sheet", JOURNEY)
 
@@ -230,27 +235,25 @@ class J04CreateSessionJourney {
         // Exactly the same folder, so exactly the same derived name.
         createFromSheet(FOLDER_TWICE)
 
-        // The second create remains on the workspace. `created:false` must not
-        // silently resume an existing session; the user chooses its row.
-        awaitTag(WORKSPACE_SCREEN_TAG)
-        awaitTag(WORKSPACE_CREATE_NOTICE_TAG)
-        compose.onNodeWithTag(SESSION_SCREEN_TAG).assertDoesNotExist()
+        // #2635 N1: the second create OPENS the session it found rather than
+        // stranding the user on a page telling them to tap a row that no
+        // longer exists. What must NOT happen is a duplicate.
+        awaitSessionScreen(SESSION_TWICE, FOLDER_TWICE)
         assertEquals(
             "an idempotent create must not duplicate the session",
             1,
             hostSessionNames().count { it == SESSION_TWICE },
         )
-
-        // ...and it is reported as a notice, never as a failure.
-        compose.onNodeWithTag(WORKSPACE_CREATE_NOTICE_TAG).assertIsDisplayed()
-        compose.onNodeWithText(
-            "Session \"$SESSION_TWICE\" already exists — choose it from the list to open it.",
-        ).assertIsDisplayed()
-        compose.onNodeWithTag(sessionRowTag(SESSION_TWICE)).performClick()
-        awaitSessionScreen(SESSION_TWICE, FOLDER_TWICE)
         JourneyScreenshots.capture("05-existing-session-opened", JOURNEY)
+
+        // …and it is still reported as a notice, never as a failure: going
+        // back shows plainly that nothing new was created.
         pressBack()
         awaitTag(WORKSPACE_SCREEN_TAG)
+        awaitTag(WORKSPACE_CREATE_NOTICE_TAG)
+        compose.onNodeWithText(
+            "Session \"$SESSION_TWICE\" already existed — opened it.",
+        ).assertIsDisplayed()
         compose.onNodeWithTag(WORKSPACE_ERROR_TAG).assertDoesNotExist()
         compose.onNodeWithTag(CREATE_SESSION_ERROR_TAG).assertDoesNotExist()
         JourneyScreenshots.capture("06-already-existed-notice", JOURNEY)
@@ -291,9 +294,17 @@ class J04CreateSessionJourney {
         )
     }
 
-    /** FAB → type the folder → Create. Leaves the screen mid-navigation. */
+    /**
+     * Type the folder → Create. Leaves the screen mid-navigation.
+     *
+     * #2635 N1: the sheet is already open when this page is entered, and the
+     * page's own "New session" button reopens it after a dismissal — so accept
+     * either state rather than assuming a tap is needed.
+     */
     private fun createFromSheet(folder: String) {
-        compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
+        if (compose.onAllNodesWithTag(CREATE_SESSION_SHEET_TAG).fetchSemanticsNodes().isEmpty()) {
+            compose.onNodeWithTag(WORKSPACE_NEW_SESSION_TAG).performClick()
+        }
         awaitTag(CREATE_SESSION_SHEET_TAG)
         compose.onNodeWithTag(CREATE_SESSION_TYPE_SHELL_TAG).performClick()
         compose.onNodeWithText("More options").performScrollTo().performClick()
@@ -323,12 +334,19 @@ class J04CreateSessionJourney {
     }
 
     /** Opens the seeded workspace and waits for its first real listing. */
+    /**
+     * #2635 N1: "New session in this workspace" is the workspace row's
+     * LONG-PRESS. A tap opens the workspace's terminal, so the create flow is
+     * reached through the row's alternate action, which lands on the
+     * workspace-start page with its create sheet already open.
+     */
     private fun openWorkspace() {
         compose.openQuietHost(hostId, TIMEOUT_MS)
         awaitTag(workspaceRowTag(WORKSPACE_MAIN))
-        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performTouchInput { longClick() }
+        awaitTag(WORKSPACE_ROW_ACTIONS_TAG)
+        compose.onNodeWithTag(WORKSPACE_ROW_NEW_SESSION_TAG).performClick()
         awaitTag(WORKSPACE_SCREEN_TAG)
-        awaitTag(sessionRowTag(CANNED_SESSION))
     }
 
     private fun pressBack() {

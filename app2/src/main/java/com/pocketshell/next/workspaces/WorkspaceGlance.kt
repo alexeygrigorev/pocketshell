@@ -1,19 +1,12 @@
 package com.pocketshell.next.workspaces
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.relativeActivityLabel
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -64,22 +57,18 @@ fun WorkspaceGlance(
 
         // A zero count renders nothing rather than a "0" chip: an empty
         // workspace should read as quiet, not as a badge saying it is empty.
+        //
+        // #2635 (D1 remainder): a bare muted integer, not a filled chip. The
+        // desktop sidebar this row copies uses a plain number; a filled surface
+        // on EVERY row is the one bit of chrome a scannable list does not need,
+        // and its 6dp radius was off the token ladder as well.
         if (sessions.isNotEmpty()) {
-            Box(
-                modifier = Modifier
-                    .background(PocketShellColors.SurfaceElev, COUNT_SHAPE)
-                    .defaultMinSize(minWidth = COUNT_MIN_WIDTH)
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                    .testTag(workspaceGlanceCountTag(path)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = sessions.size.toString(),
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.labelMono,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+            Text(
+                text = sessions.size.toString(),
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                modifier = Modifier.testTag(workspaceGlanceCountTag(path)),
+            )
         }
 
         latestActivityLabel(sessions, nowSec)?.let { label ->
@@ -106,5 +95,3 @@ internal fun latestActivityLabel(sessions: List<SessionRow>, nowSec: Long): Stri
     return relativeActivityLabel(latest, nowSec)
 }
 
-private val COUNT_SHAPE = RoundedCornerShape(6.dp)
-private val COUNT_MIN_WIDTH = 18.dp

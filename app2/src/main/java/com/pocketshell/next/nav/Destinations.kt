@@ -22,7 +22,9 @@ import java.nio.charset.StandardCharsets
  *   connections registry (task M-3). That is the deliberate break from the old
  *   graph, where a credential-carrying destination was the norm.
  *
- * Route set is fixed by plan §A.1: Hosts, Workspaces, Workspace, Session, Files, Settings, Usage,
+ * Route set is fixed by plan §A.1: Hosts, Workspaces, Session, Files, Settings, Usage
+ * (the `Workspace` page between Workspaces and Session was deleted by #2635 N1,
+ * a maintainer-approved route change: a workspace tap opens its terminal),
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
  * route rather than a tab inside [Session]) and the three host-management
  * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus the categorized
@@ -120,17 +122,18 @@ sealed class Destination(val pattern: String) {
             "workspaces-action/$hostId?$ARG_ROOT_PATH=${encodeSegment(rootPath)}&$ARG_ROOT_ACTION=${encodeSegment(action)}"
     }
 
-    /**
-     * One persistent workspace on a host. The canonical absolute path is a
-     * query argument because it contains `/`; route restoration therefore
-     * carries the workspace identity without relying on in-memory selection.
-     */
-    data object Workspace : Destination("workspace/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
-        fun route(hostId: Long, path: String): String =
-            "workspace/$hostId?$ARG_WORKSPACE_PATH=${encodeSegment(path)}"
-    }
+    // #2635 N1 (maintainer-approved route change): there is no
+    // `Destination.Workspace`. It was the page between a workspace and its
+    // terminal — a list of that workspace's sessions as rows to tap a second
+    // time — and a workspace tap now opens the terminal itself. Deleted, not
+    // deprecated (D22); the zero-session case goes to [WorkspaceStart].
 
-    /** The same workspace route with the new-session sheet already open. */
+    /**
+     * A workspace with nothing running, with the new-session sheet already
+     * open. The canonical absolute path is a query argument because it
+     * contains `/`; route restoration therefore carries the workspace identity
+     * without relying on in-memory selection.
+     */
     data object WorkspaceStart :
         Destination("workspace-start/{$ARG_HOST_ID}?$ARG_WORKSPACE_PATH={$ARG_WORKSPACE_PATH}") {
         fun route(hostId: Long, path: String): String =
@@ -317,7 +320,7 @@ sealed class Destination(val pattern: String) {
          */
         val all: List<Destination>
             get() = listOf(
-                Hosts, Workspaces, Workspace, Session, Files, FileViewer, Ports, Settings,
+                Hosts, Workspaces, Session, Files, FileViewer, Ports, Settings,
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, AccountSync, Diagnostics, DiagnosticReport,
                 About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,

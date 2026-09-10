@@ -104,18 +104,27 @@ class HostWorkspacesDirectEntryTest {
     }
 
     /**
-     * The one case that still needs the workspace screen: nothing is running
-     * there, so there is no terminal to jump to and the user needs the
-     * empty-state / start-a-session surface.
+     * The one case with no terminal to jump to — and #2635 N1 says it must not
+     * become a page either.
+     *
+     * A workspace with nothing running goes straight to the CREATE SHEET
+     * (`Destination.WorkspaceStart`), not to a list of zero sessions with one
+     * button on it. That is the last state in which tapping a workspace showed
+     * an intermediate screen, and it is why `Destination.Workspace` could be
+     * deleted rather than kept for this case.
      */
     @Test
-    fun `a workspace with no sessions still opens the workspace screen`() {
+    fun `a workspace with no sessions opens its create sheet, not a page`() {
         val hostId = seedHost(sessions = EMPTY_SESSIONS)
 
         tapWorkspace(hostId)
 
         assertEquals(emptyList<String>(), openedSessions.map { it.name })
-        assertEquals(listOf(WORKSPACE), openedWorkspaces)
+        assertEquals(
+            "an empty workspace must start a session, not show a page",
+            listOf(WORKSPACE),
+            openedWorkspaces,
+        )
     }
 
     @Test
@@ -135,7 +144,7 @@ class HostWorkspacesDirectEntryTest {
         composeRule.setContent {
             PocketShellTheme {
                 HostWorkspacesRoute(
-                    onOpenWorkspace = { openedWorkspaces += it },
+                    onStartSessionAtPath = { openedWorkspaces += it },
                     onOpenSession = { openedSessions += it },
                     onOpenFiles = {},
                     onOpenPorts = {},

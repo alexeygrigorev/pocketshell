@@ -2,7 +2,9 @@ package com.pocketshell.next.composer
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,7 +42,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -53,6 +57,12 @@ import com.pocketshell.next.files.MarkdownView
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.COMPOSER_ATTACH_TAG
+import com.pocketshell.uikit.components.COMPOSER_MIC_TAG
+import com.pocketshell.uikit.components.COMPOSER_PASTE_LABEL
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
+import com.pocketshell.uikit.components.COMPOSER_TOOLS_TRIGGER_TAG
+import com.pocketshell.uikit.components.ComposerIdleControls
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
@@ -66,10 +76,16 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 /** Stable test tags for the composer surface. */
 const val COMPOSER_TAG: String = "composer"
 const val COMPOSER_DRAFT_TAG: String = "composer-draft"
-const val COMPOSER_SEND_TAG: String = "composer-send"
 const val COMPOSER_INSERT_TAG: String = "composer-insert"
-const val COMPOSER_ATTACH_TAG: String = "composer-attach"
-const val COMPOSER_MIC_TAG: String = "composer-mic"
+
+/**
+ * The one name for paste-without-Enter (#2635 C3).
+ *
+ * It is the long-press label on Send, the accessibility action on Send, and the
+ * title of the row in the "+" tools sheet — one verb, one word, three places
+ * that must not drift apart.
+ */
+
 const val COMPOSER_DISCARD_RECORDING_TAG: String = "composer-discard-recording"
 const val COMPOSER_STOP_RECORDING_TAG: String = "composer-stop-recording"
 const val COMPOSER_HISTORY_TAG: String = "composer-history"
@@ -88,7 +104,6 @@ const val COMPOSER_WAVEFORM_TAG: String = "composer-waveform"
 const val COMPOSER_TRANSCRIBING_TAG: String = "composer-transcribing"
 const val COMPOSER_CONTROLS_ROW_TAG: String = "composer-controls-row"
 const val COMPOSER_TOOLS_TAG: String = "composer-tools"
-const val COMPOSER_TOOLS_TRIGGER_TAG: String = "composer-tools-trigger"
 const val COMPOSER_REVIEW_TAG: String = "composer-delivery-review"
 const val COMPOSER_REVIEW_DRAFT_TAG: String = "composer-delivery-review-draft"
 const val COMPOSER_REVIEW_ACTION_TAG: String = "composer-delivery-review-action"
@@ -151,7 +166,6 @@ fun ComposerBar(
     modifier: Modifier = Modifier,
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
-    onOpenHotkeys: () -> Unit = {},
     availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     var field by remember { mutableStateOf(TextFieldValue(state.draft, TextRange(state.draft.length))) }
@@ -288,9 +302,9 @@ fun ComposerBar(
                     onDraftChange(seeded.text)
                     slashSheetOpen = true
                 },
-                onHotkeys = {
+                onInsert = {
                     toolsOpen = false
-                    onOpenHotkeys()
+                    onInsert()
                 },
                 onClear = {
                     toolsOpen = false
@@ -519,6 +533,26 @@ private fun ControlsRow(
     onMicTap: () -> Unit,
     onCancelRecording: () -> Unit,
 ) {
+    // #2635: the IDLE row is the shared ui-kit component, not a local copy.
+    // The recording row stays here — it is a different, transient mode with its
+    // own controls (discard / paste / send / stop), and the kit has no reason
+    // to know about `RecordingState`.
+    if (state.recording == RecordingState.Idle) {
+        ComposerIdleControls(
+            onAttach = onAttach,
+            onOpenTools = onOpenTools,
+            onSend = onSend,
+            onPaste = onInsert,
+            onMicTap = onMicTap,
+            attachEnabled = !state.busy,
+            toolsEnabled = !state.busy,
+            sendEnabled = deliveryEnabled && state.canSend && !state.busy,
+            micEnabled = state.micAvailable,
+            modifier = Modifier.testTag(COMPOSER_CONTROLS_ROW_TAG),
+        )
+        return
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -526,39 +560,10 @@ private fun ControlsRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (state.recording == RecordingState.Idle) {
-            // Attach is a one-tap paperclip again (#2630). It was the app's
-            // most-used composer action and #2529 buried it two taps deep
-            // behind the "+" sheet; the sheet keeps the genuinely occasional
-            // tools (history / slash / hotkeys / clear).
-            ComposerAttachTrigger(
-                enabled = !state.busy,
-                onClick = onAttach,
-            )
-            ComposerToolsTrigger(
-                enabled = !state.busy,
-                onClick = onOpenTools,
-            )
-        }
         Spacer(modifier = Modifier.weight(1f))
         when (state.recording) {
-            RecordingState.Idle -> {
-                InsertButton(
-                    onClick = onInsert,
-                    enabled = deliveryEnabled && state.canSend && !state.busy,
-                    modifier = Modifier.testTag(COMPOSER_INSERT_TAG),
-                )
-                SendButton(
-                    onClick = onSend,
-                    enabled = deliveryEnabled && state.canSend && !state.busy,
-                    modifier = Modifier.testTag(COMPOSER_SEND_TAG),
-                )
-                MicTriggerButton(
-                    onClick = onMicTap,
-                    enabled = state.micAvailable,
-                    modifier = Modifier.testTag(COMPOSER_MIC_TAG),
-                )
-            }
+            // Handled above by the shared ui-kit control row.
+            RecordingState.Idle -> Unit
             RecordingState.Recording -> {
                 DiscardRecordingButton(
                     onClick = onCancelRecording,
@@ -609,38 +614,9 @@ private fun ControlsRow(
  * screenshot or a log is a primary composer action on a phone, so it costs one
  * tap, like Send and the mic.
  */
-@Composable
-private fun ComposerAttachTrigger(
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    ToolGlyphButton(
-        icon = PocketShellIcons.Paperclip,
-        contentDescription = "Attach files",
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
-    )
-}
-
-/**
- * The composer's one quiet entry point for the remaining secondary actions
- * (history, slash commands, terminal keys, clear draft). Attach is deliberately
- * NOT in here — see [ComposerAttachTrigger].
- */
-@Composable
-private fun ComposerToolsTrigger(
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    ToolGlyphButton(
-        icon = PocketShellIcons.Plus,
-        contentDescription = "Add to input",
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.testTag(COMPOSER_TOOLS_TRIGGER_TAG),
-    )
-}
+// #2635: the paperclip, the "+" and the mic trigger moved into the kit's
+// `ComposerIdleControls` with the row they belong to. Three private copies of a
+// 48dp icon button were what made the render harness need a mirror.
 
 @Composable
 private fun ComposerToolsPanel(
@@ -649,7 +625,7 @@ private fun ComposerToolsPanel(
     onDismiss: () -> Unit,
     onHistory: () -> Unit,
     onSlash: () -> Unit,
-    onHotkeys: () -> Unit,
+    onInsert: () -> Unit,
     onClear: () -> Unit,
 ) {
     Column(
@@ -682,12 +658,18 @@ private fun ComposerToolsPanel(
             )
         }
         ComposerToolRow(
-            title = "Terminal keys",
-            subtitle = "Send special keys to the current terminal",
-            icon = PocketShellIcons.Keyboard,
-            onClick = onHotkeys,
-            testTag = "composer-tools-hotkeys",
+            title = COMPOSER_PASTE_LABEL,
+            subtitle = "Write the draft into the terminal without pressing Enter",
+            icon = PocketShellIcons.Upload,
+            onClick = onInsert,
+            testTag = COMPOSER_INSERT_TAG,
         )
+        // #2635 C4: no "Terminal keys" row here. The hotkeys panel is one tap
+        // from the floating launcher's keyboard button (#2631) — which is where
+        // it belongs, because `^C` is something you reach for WHILE the
+        // terminal is in front of you, not after opening the composer's tool
+        // sheet. Two affordances onto one panel is a duplicate, and D22 says
+        // delete the loser rather than keep both.
         ComposerToolRow(
             title = "Clear draft",
             subtitle = if (state.draft.isBlank() && state.attachments.isEmpty()) {
@@ -750,12 +732,18 @@ private fun ToolGlyphButton(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SendButton(
     onClick: () -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
     recording: Boolean = false,
+    /**
+     * Paste-without-Enter (#2635 C3). Null keeps Send a plain button — the
+     * recording row still has its own explicit Paste control.
+     */
+    onLongClick: (() -> Unit)? = null,
 ) {
     val height = if (recording) ComposerRecordingPillHeight else ComposerIdlePillHeight
     val containerColor = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev
@@ -765,7 +753,25 @@ private fun SendButton(
             .height(height)
             .clip(ComposerActionPillShape)
             .background(color = containerColor, shape = ComposerActionPillShape)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .combinedClickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onLongClickLabel = onLongClick?.let { COMPOSER_PASTE_LABEL },
+            )
+            .semantics {
+                if (onLongClick != null) {
+                    // TalkBack cannot long-press a custom target, so the second
+                    // verb is published as a named accessibility action.
+                    customActions = listOf(
+                        CustomAccessibilityAction(COMPOSER_PASTE_LABEL) {
+                            onLongClick()
+                            true
+                        },
+                    )
+                }
+            }
             .padding(horizontal = if (recording) 16.dp else 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -843,7 +849,7 @@ private fun DiscardRecordingButton(
  * Ends a dictation and keeps the transcript (#2598).
  *
  * A filled accent disc with a stop square, in the same slot and at the same
- * size as [MicTriggerButton]: the mic turns into its own stop, which is the
+ * size as the idle mic: the mic turns into its own stop, which is the
  * idiom every voice recorder uses. Deliberately NOT the [DiscardRecordingButton]
  * outline — one of these two throws the user's words away and the other keeps
  * them, so they must not look alike.
@@ -869,19 +875,6 @@ private fun StopRecordingButton(
             modifier = Modifier.size(COMPOSER_STOP_GLYPH_SIZE),
         )
     }
-}
-
-@Composable
-private fun MicTriggerButton(
-    onClick: () -> Unit,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    MicButton(
-        state = if (enabled) MicButtonState.Idle else MicButtonState.Disabled,
-        onClick = onClick,
-        modifier = modifier.size(ComposerIdlePillHeight),
-    )
 }
 
 /** Quiet field/button radius for composer controls. */

@@ -202,7 +202,7 @@ class HostListNavigationTest {
     }
 
     private fun setContent(): NavHostController {
-        val vm = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
+        val vm = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()

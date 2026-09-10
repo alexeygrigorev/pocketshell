@@ -218,7 +218,7 @@ class AddEditHostNavigationTest {
      * production scoping too.
      */
     private fun setContent(): NavHostController {
-        val hostList = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
+        val hostList = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         val formViewModel = AddEditHostViewModel(
             stack.db.hostDao(),
             stack.db.sshKeyDao(),

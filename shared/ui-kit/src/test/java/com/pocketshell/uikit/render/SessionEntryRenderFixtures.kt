@@ -19,6 +19,11 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.icons.PocketShellIcons
+import com.pocketshell.uikit.components.SESSION_TAB_NEW_DESCRIPTION
+import com.pocketshell.uikit.components.HeaderIconAction
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SessionTab
 import com.pocketshell.uikit.components.SessionTabState
@@ -44,7 +49,10 @@ internal fun SessionTabStripRender() {
     Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
         // The strip as it sits on the session screen: under the header, above
         // the terminal.
-        TerminalHeaderFacsimile(title = "pocketshell", subtitle = "hetzner · Connected")
+        // #2635 T2/D3: the steady header is a DOT and a one-line title, with
+        // no "Connected" subtitle — this fixture used to show the state the
+        // change removed.
+        TerminalHeaderFacsimile(title = "pocketshell", subtitle = null)
         SessionTabStrip(
             tabs = listOf(
                 SessionTab("pocketshell:main", "main", SessionTabState.Working),
@@ -71,15 +79,16 @@ internal fun SessionTabStripRender() {
             )
         }
 
-        // The single-session case: one tab plus `+`, so the chrome does not
-        // appear and disappear as sessions come and go.
-        SectionHeader(label = "One session")
-        SessionTabStrip(
-            tabs = listOf(SessionTab("pocketshell:main", "main", SessionTabState.Idle)),
-            selectedId = "pocketshell:main",
-            onSelect = {},
-            onNewTab = {},
-            onOverflow = {},
+        // #2635 D3: with ONE session the strip is not rendered at all — a
+        // strip with a single item is 40dp of chrome offering no choice
+        // (`ux-rules.md` rule 6) — and its `+` moves into the header instead.
+        // That is what the header below shows, and it is why there is no
+        // second strip in this render any more.
+        SectionHeader(label = "One session: no strip, `+` in the header")
+        TerminalHeaderFacsimile(
+            title = "pocketshell",
+            subtitle = null,
+            trailingPlus = true,
         )
     }
 }
@@ -108,27 +117,26 @@ internal fun WorkspaceTapToSessionRender() {
             trailing = { QuietUsageGlanceFacsimile("Claude 7d", 38) },
         )
         SectionHeader(label = "~/git")
+        // #2630/#2635: the shipped row grammar — ONE dense line, a leading dot
+        // when something in the workspace is attached, a bare muted count and
+        // relative time, and no chevron (every row here navigates, so a glyph
+        // repeating that a dozen times is chrome). This fixture drew the
+        // pre-#2630 two-line row with a kind-summary subtitle until #2635; a
+        // render of a shape the app does not ship is worse than no render.
         WorkspaceRow(
             title = "pocketshell",
-            subtitleContent = {
-                Text(
-                    text = "Claude Code ×2 · Terminal",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.metadata,
-                )
-            },
+            dense = true,
+            leadingContent = { StatusDot(status = ConnectionStatus.Connected) },
+            chevron = false,
+            trailingContent = { WorkspaceGlanceFacsimile(count = 3, recency = "just now") },
             onClick = {},
             testTag = "render-workspace-pocketshell",
         )
         WorkspaceRow(
             title = "aplexer",
-            subtitleContent = {
-                Text(
-                    text = "No sessions",
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.metadata,
-                )
-            },
+            dense = true,
+            leadingContent = { StatusDot(status = ConnectionStatus.Idle) },
+            chevron = false,
             onClick = {},
             testTag = "render-workspace-aplexer",
         )
@@ -142,7 +150,10 @@ internal fun WorkspaceTapToSessionRender() {
 
         ScreenHeader(
             title = "pocketshell",
-            subtitle = "hetzner · Connected",
+            // #2635 T2: dot, not the word.
+            status = ConnectionStatus.Connected,
+            statusDescription = "hetzner · Connected",
+            titleMaxLines = 1,
             onBack = {},
             trailing = { QuietUsageGlanceFacsimile("Claude", 38) },
         )
@@ -252,13 +263,57 @@ private fun QuietUsageGlanceFacsimile(
     }
 }
 
+/**
+ * app2's `WorkspaceGlance`: a bare muted count and a relative time. Mirrored
+ * because it lives in app2, which this harness cannot import — the ROW around
+ * it is the real component.
+ */
+@Composable
+private fun WorkspaceGlanceFacsimile(count: Int, recency: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        Text(
+            text = count.toString(),
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.labelMono,
+        )
+        Text(
+            text = recency,
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.metadata,
+            maxLines = 1,
+        )
+    }
+}
+
 /** The session screen's own header, mirrored so the strip has its real context. */
 @Composable
-private fun TerminalHeaderFacsimile(title: String, subtitle: String) {
+private fun TerminalHeaderFacsimile(
+    title: String,
+    subtitle: String? = null,
+    trailingPlus: Boolean = false,
+) {
     ScreenHeader(
         title = title,
         subtitle = subtitle,
+        // #2635 T2: the steady transport state is the dot; the subtitle line is
+        // reserved for "Reconnecting…" / "Offline", which a colour cannot say.
+        status = ConnectionStatus.Connected,
+        statusDescription = "hetzner · Connected",
+        titleMaxLines = 1,
         onBack = {},
-        trailing = { QuietUsageGlanceFacsimile("Claude", 38) },
+        trailing = {
+            if (trailingPlus) {
+                HeaderIconAction(
+                    icon = PocketShellIcons.Plus,
+                    contentDescription = SESSION_TAB_NEW_DESCRIPTION,
+                    onClick = {},
+                    testTag = "render-session-header-new",
+                )
+            }
+            QuietUsageGlanceFacsimile("Claude", 38)
+        },
     )
 }

@@ -11,7 +11,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.HostListViewModel
+import com.pocketshell.next.hosts.noLiveHosts
 import com.pocketshell.next.hosts.hostRowTag
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.usage.usageGlanceCache
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +84,37 @@ class SessionResumeNavigationTest {
     }
 
     /**
+     * #2635 N3: "Save → Test connection" from the host FORM is the same
+     * gesture as a host-row tap — "take me to this machine" — so it arms the
+     * resume too.
+     *
+     * Before this, the two entry points behaved differently for no reason a
+     * user could see: tapping a host you already use landed you in your
+     * terminal, while saving that same host landed you on the workspace list.
+     * Fails on the un-armed form gate (`resumeFlags` reads `[false]`).
+     */
+    @Test
+    fun `connecting from the host form arms the resume the same way a host tap does`() {
+        stack = TestConnectStack()
+        val hostId = stack.seedHost(name = "form-fixture")
+        hostIdUnderTest = hostId
+        val controller = setContent()
+
+        composeRule.runOnUiThread {
+            controller.navigate(Destination.HostForm.route(hostId))
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("form-test-connection").performClick()
+        awaitText("Workspaces(host=$hostId)")
+
+        assertEquals(
+            "the form's connect gate must arm the resume, like the host row does",
+            listOf(true),
+            resumeFlags,
+        )
+    }
+
+    /**
      * A second arrival at the workspace list is NOT a host open — it is the
      * user going back, or a "new session" hop from a session with no workspace
      * path. Re-arming there is the trap this assertion exists to catch.
@@ -125,12 +159,15 @@ class SessionResumeNavigationTest {
         }
     }
 
+    /** Set by the N3 test so the form seam can hand the gate a real id. */
+    private var hostIdUnderTest: Long = 0L
+
     private fun setContent(
         startupHostId: Long? = null,
         startupHostExists: suspend (Long) -> Boolean = { true },
     ): NavHostController {
         val hostListViewModel =
-            HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
+            HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()
@@ -156,8 +193,16 @@ class SessionResumeNavigationTest {
                     resumeFlags += launch.resumeLastSession
                     Text("Workspaces(host=$hostId)")
                 },
-                sessionScreen = { hostId, name, _, _, _, _, _, _ ->
+                sessionScreen = { hostId, name, _, _ ->
                     Text("Session($hostId/$name)")
+                },
+                // #2635 N3: the form's "Test connection" edge, so the test can
+                // drive the same gate the Save button does.
+                hostFormScreen = { _, _, _, onTestConnection ->
+                    androidx.compose.material3.Button(
+                        onClick = { onTestConnection(hostIdUnderTest) },
+                        modifier = Modifier.testTag("form-test-connection"),
+                    ) { Text("Test connection") }
                 },
             )
         }

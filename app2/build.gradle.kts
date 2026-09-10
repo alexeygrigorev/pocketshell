@@ -7,6 +7,8 @@
 // U/P tasks add dependencies alongside the code that consumes them, the same
 // convention the version catalog documents.
 import java.io.ByteArrayOutputStream
+import java.util.Base64
+import java.util.Properties
 import java.util.concurrent.TimeUnit
 
 plugins {
@@ -140,6 +142,96 @@ fun derivePocketshellVersion(): PocketshellDerivedVersion {
 
 val pocketshellDerivedVersion = derivePocketshellVersion()
 
+// Issue #2638: release APKs sign with a DEDICATED release identity, never the
+// committed debug.keystore. Material resolves from exactly one of two places,
+// in this order:
+//
+//   1. a gitignored `keystore.properties` in the repository root (local
+//      builds; schema: storeFile / storePassword / keyAlias / keyPassword,
+//      see docs/release.md "Signing"), or
+//   2. the four CI environment variables ANDROID_RELEASE_KEYSTORE_BASE64
+//      (the PKCS12 keystore, base64-encoded), ANDROID_RELEASE_STORE_PASSWORD,
+//      ANDROID_RELEASE_KEY_ALIAS and ANDROID_RELEASE_KEY_PASSWORD
+//      (the GitHub secrets .github/workflows/build.yml exports).
+//
+// There is deliberately NO third fallback (D22): with neither source present
+// the project still configures and builds assembleDebug — the pre-release
+// confidence gate compiles the release variant (kspReleaseKotlin /
+// hiltJavaCompileRelease) on machines that hold no signing material — but any
+// task that would PACKAGE a release APK fails loudly instead of silently
+// emitting an unsigned APK (see the release build type below).
+data class PocketshellReleaseSigning(
+    val storeFile: File,
+    val storePassword: String,
+    val keyAlias: String,
+    val keyPassword: String,
+)
+
+fun resolvePocketshellReleaseSigning(): PocketshellReleaseSigning? {
+    val propsFile = rootProject.file("keystore.properties")
+    if (propsFile.isFile) {
+        val props = Properties().apply {
+            propsFile.inputStream().use { load(it) }
+        }
+        fun required(key: String): String =
+            props.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw GradleException(
+                    "keystore.properties is missing '${key}'. Expected schema: " +
+                        "storeFile / storePassword / keyAlias / keyPassword " +
+                        "(docs/release.md, \"Signing\")."
+                )
+        val store = rootProject.file(required("storeFile"))
+        if (!store.isFile) {
+            throw GradleException(
+                "keystore.properties points at a missing keystore file: $store. " +
+                    "Fix the storeFile path or delete keystore.properties (docs/release.md, \"Signing\")."
+            )
+        }
+        return PocketshellReleaseSigning(
+            storeFile = store,
+            storePassword = required("storePassword"),
+            keyAlias = required("keyAlias"),
+            keyPassword = required("keyPassword"),
+        )
+    }
+
+    val keystoreB64 = providers.environmentVariable("ANDROID_RELEASE_KEYSTORE_BASE64").orNull
+    val storePassword = providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD").orNull
+    val keyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS").orNull
+    val keyPassword = providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull
+    if (keystoreB64 == null && storePassword == null && keyAlias == null && keyPassword == null) {
+        return null
+    }
+    // Some but not all of the four variables is a broken CI configuration, not
+    // a reason to quietly fall back to anything else.
+    val envNames = mapOf(
+        "ANDROID_RELEASE_KEYSTORE_BASE64" to keystoreB64,
+        "ANDROID_RELEASE_STORE_PASSWORD" to storePassword,
+        "ANDROID_RELEASE_KEY_ALIAS" to keyAlias,
+        "ANDROID_RELEASE_KEY_PASSWORD" to keyPassword,
+    )
+    val missing = envNames.filterValues { it.isNullOrBlank() }.keys
+    require(missing.isEmpty()) {
+        "Release signing env vars are only partially set; missing: $missing. " +
+            "Set all four ANDROID_RELEASE_* variables or none of them."
+    }
+    val decoded = layout.buildDirectory
+        .dir("release-signing")
+        .get()
+        .file("pocketshell-release.keystore")
+        .asFile
+    decoded.parentFile.mkdirs()
+    decoded.writeBytes(Base64.getDecoder().decode(keystoreB64))
+    return PocketshellReleaseSigning(
+        storeFile = decoded,
+        storePassword = storePassword!!.trim(),
+        keyAlias = keyAlias!!.trim(),
+        keyPassword = keyPassword!!.trim(),
+    )
+}
+
+val pocketshellReleaseSigning = resolvePocketshellReleaseSigning()
+
 android {
     namespace = "com.pocketshell.next"
     compileSdk = 36
@@ -155,6 +247,17 @@ android {
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
+        }
+        // Issue #2638: only registered when material actually resolved. The
+        // release build type below reacts to the absence by refusing to
+        // package, never by signing with the debug identity.
+        if (pocketshellReleaseSigning != null) {
+            create("releaseKeystore") {
+                storeFile = pocketshellReleaseSigning.storeFile
+                storePassword = pocketshellReleaseSigning.storePassword
+                keyAlias = pocketshellReleaseSigning.keyAlias
+                keyPassword = pocketshellReleaseSigning.keyPassword
+            }
         }
     }
 
@@ -207,7 +310,45 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debugKeystore")
+            // Issue #2638: distinct install identity. The release APK signs
+            // with a different key than the daily-driver debug install, and
+            // Android refuses to co-install two differently-signed packages
+            // under one applicationId — so release lives beside it under
+            // com.pocketshell.app.release, with its own launcher label
+            // (app2/src/release/res/values/strings.xml). The DEBUG identity
+            // above stays byte-for-byte what it was.
+            applicationIdSuffix = ".release"
+
+            if (pocketshellReleaseSigning != null) {
+                signingConfig = signingConfigs.getByName("releaseKeystore")
+            } else {
+                // No signing material resolved: compilation lanes that do not
+                // package a release APK (the confidence gate's
+                // kspReleaseKotlin / hiltJavaCompileRelease, unit tests) stay
+                // green, but packaging fails LOUDLY instead of producing an
+                // unsigned APK. A dependency (not a doFirst) so the guard runs
+                // even when packageRelease would otherwise be up-to-date.
+                val requireReleaseSigning = tasks.register("requireReleaseSigningMaterial") {
+                    group = "verification"
+                    description = "Fails unless release signing material resolved (issue #2638)."
+                    doLast {
+                        throw GradleException(
+                            "Cannot build a release APK: no release signing material. " +
+                                "Provide EITHER a gitignored keystore.properties in the repository root " +
+                                "(schema: storeFile / storePassword / keyAlias / keyPassword) " +
+                                "OR the four CI variables ANDROID_RELEASE_KEYSTORE_BASE64, " +
+                                "ANDROID_RELEASE_STORE_PASSWORD, ANDROID_RELEASE_KEY_ALIAS, " +
+                                "ANDROID_RELEASE_KEY_PASSWORD. " +
+                                "See docs/release.md, \"Signing\". " +
+                                "Refusing to produce an unsigned release APK."
+                        )
+                    }
+                }
+                tasks.matching { it.name == "packageRelease" || it.name == "bundleRelease" }
+                    .configureEach {
+                        dependsOn(requireReleaseSigning)
+                    }
+            }
         }
     }
 

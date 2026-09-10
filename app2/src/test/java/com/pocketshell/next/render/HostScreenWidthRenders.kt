@@ -15,12 +15,6 @@ import com.pocketshell.next.hosts.HostFormState
 import com.pocketshell.next.hosts.HostListScreen
 import com.pocketshell.next.hosts.HostListUiState
 import com.pocketshell.next.hosts.HostRow
-import com.pocketshell.next.hosts.DuplicateAction
-import com.pocketshell.next.hosts.ExistingHost
-import com.pocketshell.next.hosts.QrScannerScreen
-import com.pocketshell.next.hosts.QrScannerViewModel
-import com.pocketshell.next.hosts.SshImportAuth
-import com.pocketshell.next.hosts.SshImportConfig
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Test
@@ -95,20 +89,6 @@ class HostScreenRenders360 {
             onAddKey = {},
         )
     }
-
-    @Test
-    fun qrReviewDuplicate() = render("quiet-360-qr-review-duplicate") {
-        QrScannerScreen(
-            state = duplicateReview(),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onConfirmImport = { _: DuplicateAction? -> },
-            onCancelReview = {},
-            onClose = {},
-        )
-    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -180,40 +160,6 @@ class HostScreenRenders600 {
             onAddKey = {},
         )
     }
-
-    @Test
-    fun qrReviewDuplicate() = render("quiet-600-qr-review-duplicate") {
-        QrScannerScreen(
-            state = duplicateReview(),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onConfirmImport = { _: DuplicateAction? -> },
-            onCancelReview = {},
-            onClose = {},
-        )
-    }
-}
-
-@RunWith(RobolectricTestRunner::class)
-@GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(qualifiers = "w360dp-h800dp-night-xxhdpi")
-class HostScreenRendersLargeText {
-
-    @Test
-    fun qrReviewDuplicateLargeText() = render("quiet-360-qr-review-duplicate-large-text", fontScale = 1.3f) {
-        QrScannerScreen(
-            state = duplicateReview(),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onConfirmImport = { _: DuplicateAction? -> },
-            onCancelReview = {},
-            onClose = {},
-        )
-    }
 }
 
 @Composable
@@ -223,7 +169,6 @@ private fun hosts(rows: List<HostRow>) {
         onOpenHost = {},
         onAddHost = {},
         onEditHost = {},
-        onScanQr = {},
         onOpenSettings = {},
         onDeleteHost = {},
     )
@@ -231,19 +176,6 @@ private fun hosts(rows: List<HostRow>) {
 
 private fun key(id: Long, name: String) =
     SshKeyEntity(id = id, name = name, privateKeyPath = "/data/data/ssh-keys/$name")
-
-private fun duplicateReview() = QrScannerViewModel.State.Review(
-    config = SshImportConfig(
-        name = "Development host",
-        host = "dev.example.test",
-        port = 22,
-        username = "alexey",
-        auth = SshImportAuth.KeyReference("device-key"),
-    ),
-    payload = "review-payload",
-    existingHost = ExistingHost(id = 7L, name = "Existing development host"),
-    duplicateChecked = true,
-)
 
 private fun render(
     name: String,

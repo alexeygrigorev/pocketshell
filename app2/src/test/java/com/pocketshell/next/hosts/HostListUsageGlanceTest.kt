@@ -49,7 +49,6 @@ class HostListUsageGlanceTest {
                 onOpenHost = {},
                 onAddHost = {},
                 onEditHost = {},
-                onScanQr = {},
                 onOpenSettings = {},
                 onDeleteHost = {},
                 onOpenUsage = { opened += 1 },
@@ -77,7 +76,6 @@ class HostListUsageGlanceTest {
                 onOpenHost = {},
                 onAddHost = {},
                 onEditHost = {},
-                onScanQr = {},
                 onOpenSettings = {},
                 onDeleteHost = {},
             )

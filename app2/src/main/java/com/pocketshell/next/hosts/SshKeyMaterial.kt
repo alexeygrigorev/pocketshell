@@ -46,7 +46,7 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
  * Encryption is a property of the material, not a reason to discard it. The
  * encrypted PEM stays on app-private storage and the connection flow supplies
  * a one-use passphrase to sshj after the native unlock handoff. No passphrase
- * is written here or included in a QR payload.
+ * is written here and is never included in an import payload.
  */
 object SshKeyMaterial {
 
@@ -116,7 +116,7 @@ object SshKeyMaterial {
     /**
      * Content hash of the trimmed PEM, used to reuse an existing `ssh_keys` row
      * for a byte-identical key instead of writing a second copy of the same
-     * secret to disk (re-importing the same QR twice is the normal case).
+     * secret to disk (re-importing the same key twice is the normal case).
      */
     fun fingerprint(content: String): String {
         val bytes = MessageDigest.getInstance("SHA-256")

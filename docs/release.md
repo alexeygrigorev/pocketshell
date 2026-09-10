@@ -13,6 +13,50 @@ checkout on `main` whose `HEAD` already equals `origin/main` — it does not
 accept a release-branch worktree, so tagging always happens after that
 branch's SHA has reached `main`, never before.
 
+## Signing (issue #2638)
+
+Two APKs ship from the tag-triggered Build workflow, each with its own
+signing identity:
+
+| | debug APK | release APK |
+|---|---|---|
+| applicationId | `com.pocketshell.app` | `com.pocketshell.app.release` |
+| launcher label | PocketShell | PocketShell Rel |
+| signer | committed `debug.keystore` | dedicated release keystore |
+
+Different signatures cannot replace each other under one applicationId, so
+the two install and run side by side on one device.
+
+The release keystore is NOT in the repo. It lives on this box at
+`/home/alexey/.pocketshell/keys/pocketshell-release.keystore` (PKCS12, alias
+`pocketshell-release`, valid to 2056; cert SHA256
+`0F:91:16:9C:6A:73:19:10:43:55:BB:55:11:11:DE:A8:FF:EC:12:98:00:69:A2:6D:FD:C5:AF:D3:16:A0:94:E4`).
+Losing it means every existing release install (`com.pocketshell.app.release`)
+can never be updated in place again — back it up somewhere off this box.
+
+Signing material reaches the build through exactly one of two paths, checked
+in this order by `app2/build.gradle.kts` (no debug-keystore fallback, D22):
+
+1. **Local**: a gitignored `keystore.properties` in the repository root.
+   Schema: `storeFile` / `storePassword` / `keyAlias` / `keyPassword`.
+   `keystore.properties` is gitignored, so a fresh worktree does not have
+   it — copy it from the root checkout before building a release APK there.
+2. **CI**: the four GitHub secrets `ANDROID_RELEASE_KEYSTORE_BASE64` (the
+   PKCS12 keystore, base64-encoded), `ANDROID_RELEASE_STORE_PASSWORD`,
+   `ANDROID_RELEASE_KEY_ALIAS`, `ANDROID_RELEASE_KEY_PASSWORD`, exported by
+   `.github/workflows/build.yml` around `assembleRelease`.
+
+A checkout with neither still configures and builds `assembleDebug` (and the
+confidence gate's release-compile lanes) fine; any task that would package a
+release APK fails loudly instead of silently producing an unsigned APK.
+
+Verify a built APK's identity with:
+
+```bash
+scripts/check-apk-signing.sh --variant release --apk app2/build/outputs/apk/release/app2-release.apk
+scripts/check-apk-signing.sh --variant debug  --apk app2/build/outputs/apk/debug/app2-debug.apk
+```
+
 ## Product note for the next release
 
 The #2561 session-runtime cut ships an aplexer-only product contract. The host

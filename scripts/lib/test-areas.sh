@@ -537,12 +537,12 @@ pocketshell_test_area_classify() {
 #       `tools/pocketshell/src/pocketshell/cli.py`.
 #
 #       (b) cannot be the whole consumer rule because a wire contract does not
-#       need an in-app invoker at all. `com.pocketshell.app.settings` parses the
-#       payload that `pocketshell qr-share` produces, and that payload arrives by
-#       QR scan / clipboard — no exec, so no invoking file imports the settings
-#       package and no import edge exists to follow. (c) is what catches that
-#       category. Taking the vocabulary from the Python side rather than from a
-#       loose grep is what keeps it honest: `pocketshell-voice-secrets` (a
+#       need an in-app invoker at all — a payload that arrives by scan /
+#       clipboard / transport has no exec, so no invoking file imports the
+#       receiving package and no import edge exists to follow. (c) is what
+#       catches that category. (The QR importer that first exercised it is gone
+#       from the app.) Taking the vocabulary from the Python side rather than
+#       from a loose grep is what keeps it honest: `pocketshell-voice-secrets` (a
 #       DataStore file name) and "the `pocketshell` daemon registry" (prose) are
 #       not subcommands and do not match.
 #

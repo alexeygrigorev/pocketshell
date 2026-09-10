@@ -232,7 +232,6 @@ class HostListDensityTest {
                     onOpenHost = {},
                     onAddHost = {},
                     onEditHost = {},
-                    onScanQr = {},
                     onOpenSettings = {},
                     onOpenSshKeys = {},
                     onDeleteHost = {},

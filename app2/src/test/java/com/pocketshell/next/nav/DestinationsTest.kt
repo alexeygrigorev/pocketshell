@@ -44,11 +44,13 @@ class DestinationsTest {
         // Deprecated aliases (Tree and CrashReports) intentionally do not add
         // duplicate patterns.
         //
-        // 30, not 31, since #2635 N1 deleted `Destination.Workspace` — the page
-        // between a workspace and its terminal. This count is deliberately
-        // exact so a route cannot be added or removed without someone saying so
+        // #2635 N1 deleted `Destination.Workspace` (the page between a
+        // workspace and its terminal) but added `Destination.WorkspaceStart`
+        // for the zero-session case — a net-zero swap against main's
+        // post-QR-removal baseline of 29. This count is deliberately exact
+        // so a route cannot be added or removed without someone saying so
         // here.
-        assertEquals(30, patterns.size)
+        assertEquals(29, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }

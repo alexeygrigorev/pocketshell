@@ -8,7 +8,6 @@ context; the README and current feature docs track released behavior.
 | [vision.md](vision.md) | Historical product brief — the original goals and UX vocabulary |
 | [architecture.md](architecture.md) | Post-rewrite module map, tech stack, three load-bearing decisions, connect/session/terminal/grace design |
 | [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
-| [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
 | [agent-awareness.md](agent-awareness.md) | Live agent identity from an aplexer workload and host logs |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
 | [settings-sync.md](settings-sync.md) | Optional Google sign-in + end-to-end-encrypted host sync, and the OAuth client registration it is blocked on |

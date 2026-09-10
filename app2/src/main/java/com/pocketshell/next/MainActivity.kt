@@ -45,7 +45,6 @@ import com.pocketshell.next.files.ViewerRoute
 import com.pocketshell.next.hosts.AddEditHostRoute
 import com.pocketshell.next.hosts.HOST_FORM_SELECTED_KEY_RESULT
 import com.pocketshell.next.hosts.HostListRoute
-import com.pocketshell.next.hosts.QrScannerRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.AddTunnelRoute
@@ -191,8 +190,8 @@ class MainActivity : FragmentActivity() {
 
 /**
  * Every non-dial action the host list can start. Grouped into one type because
- * the list is the app's landing screen and now carries five of them — passing
- * them as five positional lambdas through the [AppNavHost] seam made both the
+ * the list is the app's landing screen and now carries four of them — passing
+ * them as four positional lambdas through the [AppNavHost] seam made both the
  * production call and every test stand-in unreadable.
  */
 /**
@@ -220,7 +219,6 @@ data class HostListActions(
     val onOpenHost: (Long) -> Unit,
     val onAddHost: () -> Unit,
     val onEditHost: (Long) -> Unit,
-    val onScanQr: () -> Unit,
     val onOpenSettings: () -> Unit,
     val onOpenSshKeys: () -> Unit,
     /** Issue #2632: the landing usage pill's destination. */
@@ -260,7 +258,7 @@ private fun NavHostController.openSession(
  * the real screens (host list, connect gate, host workspaces, workspace,
  * terminal,
  * port-forward panel, file explorer, file viewer, host add/edit form, SSH
- * keys, QR scan, crash reports) resolve their ViewModels through
+ * keys, crash reports) resolve their ViewModels through
  * `hiltViewModel()`, which needs a Hilt-managed Activity, so a plain
  * Robolectric `createComposeRule()` composition could not host them. The
  * parameters let a test supply the same screen / the same ViewModel built by
@@ -304,7 +302,6 @@ fun AppNavHost(
             onOpenHost = actions.onOpenHost,
             onAddHost = actions.onAddHost,
             onEditHost = actions.onEditHost,
-            onScanQr = actions.onScanQr,
             onOpenSettings = actions.onOpenSettings,
             onOpenSshKeys = actions.onOpenSshKeys,
             onOpenUsage = actions.onOpenUsage,
@@ -438,8 +435,6 @@ fun AppNavHost(
     ) -> Unit = { onBack, onUseKey ->
         SshKeysRoute(onBack = onBack, onUseKey = onUseKey)
     },
-    qrScanScreen: @Composable (onFinished: (Long) -> Unit, onClose: () -> Unit) -> Unit =
-        { onFinished, onClose -> QrScannerRoute(onFinished = onFinished, onClose = onClose) },
     settingsScreen: @Composable (SettingsNavigation) -> Unit = { navigation ->
         SettingsRoute(navigation = navigation)
     },
@@ -586,7 +581,6 @@ fun AppNavHost(
                         onEditHost = { hostId ->
                             navController.navigate(Destination.HostForm.route(hostId))
                         },
-                        onScanQr = { navController.navigate(Destination.QrScan.route()) },
                         onOpenSshKeys = { navController.navigate(Destination.SshKeys.route()) },
                         // Task P-6 fast-follow: the only UI entry point into
                         // Settings, deliberately on the landing screen rather
@@ -651,18 +645,6 @@ fun AppNavHost(
                     null
                 },
             )
-        }
-        composable(Destination.QrScan.pattern) {
-            ConnectGate(
-                onConnected = { connectedHostId ->
-                    navController.navigate(Destination.Workspaces.route(connectedHostId)) {
-                        popUpTo(Destination.Hosts.pattern)
-                    }
-                },
-                viewModel = connectViewModel(),
-            ) { onOpenHost ->
-                qrScanScreen(onOpenHost) { navController.popBackStack() }
-            }
         }
         composable(
             route = Destination.Workspaces.pattern,

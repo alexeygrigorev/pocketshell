@@ -25,15 +25,6 @@ androidx-biometric = "1.1.0"
 # falls back to a plain browser Intent when no Custom Tabs provider exists.
 # 1.8.0 is the current stable line and is compileSdk-36 clean.
 androidx-browser = "1.8.0"
-zxing = "3.5.3"
-# Live camera scanner for QR import (issue #129). The
-# zxing-android-embedded library wraps the upstream `com.google.zxing:core`
-# (already on the classpath for static QR encoding/decoding) with a
-# CameraX-backed scanning Activity / Compose-compatible view. Picked over
-# ML Kit because it's a single small AAR with no Play Services
-# dependency, which keeps the F-Droid story unblocked and matches the
-# existing zxing pin.
-zxing-android-embedded = "4.3.0"
 
 # navigation-compose (rewrite task M-1, app2). The old `app` module hand-rolled
 # a `remember { mutableStateOf(AppDestination) }` navigator because #18's brief
@@ -167,8 +158,6 @@ activity-compose = { group = "androidx.activity", name = "activity-compose", ver
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "androidx-biometric" }
 androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidx-browser" }
-zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
-zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing-android-embedded" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

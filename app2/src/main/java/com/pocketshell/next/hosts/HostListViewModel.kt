@@ -5,13 +5,16 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.next.di.IoDispatcher
+import com.pocketshell.next.usage.UsageGlanceCache
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.toPillState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -44,6 +47,18 @@ data class HostRow(
 data class HostListUiState(
     val hosts: List<HostRow> = emptyList(),
     val loaded: Boolean = false,
+    /**
+     * The last usage reading this device saw, or null on an install that has
+     * never read one (issue #2632).
+     *
+     * Cached, never live: the host list is a pre-connection screen and usage
+     * never dials (D21). It is rendered by the same
+     * [com.pocketshell.next.usage.UsageGlancePill] the session screen uses, so
+     * a reading older than
+     * [com.pocketshell.next.usage.USAGE_GLANCE_STALE_AFTER] shows its muted
+     * "read at HH:mm" form rather than passing itself off as live.
+     */
+    val usagePill: UsageGlancePillState? = null,
 )
 
 /**
@@ -62,6 +77,7 @@ data class HostListUiState(
 @HiltViewModel
 class HostListViewModel @Inject constructor(
     private val hostDao: HostDao,
+    usageGlanceCache: UsageGlanceCache,
     @IoDispatcher dispatcher: CoroutineDispatcher,
 ) : ViewModel() {
 
@@ -79,8 +95,15 @@ class HostListViewModel @Inject constructor(
     }
 
     val state: StateFlow<HostListUiState> =
-        hostDao.getAll()
-            .map { hosts -> HostListUiState(hosts = hosts.map { toRow(it) }, loaded = true) }
+        combine(hostDao.getAll(), usageGlanceCache.last) { hosts, usage ->
+            HostListUiState(
+                hosts = hosts.map { toRow(it) },
+                loaded = true,
+                // Re-derived per emission, not stored: staleness is a function
+                // of when the reading was taken and when it is being looked at.
+                usagePill = usage?.toPillState(),
+            )
+        }
             .flowOn(dispatcher)
             .stateIn(
                 scope = viewModelScope,

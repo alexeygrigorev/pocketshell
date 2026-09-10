@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.hostapi.HostCliError
 import com.pocketshell.core.hostapi.SessionListError
+import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.transport.ConnectResult
@@ -13,6 +14,9 @@ import com.pocketshell.core.transport.SftpEntry
 import com.pocketshell.next.connect.ConnectionsRegistry
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.nav.Destination
+import com.pocketshell.next.terminal.LastSessionStore
+import com.pocketshell.next.terminal.resolveResumeTarget
+import com.pocketshell.next.terminal.resolveWorkspaceEntrySession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -54,6 +58,15 @@ data class HostWorkspacesUiState(
     val addWorkspaceRootFoldersFailure: String? = null,
     /** Set after a successful add so the selected folder opens immediately. */
     val openWorkspacePath: String? = null,
+    /**
+     * The live session this visit should resume into (issue #2632), or null.
+     *
+     * Only ever set once per screen instance, and only when the host's OWN
+     * listing still contains the remembered session — so a resume can never
+     * land the user on a terminal for a session that ended while the app was
+     * closed.
+     */
+    val resumeSession: SessionRow? = null,
     val createFolderVisible: Boolean = false,
     val createFolderParentPath: String = "",
     val createFolderName: String = "",
@@ -91,6 +104,7 @@ class HostWorkspacesViewModel @Inject constructor(
     private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
     private val workspaceOrderStore: WorkspaceOrderStore,
+    private val lastSessionStore: LastSessionStore,
 ) : ViewModel() {
 
     private val hostId: Long = requireNotNull(
@@ -104,6 +118,84 @@ class HostWorkspacesViewModel @Inject constructor(
     private var browseInFlight: Job? = null
     private var folderInFlight: Job? = null
     private var rootFoldersInFlight: Job? = null
+
+    /**
+     * Issue #2632's resume state, deliberately NOT in [HostWorkspacesUiState]:
+     * it is entry-scoped bookkeeping, not something the screen paints.
+     *
+     * The ViewModel is scoped to ONE navigation entry, so "resume at most
+     * once" needs no saved-state flag — backing out of the resumed session
+     * returns to this same instance with [resumeSpent] already true, which is
+     * what stops the screen from bouncing the user straight back in.
+     */
+    private var resumeArmed: Boolean = false
+    private var resumeSpent: Boolean = false
+
+    /** The last raw listing, so a late [armResume] can resolve without a refetch. */
+    private var lastSessions: List<SessionRow> = emptyList()
+
+    /**
+     * Marks this visit as one that should reopen the host's last session.
+     *
+     * Safe to call before OR after the listing lands: it resolves immediately
+     * if the sessions are already in hand, and [applyListing] retries otherwise.
+     * That removes any ordering dependency between this call and the screen's
+     * own `ON_START` refresh — the two fire from independent effects.
+     */
+    fun armResume() {
+        if (resumeSpent || resumeArmed) return
+        resumeArmed = true
+        tryResume()
+    }
+
+    /**
+     * The session a tap on the workspace at [workspacePath] should open, or
+     * null when that workspace has nothing running and the user does need the
+     * workspace screen (issue #2632, maintainer follow-up 2026-09-10).
+     *
+     * Answered from the projection this screen ALREADY holds — the host
+     * listing that painted the row carries that row's sessions — so a
+     * workspace tap costs no extra round trip and no intermediate screen. It
+     * is not a suspend function for exactly that reason: the answer is
+     * in hand before the finger lifts.
+     */
+    fun entrySessionFor(workspacePath: String): SessionRow? {
+        val sessions = sessionsInWorkspace(workspacePath)
+        return resolveWorkspaceEntrySession(
+            rememberedName = lastSessionStore.getForWorkspace(hostId, workspacePath),
+            sessions = sessions,
+        )
+    }
+
+    /**
+     * The rendered rows are the source, not a second query: matching on the
+     * projection's own canonical [WorkspaceProjection.path] is what guarantees
+     * the sessions we choose from are exactly the ones summarised under the
+     * row the user tapped.
+     */
+    private fun sessionsInWorkspace(workspacePath: String): List<SessionRow> {
+        val wanted = canonicalRemotePath(workspacePath) ?: workspacePath
+        return _state.value.roots
+            .flatMap { root -> root.workspaces }
+            .firstOrNull { (canonicalRemotePath(it.path) ?: it.path) == wanted }
+            ?.sessions
+            .orEmpty()
+    }
+
+    /** One-shot read of the resume target, in the [consumeOpenWorkspace] shape. */
+    fun consumeResumeSession(): SessionRow? {
+        val session = _state.value.resumeSession ?: return null
+        _state.update { it.copy(resumeSession = null) }
+        return session
+    }
+
+    private fun tryResume() {
+        if (!resumeArmed || resumeSpent) return
+        val target = resolveResumeTarget(lastSessionStore.get(hostId), lastSessions) ?: return
+        resumeArmed = false
+        resumeSpent = true
+        _state.update { it.copy(resumeSession = target) }
+    }
 
     fun refresh() {
         if (inFlight?.isActive == true) return
@@ -620,6 +712,11 @@ class HostWorkspacesViewModel @Inject constructor(
                 statusUnavailable = false,
             )
         }
+        // Issue #2632: the host's own listing is the authority on whether the
+        // remembered session still exists, so the resume is decided HERE —
+        // after a successful read — and never from the stored name alone.
+        lastSessions = sessions.sessions
+        tryResume()
     }
 
     private fun fail(message: String) {

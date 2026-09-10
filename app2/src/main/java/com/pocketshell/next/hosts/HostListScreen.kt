@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.next.release.UpdateCheckViewModel
+import com.pocketshell.next.usage.UsageGlancePill
 import com.pocketshell.next.release.launchUpdateUrl
 import com.pocketshell.next.release.updateAvailableBannerText
 import com.pocketshell.uikit.components.Banner
@@ -96,6 +97,7 @@ fun HostListRoute(
     onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSshKeys: () -> Unit = {},
+    onOpenUsage: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     updateCheckViewModel: UpdateCheckViewModel? = null,
@@ -126,6 +128,7 @@ fun HostListRoute(
         onScanQr = onScanQr,
         onOpenSettings = onOpenSettings,
         onOpenSshKeys = onOpenSshKeys,
+        onOpenUsage = onOpenUsage,
         onDeleteHost = viewModel::delete,
         modifier = modifier,
         updateNotice = notice,
@@ -187,6 +190,7 @@ fun HostListScreen(
     onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
     onOpenSshKeys: () -> Unit = {},
+    onOpenUsage: () -> Unit = {},
     modifier: Modifier = Modifier,
     updateNotice: HostListUpdateNotice? = null,
     onDownloadUpdate: (apkUrl: String) -> Unit = {},
@@ -206,24 +210,36 @@ fun HostListScreen(
     val showHeaderActions = state.loaded && state.hosts.isNotEmpty()
 
     Column(modifier = modifier.fillMaxSize()) {
+        // Issue #2632: the usage/cost number is on the LANDING screen, before
+        // any tap. It is the cached last reading (the list is a pre-connection
+        // screen and usage never dials — D21), so it labels itself stale once
+        // it ages out instead of pretending to be live. #2630 put "Tools" and
+        // "Add host" in the header too, so the trailing slot is
+        // [usage pill][cog][+] — the pill only when there is a reading, the
+        // two actions only on a populated page.
         ScreenHeader(
             title = "Hosts",
-            trailing = if (!showHeaderActions) {
+            trailing = if (state.usagePill == null && !showHeaderActions) {
                 null
             } else {
                 {
-                    HeaderIconAction(
-                        icon = PocketShellIcons.Settings,
-                        contentDescription = "Settings and SSH keys",
-                        onClick = { showTools = true },
-                        testTag = HOST_LIST_TOOLS_TAG,
-                    )
-                    HeaderIconAction(
-                        icon = PocketShellIcons.Plus,
-                        contentDescription = "Add host",
-                        onClick = { showAddHostMethods = true },
-                        testTag = HOST_LIST_ADD_TAG,
-                    )
+                    state.usagePill?.let { pill ->
+                        UsageGlancePill(state = pill, onClick = onOpenUsage)
+                    }
+                    if (showHeaderActions) {
+                        HeaderIconAction(
+                            icon = PocketShellIcons.Settings,
+                            contentDescription = "Settings and SSH keys",
+                            onClick = { showTools = true },
+                            testTag = HOST_LIST_TOOLS_TAG,
+                        )
+                        HeaderIconAction(
+                            icon = PocketShellIcons.Plus,
+                            contentDescription = "Add host",
+                            onClick = { showAddHostMethods = true },
+                            testTag = HOST_LIST_ADD_TAG,
+                        )
+                    }
                 }
             },
         )

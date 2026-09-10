@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -23,6 +24,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import com.pocketshell.next.usage.usageGlanceCache
 
 /**
  * [HostListViewModel] against a real in-memory Room database (plan §U-1
@@ -133,8 +135,41 @@ class HostListViewModelTest {
         assertEquals(listOf("hetzner", "zeta"), names)
     }
 
+    /**
+     * Issue #2632: the landing screen shows the last usage reading, so the
+     * state has to carry it. Nothing is connected here — this is the whole
+     * point: the number comes from the cache, not from a fetch.
+     */
+    @Test
+    fun `the landing state carries the last usage reading, or none`() = runTest {
+        insertHost(name = "hetzner", hostname = "135.181.114.209", username = "alexey")
+        val cache = usageGlanceCache()
+
+        assertNull(
+            HostListViewModel(db.hostDao(), cache, UnconfinedTestDispatcher())
+                .state.first { it.loaded }.usagePill,
+        )
+
+        cache.put(
+            com.pocketshell.next.usage.UsageGlancePillState(
+                percent = 63,
+                provider = "Claude",
+                window = null,
+                kind = com.pocketshell.uikit.model.PillKind.Ok,
+                stale = false,
+                fetchedClock = "11:40",
+            ),
+            java.time.Instant.now(),
+        )
+
+        val pill = HostListViewModel(db.hostDao(), cache, UnconfinedTestDispatcher())
+            .state.first { it.loaded }.usagePill
+        assertEquals(63, pill?.percent)
+        assertEquals("Claude", pill?.provider)
+    }
+
     private fun viewModel(): HostListViewModel =
-        HostListViewModel(db.hostDao(), UnconfinedTestDispatcher())
+        HostListViewModel(db.hostDao(), usageGlanceCache(), UnconfinedTestDispatcher())
 
     private suspend fun insertHost(
         name: String,

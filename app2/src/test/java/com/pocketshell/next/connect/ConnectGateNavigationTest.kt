@@ -22,6 +22,7 @@ import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.next.usage.usageGlanceCache
 
 /**
  * The whole U-2 edge as a real composition on the host JVM: the real host list
@@ -162,7 +163,7 @@ class ConnectGateNavigationTest {
         startupHostId: Long? = null,
         startupHostExists: suspend (Long) -> Boolean = { true },
     ): NavHostController {
-        val hostListViewModel = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
+        val hostListViewModel = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()

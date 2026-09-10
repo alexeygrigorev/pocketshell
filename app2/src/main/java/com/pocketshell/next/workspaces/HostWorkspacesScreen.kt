@@ -41,6 +41,9 @@ import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.next.tree.SESSION_TREE_FILES_TAG
 import com.pocketshell.next.tree.SESSION_TREE_PORTS_TAG
 import com.pocketshell.next.tree.SESSION_TREE_USAGE_TAG
+import com.pocketshell.next.usage.UsageGlancePill
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.UsageGlanceViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
@@ -124,11 +127,31 @@ fun HostWorkspacesRoute(
     onDisconnect: () -> Unit = {},
     initialRootPath: String? = null,
     initialRootAction: String? = null,
+    /**
+     * Issue #2632: when true, this visit was started by opening the HOST (a
+     * cold-launch resume or a host-row tap), so the last session the user was
+     * in on this host is reopened as soon as the live listing confirms it is
+     * still running. Backing out of that session returns here and does NOT
+     * re-fire: the arm is consumed once by the nav-entry-scoped ViewModel.
+     */
+    resumeLastSession: Boolean = false,
     modifier: Modifier = Modifier,
     viewModel: HostWorkspacesViewModel = hiltViewModel(),
+    /**
+     * Optional so a Robolectric composition with no Hilt graph can still host
+     * the route — the same seam [com.pocketshell.next.tree.SessionTreeRoute]
+     * uses. Production always passes one.
+     */
+    usageGlanceViewModel: UsageGlanceViewModel? = null,
 ) {
     val state by viewModel.state.collectAsState()
+    val usagePillState = hostUsageGlancePill(usageGlanceViewModel, state.loaded)
+    LaunchedEffect(resumeLastSession) { if (resumeLastSession) viewModel.armResume() }
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LaunchedEffect(state.resumeSession) {
+        val session = viewModel.consumeResumeSession() ?: return@LaunchedEffect
+        onOpenSession(session)
+    }
     LaunchedEffect(initialRootPath, initialRootAction) {
         val root = initialRootPath?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
         when (initialRootAction) {
@@ -138,12 +161,31 @@ fun HostWorkspacesRoute(
     }
     LaunchedEffect(state.openWorkspacePath) {
         val path = viewModel.consumeOpenWorkspace() ?: return@LaunchedEffect
+        // A just-added workspace has no sessions yet, so this deliberately
+        // goes to the workspace screen rather than through the direct entry.
         onOpenWorkspace(path)
     }
+
+    // Issue #2632 (maintainer follow-up 2026-09-10): "I don't want to have
+    // another screen — I want to jump to the last session I opened". A
+    // workspace tap therefore resolves to that workspace's own session and
+    // opens the terminal directly; the workspace screen is what a workspace
+    // with NOTHING running still needs, and only that.
+    val openWorkspaceDirectly: (String) -> Unit = { path ->
+        val entry = viewModel.entrySessionFor(path)
+        if (entry != null) onOpenSession(entry) else onOpenWorkspace(path)
+    }
+
     HostWorkspacesScreen(
         state = state,
-        onRefresh = viewModel::refresh,
-        onOpenWorkspace = onOpenWorkspace,
+        // Pull-to-refresh means "tell me what is true now", and the usage
+        // number is part of that. `loaded` only flips once, so without this
+        // the pill would keep showing the reading from screen entry.
+        onRefresh = {
+            viewModel.refresh()
+            usageGlanceViewModel?.refresh()
+        },
+        onOpenWorkspace = openWorkspaceDirectly,
         onStartSessionAtPath = onStartSessionAtPath,
         onOpenReorder = onOpenReorder,
         onOpenSession = onOpenSession,
@@ -152,6 +194,7 @@ fun HostWorkspacesRoute(
         onOpenPorts = onOpenPorts,
         onBack = onBack,
         onOpenUsage = onOpenUsage,
+        usagePillState = usagePillState,
         onOpenProjectRoots = onOpenProjectRoots,
         onOpenConnectionDetails = onOpenConnectionDetails,
         onDisconnect = onDisconnect,
@@ -173,6 +216,29 @@ fun HostWorkspacesRoute(
     )
 }
 
+/**
+ * The host-scoped usage glance (issue #2632).
+ *
+ * Refreshed on `ON_START` — the same event the workspace listing uses — and
+ * AGAIN once [loaded] flips true. The second trigger is what makes the pill
+ * reliable rather than lucky: on a cold-launch resume both effects fire while
+ * the dial is still in flight, and a `fetchAll` at that moment sees no live
+ * connection (D21: usage never dials, it only asks hosts that are already
+ * connected) and returns nothing. Re-asking once the listing has landed means
+ * the connection definitely exists.
+ */
+@Composable
+private fun hostUsageGlancePill(
+    viewModel: UsageGlanceViewModel?,
+    loaded: Boolean,
+): UsageGlancePillState? {
+    if (viewModel == null) return null
+    val pill by viewModel.state.collectAsState()
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.refresh() }
+    LaunchedEffect(loaded) { if (loaded) viewModel.refresh() }
+    return pill
+}
+
 /** Stateless Quiet host root; all rows come from [HostWorkspacesUiState]. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -188,6 +254,7 @@ fun HostWorkspacesScreen(
     onOpenPorts: () -> Unit = {},
     onBack: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    usagePillState: UsageGlancePillState? = null,
     onOpenProjectRoots: () -> Unit = {},
     onOpenConnectionDetails: () -> Unit = {},
     onDisconnect: () -> Unit = {},
@@ -263,6 +330,11 @@ fun HostWorkspacesScreen(
             onBack = onBack,
             backTestTag = HOST_WORKSPACES_BACK_TAG,
             trailing = {
+                // Issue #2632: usage sits ON the host screen, not three taps
+                // deep behind the kebab's Host tools sheet.
+                usagePillState?.let { pill ->
+                    UsageGlancePill(state = pill, onClick = onOpenUsage)
+                }
                 KebabTrigger(
                     onClick = { hostToolsVisible = true },
                     contentDescription = "Host actions",

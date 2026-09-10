@@ -15,7 +15,7 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.openQuietHost
-import com.pocketshell.next.terminal.SESSION_CONTEXT_BAR_TAG
+import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
 import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
@@ -221,11 +221,11 @@ class J14StopSessionJourney {
 
     private fun awaitSessionScreen() {
         awaitTag(SESSION_SCREEN_TAG)
-        awaitTag(SESSION_CONTEXT_BAR_TAG)
+        awaitTag(SESSION_TAB_STRIP_TAG)
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertIsDisplayed()
         // Quiet terminal chrome puts the workspace name in the large header
-        // and the session identity in the compact switcher row below it.
-        compose.onNodeWithTag(SESSION_CONTEXT_BAR_TAG).assertIsDisplayed()
+        // and the sibling sessions in the tab strip below it (#2632).
+        compose.onNodeWithTag(SESSION_TAB_STRIP_TAG).assertIsDisplayed()
     }
 
     private fun awaitTag(tag: String) {

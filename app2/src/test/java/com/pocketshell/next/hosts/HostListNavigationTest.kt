@@ -24,6 +24,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.next.usage.usageGlanceCache
 
 /**
  * The host list end to end on the host JVM: a row stored in Room is rendered by
@@ -201,7 +202,7 @@ class HostListNavigationTest {
     }
 
     private fun setContent(): NavHostController {
-        val vm = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
+        val vm = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()

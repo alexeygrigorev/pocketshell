@@ -679,6 +679,40 @@ class DesignRenders {
     }
 
     /**
+     * Issue #2632: the in-session tab strip. Unlike most fixtures here this
+     * renders the PRODUCTION composable
+     * ([com.pocketshell.uikit.components.SessionTabStrip]) — it was built in
+     * the ui-kit for exactly that reason — so the render is the real widget,
+     * not a mirror of it.
+     */
+    @Test
+    fun sessionTabStrip() = render("session-tab-strip") {
+        SessionTabStripRender()
+    }
+
+    /**
+     * Issue #2632: usage/cost visible on load. The Hosts landing screen paints
+     * the last reading (cached and honestly clocked, because a pre-connection
+     * screen cannot fetch one — D21), and the host screen a resumed launch
+     * lands on paints the live one next to its kebab instead of burying it
+     * three taps deep in the Host tools sheet.
+     */
+    @Test
+    fun landingUsageGlance() = render("landing-usage-glance") {
+        LandingUsageGlanceRender()
+    }
+
+    /**
+     * Issue #2632 (maintainer follow-up): the whole workspace-tap path in one
+     * image — host workspace rows, then the terminal + tab strip that ONE tap
+     * now lands on, with no session-picker screen in between.
+     */
+    @Test
+    fun workspaceTapToSession() = render("workspace-tap-to-session") {
+        WorkspaceTapToSessionRender()
+    }
+
+    /**
      * Issue #2532: session-tree header with Back top-left and Usage in the
      * trailing slot next to Files/Ports. The real tree is app-only; this is
      * the fast JVM check that both words are visible.

@@ -35,13 +35,14 @@ class SettingsScreenTest {
                     onOpenVoice = { opened += "voice" },
                     onOpenConnections = { opened += "connections" },
                     onOpenAdvanced = { opened += "advanced" },
+                    onOpenAccount = { opened += "account" },
                     onOpenDiagnostics = { opened += "diagnostics" },
                     onOpenAbout = { opened += "about" },
                 ),
             )
         }
 
-        listOf("terminal", "voice", "connections", "advanced", "diagnostics", "about")
+        listOf("terminal", "voice", "connections", "advanced", "account", "diagnostics", "about")
             .forEach { id ->
                 composeRule.onNodeWithTag(SETTINGS_LIST_TAG)
                     .performScrollToNode(hasTestTag(settingsCategoryTag(id)))
@@ -64,6 +65,7 @@ class SettingsScreenTest {
                     onOpenVoice = {},
                     onOpenConnections = {},
                     onOpenAdvanced = {},
+                    onOpenAccount = {},
                     onOpenDiagnostics = {},
                     onOpenAbout = {},
                 ),

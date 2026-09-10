@@ -54,6 +54,7 @@ import com.pocketshell.next.ports.ServicesRoute
 import com.pocketshell.next.ports.TunnelDetailRoute
 import com.pocketshell.next.settings.LocalAppSettings
 import com.pocketshell.next.settings.AboutRoute
+import com.pocketshell.next.sync.AccountSyncRoute
 import com.pocketshell.next.settings.AdvancedSettingsRoute
 import com.pocketshell.next.settings.ConnectionSettingsRoute
 import com.pocketshell.next.settings.GraceSettingsRoute
@@ -447,6 +448,9 @@ fun AppNavHost(
     },
     advancedSettingsScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
         AdvancedSettingsRoute(onBack = onBack)
+    },
+    accountSyncScreen: @Composable (onBack: () -> Unit) -> Unit = { onBack ->
+        AccountSyncRoute(onBack = onBack)
     },
     diagnosticsScreen: @Composable (
         onBack: () -> Unit,
@@ -869,6 +873,7 @@ fun AppNavHost(
                     onOpenVoice = { navController.navigate(Destination.VoiceSettings.route()) },
                     onOpenConnections = { navController.navigate(Destination.ConnectionSettings.route()) },
                     onOpenAdvanced = { navController.navigate(Destination.AdvancedSettings.route()) },
+                    onOpenAccount = { navController.navigate(Destination.AccountSync.route()) },
                     onOpenDiagnostics = { navController.navigate(Destination.Diagnostics.route()) },
                     onOpenAbout = { navController.navigate(Destination.About.route()) },
                 ),
@@ -898,6 +903,9 @@ fun AppNavHost(
         }
         composable(Destination.AdvancedSettings.pattern) {
             advancedSettingsScreen { navController.popBackStack() }
+        }
+        composable(Destination.AccountSync.pattern) {
+            accountSyncScreen { navController.popBackStack() }
         }
         composable(Destination.Diagnostics.pattern) {
             diagnosticsScreen(

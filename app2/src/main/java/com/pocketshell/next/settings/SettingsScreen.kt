@@ -80,6 +80,7 @@ data class SettingsNavigation(
     val onOpenVoice: () -> Unit,
     val onOpenConnections: () -> Unit,
     val onOpenAdvanced: () -> Unit,
+    val onOpenAccount: () -> Unit,
     val onOpenDiagnostics: () -> Unit,
     val onOpenAbout: () -> Unit,
 )
@@ -139,6 +140,13 @@ fun SettingsScreen(
             subtitle = "Timing and compatibility",
             icon = PocketShellIcons.Sliders,
             onClick = navigation.onOpenAdvanced,
+        ),
+        SettingsCategory(
+            id = "account",
+            title = "Account & sync",
+            subtitle = "Optional encrypted host sync",
+            icon = PocketShellIcons.Shield,
+            onClick = navigation.onOpenAccount,
         ),
         SettingsCategory(
             id = "diagnostics",

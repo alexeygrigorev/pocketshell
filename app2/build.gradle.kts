@@ -266,6 +266,16 @@ dependencies {
     // detail flow. MainActivity extends FragmentActivity for BiometricPrompt.
     implementation(libs.androidx.biometric)
 
+    // Issue #2633: optional Google-login settings sync.
+    // `androidx.browser` opens the OAuth authorization request in a Custom Tab
+    // — the system browser, never a WebView (Google refuses a WebView flow, and
+    // a WebView would let the app read the credentials typed into it).
+    // `security-crypto` is the same Keystore-backed EncryptedSharedPreferences
+    // `:shared:core-voice` already uses for the Whisper API key; the OAuth
+    // tokens get their own file, never a shared keyset.
+    implementation(libs.androidx.browser)
+    implementation(libs.androidx.security.crypto)
+
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

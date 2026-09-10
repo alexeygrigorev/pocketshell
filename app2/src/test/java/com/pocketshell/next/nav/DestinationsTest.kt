@@ -44,7 +44,7 @@ class DestinationsTest {
         // The aggregate includes both Quiet workspace routes and the
         // categorized Settings/support plus Services routes. Deprecated aliases
         // (Tree and CrashReports) intentionally do not add duplicate patterns.
-        assertEquals(30, patterns.size)
+        assertEquals(31, patterns.size)
         assertEquals(patterns.size, patterns.toSet().size)
         assertTrue(patterns.none { it.isBlank() })
     }

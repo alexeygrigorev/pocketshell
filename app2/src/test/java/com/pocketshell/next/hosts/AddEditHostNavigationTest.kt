@@ -29,6 +29,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import com.pocketshell.next.usage.usageGlanceCache
 
 /**
  * Add and edit a host through the REAL screens inside the REAL navigation
@@ -217,7 +218,7 @@ class AddEditHostNavigationTest {
      * production scoping too.
      */
     private fun setContent(): NavHostController {
-        val hostList = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
+        val hostList = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         val formViewModel = AddEditHostViewModel(
             stack.db.hostDao(),
             stack.db.sshKeyDao(),

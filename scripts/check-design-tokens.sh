@@ -48,11 +48,19 @@ cd "$REPO_ROOT"
 SCAN_DIR="${POCKETSHELL_DESIGN_TOKEN_SCAN_DIR:-app2/src/main}"
 BASELINE_FILE="scripts/design-token-baseline.txt"
 
-# On-ladder allow-lists (kept in sync with shared/ui-kit theme tokens).
-#   radii  -> PocketShellShapes: extraSmall/small 8, medium 14, large 20, extraLarge 28
-#   sizes  -> headlineSmall 20, titleMedium 16, bodyMedium 14, bodyDense/bodyMono 13,
-#             labelSmall/labelMono 11
-RADIUS_ALLOWED='RoundedCornerShape\((8|14|20|28)\.dp\)'
+# On-ladder allow-lists. The source of truth is
+# `docs/design-kit/design-system/tokens.json`, pinned to the shipped theme by
+# `QuietThemeTokenTest`:
+#   radii  -> radius ladder {4 badge, 8 chip/tile, 12 field/button/card, 24 sheet}
+#   sizes  -> screen 20, title 16, body 14, bodyDense/bodyMono 13,
+#             metadata/label/labelMono 11
+#
+# Issue #2635: this list used to read 8/14/20/28 — a ladder NO shipped file
+# used. `PocketShellShapes` has been 12/12/24 since the Quiet redesign, so a
+# screen writing `RoundedCornerShape(12.dp)` (the correct card radius) was
+# flagged as drift while `RoundedCornerShape(28.dp)` (on no ladder at all)
+# passed. An allow-list that matches nothing shipped is worse than none.
+RADIUS_ALLOWED='RoundedCornerShape\((4|8|12|24)\.dp\)'
 FONTSIZE_ALLOWED='fontSize = (11|13|14|16|20)\.sp'
 
 # EXISTS is not enough — it must have Kotlin in it. A self-test's `mkdir -p`

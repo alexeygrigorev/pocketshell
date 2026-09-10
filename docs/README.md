@@ -10,6 +10,7 @@ context; the README and current feature docs track released behavior.
 | [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
 | [agent-awareness.md](agent-awareness.md) | Live agent identity from an aplexer workload and host logs |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
+| [settings-sync.md](settings-sync.md) | Optional Google sign-in + end-to-end-encrypted host sync, and the OAuth client registration it is blocked on |
 | [diagnostics.md](diagnostics.md) | Shareable JSONL flight recorder for app, connection, network, and action events |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
 | [design-system.md](design-system.md) | Codified dark dev-tool design tokens and shared UI primitives |

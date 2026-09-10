@@ -301,6 +301,7 @@ src    app2/src/main/java/com/pocketshell/next/ports/*        portfwd           
 src    app2/src/main/java/com/pocketshell/next/files/*        files                full
 src    app2/src/main/java/com/pocketshell/next/hosts/*        hosts-settings       full
 src    app2/src/main/java/com/pocketshell/next/settings/*     hosts-settings       full
+src    app2/src/main/java/com/pocketshell/next/sync/*         hosts-settings       full
 src    app2/src/main/java/com/pocketshell/next/release/*      hosts-settings       full
 src    app2/src/main/java/com/pocketshell/next/share/*        share                full
 src    app2/src/main/java/com/pocketshell/next/usage/*        usage-costs          full
@@ -353,6 +354,7 @@ test   app2/src/*/java/com/pocketshell/next/ports/*        portfwd              
 test   app2/src/*/java/com/pocketshell/next/files/*        files                full
 test   app2/src/*/java/com/pocketshell/next/hosts/*        hosts-settings       full
 test   app2/src/*/java/com/pocketshell/next/settings/*     hosts-settings       full
+test   app2/src/*/java/com/pocketshell/next/sync/*         hosts-settings       full
 test   app2/src/*/java/com/pocketshell/next/release/*      hosts-settings       full
 test   app2/src/*/java/com/pocketshell/next/share/*        share                full
 test   app2/src/*/java/com/pocketshell/next/usage/*        usage-costs          full

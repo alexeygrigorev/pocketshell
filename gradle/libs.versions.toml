@@ -18,6 +18,13 @@ core-ktx = "1.17.0"
 activity-compose = "1.10.1"
 material = "1.12.0"
 androidx-biometric = "1.1.0"
+# Custom Tabs for the Google sign-in leg of settings sync (issue #2633). An
+# OAuth authorization request must run in the SYSTEM browser, not a WebView —
+# a WebView-based flow can read the user's Google credentials and Google
+# rejects it outright. androidx.browser is the small AAR that opens one and
+# falls back to a plain browser Intent when no Custom Tabs provider exists.
+# 1.8.0 is the current stable line and is compileSdk-36 clean.
+androidx-browser = "1.8.0"
 
 # navigation-compose (rewrite task M-1, app2). The old `app` module hand-rolled
 # a `remember { mutableStateOf(AppDestination) }` navigator because #18's brief
@@ -150,6 +157,7 @@ core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "androidx-biometric" }
+androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidx-browser" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

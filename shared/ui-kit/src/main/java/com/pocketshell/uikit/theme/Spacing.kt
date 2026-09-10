@@ -32,8 +32,11 @@ object PocketShellSpacing {
     /** 24 dp — sheet and large surface inset. */
     val xxl = 24.dp
 
-    /** 32 dp — separation between independent content sections. */
-    val section = 32.dp
+    // There is deliberately no 32dp `section` rung (#2635 T3). It existed only
+    // because the kit's prose asked for "32dp section separation"; the app's
+    // actual section separation is [PocketShellDensity.sectionGap] (24dp), and
+    // the rung's single remaining consumer moved to it. A rung nothing uses is
+    // an invitation to reintroduce a second spacing grammar.
 }
 
 /**
@@ -46,17 +49,30 @@ object PocketShellSpacing {
  * never shrink the hit area below 48 dp.
  */
 object PocketShellDensity {
-    /** 72 dp — standard Quiet row minimum height. */
-    val rowMinHeight = 72.dp
+    /**
+     * 56 dp — standard row minimum height.
+     *
+     * `docs/design-language.md` asks for a 48 dp *tap* floor, not a 72 dp row.
+     * The Quiet redesign read 72 dp as the design target (#2630): a Hosts
+     * screen with one host and two tools rows then spent ~360 dp of a 915 dp
+     * phone on six items. 56 dp clears [tapTargetMin] with 8 dp to spare and
+     * still fits a title + subtitle at the reconciled 14sp/11sp rungs.
+     */
+    val rowMinHeight = 56.dp
 
-    /** 88 dp — the Quiet workspace row's primary navigation target. */
-    val workspaceRowMinHeight = 88.dp
+    /** 64 dp — the workspace row's primary navigation target, one rung taller. */
+    val workspaceRowMinHeight = 64.dp
 
-    /** 72 dp — the Quiet standard row's minimum touch and reading height. */
-    val standardRowMinHeight = 72.dp
+    /**
+     * The standard row's minimum touch and reading height.
+     *
+     * An alias of [rowMinHeight], not a second value: #2630 shipped because
+     * duplicated copies of one token drifted.
+     */
+    val standardRowMinHeight = rowMinHeight
 
-    /** 16 dp — row vertical padding. Rows may grow for wrapped content. */
-    val rowPadV = 16.dp
+    /** 8 dp — row vertical padding. Rows may grow for wrapped content. */
+    val rowPadV = 8.dp
 
     /** 20 dp — Quiet screen gutter used by standard and workspace rows. */
     val rowPadH = 20.dp
@@ -67,12 +83,15 @@ object PocketShellDensity {
     /** 10 dp — chip horizontal padding. */
     val chipPadH = 10.dp
 
-    /** 32 dp — separation between independent sections. */
-    val sectionGap = 32.dp
+    /** 24 dp — separation between independent sections. */
+    val sectionGap = 24.dp
 
     /** 16 dp — indent applied per workspace-tree nesting level. */
     val treeIndent = 16.dp
 
     /** 48 dp — a11y touch-target floor. Visual density never drops the hit area below this. */
     val tapTargetMin = 48.dp
+
+    /** 56 dp — the minimum height of a text field or a full-width button. */
+    val fieldMinHeight = 56.dp
 }

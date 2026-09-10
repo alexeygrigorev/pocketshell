@@ -4,6 +4,11 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -12,11 +17,17 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import com.pocketshell.uikit.components.COMPOSER_ATTACH_TAG
+import com.pocketshell.uikit.components.COMPOSER_PASTE_LABEL
+import com.pocketshell.uikit.components.COMPOSER_MIC_TAG
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
+import com.pocketshell.uikit.components.COMPOSER_TOOLS_TRIGGER_TAG
 
 /**
  * The rendered composer on the host JVM (Robolectric).
@@ -40,7 +51,6 @@ class ComposerBarTest {
 
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
     }
 
     /**
@@ -66,11 +76,32 @@ class ComposerBarTest {
         setContent(ComposerUiState(draft = "something"))
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsEnabled()
     }
 
+    /**
+     * #2635 C3, reproduce-first: the idle row had FIVE controls — paperclip,
+     * "+", Paste, Send, mic — measuring ~330dp of the 372dp available inside
+     * the 20dp gutters at 412dp. At 360dp (320dp usable) the row does not fit
+     * and Compose clips the trailing mic: a hard failure, not a tight fit.
+     *
+     * This test fails on the five-control row (a `Paste` node exists on the
+     * idle row) and passes once Paste becomes the long-press of Send.
+     */
     @Test
-    fun `insert and send are separate taps`() {
+    fun `paste is not a control on the idle row`() {
+        setContent(ComposerUiState(draft = "something"))
+
+        composeRule.onNodeWithTag(COMPOSER_CONTROLS_ROW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Paste").assertDoesNotExist()
+    }
+
+    /**
+     * #2635 C3: Paste is still REACHABLE, as the long-press of Send. Losing the
+     * verb would be a regression, not a density win — the kit's own spec says
+     * "Paste writes text without Enter; Send explicitly appends Enter".
+     */
+    @Test
+    fun `long pressing send pastes without sending`() {
         var inserts = 0
         var sends = 0
         setContent(
@@ -79,11 +110,64 @@ class ComposerBarTest {
             onSend = { sends += 1 },
         )
 
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performTouchInput { longClick() }
+
+        assertEquals("long-press pastes", 1, inserts)
+        assertEquals("long-press must NOT also send", 0, sends)
+
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
 
         assertEquals(1, inserts)
         assertEquals(1, sends)
+    }
+
+    /**
+     * #2635 C3: a long-press is invisible to TalkBack, so the second verb is
+     * ALSO published as a named accessibility action on the same node.
+     */
+    @Test
+    fun `paste is a named accessibility action on send`() {
+        var inserts = 0
+        setContent(ComposerUiState(draft = "something"), onInsert = { inserts += 1 })
+
+        val actions = composeRule.onNodeWithTag(COMPOSER_SEND_TAG)
+            .fetchSemanticsNode()
+            .config[SemanticsActions.CustomActions]
+        val paste = actions.firstOrNull { it.label == COMPOSER_PASTE_LABEL }
+        assertNotNull("Send must publish a $COMPOSER_PASTE_LABEL action", paste)
+        paste!!.action?.invoke()
+        assertEquals(1, inserts)
+    }
+
+    /**
+     * #2635 C3: and it is DISCOVERABLE — a named row in the "+" tools sheet, so
+     * the verb is not gesture-only (Nielsen #6, recognition over recall).
+     */
+    @Test
+    fun `the tools sheet offers paste without sending`() {
+        var inserts = 0
+        setContent(ComposerUiState(draft = "something"), onInsert = { inserts += 1 })
+
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+
+        assertEquals(1, inserts)
+    }
+
+    /**
+     * #2635 C4: the hotkeys panel had TWO entry points — the floating
+     * launcher's keyboard button and a "Terminal keys" row inside the "+"
+     * sheet. D22 says delete the loser; the launcher wins because `^C` is
+     * something you reach for while the terminal is in front of you.
+     */
+    @Test
+    fun `the tools sheet has no terminal keys row`() {
+        setContent(ComposerUiState(draft = "something"))
+
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+
+        composeRule.onNodeWithText("Terminal keys").assertDoesNotExist()
+        composeRule.onNodeWithTag("composer-tools-hotkeys").assertDoesNotExist()
     }
 
     /** An attachment on its own is a complete message. */
@@ -229,10 +313,8 @@ class ComposerBarTest {
         setContent(ComposerUiState(draft = "hello", micAvailable = true))
 
         composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
 
@@ -242,8 +324,96 @@ class ComposerBarTest {
         composeRule.onNodeWithTag(COMPOSER_PREVIEW_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_DISCARD_TAG).assertDoesNotExist()
 
-        assertSameRow(COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
-        assertSameRow(COMPOSER_TOOLS_TRIGGER_TAG, COMPOSER_INSERT_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+        assertSameRow(COMPOSER_ATTACH_TAG, COMPOSER_TOOLS_TRIGGER_TAG, COMPOSER_SEND_TAG, COMPOSER_MIC_TAG)
+    }
+
+    /**
+     * #2630 reproduce-first: "now the attach button is hidden under plus".
+     *
+     * #2529 folded Attach into the "+" sheet, so staging a screenshot went from
+     * one tap to two-plus-a-modal. This fails on that shape — the tag does not
+     * exist until the sheet is opened — and passes only when the paperclip is a
+     * real control on the idle row next to Send and the mic.
+     */
+    @Test
+    fun `attach is one tap on the controls row not a row inside the plus sheet`() {
+        var attaches = 0
+        setContent(ComposerUiState(draft = "hello", micAvailable = true), onAttach = { attaches += 1 })
+
+        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Attach files").assertIsDisplayed()
+        assertSameRow(
+            COMPOSER_ATTACH_TAG,
+            COMPOSER_TOOLS_TRIGGER_TAG,
+            COMPOSER_SEND_TAG,
+            COMPOSER_MIC_TAG,
+        )
+
+        // One tap, from the closed composer, reaches the document picker.
+        composeRule.onNodeWithTag(COMPOSER_ATTACH_TAG).performClick()
+        assertEquals(1, attaches)
+
+        // And it is no longer duplicated inside the sheet: the "+" panel keeps
+        // only the genuinely occasional tools.
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TRIGGER_TAG).performClick()
+        composeRule.onNodeWithTag(COMPOSER_TOOLS_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Attach file").assertDoesNotExist()
+        composeRule.onNodeWithTag(COMPOSER_HISTORY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_SLASH_TRIGGER_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_DISCARD_TAG).assertIsDisplayed()
+    }
+
+    /**
+     * #2630 reproduce-first: the maintainer's annotated screenshot arrows the
+     * stacked attachment info, and their follow-up review asked for the
+     * pre-0.5.0 shape back.
+     *
+     * A single staged file announced itself three times — a dismissable
+     * "Attached 1 file." banner, the tile, and a full-width "Uploaded to
+     * <remote path>" line per file. The tiles are now the whole signal, and
+     * they sit BELOW the draft field the way the old client had them
+     * (`Issue2057AttachmentTilesBelowDraftProofTest`) rather than shoving the
+     * editor down.
+     *
+     * This fails on the shipped shape (a destination line exists, and the tiles
+     * are above the field) and passes on tiles-only, below the draft.
+     */
+    @Test
+    fun `staged attachments are just tiles and they sit below the draft field`() {
+        val second = StagedAttachment(SECOND_REMOTE_PATH, "log.txt", "text/plain")
+        setContent(ComposerUiState(draft = "look", attachments = listOf(attachment(), second)))
+
+        composeRule.onNodeWithTag(composerAttachmentTileTag(REMOTE_PATH)).assertIsDisplayed()
+        composeRule.onNodeWithTag(composerAttachmentTileTag(SECOND_REMOTE_PATH)).assertIsDisplayed()
+
+        // No destination caption survives, in any spelling: not per file, not
+        // merged for the batch.
+        composeRule.onNodeWithText("Uploaded to $REMOTE_PATH").assertDoesNotExist()
+        composeRule.onNodeWithText("Uploaded to $SECOND_REMOTE_PATH").assertDoesNotExist()
+        composeRule.onNodeWithText("Uploaded to $REMOTE_DIR").assertDoesNotExist()
+        assertEquals(
+            "no 'Uploaded to' caption may remain under the tiles",
+            0,
+            composeRule.onAllNodesWithText("Uploaded to", substring = true)
+                .fetchSemanticsNodes().size,
+        )
+
+        // Order: draft field, THEN the tiles, THEN the controls row.
+        val draft = composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).fetchSemanticsNode().boundsInRoot
+        val tiles = composeRule.onNodeWithTag(COMPOSER_ATTACHMENTS_TAG).fetchSemanticsNode().boundsInRoot
+        val controls = composeRule.onNodeWithTag(COMPOSER_CONTROLS_ROW_TAG)
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "tiles must sit BELOW the draft field (draft ended at ${draft.bottom}, " +
+                "tiles started at ${tiles.top})",
+            tiles.top >= draft.bottom,
+        )
+        assertTrue(
+            "tiles must sit above the controls row (tiles ended at ${tiles.bottom}, " +
+                "controls started at ${controls.top})",
+            tiles.bottom <= controls.top,
+        )
     }
 
     /**
@@ -385,7 +555,6 @@ class ComposerBarTest {
         )
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
 
         assertEquals("local draft more", drafts.last())
@@ -400,6 +569,7 @@ class ComposerBarTest {
         onDraftChange: (String) -> Unit = {},
         onSend: () -> Unit = {},
         onInsert: () -> Unit = {},
+        onAttach: () -> Unit = {},
         onRemoveAttachment: (String) -> Unit = {},
         onToggleHistory: () -> Unit = {},
         onMicTap: () -> Unit = {},
@@ -413,7 +583,7 @@ class ComposerBarTest {
                     onDraftChange = onDraftChange,
                     onSend = onSend,
                     onInsert = onInsert,
-                    onAttach = {},
+                    onAttach = onAttach,
                     onMicTap = onMicTap,
                     onCancelRecording = onCancelRecording,
                     onToggleHistory = onToggleHistory,
@@ -450,6 +620,8 @@ class ComposerBarTest {
     }
 
     private companion object {
-        const val REMOTE_PATH = "~/.pocketshell/attachments/7-devbox/shot.png"
+        const val REMOTE_DIR = "~/.pocketshell/attachments/7-devbox"
+        const val REMOTE_PATH = "$REMOTE_DIR/shot.png"
+        const val SECOND_REMOTE_PATH = "$REMOTE_DIR/log.txt"
     }
 }

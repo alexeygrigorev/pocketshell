@@ -5,13 +5,18 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.next.di.IoDispatcher
+import com.pocketshell.next.di.LiveHostIds
+import com.pocketshell.next.usage.UsageGlanceCache
+import com.pocketshell.next.usage.UsageGlancePillState
+import com.pocketshell.next.usage.toPillState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -24,14 +29,25 @@ import kotlinx.coroutines.launch
  * ViewModel needed probe scheduling, cache-staleness rules and a connection
  * observer to keep them honest. app2's list is a read-only projection of the
  * `hosts` table: what Room emits is what the screen paints, so there is no
- * second source of truth to reconcile. Status indicators come back in a later
- * plan task (P-6) on top of the connections registry, not from here.
+ * second source of truth to reconcile. [connected] is the one derived field,
+ * and it stays honest the same way — it is `ConnectionsRegistry`'s own live
+ * feed folded in, not a status this ViewModel caches and has to re-check.
  */
 data class HostRow(
     val id: Long,
     val name: String,
     /** `username@hostname` — the muted mono subtitle line on the row. */
     val subtitle: String,
+    /**
+     * Whether this host currently holds a live connection (#2635 2a).
+     *
+     * Read from [com.pocketshell.next.connect.ConnectionsRegistry.liveHostIds],
+     * which observes the transports themselves — this is not a cached flag the
+     * list has to keep honest, which is what the comment above meant by "no
+     * second source of truth to reconnect". Never dials: the list is a
+     * pre-connection screen (D21).
+     */
+    val connected: Boolean = false,
 )
 
 /**
@@ -44,6 +60,18 @@ data class HostRow(
 data class HostListUiState(
     val hosts: List<HostRow> = emptyList(),
     val loaded: Boolean = false,
+    /**
+     * The last usage reading this device saw, or null on an install that has
+     * never read one (issue #2632).
+     *
+     * Cached, never live: the host list is a pre-connection screen and usage
+     * never dials (D21). It is rendered by the same
+     * [com.pocketshell.next.usage.UsageGlancePill] the session screen uses, so
+     * a reading older than
+     * [com.pocketshell.next.usage.USAGE_GLANCE_STALE_AFTER] shows its muted
+     * "read at HH:mm" form rather than passing itself off as live.
+     */
+    val usagePill: UsageGlancePillState? = null,
 )
 
 /**
@@ -62,6 +90,8 @@ data class HostListUiState(
 @HiltViewModel
 class HostListViewModel @Inject constructor(
     private val hostDao: HostDao,
+    usageGlanceCache: UsageGlanceCache,
+    @LiveHostIds liveHostIds: @JvmSuppressWildcards Flow<Set<Long>>,
     @IoDispatcher dispatcher: CoroutineDispatcher,
 ) : ViewModel() {
 
@@ -79,8 +109,19 @@ class HostListViewModel @Inject constructor(
     }
 
     val state: StateFlow<HostListUiState> =
-        hostDao.getAll()
-            .map { hosts -> HostListUiState(hosts = hosts.map { toRow(it) }, loaded = true) }
+        combine(
+            hostDao.getAll(),
+            usageGlanceCache.last,
+            liveHostIds,
+        ) { hosts, usage, liveHostIds ->
+            HostListUiState(
+                hosts = hosts.map { toRow(it, connected = it.id in liveHostIds) },
+                loaded = true,
+                // Re-derived per emission, not stored: staleness is a function
+                // of when the reading was taken and when it is being looked at.
+                usagePill = usage?.toPillState(),
+            )
+        }
             .flowOn(dispatcher)
             .stateIn(
                 scope = viewModelScope,
@@ -99,10 +140,11 @@ class HostListViewModel @Inject constructor(
          * the stored label is blank, so a row imported without a name is still
          * tappable and identifiable rather than rendering as an empty line.
          */
-        fun toRow(host: HostEntity): HostRow = HostRow(
+        fun toRow(host: HostEntity, connected: Boolean): HostRow = HostRow(
             id = host.id,
             name = host.name.ifBlank { host.hostname },
             subtitle = "${host.username}@${host.hostname}",
+            connected = connected,
         )
     }
 }

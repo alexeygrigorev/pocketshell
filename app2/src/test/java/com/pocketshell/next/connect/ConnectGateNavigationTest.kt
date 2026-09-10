@@ -13,6 +13,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.AppNavHost
 import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.HostListViewModel
+import com.pocketshell.next.hosts.noLiveHosts
 import com.pocketshell.next.hosts.hostRowTag
 import com.pocketshell.next.nav.Destination
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.next.usage.usageGlanceCache
 
 /**
  * The whole U-2 edge as a real composition on the host JVM: the real host list
@@ -162,7 +164,7 @@ class ConnectGateNavigationTest {
         startupHostId: Long? = null,
         startupHostExists: suspend (Long) -> Boolean = { true },
     ): NavHostController {
-        val hostListViewModel = HostListViewModel(stack.db.hostDao(), Dispatchers.Unconfined)
+        val hostListViewModel = HostListViewModel(stack.db.hostDao(), usageGlanceCache(), noLiveHosts(), Dispatchers.Unconfined)
         lateinit var controller: NavHostController
         composeRule.setContent {
             controller = rememberNavController()

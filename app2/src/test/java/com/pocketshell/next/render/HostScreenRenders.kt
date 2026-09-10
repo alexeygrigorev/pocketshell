@@ -41,6 +41,24 @@ import org.robolectric.annotation.GraphicsMode
  * These are renders, not assertions — they exist to be looked at. The behaviour
  * of every screen below is covered by its own test class; nothing here is the
  * only check on anything.
+ *
+ * ## Reading these PNGs
+ *
+ * Each capture is the FULL 1236x2745 phone viewport, so it is 2.2x taller than
+ * it is wide. Downscaled to fit a review pane, sparse content at one end is easy
+ * to mis-attribute to the other — #2630's review reported a semi-transparent
+ * "Add host" ghosted into the Hosts header, and the pixels showed the only
+ * "Add host" in the file was the real one, 2500px lower. Before filing a visual
+ * bug from one of these, crop or amplify the region:
+ *
+ * ```
+ * convert build/renders/<name>.png -crop 1236x400+0+0 +repage -level 5%,14% /tmp/band.png
+ * ```
+ *
+ * The `-level` stretch maps the near-background range to full contrast, so any
+ * ink down to alpha 1/255 becomes obvious and a genuinely empty band stays flat.
+ * A screen's real structure is asserted by its own test class (for the host
+ * list, `HostListDensityTest`), never by a reading of one of these images.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)

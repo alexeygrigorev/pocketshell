@@ -15,27 +15,37 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.uikit.components.CommandChip
+import com.pocketshell.uikit.components.ComposerIdleControls
+import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.icons.PocketShellIcons
+import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Issue #2529: Prompt Composer as a floating sheet — title, close, draft,
- * and the v0.4.47 single action row: grouped 📎/`{}`/`/` pill, Insert,
- * filled Send, 44dp mic. The real `PromptComposerSheet` lives in app2; this
- * is the ui-kit visual mirror `scripts/render.sh` can actually run.
+ * Prompt Composer as a floating sheet — title, close, draft, and the single
+ * action row. The real `PromptComposerSheet` lives in app2; this is the ui-kit
+ * visual mirror `scripts/render.sh` can actually run.
+ *
+ * Updated for #2630: the action row is [ComposerIdleControlsRow], which now
+ * mirrors app2's real `ControlsRow` rather than the v0.4.47 grouped
+ * 📎/`{}`/`/` pill it had frozen at. A mirror that has drifted from the screen
+ * it mirrors is worse than no mirror — it renders green for a layout that no
+ * longer exists.
  */
 @Composable
 internal fun PromptComposerSheetRender() {
@@ -46,7 +56,7 @@ internal fun PromptComposerSheetRender() {
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
-        SheetHeader(title = "Prompt Composer", onClose = {})
+        SheetHeader(title = COMPOSER_SHEET_TITLE_MIRROR, onClose = {})
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -89,7 +99,7 @@ internal fun ComposerControlsRowRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -125,87 +135,43 @@ internal fun ComposerControlsRowRender() {
     }
 }
 
-/** v0.4.47 idle row (#2529): [📎  {}  /] .... [Insert] [Send ➤] [MIC]. */
+/**
+ * The idle controls row as app2's `ComposerBar.ControlsRow` composes it after
+ * #2630:
+ *
+ * ```
+ * [📎] [+] ....................... [Send ➤] (MIC)
+ * ```
+ *
+ * Paste is the long-press of Send since #2635 C3 — five controls did not fit a
+ * 360dp device — and this fixture calls the production
+ * [com.pocketshell.uikit.components.ComposerIdleControls], so it cannot say
+ * otherwise than the app does.
+ */
 @Composable
 private fun ComposerIdleControlsRow() {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                .padding(horizontal = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-            }
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "{}",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "/",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        Box(
-            modifier = Modifier
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "Insert",
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Row(
-            modifier = Modifier
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                .padding(horizontal = 18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Text(
-                text = "Send",
-                color = PocketShellColors.OnAccent,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
-        }
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(PocketShellColors.Accent, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
-        }
-    }
+    // #2635: the REAL production component, not a mirror of it. This render is
+    // now evidence about the shipped screen; before, it was evidence about a
+    // hand-kept copy that had already drifted twice this session.
+    ComposerIdleControls(
+        onAttach = {},
+        onOpenTools = {},
+        onSend = {},
+        onPaste = {},
+        onMicTap = {},
+    )
 }
+
+/**
+ * What the production sheet header actually says (`PromptComposerSheet`:
+ * `"Input to $targetLabel"`). The mirrors said "Prompt Composer" — the kit's
+ * own rule is "always name the input target before Send", so a render showing
+ * a generic title was showing a rule being broken that production keeps.
+ */
+private const val COMPOSER_SHEET_TITLE_MIRROR = "Input to claude-main"
+
+private val COMPOSER_ACTION_HEIGHT = 48.dp
+private val COMPOSER_PILL_SHAPE = RoundedCornerShape(12.dp)
 
 @Composable
 internal fun ComposerRecordingControlsRowRender() {
@@ -326,7 +292,7 @@ internal fun ComposerLongDraftCaretVisibleRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -435,30 +401,10 @@ internal fun ComposerLongDraftCaretVisibleRender() {
     }
 }
 
-@Composable
-internal fun TerminalBottomChipsWithCompactHotkeysRender() {
-        Spacer(Modifier.height(560.dp))
-        // The reclaimed space: NO full-width bar row here anymore — just the
-        // single chip band below, with the compact `hotkeys` chip inline.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(PocketShellColors.Surface)
-                .border(1.dp, PocketShellColors.Border)
-                .padding(horizontal = 10.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            // The flexible static-chip strip yields/scrolls in production;
-            // the primary cluster (incl. the new compact `hotkeys` chip) is
-            // pinned to the right and always fully visible.
-            CommandChip(label = "clear", onClick = {})
-            Spacer(Modifier.weight(1f))
-            CommandChip(label = "Enter", onClick = {})
-            CommandChip(label = "hotkeys", onClick = {})
-            CommandChip(label = "snippets", onClick = {})
-        }
-}
+// #2635 dead-canon cut: `TerminalBottomChipsWithCompactHotkeysRender` was a
+// static mirror of `:app`'s `BottomChipControls` — a screen the rewrite
+// hard-deleted (#2481) — drawn with `CommandChip`, a ui-kit component with
+// zero app2 consumers. Both are gone (D22).
 
 @Composable
 internal fun ConversationLauncherOnlyBottomRender() {
@@ -539,7 +485,7 @@ internal fun ComposerKeyboardUpNoKeyBarRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -670,7 +616,7 @@ internal fun ComposerSlashAutocompleteRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -961,17 +907,25 @@ internal fun ComposerQueueStateRender(failed: Boolean = false, offline: Boolean 
 
 /**
  * Issue #2057: the composer with staged attachment tiles BELOW the draft field —
- * between the editor and the bottom controls row (📎 · `{}` · `/` · Send · mic),
- * which is where the maintainer wants them and where they sat before #1619
- * hoisted them above the field.
+ * between the editor and the bottom controls row — which is where the
+ * maintainer wants them and where they sat before #1619 hoisted them above the
+ * field.
  *
- * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTileGrid`
- * live in the `:app` module, which the ui-kit render harness cannot see, so this
+ * Issue #2630 updated the attachment block itself: staging a file used to say
+ * so three times (a dismissable "Attached N file(s)." banner, the tile, and a
+ * full-width "Uploaded to <full remote path>" line PER file). It is now the
+ * tiles and NOTHING else — #2630's second round deleted the merged destination
+ * line too ("the remote path is not actionable inside the composer, it is
+ * injected into the message on send"), and #2635 C2 confirmed this fixture
+ * matches: no banner, no per-file caption, no batch destination line.
+ *
+ * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTiles`
+ * live in the app2 module, which the ui-kit render harness cannot see, so this
  * is a hand-written static MIRROR of the arrangement, not the production
- * composable. It is the fast "does the order read right?" check only. The
- * acceptance for the layout itself is
- * `Issue2057AttachmentTilesBelowDraftProofTest` plus the full-device emulator
- * screenshot; a change to the production layout does NOT change this render.
+ * composable. It is the fast "does the order read right?" check only; the
+ * acceptance for the layout itself is `ComposerBarTest` plus the full-device
+ * emulator screenshot, and a change to the production layout does NOT change
+ * this render — keep them in step by hand.
  */
 @Composable
 internal fun ComposerAttachmentsBelowFieldRender() {
@@ -998,7 +952,7 @@ internal fun ComposerAttachmentsBelowFieldRender() {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Prompt Composer",
+                text = COMPOSER_SHEET_TITLE_MIRROR,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = PocketShellColors.Text,
@@ -1029,7 +983,10 @@ internal fun ComposerAttachmentsBelowFieldRender() {
                 fontSize = 14.sp,
             )
         }
-        // 2) THEN the staged attachment tiles, directly under the field.
+        // 2) THEN the staged attachment tiles, directly under the field, and
+        //    NOTHING else — no "Attached 2 files." banner, no per-file
+        //    "Uploaded to <path>" caption, no merged destination line (#2630).
+        //    The tile is the whole signal, as in the pre-0.5.0 composer.
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AttachmentTileMirror(label = "Screenshot_2026…png", type = "PNG")
@@ -1037,67 +994,7 @@ internal fun ComposerAttachmentsBelowFieldRender() {
         }
         // 3) THEN the controls row.
         Spacer(Modifier.height(12.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-                }
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "{ }",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "/",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Row(
-                modifier = Modifier
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
-                Text(
-                    text = "Send",
-                    color = PocketShellColors.OnAccent,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
-            }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(PocketShellColors.Accent, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
-            }
-        }
+        ComposerIdleControlsRow()
     }
 }
 
@@ -1127,6 +1024,7 @@ private fun AttachmentTileMirror(label: String, type: String) {
             Text(
                 text = label,
                 color = PocketShellColors.TextSecondary,
+                // Matches ComposerAttachmentTiles' 9sp in-tile caption (#2630).
                 fontSize = 9.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

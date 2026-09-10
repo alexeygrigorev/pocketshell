@@ -114,6 +114,50 @@
         </activity>
 
         <!--
+            Issue #2633: the Google sign-in redirect target for optional
+            settings sync.
+
+            An Android OAuth client's redirect URI is its client ID with the
+            dot-separated labels reversed — Google issues no other form for
+            this client type, and it is not a URL, so there is no App Link and
+            no loopback listener (which is what the desktop app uses and what
+            cannot work here). The browser hands the authorization code back by
+            launching this scheme, so an activity has to declare it.
+
+            `exported="true"` because that is what "the browser can launch it"
+            means; SyncOAuthRedirectActivity therefore treats its intent as
+            untrusted input, and the `state` nonce checked in
+            `parseAuthorizationCallback` is what rejects a redirect this app
+            did not start.
+
+            `excludeFromRecents` + `noHistory`: a one-shot transaction that
+            finishes in onCreate must not leave a second PocketShell card in
+            Recents or a blank entry on the back stack.
+
+            KEEP THE SCHEME IN SYNC WITH SyncConfig.GOOGLE_ANDROID_CLIENT_ID.
+            It is the reversed form of that constant, and `SyncConfigTest`
+            fails if the two drift — a mismatch is silent at build time and
+            shows up only as a sign-in that never comes back. Both are
+            placeholders until the maintainer registers the Android OAuth
+            client (issue #2633).
+        -->
+        <activity
+            android:name=".sync.SyncOAuthRedirectActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.PocketShellNext">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="com.googleusercontent.apps.1035162854462-cofe78n86nb6edf5rifnt8rahmg8i7vv"
+                    android:path="/oauth2redirect" />
+            </intent-filter>
+        </activity>
+
+        <!--
             Task P-4: the port-forwarding foreground service.
 
             `foregroundServiceType="specialUse"` because keeping a user-initiated

@@ -3,7 +3,10 @@ package com.pocketshell.next.terminal
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -12,12 +15,12 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.width
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.next.composer.COMPOSER_INSERT_TAG
 import com.pocketshell.next.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.next.composer.COMPOSER_REVIEW_ACTION_TAG
 import com.pocketshell.next.composer.COMPOSER_REVIEW_TAG
-import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.composer.COMPOSER_TITLE_TAG
 import com.pocketshell.next.composer.COMPOSER_UNDELIVERED_TAG
@@ -28,17 +31,20 @@ import com.pocketshell.next.tree.STOP_SESSION_CONFIRM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_ITEM_TAG
 import com.pocketshell.next.tree.STOP_SESSION_TITLE
 import com.pocketshell.next.tree.stopSessionMessage
+import com.pocketshell.next.usage.USAGE_GLANCE_EMPTY_LABEL
 import com.pocketshell.next.usage.USAGE_GLANCE_PILL_TAG
 import com.pocketshell.next.usage.UsageGlancePillState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
-import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_OVERLAY_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * The rendered session screen on the host JVM (Robolectric).
@@ -79,7 +85,7 @@ class SessionScreenTest {
         composeRule.onNodeWithTag(SESSION_ENDED_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("Session ended").assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_ERROR_BANNER_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_CONNECTING_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(SESSION_TERMINAL_TAG).assertDoesNotExist()
     }
@@ -95,11 +101,22 @@ class SessionScreenTest {
         assertEquals(1, backs)
     }
 
+    /**
+     * #2635 §5: the header must not RESHAPE when the usage number arrives.
+     *
+     * With no reading the header used to swap the pill for a
+     * `PocketShellButton(text = "Usage")` — a text button where every other
+     * screen shows a pill — so the header reflowed the moment the first
+     * reading landed. Now the pill owns the slot in both states and only its
+     * text changes. This fails on the text-button fallback (the pill tag does
+     * not exist without a reading).
+     */
     @Test
-    fun `usage fallback stays promoted out of the terminal actions sheet`() {
+    fun `the usage glance keeps its pill shape before any reading arrives`() {
         setContent(SessionUiState.Connecting)
 
-        composeRule.onNodeWithTag(SESSION_USAGE_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText(USAGE_GLANCE_EMPTY_LABEL).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).performClick()
         composeRule.onNodeWithTag(TERMINAL_ACTIONS_USAGE_TAG).assertDoesNotExist()
     }
@@ -130,6 +147,8 @@ class SessionScreenTest {
         composeRule.onNodeWithTag(SESSION_HEADER_KEBAB_TAG).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Usage Claude 38%").assertIsDisplayed()
         composeRule.onNodeWithText("Claude 7d").assertDoesNotExist()
+        // …and the empty-state word is gone once there is a number to show.
+        composeRule.onNodeWithText(USAGE_GLANCE_EMPTY_LABEL).assertDoesNotExist()
     }
 
     @Test
@@ -272,7 +291,6 @@ class SessionScreenTest {
         )
 
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsNotEnabled()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsNotEnabled()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(" more")
 
         assertEquals("local draft more", drafts.last())
@@ -332,7 +350,7 @@ class SessionScreenTest {
     fun `closed chrome is the compact launcher, not the composer or key bar`() {
         setContent(SessionUiState.Live(createRemoteTerminalSession()))
 
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
         composeRule.onNodeWithText("Ctrl").assertDoesNotExist()
@@ -341,14 +359,67 @@ class SessionScreenTest {
         composeRule.onNodeWithText("Enter").assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * #2631: the launcher must float OVER the terminal, not dock below it.
+     *
+     * Fails on the pre-#2631 `SessionLauncherBar`, whose full-width row sat
+     * after the terminal `Box` in the session `Column` — the terminal then
+     * stopped short of the screen bottom and the launcher's rectangle was
+     * entirely below the terminal's. The three assertions are the whole
+     * acceptance: the terminal owns the bottom edge, the launcher is drawn
+     * inside the terminal's rectangle, and it is a corner control rather than
+     * a full-width strip.
+     */
+    @Test
+    fun `the launcher floats over the terminal instead of docking below it`() {
+        setContent(SessionUiState.Live(createRemoteTerminalSession()))
+
+        val root = composeRule.onRoot().getUnclippedBoundsInRoot()
+        val terminal = composeRule.onNodeWithTag(SESSION_TERMINAL_TAG)
+            .getUnclippedBoundsInRoot()
+        val launcher = composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG)
+            .getUnclippedBoundsInRoot()
+
+        assertTrue(
+            "the terminal must reach the screen bottom, got ${terminal.bottom} of ${root.bottom}",
+            terminal.bottom >= root.bottom - 1.dp,
+        )
+        assertTrue(
+            "the launcher must sit inside the terminal slot, got $launcher in $terminal",
+            launcher.top >= terminal.top && launcher.bottom <= terminal.bottom,
+        )
+        assertTrue(
+            "the launcher must not span the screen, got ${launcher.width} of ${root.width}",
+            launcher.width < root.width / 2,
+        )
+
+        // #2631 follow-up: "right bottom corner, not middle". On the real
+        // screen the launcher must sit exactly one 16dp inset in from the
+        // terminal's bottom-right corner. A padded wrapper anywhere between
+        // the session Column and this control would push these numbers up.
+        assertEquals(
+            "expected a 16dp inset from the terminal's end edge, got " +
+                "${terminal.right - launcher.right} ($launcher in $terminal)",
+            16f,
+            (terminal.right - launcher.right).value,
+            1f,
+        )
+        assertEquals(
+            "expected a 16dp inset from the terminal's bottom edge, got " +
+                "${terminal.bottom - launcher.bottom} ($launcher in $terminal)",
+            16f,
+            (terminal.bottom - launcher.bottom).value,
+            1f,
+        )
     }
 
     @Test
     fun `the compact launcher is present while connecting`() {
         setContent(SessionUiState.Connecting)
 
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
     }
 
@@ -371,9 +442,8 @@ class SessionScreenTest {
 
         composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
     }
 
     @Test
@@ -444,7 +514,7 @@ class SessionScreenTest {
     }
 
     @Test
-    fun `insert does not dismiss the composer sheet`() {
+    fun `pasting does not dismiss the composer sheet`() {
         var inserts = 0
         setContent(
             SessionUiState.Live(createRemoteTerminalSession()),
@@ -454,7 +524,8 @@ class SessionScreenTest {
             embedComposerInWindow = false,
         )
 
-        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
+        // #2635 C3: Paste is the long-press of Send.
+        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performTouchInput { longClick() }
 
         assertEquals(1, inserts)
         composeRule.onNodeWithTag(COMPOSER_TAG).assertIsDisplayed()

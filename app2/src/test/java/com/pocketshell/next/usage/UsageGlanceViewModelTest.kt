@@ -252,11 +252,17 @@ class UsageGlanceViewModelTest {
 
     // --- helpers -----------------------------------------------------------
 
-    private fun viewModel(stack: TestUsageStack) = UsageGlanceViewModel(
+    private fun viewModel(
+        stack: TestUsageStack,
+        // Issue #2632: the real cache, so a test that asserts on the pill also
+        // exercises the write that feeds the landing screen.
+        cache: UsageGlanceCache = usageGlanceCache(),
+    ) = UsageGlanceViewModel(
         fetcher = stack.fetcher,
         connections = stack.registry,
         clients = stack.clients,
         settings = stack.settings,
+        cache = cache,
     )
 
     private fun vmTest(body: suspend TestScope.(TestUsageStack) -> Unit) = runTest {

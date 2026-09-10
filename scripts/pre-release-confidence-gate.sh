@@ -1601,7 +1601,7 @@ try:
                 """
                 SELECT id, name, hostname, port, username, keyId, maxAutoPort,
                        skipPortsBelow, scanIntervalSec, enabled, createdAt,
-                       lastConnectedAt, tmuxInstalled, lastBootstrapAt,
+                       lastConnectedAt, lastBootstrapAt,
                        pocketshellInstalled, pocketshellLastDetectedAt,
                        pocketshellCliVersion, pocketshellExpectedCliVersion,
                        pocketshellVersionCompatible, pocketshellDaemonRunning,
@@ -1610,7 +1610,7 @@ try:
                 """,
                 (
                     301, "gate-v030-host", "v030.example.com", 2230, "alexey", 300,
-                    13000, 1300, 10, 1, 3001, 3002, 1, 3003, 1, 3004,
+                    13000, 1300, 10, 1, 3001, 3002, 3003, 1, 3004,
                     None, None, None, None, None, "gate-usage-v030",
                 ),
             ),
@@ -1662,8 +1662,13 @@ try:
         host_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(hosts)")
         }
-        if "pathOverride" in host_columns:
-            raise SystemExit(f"{scenario}: dropped pathOverride column unexpectedly survived")
+        # #2561: MIGRATION_20_21 rebuilds `hosts` and deliberately drops both
+        # columns; their fixture values are historical migration input only.
+        for dropped_column in ("pathOverride", "tmuxInstalled"):
+            if dropped_column in host_columns:
+                raise SystemExit(
+                    f"{scenario}: dropped {dropped_column} column unexpectedly survived"
+                )
         for table_name in (
             "ssh_keys",
             "hosts",

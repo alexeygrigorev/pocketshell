@@ -320,14 +320,6 @@ dependencies {
     // its first app2 consumer.
     implementation(project(":shared:core-usage"))
 
-    // Task P-6: QR host import/export. `zxing-core` is the encoder/decoder used
-    // to render a host QR and to read one out of a still image;
-    // `zxing-android-embedded` adds the CameraX-backed `DecoratedBarcodeView`
-    // the live scanner hosts in an `AndroidView`. Both were already pinned in
-    // the version catalog for the shipping client's #129 scanner — no new
-    // catalog entries, and the same versions that shipped.
-    implementation(libs.zxing.core)
-    implementation(libs.zxing.android.embedded)
     // SshKeyMaterial derives the public half through sshj and registers the
     // same full provider used by core-transport on real Android devices.
     implementation(libs.bouncycastle.bcprov)
@@ -354,7 +346,7 @@ dependencies {
     debugImplementation(libs.compose.ui.test.manifest)
 
     // Task P-6: Roborazzi renders app2's own screens to PNG on the host JVM, so
-    // a design change to the host form / key manager / QR screens can be looked
+    // a design change to the host form / key manager screens can be looked
     // at in seconds. Same versions :shared:ui-kit uses; nothing new in the
     // catalog.
     testImplementation(libs.roborazzi)

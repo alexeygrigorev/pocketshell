@@ -24,7 +24,6 @@ import com.pocketshell.next.connect.SshKeyUnlocker
 import com.pocketshell.next.diagnostics.DiagnosticRecorder
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
-import com.pocketshell.next.hosts.HostImporter
 import com.pocketshell.next.hosts.SshKeyStore
 import com.pocketshell.next.release.ReleaseChecker
 import com.pocketshell.next.settings.SettingsRepository
@@ -151,8 +150,7 @@ object AppModule {
     // and the connection stack.
 
     // -------------------------------------------------------------------------
-    // Host management (task P-6): the key store the add/edit form picks from,
-    // and the QR importer that writes a scanned host.
+    // Host management (task P-6): the key store the add/edit form picks from.
 
     /**
      * Private keys live in `filesDir/ssh-keys`, the same path the shipping
@@ -170,15 +168,6 @@ object AppModule {
         sshKeyDao: SshKeyDao,
         @IoDispatcher dispatcher: CoroutineDispatcher,
     ): SshKeyStore = SshKeyStore(File(context.filesDir, "ssh-keys"), sshKeyDao, dispatcher)
-
-    @Provides
-    @Singleton
-    fun provideHostImporter(
-        hostDao: HostDao,
-        sshKeyDao: SshKeyDao,
-        keyStore: SshKeyStore,
-        @IoDispatcher dispatcher: CoroutineDispatcher,
-    ): HostImporter = HostImporter(hostDao, sshKeyDao, keyStore, dispatcher)
 
     // -------------------------------------------------------------------------
     // The connection stack (task U-2). Four bindings, each one an interface

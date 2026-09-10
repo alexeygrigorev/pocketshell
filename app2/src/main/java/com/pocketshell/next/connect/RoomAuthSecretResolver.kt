@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
  *   surface calls [rememberPassphrase] with a user-entered `CharArray`; the
  *   resolver returns a copy to sshj for one dial and [clearPassphrase] wipes
  *   its process-local copy when that attempt has completed. No passphrase is
- *   written to Room, a preference, a QR payload, or a log.
+ *   written to Room, a preference, or a log.
  * - **Password auth has no producer.** The `hosts` schema has a non-null
  *   `keyId` FK and no password column, so nothing can construct an
  *   [com.pocketshell.core.transport.AuthMaterial.Password]. [resolvePassword]

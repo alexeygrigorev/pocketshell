@@ -34,7 +34,6 @@ from pocketshell.logs import logs_group
 from pocketshell.profiles import profiles_group
 from pocketshell.prune_attachments import prune_attachments_command
 from pocketshell.push import push_group
-from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
 from pocketshell.serve import serve_command
@@ -47,10 +46,9 @@ from pocketshell.workspaces import workspaces_group
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Unified server-side helper for the PocketShell Android client.\n\n"
-        "Subcommands replace the separately-installed `quse` and `qr-share` "
-        "CLIs. Today `usage`, `sessions`, "
-        "`agent-log`, `repos`, `github`, `daemon`, `serve`, and `qr-share` are wired "
-        "up; more subcommands will land in follow-up rounds."
+        "Subcommands replace the separately-installed `quse` CLI. Today "
+        "`usage`, `sessions`, `agent-log`, `repos`, `github`, `daemon`, and "
+        "`serve` are wired up; more subcommands will land in follow-up rounds."
     ),
 )
 @click.version_option(__version__, "-V", "--version", prog_name="pocketshell")
@@ -77,7 +75,6 @@ cli.add_command(push_group, name="push")
 # `push checklist|get|status|check`. Additive — the FCM `push` group stays the
 # single owner of the group object (see pocketshell.cards).
 register_push_card_commands(push_group)
-cli.add_command(qr_share_command, name="qr-share")
 cli.add_command(serve_command, name="serve")
 cli.add_command(workspaces_group, name="workspaces")
 

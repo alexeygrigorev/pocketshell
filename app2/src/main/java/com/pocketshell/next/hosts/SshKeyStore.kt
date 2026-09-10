@@ -24,7 +24,7 @@ import kotlinx.coroutines.withContext
  *
  * Two rules the flows above rely on:
  * - **Byte-identical keys are deduplicated** by [SshKeyMaterial.fingerprint].
- *   Importing the same QR twice reuses the row instead of writing a second copy
+ *   Importing the same key twice reuses the row instead of writing a second copy
  *   of the same secret under a `-<suffix>` name.
  * - **Encrypted keys are retained exactly as supplied.** The passphrase is
  *   never stored beside the PEM; the connect flow hands a user-entered,
@@ -148,9 +148,9 @@ class SshKeyStore(
     }
 
     /**
-     * A key's display name doubles as its filename, and the name can come from a
-     * scanned QR payload, so path separators are stripped — a payload naming its
-     * key `../../databases/pocketshell.db` must not choose where the write
+     * A key's display name doubles as its filename, and the name comes from
+     * user-supplied import input, so path separators are stripped — an imported
+     * name of `../../databases/pocketshell.db` must not choose where the write
      * lands.
      */
     private fun sanitiseName(name: String): String = name

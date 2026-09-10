@@ -201,14 +201,12 @@ class HostListNavigationTest {
                         onOpenHost = actions.onOpenHost,
                         onAddHost = actions.onAddHost,
                         onEditHost = actions.onEditHost,
-                        onScanQr = actions.onScanQr,
                         onOpenSettings = actions.onOpenSettings,
                         onOpenSshKeys = actions.onOpenSshKeys,
                         viewModel = vm,
                     )
                 },
                 hostFormScreen = { hostId, _, _, _ -> Text("HostForm(hostId=$hostId)") },
-                qrScanScreen = { _, _ -> Text("QrScan") },
                 // `SettingsRoute`'s default resolves its ViewModel through
                 // `hiltViewModel()`, which this plain compose rule cannot
                 // provide. This suite is about the host list header's tap →

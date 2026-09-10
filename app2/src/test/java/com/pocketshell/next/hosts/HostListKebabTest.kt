@@ -12,7 +12,8 @@ import org.robolectric.RobolectricTestRunner
 
 /**
  * Issue #2523: the host kebab is Edit and Delete only. Share QR must not
- * reappear — Scan in the header is the remaining QR path.
+ * reappear — QR import was removed from the app entirely, so there is no QR
+ * path left at all.
  */
 @RunWith(RobolectricTestRunner::class)
 class HostListKebabTest {
@@ -31,7 +32,6 @@ class HostListKebabTest {
                 onOpenHost = {},
                 onAddHost = {},
                 onEditHost = {},
-                onScanQr = {},
                 onOpenSettings = {},
                 onDeleteHost = {},
             )

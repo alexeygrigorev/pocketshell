@@ -99,10 +99,12 @@
 #   (c) VOCABULARY— a file in it NAMES a real host-CLI subcommand, where the
 #                   subcommand list is extracted from the producer itself
 #                   (`cli.add_command(…, name="…")` in
-#                   tools/pocketshell/src/pocketshell/cli.py). This is the case
-#                   with no in-app invoker at all: the settings QR importer
-#                   parses what `pocketshell qr-share` emits, and that payload
-#                   arrives by QR scan, so no import edge exists to follow.
+#                   tools/pocketshell/src/pocketshell/cli.py). This covers a
+#                   wire contract with no in-app invoker at all — a payload that
+#                   arrives by scan/clipboard/transport, so no import edge
+#                   exists to follow. (The QR importer that motivated this rule
+#                   is gone from the app, but any future wire contract without
+#                   an exec still lands here.)
 #
 # Rules 4 and 5 are computed in scripts/lib/test-areas.sh; that file's index
 # comment carries the full rationale, the two stronger designs that were

@@ -24,8 +24,8 @@ import java.nio.charset.StandardCharsets
  *
  * Route set is fixed by plan §A.1: Hosts, Workspaces, Workspace, Session, Files, Settings, Usage,
  * plus [Ports] (task P-4 — see its own doc for why forwarding is a host-scoped
- * route rather than a tab inside [Session]) and the three host-management
- * routes task P-6 adds ([HostForm], [SshKeys], [QrScan]), plus the categorized
+ * route rather than a tab inside [Session]) and the host-management routes
+ * task P-6 adds ([HostForm], [SshKeys]), plus the categorized
  * Settings/support routes from issue #2610. A new screen is a new object here,
  * never an ad-hoc string at a call site.
  */
@@ -248,11 +248,6 @@ sealed class Destination(val pattern: String) {
         fun route(): String = pattern
     }
 
-    /** Scan a QR to import a host (task P-6). */
-    data object QrScan : Destination("qr-scan") {
-        fun route(): String = pattern
-    }
-
     /**
      * Per-host workspace-root shortcuts (task P-6), opened from the Settings →
      * Workspace section for one saved host.
@@ -316,7 +311,7 @@ sealed class Destination(val pattern: String) {
                 TerminalSettings, VoiceSettings, VoiceLanguage, ConnectionSettings,
                 GraceSettings, AdvancedSettings, Diagnostics, DiagnosticReport,
                 About, Update, Usage, HostUsage, TunnelDetail, AddTunnel,
-                HostForm, SshKeys, QrScan, WorkspaceRoots, AddWorkspaceRoot,
+                HostForm, SshKeys, WorkspaceRoots, AddWorkspaceRoot,
                 WorkspaceStart, ReorderWorkspaces, WorkspaceRootAction,
             )
 

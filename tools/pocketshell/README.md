@@ -3,8 +3,8 @@
 Unified server-side Python utility for the [PocketShell](https://github.com/alexeygrigorev/pocketshell)
 Android client. The app probes for this single helper on each remote
 host and uses its subcommands for usage, aplexer session lifecycle, agent
-conversations, QR host setup, repository discovery, environment files, hooks,
-logs, and daemon lifecycle checks.
+conversations, repository discovery, environment files, hooks, logs, and
+daemon lifecycle checks.
 
 ## Durable workspaces
 
@@ -44,21 +44,6 @@ pocketshell --help
 pipx. Both install paths produce a `pocketshell` binary that the
 PocketShell app's bootstrap probe detects.
 
-### Optional extras
-
-`pocketshell qr-share` requires the `qrcode[pil]` package (Pillow) to
-render QR images. Because Pillow is heavy and not needed by any other
-subcommand, it ships behind an optional `qr` extra:
-
-```bash
-uv tool install pocketshell --with qrcode[pil]
-# or
-pip install pocketshell[qr]
-```
-
-Without the extra, every other subcommand keeps working; only
-`pocketshell qr-share` exits 127 with a friendly install hint.
-
 ## Usage
 
 Top-level commands in the current helper:
@@ -77,7 +62,6 @@ pocketshell hooks ...                       # Claude/Codex/OpenCode hooks
 pocketshell logs ...                        # server-side trace sink
 pocketshell daemon ...                      # IPC daemon lifecycle
 pocketshell serve --dir PATH [--port N]     # foreground static HTTP server
-pocketshell qr-share ...                    # SSH host QR import payloads
 ```
 
 Run `pocketshell --help` or `pocketshell <command> --help` for the live
@@ -240,47 +224,6 @@ Requests serve static files with stdlib MIME detection. A directory resolves
 to its `index.html` when present; paths are resolved before the containment
 check, so parent traversal and symlinks that leave the selected directory are
 rejected rather than served.
-
-### `pocketshell qr-share`
-
-Builds a `pocketshell.ssh-import.v1` payload from an `~/.ssh/config`
-alias (resolved via `ssh -G`) or from explicit flags, wraps it in one or
-more `pocketshell.qr.v1` chunked envelopes (matching the Kotlin
-`QrChunkCodec` byte-for-byte), and emits QR codes for the phone-side
-scanner to consume (issue #129).
-
-```bash
-pocketshell qr-share prod                           # ssh-config alias
-pocketshell qr-share --host h --user u --key ~/.ssh/id_ed25519 --name h
-pocketshell qr-share prod --png --out-dir /tmp/qr   # write PNGs
-pocketshell qr-share prod --print-only --id deadbeef  # debug envelopes
-```
-
-When stdout is a TTY the QRs are drawn inline as Unicode blocks; between
-multi-part transmissions the command pauses on "Press Enter for next
-QR" so the user can scan each in turn. When stdout is not a TTY (or
-`--png` is passed) a numbered PNG sequence (`qr-share-01.png`,
-`qr-share-02.png`, ...) is written to `--out-dir`.
-
-Requires the optional `qr` extra (see [Optional extras](#optional-extras)).
-Without it, the command exits 127 with the install hint and every other
-subcommand keeps working.
-
-#### Running from a repo clone (no install)
-
-To run `qr-share` straight from a checkout without installing the tool,
-use `uv run` from `tools/pocketshell` and include the `qr` extra:
-
-```bash
-cd tools/pocketshell
-uv run --extra qr pocketshell qr-share prod
-```
-
-The first run creates `.venv` and installs the QR dependency; later runs
-are instant. Run it in an interactive terminal so stdout is a TTY and the
-QR renders inline — otherwise it falls back to writing PNGs (add
-`--png --out-dir ./qr` to force PNGs). Omitting `--extra qr` makes the
-command exit 127 with the install hint.
 
 ### `pocketshell hooks`
 

@@ -21,6 +21,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -79,7 +80,6 @@ data class SettingsNavigation(
     val onOpenVoice: () -> Unit,
     val onOpenConnections: () -> Unit,
     val onOpenAdvanced: () -> Unit,
-    val onOpenAccount: () -> Unit,
     val onOpenDiagnostics: () -> Unit,
     val onOpenAbout: () -> Unit,
 )
@@ -141,13 +141,6 @@ fun SettingsScreen(
             onClick = navigation.onOpenAdvanced,
         ),
         SettingsCategory(
-            id = "account",
-            title = "Account & sync",
-            subtitle = "Optional encrypted host sync",
-            icon = PocketShellIcons.Shield,
-            onClick = navigation.onOpenAccount,
-        ),
-        SettingsCategory(
             id = "diagnostics",
             title = "Diagnostics",
             subtitle = "Local reports",
@@ -176,11 +169,7 @@ fun SettingsScreen(
             contentPadding = PaddingValues(bottom = PocketShellSpacing.lg),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
-            // #2635: no `SectionHeader` on a single-section screen. A page
-            // titled "Settings" does not need a "Preferences" label 32dp under
-            // it saying the same thing (Nielsen #8). The rule is: a section
-            // label earns its row only when there are ≥2 sections to tell
-            // apart.
+            item { SectionHeader(label = "Preferences") }
             items(categories, key = { it.id }) { category ->
                 ListRow(
                     title = category.title,

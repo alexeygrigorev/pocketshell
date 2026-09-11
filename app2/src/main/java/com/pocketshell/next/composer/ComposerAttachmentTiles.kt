@@ -5,13 +5,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.icons.PocketShellIcons
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import java.util.Locale
 
 /** Test tags for the staged-attachment strip. */
@@ -38,10 +39,12 @@ fun composerAttachmentTileTag(remotePath: String): String = "composer-attachment
 
 fun composerAttachmentRemoveTag(remotePath: String): String = "composer-attachment-remove:$remotePath"
 
+fun composerAttachmentDestinationTag(remotePath: String): String =
+    "composer-attachment-destination:$remotePath"
+
 /**
- * The staged-attachment tiles BELOW the draft field (rewrite task P-1, ported
- * from the old client's `AttachmentTileGrid`; position restored in #2630 — see
- * the call site in [ComposerBar]).
+ * The staged-attachment tiles above the draft field (rewrite task P-1, ported
+ * from the old client's `AttachmentTileGrid`).
  *
  * ## One deliberate trim: typed tiles, never thumbnails
  *
@@ -63,21 +66,29 @@ internal fun AttachmentTiles(
     onRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // The tiles are the WHOLE signal (#2630). Staging one file used to say so
-    // three times — a dismissable "Attached 1 file." banner, the tile, and a
-    // full-width "Uploaded to <remote path>" line per file. The banner is gone
-    // and the destination line with it: the remote path is not actionable
-    // inside the composer, it is injected into the message on send, and this
-    // strip sits directly above the keyboard where the room is scarcest. This
-    // is what the pre-0.5.0 composer did — tiles, nothing else.
-    FlowRow(
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .testTag(COMPOSER_ATTACHMENTS_TAG),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        attachments.forEach { attachment -> AttachmentTile(attachment, onRemove) }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            attachments.forEach { attachment -> AttachmentTile(attachment, onRemove) }
+        }
+        attachments.forEach { attachment ->
+            Text(
+                text = "Uploaded to ${attachment.remotePath}",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.metadata,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(composerAttachmentDestinationTag(attachment.remotePath)),
+            )
+        }
     }
 }
 
@@ -163,12 +174,7 @@ internal fun extensionLabel(displayName: String): String =
 private val TILE_SIZE = 64.dp
 private val REMOVE_TOUCH_SIZE = 48.dp
 private val REMOVE_SIZE = 22.dp
-// A circle, not a radius: 11dp was half of REMOVE_SIZE, which read as an
-// off-ladder radius to `check-design-tokens.sh` and would break the moment the
-// badge resized. `CircleShape` says the thing that is actually true (#2635 T1).
-private val REMOVE_SHAPE = CircleShape
+private val REMOVE_SHAPE = RoundedCornerShape(11.dp)
 
-// The caption sits inside a 64dp square. 9sp, matching the pre-0.5.0 tile
-// (#2630: "more subtle") — deliberately below the 11sp caption rung, because
-// this is in-tile chrome fitting a filename into 64dp, not page text.
-private val LABEL_FONT_SIZE = 9.sp
+// The caption sits inside a 64dp square; keep it on the Quiet caption rung.
+private val LABEL_FONT_SIZE = 11.sp

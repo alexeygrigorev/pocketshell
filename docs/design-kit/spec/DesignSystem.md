@@ -4,20 +4,7 @@ Version 1.0.0 · Terminal-first Android UI
 ## Product structure
 A **host** is the machine. A **root** is a host-specific folder used to organize work. A **workspace** is a particular remote folder, not a session, chat, repository-only object or profile. A **session** is one running terminal in that workspace. A workspace can contain zero, one or several sessions. Git is not required.
 
-The high-frequency route is `Host workspaces → Terminal`. A workspace tap opens
-that workspace's terminal — the one you were last in there, else the freshest —
-and the terminal's own tab strip is that workspace's other sessions. A workspace
-with nothing running opens its create sheet instead, so there is no state in
-which tapping a workspace shows a page whose only content is a button.
-
-**This spec was changed deliberately, with the maintainer's explicit approval
-(2026-09-10, issue #2635 N1).** It previously read `Host workspaces → Workspace
-sessions → Terminal`, and a `Workspace sessions` page existed to serve it. The
-maintainer's report was tap count — "I don't want to have another screen" — and
-the level did not earn its rows: with the terminal's tab strip listing siblings,
-every row that page carried already existed somewhere the user was going anyway.
-`Destination.Workspace` and its screen are deleted (D22), not hidden behind a
-flag. Existing folders do not require a naming/configuration wizard. A folder can be added to the visible workspace list without creating a new session. Creating a folder and starting a session are separate, explicit operations.
+The high-frequency route is `Host workspaces → Workspace sessions → Terminal`. Existing folders do not require a naming/configuration wizard. A folder can be added to the visible workspace list without creating a new session. Creating a folder and starting a session are separate, explicit operations.
 
 A session directly in a root is supported by **Start session here**. Show these sessions in an **In this root** row rather than hiding them or fabricating a child workspace. Paths outside registered roots belong to **Other folders**; unknown paths must stay unknown, never silently assigned to a convenient root.
 
@@ -48,38 +35,23 @@ The accent identifies an intentional action or focus, not every selectable optio
 Session marks always inherit muted gray. They do not use brand colors, chip fills, shadows, colored square tiles or individual green pips. A known running-session summary does not claim the agent is busy or waiting. Host **Connected** can have one green dot plus its text label. Do not equate SSH connected, terminal attached, process running and agent working.
 
 ## Typography
-Sizes, line heights and weights are in
-[`../design-system/tokens.json`](../design-system/tokens.json) § `type` — the
-single machine-readable source of truth, pinned to the shipped theme by
-`QuietThemeTokenTest`. The rungs are `screen`, `workspace`, `title`, `body`,
-`metadata`, `label`, `button`, `terminal`, plus `bodyDense` / `bodyMono` /
-`labelMono` for dense rows, paths and inline counts.
-
-This section used to restate 28/20/18/16, one full rung above what the app
-ships. #2635 reconciled the kit onto the app's restrained scale (issue #2630's
-maintainer report was "the interface became worse, it's too large"): a phone at
-412dp cannot spend a 28sp heading and a 72dp row on a list of five things.
+- **screen**: 28sp, 34sp line height, weight 700.
+- **workspace**: 20sp, 28sp line height, weight 600.
+- **title**: 20sp, 28sp line height, weight 600.
+- **body**: 18sp, 26sp line height, weight 400.
+- **metadata**: 16sp, 22sp line height, weight 400.
+- **label**: 16sp, 22sp line height, weight 500.
+- **button**: 18sp, 24sp line height, weight 600.
+- **terminal**: 16sp, 22sp line height, weight 400.
 
 Use proportional system sans for app UI. Use monospace for commands, raw file content and terminal output only. Browser CSS pixels model dp at baseline; native text uses sp. Support Android system font scaling, wrapping, keyboard and safe insets. Do not scale down long workspace names to preserve a one-line layout.
 
 Terminal text size is a separate preference. The browser terminal is fixture text with its own fixed 16px grid; its surrounding app controls use the UI font scale. Do not enlarge or resize a real terminal implicitly when a composer or keyboard opens.
 
 ## Geometry
-Every number is in [`../design-system/tokens.json`](../design-system/tokens.json)
-§ `space`, `size` and `radius`. Read it there: `screenGutter`, the `xs`…`xxl`
-spacing rungs, `sectionGap`, `touchMin`, `fieldMin`/`buttonMin`, `listRowMin`,
-`workspaceRowMin`, and the `{badge, chip, field, button, card, sheet}` radius
-ladder. These are minima, not clipping heights — labels and supporting text can
-grow rows.
+20dp screen gutters; 4/8/12/16/20/24dp spacing; 32dp section separation. Minimum 48dp interactive target, 56dp field/button, 72dp standard row and 88dp workspace row. These are minima, not clipping heights. Labels and supporting text can grow rows.
 
-`touchMin` is the INTERACTIVE floor, not a row target. This section previously
-specified 72dp standard rows, 88dp workspace rows and 32dp section separation;
-reading the touch floor as a design target is exactly how the app came to spend
-a 915dp phone screen on six items (#2630), and #2635 retired the 32dp `section`
-rung with it.
-
-No elevation on workspace rows. Thin separators, no nested cards. Input/control
-boundaries have a stronger neutral contrast than decorative dividers.
+12dp field/button radius. 24dp top corners on sheets. No elevation on workspace rows. Thin separators, no nested cards. Input/control boundaries have a stronger neutral contrast than decorative dividers.
 
 ## Component contracts
 ### Screen header
@@ -89,19 +61,7 @@ Back, title, optional meaningful context, at most one secondary action. The host
 Root path on the left; contextual **+ Add** on the right. The entire root label has a 48dp action target opening root actions. Add can find a folder, create one, or explicitly start a session in the root. Full Add workspace remains the accessibility description.
 
 ### Workspace row
-Name at the `title` rung, one line, ellipsised; a leading status dot when any
-session in the workspace is attached; a muted count and relative activity in the
-trailing slot. One row is one hit target. Agent marks are non-interactive metadata and have no independent tap or
-long-press action on their own. This avoids tiny nested targets and ambiguous
-same-agent jumps.
-
-A tap opens the workspace's terminal directly (#2635 N1, maintainer-approved —
-this line previously read "Open the workspace to choose a particular terminal").
-Choosing a DIFFERENT terminal in that workspace is the terminal's tab strip, and
-choosing one in another workspace is that strip's overflow sheet, which lists the
-host's other workspaces (#2635 N2). The row's long-press is its alternate action
-— new session, browse files, copy path, reorder, remove from list — which is
-where the deleted page's utilities went.
+Name 20sp semibold, followed by muted 16sp session-kind summary. One row is one hit target. Agent marks are non-interactive metadata and have no independent tap or long-press action. This avoids tiny nested targets and ambiguous same-agent jumps. Open the workspace to choose a particular terminal.
 
 Collapse duplicate kinds into a count (Terminal ×2); show up to three kinds then +N more kinds. Announce readable labels, not glyph names. No sessions and Status unavailable are different states. Stable manual order, otherwise creation/first-discovery order; live refresh never reorders rows beneath a tap.
 
@@ -109,11 +69,7 @@ Collapse duplicate kinds into a count (Terminal ×2); show up to three kinds the
 Reuse the desktop's existing shape vocabulary: hexagon = Claude, code chevrons = Codex, terminal mark = OpenCode, bolt = Grok. Shell has the label Terminal. These are product-local identifiers, **not vendor logos**. Keep text beside the marks, so no onboarding legend is necessary. Mark geometry is an icon asset; do not substitute an emoji or character from a font.
 
 ### Standard row
-A `body` main label, optional `metadata` supporting text and quiet navigation
-chevron, on a list where only SOME rows navigate. When EVERY row on a list
-navigates, the chevron says nothing the list does not already say, and it is
-dropped (#2635) — the workspace list repeated one glyph a dozen times to
-announce the only thing a tap there has ever done. Avoid putting long values in a narrow trailing column; move them below the label. The current compact trailing slot is only for short values such as 300ms or Current.
+An 18sp main label, optional 16sp supporting text and quiet navigation chevron. Avoid putting long values in a narrow trailing column; move them below the label. The current compact trailing slot is only for short values such as 300ms or Current.
 
 ### Fields and actions
 Persistent label above the field; no placeholder-only identification. Clear text input colors and native cursor/focus feedback. One primary action pinned above the safe/keyboard inset. Long forms scroll independently from the action area. Backend, profile and explicit session name remain in More options.
@@ -128,10 +84,7 @@ The real emulator stays. The terminal area owns its character grid. The session 
 Reuse the flat rows and named actions. Paths are useful in the file browser location bar, not duplicated on workspace rows. Save to host and Download are different actions. Tunnels and Usage are host-scoped even when opened from a workspace. A tunnel should show remote and local endpoints, and default to loopback-only local exposure.
 
 ## State vocabulary
-- Connected / Reconnecting / Offline: transport state. The STEADY state
-  (Connected) is a dot with no text; Reconnecting and Offline keep their textual
-  label, because a colour cannot say them (#2635 T2). TalkBack always hears the
-  word.
+- Connected / Reconnecting / Offline: transport state, with a textual label.
 - Running: verified remote process/session state; no implication of CPU activity.
 - No sessions: a successful enumeration reported none.
 - Status unavailable: session enumeration is stale or unavailable.

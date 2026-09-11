@@ -42,8 +42,6 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.Description
 import org.junit.runner.RunWith
-import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
-import com.pocketshell.uikit.components.COMPOSER_TOOLS_TRIGGER_TAG
 
 /**
  * Journey J07 — compose a message on a real session and watch it land (rewrite

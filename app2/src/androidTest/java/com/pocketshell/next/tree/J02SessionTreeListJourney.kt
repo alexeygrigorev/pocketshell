@@ -12,9 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
@@ -48,10 +46,9 @@ import com.pocketshell.next.workspaces.REORDER_WORKSPACES_SCREEN_TAG
 import com.pocketshell.next.workspaces.REORDER_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_SEARCH_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
-import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
-import com.pocketshell.uikit.components.sessionTabTag
-import com.pocketshell.next.workspaces.WORKSPACE_ROW_ACTIONS_TAG
-import com.pocketshell.next.workspaces.WORKSPACE_ROW_REORDER_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_ACTIONS_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_REORDER_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRootAddTag
 import com.pocketshell.next.workspaces.workspaceRootActionsTag
 import com.pocketshell.next.workspaces.workspaceRootTag
@@ -348,11 +345,10 @@ class J02SessionTreeListJourney {
     fun reorderPageShowsPersistentRootAndWorkspaceControls() {
         openWorkspaces()
 
-        // #2635 N1: reorder used to be on the workspace PAGE's actions sheet.
-        // A workspace tap now opens its terminal, so the per-workspace actions
-        // are the row's LONG-PRESS.
-        openWorkspaceRowActions(WORKSPACE_MAIN)
-        compose.onNodeWithTag(WORKSPACE_ROW_REORDER_TAG).performClick()
+        compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        compose.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_REORDER_TAG).performClick()
         awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
         awaitTag(REORDER_WORKSPACES_LIST_TAG)
         JourneyScreenshots.capture("08-reorder-workspaces", JOURNEY)
@@ -380,9 +376,9 @@ class J02SessionTreeListJourney {
         JourneyScreenshots.capture("08-reorder-workspaces-after-move", JOURNEY)
 
         compose.onNodeWithTag(REORDER_WORKSPACES_BACK_TAG).performClick()
-        awaitTag(HOST_WORKSPACES_LIST_TAG)
-        openWorkspaceRowActions(WORKSPACE_MAIN)
-        compose.onNodeWithTag(WORKSPACE_ROW_REORDER_TAG).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        compose.onNodeWithTag(WORKSPACE_ACTIONS_TAG).performClick()
+        compose.onNodeWithTag(WORKSPACE_REORDER_TAG).performClick()
         awaitTag(REORDER_WORKSPACES_SCREEN_TAG)
         awaitTag(REORDER_WORKSPACES_LIST_TAG)
         compose.onNodeWithTag(REORDER_WORKSPACES_LIST_TAG)
@@ -404,15 +400,16 @@ class J02SessionTreeListJourney {
         )
         JourneyScreenshots.capture("09-switch-A", JOURNEY)
 
-        // #2635 N1/N2: switching to a sibling no longer leaves the terminal at
-        // all — the tab strip is the workspace's session list.
-        openSessionFromTabStrip(SESSION_OTHER, "J02_VISIBLE_OPENCODE_B")
+        backToWorkspace()
+        openSessionFromCurrentWorkspace(SESSION_OTHER, "J02_VISIBLE_OPENCODE_B")
         JourneyScreenshots.capture("10-switch-B", JOURNEY)
 
+        backToWorkspace()
         backToHost()
         openWorkspaceAndSession(WORKSPACE_MAIN, SESSION_QUIET, "J02_VISIBLE_CODEX_C")
         JourneyScreenshots.capture("11-switch-C", JOURNEY)
 
+        backToWorkspace()
         backToHost()
         openWorkspaceAndSession(
             WORKSPACE_APLEXER,
@@ -453,45 +450,34 @@ class J02SessionTreeListJourney {
         typeMarker(marker)
     }
 
-    /**
-     * #2635 N1: Back from a terminal returns to the WORKSPACE LIST, because
-     * there is no page between them any more.
-     */
-    private fun backToHost() {
+    private fun backToWorkspace() {
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+    }
+
+    private fun backToHost() {
+        compose.onNodeWithTag(com.pocketshell.next.workspaces.WORKSPACE_BACK_TAG).performClick()
         awaitTag(HOST_WORKSPACES_TAG)
         awaitTag(HOST_WORKSPACES_LIST_TAG)
     }
 
-    /** The workspace row's long-press actions (#2635 N1). */
-    private fun openWorkspaceRowActions(workspace: String) {
-        scrollToWorkspace(workspace)
-        compose.onNodeWithTag(workspaceRowTag(workspace)).performTouchInput { longClick() }
-        awaitTag(WORKSPACE_ROW_ACTIONS_TAG)
-    }
-
-    /**
-     * #2635 N1: a workspace tap IS opening its session. The journey used to
-     * tap the row, wait for a workspace page, then tap a session row on it;
-     * the middle step is gone, so a specific session is reached through the
-     * terminal's own tab strip instead.
-     */
-    private fun openWorkspaceAndSession(workspace: String, session: String, marker: String) {
-        scrollToWorkspace(workspace)
-        compose.onNodeWithTag(workspaceRowTag(workspace)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
-        openSessionFromTabStrip(session, marker)
-    }
-
-    /** Switch to a named sibling session without leaving the terminal. */
-    private fun openSessionFromTabStrip(session: String, marker: String) {
-        awaitTag(SESSION_TAB_STRIP_TAG)
-        awaitTag(sessionTabTag(session))
-        compose.onNodeWithTag(sessionTabTag(session)).performClick()
+    private fun openSessionFromCurrentWorkspace(session: String, marker: String) {
+        awaitTag(com.pocketshell.next.workspaces.WORKSPACE_LIST_TAG)
+        compose.onNodeWithTag(com.pocketshell.next.workspaces.WORKSPACE_LIST_TAG)
+            .performScrollToNode(hasTestTag(sessionRowTag(session)))
+        awaitTag(sessionRowTag(session))
+        compose.onNodeWithTag(sessionRowTag(session)).performClick()
         awaitTag(SESSION_SCREEN_TAG)
         awaitText(readableSessionName(session))
         awaitRenderedTerminal(session)
         typeMarker(marker)
+    }
+
+    private fun openWorkspaceAndSession(workspace: String, session: String, marker: String) {
+        scrollToWorkspace(workspace)
+        compose.onNodeWithTag(workspaceRowTag(workspace)).performClick()
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        openSessionFromCurrentWorkspace(session, marker)
     }
 
     private fun assertWorkspaceOrder(first: String, second: String) {

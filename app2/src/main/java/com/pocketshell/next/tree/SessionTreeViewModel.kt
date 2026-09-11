@@ -471,23 +471,12 @@ class SessionTreeViewModel @Inject constructor(
                             notice = if (created.created) {
                                 null
                             } else {
-                                "Session \"${created.name}\" already existed — opened it."
+                                "Session \"${created.name}\" already exists — choose it from the list to open it."
                             },
-                            // #2635 N1: an idempotent create OPENS the session
-                            // it found.
-                            //
-                            // The old behaviour was to show a notice and make
-                            // the user tap that session's row instead, which
-                            // was reasonable while the row was on the same
-                            // page. N1 deleted that page, so refusing to
-                            // navigate would leave the user on a create sheet
-                            // being told about a session with nothing on
-                            // screen to reach it by. The user typed the name
-                            // and pressed Create; landing in the session with
-                            // that name is what they asked for either way, and
-                            // the notice still says plainly that it was not
-                            // newly created.
-                            openRequest = created.name,
+                            // Only a newly created session is opened by the
+                            // explicit New session action. An idempotent
+                            // existing result must remain an explicit row tap.
+                            openRequest = created.name.takeIf { created.created },
                         )
                     }
                     // Same reason as the kill path: the new session must not

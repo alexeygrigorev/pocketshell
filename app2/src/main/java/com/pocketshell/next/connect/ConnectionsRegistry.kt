@@ -12,14 +12,6 @@ import com.pocketshell.core.transport.TransportState
 import com.pocketshell.core.transport.TrustStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -83,18 +75,6 @@ class ConnectionsRegistry(
     private val connections = ConcurrentHashMap<Long, HostConnection>()
 
     /**
-     * Membership of [connections], as a flow, so [liveHostIds] can react.
-     *
-     * Deliberately only MEMBERSHIP: whether a member is still live is the
-     * member's own `state` flow, which [liveHostIds] folds in. Publishing a
-     * pre-computed live set here instead would go stale the moment a
-     * connection dropped without anyone calling the registry, which is exactly
-     * the "shadow state that disagrees with the transport" shape D28 exists to
-     * keep out of this file.
-     */
-    private val membership = MutableStateFlow<Map<Long, HostConnection>>(emptyMap())
-
-    /**
      * Returns the live connection for [hostId], dialing one if there is none
      * (or the stored one is dead).
      *
@@ -114,7 +94,6 @@ class ConnectionsRegistry(
                 // never leave a dead connection behind for `current()` to hand
                 // out.
                 connections.remove(hostId)
-                publishMembership()
                 runCatching { existing.close() }
             }
 
@@ -127,7 +106,6 @@ class ConnectionsRegistry(
             when (result) {
                 is ConnectResult.Connected -> {
                     connections[hostId] = result.connection
-                    publishMembership()
                     result
                 }
 
@@ -188,44 +166,10 @@ class ConnectionsRegistry(
     fun liveConnections(): List<HostConnection> =
         connections.values.filter { it.state.value.isLive() }
 
-    /**
-     * The ids whose connection is live right now, as a flow (#2635 2a).
-     *
-     * The host list paints a leading [com.pocketshell.uikit.components.StatusDot]
-     * from this so "which host is warm" is answerable BEFORE tapping — the
-     * desktop client's host picker has had that dot since day one and the phone
-     * shipped a list with no status at all.
-     *
-     * Reactive on both axes: [membership] re-emits when the registry gains or
-     * loses an entry, and each entry's own `state` re-emits when its transport
-     * drops, so a connection dying on its own turns the dot off without anyone
-     * touching the registry. It NEVER dials — this is a pre-connection screen
-     * (D21) and a status dot that opened SSH sessions would be a bug, not a
-     * glance.
-     */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun liveHostIds(): Flow<Set<Long>> = membership.flatMapLatest { entries ->
-        if (entries.isEmpty()) {
-            flowOf(emptySet())
-        } else {
-            val perHost = entries.map { (hostId, connection) ->
-                connection.state.map { hostId to it.isLive() }
-            }
-            combine(perHost) { pairs ->
-                pairs.filter { it.second }.map { it.first }.toSet()
-            }
-        }
-    }.distinctUntilChanged()
-
-    private fun publishMembership() {
-        membership.value = connections.toMap()
-    }
-
     /** Closes and removes the connection for [hostId], if one is currently held. */
     suspend fun close(hostId: Long) = mutex.withLock {
         withContext(dispatcher) {
             connections.remove(hostId)?.let { runCatching { it.close() } }
-            publishMembership()
         }
     }
 
@@ -234,7 +178,6 @@ class ConnectionsRegistry(
         withContext(dispatcher) {
             val open = connections.values.toList()
             connections.clear()
-            publishMembership()
             open.forEach { runCatching { it.close() } }
         }
     }

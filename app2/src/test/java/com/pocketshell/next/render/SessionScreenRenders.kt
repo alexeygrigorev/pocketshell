@@ -121,44 +121,6 @@ class SessionScreenRenders {
         )
     }
 
-    /**
-     * #2630: the maintainer's terminal screenshot wrapped the workspace name to
-     * two lines, pushing the terminal down. The stock fixtures use a 15-char
-     * name that never wrapped even at the shipped 28sp, so this case carries a
-     * longer, realistic one.
-     *
-     * Honest scope note: the reconciled 20sp screen rung roughly doubles the
-     * one-line budget at 412dp (about 16 characters at 28sp to about 23 at
-     * 20sp), which is what this render shows. It does not make wrapping
-     * impossible — a name longer than that still takes two lines, and fixing
-     * THAT would be a header-layout change (marquee/ellipsis/truncation), not
-     * the density pass this issue is.
-     */
-    @Test
-    fun sessionLongWorkspaceNameHeader() = render("i2630-session-long-name-header") {
-        SessionScreen(
-            state = SessionUiState.Live(createRemoteTerminalSession()),
-            composerState = ComposerUiState(),
-            sessionName = "pocketshell-quiet-ui",
-            onBack = {},
-            onResized = { _, _ -> },
-            onRetry = {},
-            onHotkeySend = {},
-            onDraftChange = {},
-            onSend = { true },
-            onInsert = {},
-            onAttach = {},
-            onMicTap = {},
-            onCancelRecording = {},
-            onToggleHistory = {},
-            onTogglePreview = {},
-            onRemoveAttachment = {},
-            onDismissNotice = {},
-            onDiscardDraft = {},
-            onUseHistoryEntry = {},
-        )
-    }
-
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

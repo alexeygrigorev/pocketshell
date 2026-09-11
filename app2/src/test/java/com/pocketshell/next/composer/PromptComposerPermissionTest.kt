@@ -2,8 +2,6 @@ package com.pocketshell.next.composer
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -12,8 +10,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import com.pocketshell.uikit.components.COMPOSER_MIC_TAG
-import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * The RECORD_AUDIO gate (#2521) and the Insert vs Send chrome on the
@@ -54,7 +50,7 @@ class PromptComposerPermissionTest {
     }
 
     @Test
-    fun `the sheet names its target and offers paste and send`() {
+    fun `the sheet is titled Prompt Composer and offers Insert and Send`() {
         var inserts = 0
         var sends = 0
         setContent(
@@ -64,8 +60,7 @@ class PromptComposerPermissionTest {
         )
 
         composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
-        // #2635 C3: Paste is the long-press of Send, not a separate control.
-        composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performTouchInput { longClick() }
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).performClick()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
 
         assertEquals(1, inserts)
@@ -98,6 +93,7 @@ class PromptComposerPermissionTest {
         composeRule.onNodeWithTag(COMPOSER_TITLE_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INSERT_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
     }
 

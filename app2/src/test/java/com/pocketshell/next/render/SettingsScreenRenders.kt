@@ -80,7 +80,6 @@ class SettingsScreenRenders {
         onOpenVoice = {},
         onOpenConnections = {},
         onOpenAdvanced = {},
-        onOpenAccount = {},
         onOpenDiagnostics = {},
         onOpenAbout = {},
     )

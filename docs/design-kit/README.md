@@ -5,16 +5,15 @@ directory holds the **source of truth** parts, committed so implementers and
 reviewers can work from them offline. Implementation is tracked by the umbrella
 issue for the redesign.
 
-`docs/design-system.md` describes the **current shipped** UI: which primitive is
-for what, and which rung of this kit's `tokens.json` each one uses. Since #2635
-it no longer restates any number — the JSON carries values, the prose carries
-intent, and there is one copy of each (D22 — one design system, not two).
+`docs/design-system.md` still describes the **current shipped** UI and stays
+authoritative until the redesign lands. When it does, that file is replaced
+rather than kept alongside (D22 — one design system, not two).
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `design-system/tokens.json` | Colour, type, spacing, size, radius, motion. **The** source of truth — edit here, never in a screen. Since #2635 that claim is enforced, not just asserted: `QuietThemeTokenTest` reads this file and fails the ui-kit JVM gate when `Type.kt`/`Spacing.kt`/`Shape.kt`/`Color.kt` or `android/PocketShellTheme.kt` disagree with it. |
+| `design-system/tokens.json` | Colour, type, spacing, size, radius, motion. **The** source of truth — edit here, never in a screen. |
 | `design-system/tokens.css` | Generated from `tokens.json`. Do not hand-edit. |
 | `design-system/catalog.json` | All 81 frames: content, route and state descriptions. Machine-readable equivalent of the interactive prototype. |
 | `design-system/icons.json` | Icon path data, shared by the SVG and Compose registries. |

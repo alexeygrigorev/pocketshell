@@ -1,0 +1,19 @@
+// Only the explicitly selected render TEST task is forced to execute.
+// Compilation/resources retain their incremental and build-cache behavior.
+// Do not replace this with --rerun-tasks or project-wide no-cache settings.
+gradle.projectsEvaluated {
+    def selected = gradle.startParameter.projectProperties['pocketshell.uiMockModule']
+    if (!(selected in ['app2', 'shared:ui-kit'])) {
+        throw new GradleException('ui-mock requires an allowlisted pocketshell.uiMockModule')
+    }
+    def target = gradle.rootProject.findProject(':' + selected)
+    if (target == null) throw new GradleException('ui-mock module not found: ' + selected)
+    target.tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        if (name == 'testDebugUnitTest') {
+            outputs.upToDateWhen { false }
+            outputs.cacheIf { false }
+            systemProperty 'java.awt.headless', 'true'
+            maxParallelForks = 1
+        }
+    }
+}

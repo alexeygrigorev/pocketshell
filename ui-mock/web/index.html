@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PocketShell · UI Mock</title><link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header><div><strong>PocketShell</strong><span class="label">UI MOCK</span></div><span id="status" role="status">Подключение…</span></header>
+<div id="auth" hidden>Откройте адрес, напечатанный сервером, целиком — вместе с <code>#token=…</code>. Доступ через SSH-туннель.</div>
+<main>
+  <aside>
+    <h1>Сценарии интерфейса</h1><p class="muted">Настоящий Compose-код · данные из render-фикстур</p>
+    <label for="search">Поиск экрана или состояния</label><input id="search" type="search" placeholder="Composer, hosts, error…" autocomplete="off">
+    <p id="count" class="muted"></p><nav id="cases" aria-label="Сценарии"></nav>
+    <details><summary>Ограничения каталога</summary><p>Это визуальный просмотр PNG, не интерактивное Android-приложение. Клавиатуру, жесты и терминальную сетку проверяйте на устройстве.</p><p>Наличие render-фикстуры не означает покрытие всех состояний экрана. Каталог не является полным перечнем интерфейса.</p><pre id="warnings"></pre></details>
+  </aside>
+  <section id="workspace" aria-label="Предпросмотр">
+    <div class="toolbar"><div><h2 id="title">Выберите сценарий</h2><p id="source" class="muted"></p></div><div class="actions"><button id="rebuild">Перерисовать</button><button id="log-button" aria-expanded="false">Лог сборки</button><button id="zoom" aria-pressed="false">100%</button></div></div>
+    <div id="banner" role="status">Первый запуск может потребовать загрузки Android/Gradle-зависимостей.</div>
+    <div id="error" role="alert" hidden></div>
+    <div id="gallery" class="fit"></div>
+    <pre id="log" hidden aria-label="Лог Gradle"></pre>
+    <footer><span id="timing"></span><span>Измените Kotlin → сохраните → дождитесь нового рендера. APK не собирается.</span></footer>
+  </section>
+</main>
+</body>
+</html>

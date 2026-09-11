@@ -8,14 +8,15 @@ set -euo pipefail
 # introduced:
 #
 #   release variant: packageName == com.pocketshell.app.release, launcher
-#     label DISTINCT from debug's "PocketShell", and the signer certificate
-#     is NOT the committed debug.keystore's certificate (and, when release
-#     signing material is resolvable on this machine, IS the release
-#     keystore's certificate).
+#     label == "PocketShell" — DISTINCT from debug's "PocketShell Debug"
+#     (issue #2650) — and the signer certificate is NOT the committed
+#     debug.keystore's certificate (and, when release signing material is
+#     resolvable on this machine, IS the release keystore's certificate).
 #
-#   debug variant: packageName == com.pocketshell.app, label "PocketShell",
-#     signer IS the committed debug.keystore — i.e. the daily-driver install
-#     identity did not move when release signing landed.
+#   debug variant: packageName == com.pocketshell.app, label
+#     "PocketShell Debug", signer IS the committed debug.keystore — i.e.
+#     the daily-driver install identity did not move when release signing
+#     landed.
 #
 # Neither check can be done from source alone: the point is what actually got
 # packaged and signed, so this runs against APK files. Side-by-side coinstall
@@ -176,9 +177,9 @@ if [[ "$VARIANT" == "release" ]]; then
   pass "packageName == com.pocketshell.app.release"
 
   [[ -n "$LABEL" ]] || fail "release APK has no application-label"
-  [[ "$LABEL" != "PocketShell" ]] ||
-    fail "release APK launcher label is 'PocketShell' — it must be distinct from debug's label"
-  pass "launcher label is distinct from debug's ('$LABEL')"
+  [[ "$LABEL" == "PocketShell" ]] ||
+    fail "release APK launcher label is '$LABEL', expected 'PocketShell' (distinct from debug's 'PocketShell Debug')"
+  pass "launcher label is 'PocketShell'"
 
   [[ "$SIGNER_SHA" != "$DEBUG_CERT_SHA" ]] ||
     fail "release APK is signed by the DEBUG certificate ($DEBUG_CERT_SHA) — the release identity did not apply"
@@ -209,9 +210,9 @@ else
     fail "debug APK packageName is '$PACKAGE_NAME', expected com.pocketshell.app"
   pass "packageName == com.pocketshell.app"
 
-  [[ "$LABEL" == "PocketShell" ]] ||
-    fail "debug APK launcher label is '$LABEL', expected 'PocketShell'"
-  pass "launcher label is still 'PocketShell'"
+  [[ "$LABEL" == "PocketShell Debug" ]] ||
+    fail "debug APK launcher label is '$LABEL', expected 'PocketShell Debug'"
+  pass "launcher label is 'PocketShell Debug'"
 
   [[ "$SIGNER_SHA" == "$DEBUG_CERT_SHA" ]] ||
     fail "debug APK signer ($SIGNER_SHA) is not the committed debug.keystore cert ($DEBUG_CERT_SHA)"

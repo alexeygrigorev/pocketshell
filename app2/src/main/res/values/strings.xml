@@ -1,4 +1,9 @@
 <resources>
-    <!-- User-visible launcher name. This is PocketShell, not a rebrand. -->
-    <string name="app_name">PocketShell</string>
+    <!--
+        Daily-driver DEBUG install's launcher label. Issue #2650: the debug
+        build says what it is; the plain "PocketShell" name belongs to the
+        release overlay (src/release). The two labels must stay distinct —
+        see LauncherBrandingTest and scripts/check-apk-signing.sh.
+    -->
+    <string name="app_name">PocketShell Debug</string>
 </resources>

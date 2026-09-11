@@ -21,7 +21,7 @@ signing identity:
 | | debug APK | release APK |
 |---|---|---|
 | applicationId | `com.pocketshell.app` | `com.pocketshell.app.release` |
-| launcher label | PocketShell | PocketShell Rel |
+| launcher label | PocketShell Debug | PocketShell |
 | signer | committed `debug.keystore` | dedicated release keystore |
 
 Different signatures cannot replace each other under one applicationId, so

@@ -202,14 +202,10 @@ Every entry names the mutation that leaves it green.
     unread JSON report changes). The marker/validator assertions are real but do not need a
     10MB fixture. The sibling `dirtyRegionRenderingBeatsFullRepaint` has a real ≥8× gate —
     leave it alone.
-12. **`AddEditHostScreenTest#scanQrAction_visibleOnAddHost_andInvokesCallback`** (`:112-116`)
-    — asserts a test-local lambda fired. **Mutation: break `HostQrCode.decode` handling at
-    `HostListViewModel.kt:1018` or `QrScannerScreen` delivery entirely — green.** Fine as a
-    button-presence check; must not be counted as QR-import coverage (see §3).
-13. **`EmulatorDockerSshSmokeTest` (1147 lines) + `EmulatorWorkflowE2eTest` (704 lines)** —
+12. **`EmulatorDockerSshSmokeTest` (1147 lines) + `EmulatorWorkflowE2eTest` (704 lines)** —
     not vacuous, but fully subsumed: all 169 journey classes prove emulator→`agents:2222`
     SSH + tmux attach + input every push. Delete; ~1.8k lines of drifting harness.
-14. Micro: `FailureReasonTest:89-90` reads a constructor arg back;
+13. Micro: `FailureReasonTest:89-90` reads a constructor arg back;
     `ConnectionManagerEquivalenceTest:293-302,323-330` assert `assertNotEquals("Failed")`
     immediately after pinning the value to `"Reconnecting"` — decorative, can never fire first.
 
@@ -287,7 +283,6 @@ a D28 smell, and a maintainer call.
 | Settings persistence | **Covered** — `SettingsPersistenceE2eTest`, nightly |
 | Long-running session | **Split** — 90s no-flap hold per-push; 10-min hold release-gate-only. Acceptable per process.md |
 | Real-agent CLI | **Cadence gap** — `RealAgentReleaseGateTest` is excluded from nightly and runs only under `REAL_AGENTS=1`. A real Claude/Codex rendering regression stays invisible until a release cut |
-| QR import | **Genuine gap** — the codec round-trip is unit-tested (`HostQrCodeTest`), but scan → decode → prefill → save → connect has no test; the only androidTest is the lambda-fired check (§2.12) |
 
 Most of that list is stale — it should be updated in the docs.
 
@@ -469,7 +464,7 @@ Nothing here is a code change yet — these are issue candidates, in the order I
    coverage.
 5. **Path-condition the harness-only guards** (§4) — ~17-18 min/push.
 6. **Relocate the script-harness classes** (§4) — ~230s/push, follows a decided precedent.
-7. **Delete the vacuous tests** (§2.5-2.14) — maintenance surface, not seconds.
+7. **Delete the vacuous tests** (§2.5-2.13) — maintenance surface, not seconds.
 8. **The three repeat flakes** (§4) — before the retry starts hiding something real.
-9. **QR-import journey + breadcrumb/KeyBar containment tests** (§3) — genuine gaps.
+9. **Breadcrumb/KeyBar containment tests** (§3) — genuine gaps.
 10. **Update the Phase-2 gap list in the docs** — most of it is stale.

@@ -220,8 +220,8 @@ class SshKeyStoreTest {
     }
 
     /**
-     * A key name comes off a scanned QR, and it doubles as the filename. A
-     * payload naming its key `../../databases/pocketshell.db` must not choose
+     * A key name comes from user-supplied import input, and it doubles as the
+     * filename. A name of `../../databases/pocketshell.db` must not choose
      * where the write lands.
      */
     @Test

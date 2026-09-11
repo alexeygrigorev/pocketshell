@@ -56,7 +56,6 @@ object PocketShellIcons {
     val Trash: ImageVector get() = vectors.getValue("trash")
     val Ports: ImageVector get() = vectors.getValue("ports")
     val Chart: ImageVector get() = vectors.getValue("chart")
-    val Qr: ImageVector get() = vectors.getValue("qr")
     val Flash: ImageVector get() = vectors.getValue("flash")
     val Eye: ImageVector get() = vectors.getValue("eye")
     val Pause: ImageVector get() = vectors.getValue("pause")
@@ -193,12 +192,6 @@ object PocketShellIcons {
             "M8 13l-5 4 5 4",
         ),
         "chart" to listOf("M5 21V10", "M12 21V3", "M19 21V7"),
-        "qr" to listOf(
-            "M3 3h6v6H3z",
-            "M15 3h6v6h-6z",
-            "M3 15h6v6H3z",
-            "M15 15h3v3h3v3h-6z",
-        ),
         "flash" to listOf("M13 2L4 14h7v8L21 9h-8z"),
         "eye" to listOf(
             "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z",

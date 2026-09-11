@@ -111,14 +111,13 @@ kebab menu (the maintainer's concrete "too much on here" example) plus the
 prior round's open items. This replaces the "still under discussion" list —
 everything below is now decided:**
 
-- **P-6 keys/QR**: QR host import/export CONFIRMED KEEP ("very useful for
-  adding things" / "QR code is needed" — maintainer, 2026-09-03). Biometric
-  passphrase unlock CUT ("biometric unlock not needed"). Plain SSH key
-  add/edit stays regardless (baseline, not in question).
+- **P-6 keys**: Biometric passphrase unlock CUT (“biometric unlock not
+  needed”). Plain SSH key add/edit stays regardless (baseline, not in
+  question).
 - **P-6, unstated but required**: app2 has no host add/edit screen yet (U-1
   only reads the existing list) — this is a release blocker independent of
   the maintainer's feature list, sized as its own small task alongside the
-  QR/keys work.
+  keys work.
 - **P-7 `env/`**: CUT — its primary consumer was configuring agent sessions
   (already cut); the rare manual need is covered by the file editor or
   `$EDITOR` in the terminal.
@@ -156,7 +155,7 @@ everything below is now decided:**
 (snippets cut too, not deferred, per the 2026-09-03 follow-up); P-10 shrinks
 to `crash/` + trimmed `diagnostics/` + share-upload notification; P-6
 shrinks to settings + host add/edit (new,
-required) + plain key storage + QR import/export, minus biometric.
+required) + plain key storage, minus biometric.
 Roughly 9,500 further lines of would-have-been code avoided.
 
 **Lean terminal-session menu design** (for U-4/U-5 chrome; full old-menu →
@@ -1153,8 +1152,8 @@ re-import the calcification the diagnosis doc §1.5(6) documents.
   suites (they test the probe/status/update machinery app2 does not have).
 - Accept: [ ] app2 shows the maintainer's real host list; [ ] VM unit test
   with in-memory Room; [ ] `HostListViewModel.kt` ≤ 200 lines.
-- Non-goals: add/edit host UI (P-6 scope brings it over with settings); QR
-  (P-9); delete/edit actions.
+- Non-goals: add/edit host UI (P-6 scope brings it over with settings);
+  delete/edit actions.
 
 ---
 
@@ -1531,7 +1530,7 @@ needed it.
 
 ---
 
-**P-6 — settings + hosts add/edit + keys/QR**
+**P-6 — settings + hosts add/edit + keys**
 - Depends on: U-1.
 - PORT: settings surface minus dead fields — from the audit, DROP:
   `tmuxOnAttachByDefault`, `outboundDeliveryAuthority` (+ its enum,
@@ -1540,11 +1539,10 @@ needed it.
   (font/theme), voice, assistant, usage, workspace roots, about. Port
   hosts add/edit (`AddEditHostScreen.kt` 817 + VM 397 — fixing the known
   #2456/F1 identity bug per the audit's `bind(Long?)` note), `SshKeys*` +
-  biometric (818), QR stack (1,170 — codecs port verbatim).
+  biometric (818).
 - Accept: [ ] add/edit/delete host works (regression test for the F1
   edit-then-add overwrite bug — red on the old VM logic, green on new);
-  [ ] key generate + biometric-gated passphrase + QR export/import round-
-  trip on device; [ ] `backgroundGraceMillis` exposed as one setting row
+  [ ] key generate + biometric-gated passphrase on device; [ ] `backgroundGraceMillis` exposed as one setting row
   feeding `GraceCoordinator`.
 - Non-goals: no settings redesign; no import-conflict dialog machinery
   unless add/edit hits it naturally.
@@ -1624,7 +1622,7 @@ gate replaces it.
   the existing host list (read-only). A release needs a way to add a host on
   a fresh install. Treat this as an unstated but load-bearing part of P-6,
   sized independently of the rest of that task's original (larger) scope.
-- The "still under discussion" list (keys/QR, env/jobs, snippets, bootstrap
+- The "still under discussion" list (keys, env/jobs, snippets, bootstrap
   probe, messaging/notifications, widget/tile) resolves via the JTBD audit
   in flight as of this writing; whatever it recommends cutting is NOT a
   release blocker, whatever it recommends keeping gets its own small task.

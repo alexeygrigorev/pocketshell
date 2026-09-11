@@ -149,14 +149,12 @@ sealed interface HostListUpdateNotice {
  * What P-6 adds is the *management* surface it was missing — a fresh install had
  * literally no way to get a host into the table:
  *
- * - The empty state has one **Add host** action that opens the two real setup
- *   methods. Populated Hosts keeps setup in a full-width footer and puts **SSH
+ * - The empty state has one **Add host** action that opens the setup sheet.
+ *   Populated Hosts keeps setup in a full-width footer and puts **SSH
  *   keys** and **Settings** in a separate tools section.
  * - A per-row [Kebab] with Edit / Delete. It sits in the trailing slot the
  *   navigation chevron used to occupy: the row's own tap still dials the host,
- *   and a menu tap does not (an inner clickable consumes it). Share QR was
- *   removed (issue #2523); QR import was removed from the app entirely, so
- *   hosts are added by entering connection details.
+ *   and a menu tap does not (an inner clickable consumes it).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

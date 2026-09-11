@@ -451,7 +451,7 @@ named files; "port as-is" = copy + exec-rewire only):
 | `app/tmux/` (all of it) | 42,451 | ~3,500 | above |
 | `app/projects/` | 19,667 | ~4,300 | tree/create ~2,500 (JSON `workspace` grouping replaces `HostTreeModel`/`SessionNamePolicy`/`FolderListGateway` 2,514/`TmuxSocketSweep`) + repo browser & watched folders ~1,800 kept |
 | `app/composer/` | 17,198 | ~6,000 | 11 outbound-queue files (~6,700) not ported; VM 3,585 (288 outbound/queue refs) → new ≤400; sheet/markdown/attachments/drafts kept |
-| `app/hosts/` | 7,815 | ~2,800 | QR+keys+add/edit (3,226) kept near-verbatim; update-warning/probe-generation/phase machinery (~2,400 accreted) dropped |
+| `app/hosts/` | 7,815 | ~2,800 | keys+add/edit (3,226) kept near-verbatim; update-warning/probe-generation/phase machinery (~2,400 accreted) dropped |
 | `app/fileviewer/` + `fileexplorer/` | 9,566 | ~4,750 | review mode + image annotation (~2,000) kept — real surface electron lacks; insurance seams dropped |
 | `app/portfwd/` | 5,485 | ~1,750 | ~900 LOC of notification generation-fencing (`*MutationAuthority`, `*StopAuthority`, `*CloseBarrier`, 208 `generation` refs) → ~150-line clean service; 1,150 LOC pane-scrape port-attribution dropped |
 | `app/session/` | 5,345 | ~2,300 | `AgentConversationRepository` 2,463 → ~225 (audit: 1,069 lines guess which file a pane's agent writes via `ps`+`/proc/fd`, 832 build per-engine tail/sqlite commands — all replaced by the server transcript stream); `InlineDictation` 1,570 lifted verbatim |
@@ -479,7 +479,7 @@ ratchet worked (per-file line budgets are written into the playbook's tasks);
 sheds automatically — portfwd is 33% comment lines, hosts 26%,
 `AgentConversationRepository` 41%, and those comments are issue-archaeology,
 not API docs; (3) nothing essential is cut to get here — voice (4,933 LOC
-lifted verbatim), QR/biometric key import, file review mode, and image
+lifted verbatim), biometric key import, file review mode, and image
 annotation all survive; the deletions are the `-CC` stack, the lease pool,
 client-side detection, delivery insurance, and generation-fence scar tissue.
 The correlated evidence that the right code dies: the audit found `ForTest`

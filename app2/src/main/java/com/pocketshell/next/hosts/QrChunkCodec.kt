@@ -21,10 +21,11 @@ import java.util.zip.CRC32
  * Ported from the old client with one change: base64 goes through
  * `java.util.Base64`'s URL-safe, unpadded codec instead of `android.util.Base64`
  * with `URL_SAFE or NO_WRAP or NO_PADDING`. Byte-for-byte the same alphabet and
- * output — Python's `base64.urlsafe_b64encode(...).rstrip("=")` in
- * `tools/pocketshell/src/pocketshell/qr_share.py` is the third implementation of
- * the same thing — but it makes this file pure JVM, so the codec is tested
- * without an Android runtime.
+ * output — byte-compatible with pocketshell-desktop's emitter, the format's
+ * other live implementation since the host CLI's `qr_share.py` renderer was
+ * removed (issue #2643; the CLI now lives at PocketShell-io/pocketshell-cli)
+ * — but it makes this file pure JVM, so the codec is tested without an Android
+ * runtime.
  */
 object QrChunkCodec {
 

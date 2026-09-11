@@ -37,9 +37,11 @@ the pin is asserted by BEHAVIOUR — a stub `a`, a missing sibling worker, or an
 
 This file does not, and cannot, prove the binary's VINTAGE: a neighbouring
 release that still satisfies the lifecycle would pass. Vintage comes from
-`Dockerfile.agents` deriving the version from the same `pyproject.toml` line
-production pins and fetching that exact release asset. This file proves that
-whatever lands is a WORKING aplexer, which the derivation alone cannot.
+``Dockerfile.agents`` deriving both the wheel pin and the aplexer release
+from the committed ``tests/docker/fixture-pins.txt`` (issue #2643 — the CLI
+is installed from PyPI, never built from an app-repo source tree). This file
+proves that whatever lands is a WORKING aplexer, which the derivation alone
+cannot.
 
 Takes no arguments. Exit 0 on success; on failure, exit 1 and one
 ``FIXTURE-APLEXER-SELFCHECK FAIL [<check>] ...`` line on stderr.
@@ -56,7 +58,6 @@ import time
 import uuid
 from pathlib import Path
 
-REAL_SRC = os.environ.get("POCKETSHELL_REAL_SRC", "/opt/pocketshell-real/src")
 MARKER = "FIXTURE-APLEXER-SELFCHECK"
 #: The real CLI has to finish `a start` and see the record; aplexer's own
 #: `--startup-timeout-ms` default is 10 s, so give the whole create room.
@@ -85,8 +86,9 @@ def _home() -> str:
 def _child_env() -> dict[str, str]:
     env = dict(os.environ)
     env["HOME"] = _home()
-    path = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = f"{REAL_SRC}:{path}" if path else REAL_SRC
+    # The real CLI is the pinned PyPI wheel installed into the image's system
+    # interpreter at build time (issue #2643) — no PYTHONPATH seeding; whatever
+    # `python3 -m pocketshell` resolves to here IS the fixture's CLI.
     # A kill switch left set in the environment would make every aplexer probe
     # return None, which is the SILENCE this guard exists to reject. Refuse to
     # "pass" under it rather than quietly measuring nothing.
@@ -125,13 +127,12 @@ def run_cli(args: list[str], *, timeout: float) -> subprocess.CompletedProcess:
 
 def check_placement() -> tuple[str, str]:
     """The bundled `a` + sibling worker must sit next to ``sys.executable``."""
-    sys.path.insert(0, REAL_SRC)
     try:
         from pocketshell import aplexer as _aplexer
     except ImportError as exc:  # pragma: no cover - packaging integrity
         raise fail(
             "import",
-            f"cannot import pocketshell.aplexer from {REAL_SRC}: {exc}",
+            f"cannot import the installed pocketshell package: {exc}",
         ) from exc
 
     if os.environ.get("APLEXER_BIN"):
@@ -213,8 +214,9 @@ def check_lifecycle(binary: str) -> None:
         # ("Failed to connect to user scope bus ... $XDG_RUNTIME_DIR not
         # defined"), so the fixture opts out EXPLICITLY, at the call site,
         # rather than the CLI silently dropping the cap for everyone. Capping
-        # itself cannot be proven here; `tools/pocketshell/tests/
-        # test_sessions_mem_cap.py` proves it against a real delegated scope.
+        # itself cannot be proven here; the pinned-wheel pytest suite in
+        # PocketShell-io/pocketshell-cli proves it against a real delegated
+        # scope (the former tools/pocketshell tests, issue #2643).
         [
             "sessions", "create", tag,
             "--cwd", workspace,

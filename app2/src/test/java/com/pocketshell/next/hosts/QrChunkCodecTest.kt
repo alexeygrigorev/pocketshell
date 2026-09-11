@@ -13,9 +13,10 @@ import java.util.zip.CRC32
  * [QrChunkCodec] and [QrChunkAssembler] on the plain JVM — no Robolectric, no
  * Android, because the port to `java.util.Base64` made the envelope pure Kotlin.
  *
- * What these pin is the wire format, which has three independent
- * implementations (this one, the shipping client's, and
- * `tools/pocketshell/src/pocketshell/qr_share.py`). A change here that looks
+ * What these pin is the wire format, which has two independent
+ * implementations (this one, and pocketshell-desktop's emitter — the host
+ * CLI's `qr_share.py` renderer was removed, issue #2643, when the CLI moved
+ * to PocketShell-io/pocketshell-cli). A change here that looks
  * harmless — padding, alphabet, token order — silently stops the desktop
  * emitter's QRs from scanning, and nothing else in the build would notice.
  */

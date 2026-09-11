@@ -22,7 +22,9 @@ Phase C   dual-runtime transition           RETIRED by #2561
 Phase D   aplexer-only PocketShell product  DONE (#2561)
 ```
 
-The integration seam remains the **host CLI** (`tools/pocketshell/`): the phone
+The integration seam remains the **host CLI** (its own repo since #2643:
+[PocketShell-io/pocketshell-cli](https://github.com/PocketShell-io/pocketshell-cli),
+PyPI name `pocketshell` unchanged): the phone
 runs `pocketshell sessions list|create|attach|kill`, while `a` owns the remote
 session lifecycle. There is no second session manager to merge or select. The
 old planning references below are historical and are not implementation
@@ -32,7 +34,7 @@ instructions.
 
 ## Shipping: aplexer is part of the pocketshell CLI (#2543)
 
-aplexer is **not installed separately**. `tools/pocketshell/pyproject.toml`
+aplexer is **not installed separately**. The CLI's `pyproject.toml`
 carries a pinned, Linux-marked hard dependency:
 
 ```toml
@@ -97,8 +99,9 @@ reports the sibling that was found.
 
 ### Version coupling, and why the version string is not the contract
 
-The pin is enforced by the exact `==` specifier, the committed
-`tools/pocketshell/uv.lock`, and `tools/pocketshell/tests/test_aplexer_contract.py`.
+The pin is enforced by the exact `==` specifier, the CLI repo's committed
+`uv.lock`, and its `tests/test_aplexer_contract.py`
+(PocketShell-io/pocketshell-cli).
 It deliberately does **not** get a release-time guard:
 `scripts/check-pypi-version.sh` couples pocketshell's own package version to
 the release tag and says nothing about the host session runtime either.
@@ -234,7 +237,7 @@ after the matching GitHub release assets (`a-linux-{amd64,arm64}`,
 
 ### Lock cutoff
 
-`[tool.uv] exclude-newer` in `tools/pocketshell/pyproject.toml` (mirrored in
+`[tool.uv] exclude-newer` in the CLI repo's `pyproject.toml` (mirrored in
 `uv.lock`'s `[options]`) is a project-local reproducibility cutoff, and a
 package uploaded *after* it is simply invisible to `uv lock` — which looks
 like a broken index rather than a stale cutoff. So it moves in lock-step with
@@ -303,8 +306,8 @@ the aplexer session registry.
 
 ## Session memory caps
 
-Every session PocketShell creates resolves its memory cap in
-`tools/pocketshell/src/pocketshell/memcap.py`. The order is: explicit `--mem`,
+Every session PocketShell creates resolves its memory cap in the CLI's
+`memcap.py` (PocketShell-io/pocketshell-cli). The order is: explicit `--mem`,
 project `cgroups.toml`, project `pyproject.toml` `[tool.pocketshell]` data,
 the repository root equivalents, then the 12 GiB default. Malformed or unsafe
 values fail closed; the explicit `--mem none` flag is the fixture escape hatch

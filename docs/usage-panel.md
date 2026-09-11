@@ -139,8 +139,9 @@ A failed live fetch is **not** cached, so a transient provider hiccup never
 pins a bad reading.
 
 The scheduler units (systemd user `.timer`/`.service` + a cron example) and
-install instructions live in
-[`tools/pocketshell/scheduler/`](../tools/pocketshell/scheduler/README.md).
+install instructions live in the CLI repo's `scheduler/` directory
+([PocketShell-io/pocketshell-cli](https://github.com/PocketShell-io/pocketshell-cli),
+issue #2643).
 The recommended install is an hourly `systemctl --user` timer.
 
 ### App read path
@@ -233,9 +234,11 @@ Producer boundary (issues #2274 → #2293): #2283's `short_term` / `long_term`
 translation existed only while the published wheel lagged quse HEAD. The pin is
 now 0.0.15, which IS the canonical producer, so that translation is hard-cut
 (D22) — a legacy-shaped record fails loudly instead of being re-shaped. The
-passthrough is covered by the real published six-provider capture in
-`tools/pocketshell/tests/data/quse-0.0.15-usage.json`, whose exact producer
-output (`…-usage.ndjson`) is also what the Android parser test and the
+passthrough is covered by the real published six-provider capture in the CLI
+repo's `tests/data/quse-0.0.15-usage.json` (PocketShell-io/pocketshell-cli),
+whose exact producer output (`…-usage.ndjson`) is kept byte-identical in this
+repo's `shared/core-usage` test resources and is what the Android parser test
+and the
 `Usage1318StrictSchemaRenderE2eTest` connected journey consume.
 
 The pinned wheel provides `codex`, `claude`, `copilot`, `go` (OpenCode Go),

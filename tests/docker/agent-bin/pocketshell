@@ -376,8 +376,8 @@ case "${1:-}" in
     # Dockerfile.agents seeds ~/.config/pocketshell/engines.yaml with five
     # fixture rows (missing / disabled / nvm-only / login-only / forced) on top
     # of the built-in claude/codex/opencode/grok.
-    if [ ! -d /opt/pocketshell-real/src ]; then
-      printf 'pocketshell engines fixture needs /opt/pocketshell-real/src\n' >&2
+    if ! python3 -c 'import pocketshell' 2>/dev/null; then
+      printf 'pocketshell engines fixture needs the pinned pocketshell wheel (issue #2643)\n' >&2
       exit 64
     fi
     exec /usr/local/bin/pocketshell-real "$@"
@@ -599,8 +599,8 @@ PYEOF
     # Session lifecycle is the product contract. Run the real package against
     # the real bundled aplexer; this fixture must not maintain a second session
     # protocol or silently turn an unavailable aplexer into canned rows.
-    if [ ! -d /opt/pocketshell-real/src ]; then
-      printf 'pocketshell sessions fixture needs /opt/pocketshell-real/src\n' >&2
+    if ! python3 -c 'import pocketshell' 2>/dev/null; then
+      printf 'pocketshell sessions fixture needs the pinned pocketshell wheel (issue #2643)\n' >&2
       exit 64
     fi
     if [ "${1:-}" = "list" ] && [ -r "${POCKETSHELL_FIXTURE_SESSION_ERRORS_FILE:-$HOME/.pocketshell-fixture-session-errors.json}" ]; then

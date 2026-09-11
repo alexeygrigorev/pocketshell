@@ -9,7 +9,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="$ROOT_DIR/tests/docker/Dockerfile.agents"
 SELFCHECK="$ROOT_DIR/tests/docker/agents-aplexer-selfcheck.py"
 SHIM="$ROOT_DIR/tests/docker/agent-bin/pocketshell"
-PYPROJECT="$ROOT_DIR/tools/pocketshell/pyproject.toml"
+PINS="$ROOT_DIR/tests/docker/fixture-pins.txt"
 
 pass_count=0
 
@@ -28,6 +28,13 @@ printf 'Static agents-fixture aplexer invariants...\n'
 [[ -f "$DOCKERFILE" ]] || fail "missing $DOCKERFILE"
 [[ -f "$SELFCHECK" ]] || fail "missing $SELFCHECK"
 [[ -x "$SHIM" ]] || fail "missing executable fixture shim $SHIM"
+[[ -f "$PINS" ]] || fail "missing fixture pin file $PINS"
+
+grep -Eq '^POCKETSHELL_PIN=[0-9]' "$PINS" \
+  || fail "fixture-pins.txt does not pin a POCKETSHELL_PIN version"
+grep -Eq '^APLEXER_PIN=[0-9]' "$PINS" \
+  || fail "fixture-pins.txt does not pin an APLEXER_PIN version"
+ok "fixture pins file pins both the pocketshell wheel and the aplexer release"
 
 grep -Eq '^FROM[[:space:]]+debian:trixie-slim([[:space:]]|$)' "$DOCKERFILE" \
   || fail "Dockerfile.agents must use the glibc trixie base"
@@ -38,10 +45,12 @@ grep -Fq 'curl -fsSL -o /usr/bin/a' "$DOCKERFILE" \
 grep -Fq 'curl -fsSL -o /usr/bin/aplexer' "$DOCKERFILE" \
   || fail "Dockerfile.agents does not install the sibling aplexer worker"
 grep -Fq 'sed -n' "$DOCKERFILE" \
-  || fail "Dockerfile.agents must derive the release from pyproject.toml"
-grep -Fq 'pyproject.toml' "$DOCKERFILE" \
-  || fail "Dockerfile.agents no longer reads the production pin"
-ok "Dockerfile installs both binaries from the production-derived release"
+  || fail "Dockerfile.agents must derive the pins from fixture-pins.txt"
+grep -Fq 'fixture-pins.txt' "$DOCKERFILE" \
+  || fail "Dockerfile.agents no longer reads the fixture pins"
+grep -Eq 'pip install .*pocketshell==' "$DOCKERFILE" \
+  || fail "Dockerfile.agents must install the pinned pocketshell wheel (issue #2643)"
+ok "Dockerfile installs the pinned wheel and both aplexer binaries from the fixture pins"
 
 if grep -Eiq 'tmux|tmuxctl|--backend|pocketshell-fixture-sessions' "$DOCKERFILE"; then
   fail "Dockerfile.agents still carries a retired session backend or helper"

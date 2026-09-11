@@ -92,9 +92,10 @@ if [[ "${1:-}" != "" ]]; then
   exit 2
 fi
 
+# Since issue #2643 the host CLI (tools/pocketshell/) is scanned by this
+# guard's copy in PocketShell-io/pocketshell-cli; the paths below are the
+# product surface this repo owns.
 scan_paths \
-  tools/pocketshell/src \
-  tools/pocketshell/pyproject.toml \
   app2/src/main \
   app2/build.gradle.kts \
   shared/*/src/main

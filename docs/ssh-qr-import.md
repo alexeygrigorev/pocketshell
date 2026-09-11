@@ -81,7 +81,7 @@ A payload below 1500 bytes still encodes as a single envelope with `part=1/1` so
 ## Desktop Emitter
 
 The companion CLI is `pocketshell qr-share`, part of the unified
-[`pocketshell`](../tools/pocketshell/) Python tool. It reads `~/.ssh/config` (or accepts `--host` / `--user` / `--port` / `--key` flags) to produce a payload and emit QR(s). It prints QRs inline in the terminal when stdout is a TTY and writes a numbered PNG sequence (`qr-share-01.png`, ...) otherwise. For multi-QR payloads it pauses between codes so the user can scan each in turn.
+[`pocketshell`](https://github.com/PocketShell-io/pocketshell-cli) Python tool (its own repo since #2643). It reads `~/.ssh/config` (or accepts `--host` / `--user` / `--port` / `--key` flags) to produce a payload and emit QR(s). It prints QRs inline in the terminal when stdout is a TTY and writes a numbered PNG sequence (`qr-share-01.png`, ...) otherwise. For multi-QR payloads it pauses between codes so the user can scan each in turn.
 
 Install the optional `qr` extra so QR rendering is available:
 

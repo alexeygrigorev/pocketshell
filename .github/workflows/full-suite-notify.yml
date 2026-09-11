@@ -59,6 +59,5 @@ jobs:
             --sha "${{ github.event.workflow_run.head_sha }}" \
             --last-green-sha "${{ steps.green.outputs.last_green_sha }}" \
             --unit-gate "${{ steps.jobs.outputs.unit_gate }}" \
-            --python "${{ steps.jobs.outputs.python }}" \
             --integration "${{ steps.jobs.outputs.integration }}" \
             --emulator-journey-verdict "${{ steps.jobs.outputs.emulator_journey_verdict }}"

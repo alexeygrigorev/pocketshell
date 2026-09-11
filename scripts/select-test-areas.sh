@@ -781,59 +781,23 @@ verify_manifest() {
   #    catches "someone deleted half the suite" while passing a codebase that is
   #    legitimately smaller. Measured on the app2 tree when recalibrated:
   #      indexed test classes 172, production packages 34, import lines 213,
-  #      cross-area classes 75, host-CLI seam 8 packages / 55 classes
-  #      (1 producer, 1 consumer, 8 vocabulary, 4 under shared/),
-  #      20 live Click commands.
+  #      cross-area classes 75. (The host-CLI seam machinery and its floors
+  #      were deleted with the producer they coupled to — issue #2643 moved
+  #      the CLI to PocketShell-io/pocketshell-cli; a producer bump now
+  #      arrives as a tests/docker/fixture-pins.txt change, which force-fulls
+  #      via `full tests/docker/*`.)
   #
-  #    The two ENDS collapsed to ONE package each, and that is architectural,
-  #    not a narrowing: the rewrite centralised every host-CLI call behind a
-  #    single client instead of scattering `pocketshell …` strings across a
-  #    dozen packages. A `>= 1` count floor on those two ends would be exactly
-  #    the toothless shape B7 rejected, so the count is NOT what protects them
-  #    any more — SEAM_PKG_PINS below names the packages that must stay on the
-  #    seam. A named pin does not decay as the codebase changes size, and it
-  #    goes red on precisely the B6 defect (`:shared:core-usage:test`, the
-  #    strict reader of `pocketshell usage --json`, dropping off the wire).
   local -a index_fail=()
-  local -a SEAM_PKG_PINS=(
-    # The B6 class itself: the STRICT / fail-loud NDJSON reader. If this package
-    # leaves the seam, a tools/pocketshell/src/pocketshell/usage.py change stops
-    # running the test that a schema drift breaks.
-    "com.pocketshell.core.usage"
-    # The Kotlin end of every host-CLI verb (HostCliClient + the sessions/engines
-    # JSON models). A `pocketshell` subcommand or payload change breaks here
-    # first; #847 / v0.4.10 was exactly this contract.
-    "com.pocketshell.core.hostapi"
-    # The screens built out of what the CLI emits: the session tree
-    # (`sessions --json`) and the usage panel (`usage --json`).
-    "com.pocketshell.next.tree"
-    "com.pocketshell.next.usage"
-  )
-  local seam_pkg
-  for seam_pkg in "${SEAM_PKG_PINS[@]}"; do
-    [[ -n "${POCKETSHELL_TA_PROD_PKG_HOSTCLI[$seam_pkg]:-}" ]] ||
-      index_fail+=("host-CLI wire seam no longer reaches $seam_pkg — a tools/pocketshell change would stop running the tests that read what it emits (#847/#1509/B6)")
-  done
   [[ "$POCKETSHELL_TA_INDEX_CLASSES"      -ge 120 ]] || index_fail+=("indexed test classes = $POCKETSHELL_TA_INDEX_CLASSES (< 120)")
   [[ "$POCKETSHELL_TA_INDEX_PROD_PKGS"    -ge 24  ]] || index_fail+=("production packages mapped = $POCKETSHELL_TA_INDEX_PROD_PKGS (< 24)")
   [[ "$POCKETSHELL_TA_INDEX_IMPORT_LINES" -ge 150 ]] || index_fail+=("com.pocketshell import lines scanned = $POCKETSHELL_TA_INDEX_IMPORT_LINES (< 150)")
   [[ "$POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES" -ge 45 ]] || index_fail+=("test classes with a cross-area production dependency = $POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES (< 45)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS" -ge 1 ]] || index_fail+=("host-CLI wire-seam PRODUCER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS (< 1) — the invoke marker /$POCKETSHELL_TA_HOSTCLI_MARKER/ has narrowed (#847 lockstep coupling)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS" -ge 1 ]] || index_fail+=("host-CLI wire-seam CONSUMER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS (< 1) — the reply end of the wire has narrowed (finding B6)")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS" -ge 6 ]] || index_fail+=("host-CLI wire-seam VOCABULARY packages = $POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS (< 6) — packages naming a real subcommand have narrowed")
-  # The live command count has a floor so a dead/empty reader cannot satisfy
-  # the guard at zero. Import and runtime failures are a separate fail-closed
-  # condition; they must never be laundered into a smaller vocabulary.
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS" -ge 12 ]] || index_fail+=("host-CLI live Click commands read = $POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS (< 12) — the live vocabulary reader is dead or empty")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE" -eq 0 ]] || index_fail+=("host-CLI live vocabulary reader could not import/read $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE: $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS" -ge 3 ]] || index_fail+=("host-CLI wire-seam packages under shared/ = $POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS (< 3) — this is EXACTLY the B6 defect: it was 0 while the total looked healthy, and :shared:core-usage:test (the strict parser of \`pocketshell usage --json\`) did not run on a host-CLI change")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES" -ge 35 ]] || index_fail+=("test classes depending on the host CLI = $POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES (< 35) — #1509 / the usage parser would stop running on a tools/pocketshell change")
   if [[ "${#index_fail[@]}" -gt 0 ]]; then
     echo "FAIL: the import-dependency index looks broken, so selection would under-run:"
     printf '  %s\n' "${index_fail[@]}"
     failures=$((failures + 1))
   else
-    echo "OK: dependency index populated (${POCKETSHELL_TA_INDEX_CLASSES} classes, ${POCKETSHELL_TA_INDEX_PROD_PKGS} production packages, ${POCKETSHELL_TA_INDEX_IMPORT_LINES} imports, ${POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES} cross-area, ${POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES} host-CLI-dependent via ${POCKETSHELL_TA_INDEX_HOSTCLI_PKGS} wire-seam packages = ${POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS} producer / ${POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS} consumer / ${POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS} vocabulary over ${POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS} live Click commands read from ${POCKETSHELL_TA_HOSTCLI_CLI_SOURCE} — ${POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS} of them under shared/)"
+    echo "OK: dependency index populated (${POCKETSHELL_TA_INDEX_CLASSES} classes, ${POCKETSHELL_TA_INDEX_PROD_PKGS} production packages, ${POCKETSHELL_TA_INDEX_IMPORT_LINES} imports, ${POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES} cross-area)"
   fi
 
   # 8. Every Gradle test task the planner can emit is a real Gradle project.
@@ -1140,36 +1104,25 @@ if want_inv I8; then
   #     module, and it was not run by a change to the Python that produces that
   #     NDJSON. UNIT_PINS below closes that half; they are checked against the
   #     indexed class set rather than the journey registry.
+  # Issue #2643: the three host-cli unit pins were DELETED with the area they
+  # pinned (the producer moved to PocketShell-io/pocketshell-cli; a producer
+  # bump now force-fulls the run via the manifest's `full tests/docker/*` row,
+  # which runs every unit class including these — selftest case 16a-2). The
+  # one surviving unit pin is cross-area on the KOTLIN side:
   local -a UNIT_PINS=(
-    # #1318 / #847: PocketshellUsageJsonParser is deliberately STRICT — any
-    # schema drift in tools/pocketshell/src/pocketshell/usage.py throws and the
-    # whole usage panel errors. The producer of that NDJSON must run it.
-    "com.pocketshell.core.usage.PocketshellUsageJsonParserTest|host-cli"
-    # core-storage: HostEntity carries the CLI lockstep version columns
-    # (pocketshellCliVersion / pocketshellExpectedCliVersion) and its schema
-    # test is what a version-contract change breaks. The round-2 reviewer asked
-    # for this to be audited rather than assumed; it resolves through the
-    # consumer end (core.storage.entity), not by hand.
-    "com.pocketshell.core.storage.AppDatabaseTest|host-cli"
-    # app2: the session-tree navigation test consumes the CLI's session rows
-    # and agent state, so a host-CLI producer change must run this unit-level
-    # reader even though the old ui-kit model pin was removed by the rewrite.
-    "com.pocketshell.next.tree.SessionTreeNavigationTest|host-cli"
+    # #1318: PocketshellUsageJsonParser is deliberately STRICT — any schema
+    # drift in the usage wire throws and the whole usage panel errors. The
+    # usage-costs screens consume what it parses, so a usage-costs change must
+    # both select it and emit its module's task (selftest case 19c pins that
+    # pair: selected != executed is the B6 symptom shape).
+    "com.pocketshell.core.usage.PocketshellUsageJsonParserTest|usage-costs"
   )
   # RE-PINNED for app2 (the rewrite's hard cut deleted every class the old pin
-  # set named). The PROPERTIES pinned are unchanged — a host-CLI change must
-  # still run the journeys that read what the CLI emits, and a transport change
-  # must still run the journeys that drive it end to end — only the classes
-  # carrying them moved.
+  # set named). Issue #2643 then removed the three host-cli journey pins with
+  # their area: a producer bump now force-fulls the run via `full
+  # tests/docker/*` (selftest case 16a asserts the wire journeys run on it),
+  # so no per-area host-cli pin has a subject left.
   local -a PINS=(
-    # #1509 G10 + #847 / v0.4.10: host-CLI/client version is a RUNTIME lockstep.
-    # The tree journey is the successor of the FolderList* pins: it is the
-    # screen built from `pocketshell sessions --json`, so a producer-side schema
-    # or version change is exactly what breaks it.
-    "com.pocketshell.next.tree.J02SessionTreeListJourney|host-cli"
-    "com.pocketshell.next.tree.J04CreateSessionJourney|host-cli"
-    # #1318: the usage panel is the STRICT reader of `pocketshell usage --json`.
-    "com.pocketshell.next.usage.J12UsagePanelJourney|host-cli"
     # D28 connection core: journeys that drive transport production types.
     "com.pocketshell.next.connect.J01ConnectAndTrustJourney|connection-core"
     "com.pocketshell.next.terminal.J03AttachAndTypeJourney|connection-core"
@@ -1208,11 +1161,19 @@ if want_inv I8; then
       # Selection is necessary but not sufficient: the emitted plan must also
       # carry the class's Gradle module, or the guard is green while the run
       # never touches it. That IS the concrete B6 symptom —
-      # `:shared:core-usage:test` absent from a `tools/pocketshell/**` plan.
+      # `:shared:core-usage:test` absent from a pinned-producer plan.
       local pin_mod="${POCKETSHELL_TA_CLASS_MODULE[$j]:-}"
-      local pin_tasks
-      pin_tasks="$(plan_gradle_unit | sed -n 's/^UNIT_SHARED_TASKS=//p')"
-      if [[ "$pin_mod" == :shared:* && " $pin_tasks " != *" ${pin_mod}:test "* ]]; then
+      local pin_plan pin_mode pin_tasks
+      pin_plan="$(plan_gradle_unit)"
+      pin_mode="$(sed -n 's/^UNIT_MODE=//p' <<<"$pin_plan")"
+      pin_tasks="$(sed -n 's/^UNIT_SHARED_TASKS=//p' <<<"$pin_plan")"
+      # Issue #2643: the host-cli probe (tests/docker/fixture-pins.txt)
+      # force-fulls, and a full plan runs every module's :test by construction
+      # (UNIT_GRADLE_TASKS=test) with UNIT_SHARED_TASKS empty — the scoped
+      # plan assertion below is meaningful only for scoped plans.
+      if [[ "$pin_mode" == full ]]; then
+        :
+      elif [[ "$pin_mod" == :shared:* && " $pin_tasks " != *" ${pin_mod}:test "* ]]; then
         pin_fail+=("a change to '$a' ($probe) selects $j but the emitted plan does NOT run ${pin_mod}:test")
       fi
     fi

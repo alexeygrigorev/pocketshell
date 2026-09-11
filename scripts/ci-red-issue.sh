@@ -16,7 +16,7 @@
 #   ci-red-issue.sh
 #     --repo OWNER/NAME --run-url URL --sha SHA
 #     [--last-green-sha SHA]
-#     [--unit-gate RESULT] [--python RESULT] [--integration RESULT]
+#     [--unit-gate RESULT] [--integration RESULT]
 #     [--emulator-journey-verdict RESULT]
 #     [--gh PATH]
 #   (each RESULT is a `needs.<job>.result` value; only "failure" counts as
@@ -37,7 +37,6 @@ RUN_URL=""
 SHA=""
 LAST_GREEN_SHA=""
 UNIT_GATE=""
-PYTHON_R=""
 INTEGRATION_R=""
 JOURNEY_R=""
 GH_BIN="${POCKETSHELL_GH_BIN:-gh}"
@@ -49,7 +48,6 @@ while [[ $# -gt 0 ]]; do
     --sha) SHA="$2"; shift 2 ;;
     --last-green-sha) LAST_GREEN_SHA="$2"; shift 2 ;;
     --unit-gate) UNIT_GATE="$2"; shift 2 ;;
-    --python) PYTHON_R="$2"; shift 2 ;;
     --integration) INTEGRATION_R="$2"; shift 2 ;;
     --emulator-journey-verdict) JOURNEY_R="$2"; shift 2 ;;
     --gh) GH_BIN="$2"; shift 2 ;;
@@ -62,7 +60,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$REPO" || -z "$RUN_URL" || -z "$SHA" ]]; then
-  echo "usage: $0 --repo OWNER/NAME --run-url URL --sha SHA [--last-green-sha SHA] [--unit-gate R] [--python R] [--integration R] [--emulator-journey-verdict R] [--gh PATH]" >&2
+  echo "usage: $0 --repo OWNER/NAME --run-url URL --sha SHA [--last-green-sha SHA] [--unit-gate R] [--integration R] [--emulator-journey-verdict R] [--gh PATH]" >&2
   exit 2
 fi
 
@@ -79,7 +77,6 @@ fi
 
 declare -a failed=()
 [[ "$UNIT_GATE" == "failure" ]] && failed+=("Unit tests")
-[[ "$PYTHON_R" == "failure" ]] && failed+=("Python utility tests (pocketshell)")
 [[ "$INTEGRATION_R" == "failure" ]] && failed+=("Integration tests (Docker)")
 [[ "$JOURNEY_R" == "failure" ]] && failed+=("Emulator journey aggregate verdict (one or more of the 9 shards; see the run for which)")
 failure_summary="$(printf '%s; ' "${failed[@]:-}")"

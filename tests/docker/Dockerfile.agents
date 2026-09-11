@@ -50,7 +50,7 @@ FROM debian:trixie-slim
 # journey opens a real nano buffer and drives `^O`/`^X` from the hotkeys panel,
 # so the fixture must ship a real `nano`.
 # Issue #2276: `python3-yaml` is required because the fixture's `engines list
-# --json` arm delegates to the REPOSITORY's real `pocketshell.engines`
+# --json` arm delegates to the wheel-installed real `pocketshell.engines`
 # registry (see agent-bin/pocketshell), which reads
 # ~/.config/pocketshell/engines.yaml. Without PyYAML the registry silently
 # ignores the fixture's engine rows.
@@ -58,17 +58,22 @@ FROM debian:trixie-slim
 # Alpine -> Debian package mapping (issue #2563):
 #   openssh-sftp-server -> shipped INSIDE openssh-server on Debian
 #   sqlite              -> sqlite3
-#   py3-click/py3-yaml  -> python3-click/python3-yaml
+#   py3-yaml            -> python3-yaml. py3-click is deliberately NOT mapped:
+#                          the pinned wheel owns `click` — an apt-installed
+#                          click has no pip RECORD file, and the wheel's
+#                          dependency upgrade aborts with
+#                          uninstall-no-record-file
 #   adduser -D          -> useradd -m
 #   passwd -u           -> usermod -p '*'  (Debian's passwd(1) refuses to
 #                          unlock into a passwordless account and exits 3;
 #                          busybox's is lenient)
-# `curl` + `ca-certificates` are new and exist only to fetch the pinned
-# aplexer release binaries below.
+# `curl` + `ca-certificates` exist to fetch the pinned aplexer release
+# binaries below; `python3-pip` installs the pinned `pocketshell` wheel
+# (issue #2643 — the CLI is no longer built from this repo).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server openssh-client \
         procps bash sqlite3 git nano ca-certificates curl \
-        python3 python3-click python3-yaml \
+        python3 python3-pip python3-yaml \
     && find /var/lib/apt/lists -mindepth 1 -delete \
     && ln -sfn /usr/lib/openssh /usr/lib/ssh \
     && mkdir -p /run/sshd \
@@ -78,13 +83,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh
 
-# Copied on its own, ABOVE the source tree, so editing tools/pocketshell/src
-# does not invalidate the aplexer download layer below it.
-COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
+# The pins this fixture installs (issue #2643). Copied on its own so editing
+# unrelated test code does not invalidate the download/install layers below.
+COPY tests/docker/fixture-pins.txt /opt/pocketshell-fixture/pins.txt
 
-# THE REAL, PINNED aplexer (issue #2563).
+# THE REAL, PINNED host CLI + aplexer (issues #2563, #2643).
 #
-# WHERE the binaries land is load-bearing; being on PATH is NOT enough.
+# Since #2643 the CLI is not built from this repo at all: the pinned PyPI
+# wheel is installed, so the fixture exercises exactly what production hosts
+# run (`uv tool install pocketshell`). The pip install runs BEFORE the
+# agent-bin COPY below, so the wheel's `pocketshell`/`quse` console scripts
+# are deliberately overwritten by the fixture shims that shadow them on PATH;
+# the real entry point stays `python3 -m pocketshell`. `--break-system-packages`
+# is the sanctioned way to install into Debian's externally-managed system
+# interpreter.
+#
+# WHERE the `a` binary lands is load-bearing; being on PATH is NOT enough.
 # `pocketshell.aplexer::_bundled_bin_dirs` resolves `a` next to
 # `sys.executable` and nowhere else — the PATH lookup is a D22 hard cut
 # (#2543). With `a` only on PATH the real CLI reports no aplexer rows and exit
@@ -92,12 +106,14 @@ COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # the exact vacuous-pass shape docs/ci-pitfalls.md catalogues. `/usr/bin/a`
 # sitting next to `/usr/bin/python3` is what makes the resolution succeed, and
 # the self-check further down fails the BUILD if that ever stops being true.
+# (The aplexer wheel that arrives as a dependency of the pocketshell wheel may
+# also drop an `a` in /usr/local/bin — harmless: resolution is
+# interpreter-adjacent and never a PATH walk, and the self-check asserts it.)
 #
 # `a` also needs its sibling worker: aplexer/src/lib.rs::worker_executable
 # resolves `aplexer` next to `current_exe`, so both binaries ship.
 #
-# The version is DERIVED from the same `aplexer==X.Y.Z` line
-# tools/pocketshell/pyproject.toml already pins for production — never a
+# Both versions are DERIVED from tests/docker/fixture-pins.txt — never a
 # hardcoded literal and never a `--build-arg` default, which is exactly the
 # drift a fixture must not have. Bump the pin and the fixture follows in the
 # same commit; they cannot disagree.
@@ -107,22 +123,25 @@ COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # wheel-packs it and uploads it), so this is the production artefact rather
 # than "a build of the same version" — the 143-commit version trap recorded in
 # AGENTS.md does not apply. Nothing here greps `a --version`: the pin is
-# asserted by BEHAVIOUR (the self-check below, and
-# tools/pocketshell/tests/test_aplexer_contract.py).
+# asserted by BEHAVIOUR (the self-check below, and the aplexer contract test
+# in PocketShell-io/pocketshell-cli).
 RUN set -eu; \
-    ver="$(sed -n 's/^ *"aplexer==\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-real/pyproject.toml | head -1)"; \
-    test -n "$ver" || { echo "FATAL: no aplexer==X.Y.Z pin in pyproject.toml" >&2; exit 1; }; \
+    cli_pin="$(sed -n 's/^POCKETSHELL_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
+    test -n "$cli_pin" || { echo "FATAL: no POCKETSHELL_PIN in fixture-pins.txt" >&2; exit 1; }; \
+    ver="$(sed -n 's/^APLEXER_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
+    test -n "$ver" || { echo "FATAL: no APLEXER_PIN in fixture-pins.txt" >&2; exit 1; }; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) asset_arch=linux-amd64 ;; \
       arm64) asset_arch=linux-arm64 ;; \
       *) echo "FATAL: aplexer publishes no release binary for dpkg arch $arch" >&2; exit 1 ;; \
     esac; \
-    echo "pinned aplexer=$ver $asset_arch (derived from pyproject.toml)"; \
+    echo "pinned pocketshell=$cli_pin (PyPI wheel), aplexer=$ver $asset_arch (derived from fixture-pins.txt)"; \
     base="https://github.com/alexeygrigorev/aplexer/releases/download/v${ver}"; \
     curl -fsSL -o /usr/bin/a "$base/a-${asset_arch}"; \
     curl -fsSL -o /usr/bin/aplexer "$base/aplexer-${asset_arch}"; \
-    chmod +x /usr/bin/a /usr/bin/aplexer
+    chmod +x /usr/bin/a /usr/bin/aplexer; \
+    pip install --break-system-packages --no-cache-dir "pocketshell==${cli_pin}"
 
 COPY tests/docker/sshd_config /etc/ssh/sshd_config
 COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
@@ -132,8 +151,9 @@ COPY tests/docker/test_key /root/test_key
 COPY tests/docker/agent-bin/ /usr/local/bin/
 # Issue #2240: the standard fixture keeps its deterministic probes, but the
 # acknowledged send verb delegates to the real host implementation so a
-# connected test can leave and reread a genuine pending journal record.
-COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
+# connected test can leave and reread a genuine pending journal record. The
+# real implementation itself is the pinned PyPI wheel installed above (issue
+# #2643) — there is no source COPY anymore.
 # The #1302/#1208 idle-incremental-claude.sh TUI fixture was DELETED here (D22).
 # It painted a full TUI frame once and then repainted only a spinner in place —
 # an idle agent that cannot self-heal a lost grid, so recovery had to come from
@@ -255,9 +275,10 @@ RUN install -d -o testuser -g testuser \
 #
 # What this check does NOT prove is the binary's VINTAGE. A neighbouring
 # release that still satisfies this lifecycle would pass it, and that is fine:
-# the vintage guarantee comes from the derivation above (the version is read
-# out of the same pyproject.toml line production pins) plus the release URL it
-# builds, not from anything asserted at run time. Version STRINGS are never
+# the vintage guarantee comes from the pins above (the wheel version is read
+# out of tests/docker/fixture-pins.txt, and bumping that pin is a deliberate,
+# reviewed app-repo change) plus the release URL it builds, not from anything
+# asserted at run time. Version STRINGS are never
 # consulted anywhere here — see the note above the download for why they are
 # not evidence.
 RUN su testuser -s /bin/sh -c 'HOME=/home/testuser /usr/local/bin/pocketshell-fixture-aplexer-selfcheck'

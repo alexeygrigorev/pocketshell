@@ -91,7 +91,7 @@ out="$(cd "$SANDBOX/repo" && PATH="$SANDBOX/bin:$PATH" "$TARGET" \
   --run-url "https://github.com/owner/repo/actions/runs/123" \
   --sha "$sha_c" \
   --last-green-sha "$sha_a" \
-  --unit-gate failure --python success --integration skipped --emulator-journey-verdict failure 2>&1)"
+  --unit-gate failure --integration skipped --emulator-journey-verdict failure 2>&1)"
 echo "$out" | grep -q "Created tracking issue" || fail "expected a create when no existing issue is found: $out"
 calls="$(cat "$SANDBOX/call-count.txt")"
 [[ "$calls" -eq 2 ]] || fail "expected exactly 2 gh calls (list, create), got $calls"

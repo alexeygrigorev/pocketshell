@@ -70,7 +70,7 @@ write_fixture_api() {
 
   cat > "$dir/check-runs.json" <<JSON
 {"total_count": 2, "check_runs": [
-  {"name": "Python utility tests (pocketshell)", "status": "completed", "conclusion": "success",
+  {"name": "Integration tests (Docker)", "status": "completed", "conclusion": "success",
    "head_sha": "$sha", "details_url": "https://github.com/o/r/actions/runs/900/job/1"},
   {"name": "Unit tests", "status": "$check_status", "conclusion": "$check_conclusion",
    "head_sha": "$check_head_sha", "details_url": "https://github.com/o/r/actions/runs/4242/job/7"}

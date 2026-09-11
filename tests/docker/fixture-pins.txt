@@ -1,0 +1,26 @@
+# Pinned versions the Docker `agents` fixtures install (issue #2643).
+#
+# The host CLI and its aplexer worker are no longer built from this repo —
+# the CLI lives in PocketShell-io/pocketshell-cli (PyPI name `pocketshell`)
+# and the fixtures install the PUBLISHED, pinned wheel, i.e. they test what
+# production hosts actually run (`uv tool install pocketshell`). This file is
+# the app-repo side of that contract:
+#
+#   * POCKETSHELL_PIN — the `pocketshell` PyPI version installed into the
+#     fixture images. Pin the NEWEST RELEASED wheel, not a wish: a version
+#     that is not on PyPI fails the image build. Bumping it is a deliberate,
+#     reviewed app-repo change; this file sits under the `full tests/docker/*`
+#     trigger row, so a bump force-fulls the suite.
+#   * APLEXER_PIN — the aplexer GitHub release the `a`/`aplexer` binaries are
+#     downloaded from. `a` must sit next to /usr/bin/python3
+#     (`pocketshell.aplexer::_bundled_bin_dirs` resolves it there and nowhere
+#     else — the PATH lookup is a D22 hard cut, #2543), so the binaries stay
+#     release-asset downloads rather than whatever the wheel happens to place
+#     on PATH. Keep this in lock-step with the pin inside the pocketshell
+#     wheel's own dependencies (aplexer==X.Y.Z there).
+#
+# Both Dockerfiles parse this file at build time (never a --build-arg
+# default, never a hardcoded literal — that is the drift a fixture must not
+# have), and scripts/test-agents-fixture-aplexer.sh asserts they still do.
+POCKETSHELL_PIN=0.5.5
+APLEXER_PIN=0.1.5

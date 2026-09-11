@@ -115,7 +115,7 @@ touch \
 # Seed one real aplexer shell so every tree journey has an independent row to
 # wait for. Each journey creates and cleans up its own additional records.
 su testuser -s /bin/sh -c \
-  'HOME=/home/testuser PYTHONPATH=/opt/pocketshell-real/src \
+  'HOME=/home/testuser \
    /usr/local/bin/pocketshell-real sessions create --cwd /home/testuser/git/pocketshell \
    --mem none --json -- claude-main >/dev/null'
 

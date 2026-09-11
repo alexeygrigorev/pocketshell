@@ -78,31 +78,15 @@
 #   4. it IMPORTS the production code of an area that is in the diff — derived
 #      from the class's own `import com.pocketshell.…` lines, NOT from any row
 #      in this file;
-#   5. it lives in — or imports — a package on the host-CLI WIRE SEAM, and
-#      `tools/pocketshell/**` is in the diff.
-#
-# THE WIRE SEAM MARKS BOTH ENDS OF THE CONTRACT (rule 5, round-2 finding B6)
-#
-# A wire contract has a producer and a consumer, and marking only the invoking
-# end left the entire `shared/*` half of the tree outside the seam by
-# construction — no shared module ever shells out. That is how
-# `:shared:core-usage:test`, the STRICT / fail-loud reader of the NDJSON
-# `tools/pocketshell/src/pocketshell/usage.py` emits, was not run by a change to
-# the code that produces it, with every guard green. A production package is on
-# the seam when ANY of these holds:
-#
-#   (a) PRODUCER  — a file in it invokes the CLI (`PocketshellCommand`, or a
-#                   literal `pocketshell …` command string);
-#   (b) CONSUMER  — an INVOKING FILE imports it (one hop): the invoker builds the
-#                   request and hands the reply to something, and that something
-#                   is in the invoking file's own import set;
-#   (c) VOCABULARY— a file in it NAMES a real host-CLI subcommand, where the
-#                   subcommand list is extracted from the producer itself
-#                   (`cli.add_command(…, name="…")` in
-#                   tools/pocketshell/src/pocketshell/cli.py). This is the case
-#                   with no in-app invoker at all: the settings QR importer
-#                   parses what `pocketshell qr-share` emits, and that payload
-#                   arrives by QR scan, so no import edge exists to follow.
+#   5. DELETED (issue #2643): the host-CLI WIRE SEAM. The producer moved to
+#      PocketShell-io/pocketshell-cli, and the seam machinery that mapped a
+#      producer-side change onto the Kotlin wire tests was deleted with it
+#      (D22: the guard's subject left the repo). The protection survives in
+#      the `full tests/docker/*` row below: the producer-side trigger inside
+#      this repo is tests/docker/fixture-pins.txt (the pinned wheel the Docker
+#      fixtures install), and bumping it force-fulls the run — every
+#      wire-reading journey and unit class runs, plus the rest. Cross-repo
+#      contract drift itself is owned by the CLI repo's own CI.
 #
 # Rules 4 and 5 are computed in scripts/lib/test-areas.sh; that file's index
 # comment carries the full rationale, the two stronger designs that were
@@ -159,18 +143,13 @@ area   bootstrap            changed  The Kotlin host-CLI client (:shared:core-ho
 area   diagnostics-crash    changed  Diagnostics, crash reporting, env and snippets
 area   ui-shell             changed  Shared ui-kit design system, layout, insets and branding
 area   ci-harness           changed  JVM-driven shell harness tests for the CI scripts
-# host-cli has ZERO Kotlin test classes of its own (its unit tests are the
-# separate `Python utility tests` job). It matters because host-CLI/client
-# version is a RUNTIME lockstep — #847 / v0.4.10, the most expensive break this
-# repo has shipped. Its coupling to the Kotlin tests is derived from the
-# two-ended wire seam (rule 5 above), not from a `couple` row, and I9 in
-# --coverage-invariant pins both journeys (#1509, FolderListOldCliHydrateDockerTest)
-# and UNIT consumers (PocketshellUsageJsonParserTest, AppDatabaseTest,
-# SessionTreeNavigationTest) to it by name. Measured consequence, stated rather
-# than buried: with both ends marked, a `tools/pocketshell/**` change selects
-# 158 of 161 journeys and 570 of 659 unit classes — a host-CLI change is now
-# effectively a full run. That is the deliberate answer for the #847 class.
-area   host-cli             changed  The host-side `pocketshell` Python CLI
+# The `host-cli` AREA was DELETED with its subject (issue #2643): the CLI's
+# pytest suite lives in PocketShell-io/pocketshell-cli, and no tracked path
+# classifies into the area any more — the producer trigger (fixture-pins.txt)
+# deliberately force-fulls via `full tests/docker/*` instead, and an area
+# representative must classify INTO its area, which a force-full path cannot.
+# The #847 lockstep property is asserted by selftest case 16a/16a-2: a pin
+# bump runs every journey and unit class, including the wire readers.
 
 # ---------------------------------------------------------------------------
 # FORCE-FULL — blast-radius escapes. Evaluated FIRST, in this order.
@@ -307,7 +286,8 @@ src    app2/src/main/java/com/pocketshell/next/diagnostics/*  diagnostics-crash 
 src    app2/src/main/java/com/pocketshell/next/crash/*        diagnostics-crash    full
 
 # -- host CLI --
-src    tools/pocketshell/*           host-cli             full
+# No `src … host-cli` row any more (issue #2643): the producer-side trigger is
+# tests/docker/fixture-pins.txt, already force-full via `full tests/docker/*`.
 
 # -- CI/dev-tooling scripts NOT covered by an explicit `full` row above
 #    (issue #2355). Most have their own unconditional self-test (a sibling
@@ -367,7 +347,9 @@ test   app2/src/*/java/com/pocketshell/next/nav/*          app-shell            
 test   app2/src/*/java/com/pocketshell/next/+([A-Za-z0-9_])Test.kt  app-shell  full
 
 # -- host CLI tests --
-test   tools/pocketshell/tests/*     host-cli             full
+# The `test tools/pocketshell/tests/* host-cli full` row was DELETED with the
+# tree it mapped (issue #2643): the CLI's pytest suite now lives in
+# PocketShell-io/pocketshell-cli.
 
 # ---------------------------------------------------------------------------
 # PER-CLASS OVERRIDES

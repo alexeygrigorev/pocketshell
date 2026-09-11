@@ -10,7 +10,7 @@ ARG OLD_CLI_MODE=unknown
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server openssh-client procps bash sqlite3 git nano \
-        ca-certificates curl python3 python3-click python3-yaml \
+        ca-certificates curl python3 python3-pip python3-yaml \
     && find /var/lib/apt/lists -mindepth 1 -delete \
     && ln -sfn /usr/lib/openssh /usr/lib/ssh \
     && mkdir -p /run/sshd \
@@ -20,16 +20,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh
 
-COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
+COPY tests/docker/fixture-pins.txt /opt/pocketshell-fixture/pins.txt
+# Issue #2643: the real CLI is the pinned PyPI wheel (never built from this
+# repo). The pip install runs BEFORE the agent-bin COPY below so the fixture
+# shims overwrite the wheel's console scripts; `python3 -m pocketshell` stays
+# the real entry point.
 RUN set -eu; \
-    ver="$(sed -n 's/^ *"aplexer==\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-real/pyproject.toml | head -1)"; \
+    cli_pin="$(sed -n 's/^POCKETSHELL_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
+    test -n "$cli_pin"; \
+    ver="$(sed -n 's/^APLEXER_PIN=\([0-9][^"; ]*\).*/\1/p' /opt/pocketshell-fixture/pins.txt | head -1)"; \
     test -n "$ver"; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in amd64) asset_arch=linux-amd64 ;; arm64) asset_arch=linux-arm64 ;; *) exit 1 ;; esac; \
     base="https://github.com/alexeygrigorev/aplexer/releases/download/v${ver}"; \
     curl -fsSL -o /usr/bin/a "$base/a-${asset_arch}"; \
     curl -fsSL -o /usr/bin/aplexer "$base/aplexer-${asset_arch}"; \
-    chmod +x /usr/bin/a /usr/bin/aplexer
+    chmod +x /usr/bin/a /usr/bin/aplexer; \
+    pip install --break-system-packages --no-cache-dir "pocketshell==${cli_pin}"
 
 COPY tests/docker/sshd_config /etc/ssh/sshd_config
 COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
@@ -37,7 +44,6 @@ COPY tests/docker/test_key /root/test_key
 COPY tests/docker/agent-bin/ /usr/local/bin/
 COPY tests/docker/agent-bin/pocketshell-real /usr/local/bin/pocketshell-real
 COPY tests/docker/agent-bin-old-cli/pocketshell /usr/local/bin/pocketshell
-COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
 COPY tests/docker/agents-aplexer-selfcheck.py /usr/local/bin/pocketshell-fixture-aplexer-selfcheck

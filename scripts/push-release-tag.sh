@@ -16,13 +16,14 @@ commit being tagged. Run it from `main` after any release candidate has been
 fast-forwarded there (docs/release.md). HEAD must equal `origin/main`.
 
 Issue #2356 (Phase 4 of epic #2350): there is no version-bump commit any
-more. app/build.gradle.kts and tools/pocketshell derive their version FROM
-the tag being pushed (scripts/derive-version.sh), so this script creates the
-tag LOCALLY first and verifies the derivation produces the expected
-versionName AND a strictly-monotonic versionCode (versus the newest tag
-already reachable from origin/main) before ever pushing it — a derivation
-bug is caught here, not after the tag has already reached origin and
-triggered the Build workflow.
+more. app2/build.gradle.kts derives its version FROM the tag being pushed
+(scripts/derive-version.sh), so this script creates the tag LOCALLY first
+and verifies the derivation produces the expected versionName AND a
+strictly-monotonic versionCode (versus the newest tag already reachable
+from origin/main) before ever pushing it — a derivation bug is caught here,
+not after the tag has already reached origin and triggered the Build
+workflow. Since issue #2643 the host CLI no longer shares this tag: it
+versions itself from PocketShell-io/pocketshell-cli's own releases.
 
 Example:
   scripts/release-emulator-validation.sh

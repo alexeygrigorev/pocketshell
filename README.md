@@ -123,8 +123,9 @@ uv tool install pocketshell --with "qrcode[pil]"
 ```
 
 Put `~/.local/bin` on `PATH` for **non-interactive** SSH (the app does not
-open a login shell). See [docs/server-setup.md](docs/server-setup.md) and
-[tools/pocketshell/README.md](tools/pocketshell/README.md).
+open a login shell). See [docs/server-setup.md](docs/server-setup.md) and the CLI repo's README
+([PocketShell-io/pocketshell-cli](https://github.com/PocketShell-io/pocketshell-cli),
+extracted from this repo's `tools/pocketshell/` in issue #2643).
 
 ## Configure a host
 
@@ -265,6 +266,8 @@ ship a version (candidate branch, stabilize, fast-forward the exact SHA to main,
 - `shared/core-voice/` — Whisper and speech input.
 - `shared/ui-kit/` — shared dark design system.
 - `shared/test-support/` — test-only settle helpers (not shipped in the APK).
-- `tools/pocketshell/` — server-side Python helper published to PyPI.
+- The host-side `pocketshell` CLI — published to PyPI from its own repo,
+  [PocketShell-io/pocketshell-cli](https://github.com/PocketShell-io/pocketshell-cli)
+  (extracted from `tools/pocketshell/` in issue #2643; its own release cycle).
 - `tests/docker/` — deterministic SSH/dev-box test fixtures.
 - `docs/` — product docs, architecture notes, and QA runbooks.

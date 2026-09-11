@@ -28,7 +28,6 @@ case "\$1 \$2" in
       mixed)
         echo '{"jobs": [
           {"name": "Unit tests", "conclusion": "failure"},
-          {"name": "Python utility tests (pocketshell)", "conclusion": "success"},
           {"name": "Integration tests (Docker)", "conclusion": "success"},
           {"name": "Emulator journey aggregate verdict (#1458)", "conclusion": "failure"}
         ]}'
@@ -48,7 +47,6 @@ run_target() {
 write_fake_gh mixed
 out="$(run_target)"
 echo "$out" | grep -qx "UNIT_GATE=failure" || fail "Unit tests must read failure: $out"
-echo "$out" | grep -qx "PYTHON=success" || fail "Python must read success: $out"
 echo "$out" | grep -qx "INTEGRATION=success" || fail "Integration must read success: $out"
 echo "$out" | grep -qx "EMULATOR_JOURNEY_VERDICT=failure" || fail "Emulator journey verdict must read failure: $out"
 pass "each named job's conclusion is read independently and correctly"
@@ -80,7 +78,7 @@ gh_out="$SANDBOX/github_output.txt"
 PATH="$SANDBOX/bin:$PATH" GITHUB_OUTPUT="$gh_out" "$TARGET" --repo owner/repo --run-id 123 >/dev/null
 grep -qx "unit_gate=failure" "$gh_out" || fail "GITHUB_OUTPUT must mirror unit_gate: $(cat "$gh_out")"
 grep -qx "emulator_journey_verdict=failure" "$gh_out" || fail "GITHUB_OUTPUT must mirror emulator_journey_verdict: $(cat "$gh_out")"
-pass "GITHUB_OUTPUT mirrors all four values with lowercased keys"
+pass "GITHUB_OUTPUT mirrors all three values with lowercased keys"
 
 # 6. missing required arguments -> usage error, exit 2.
 set +e

@@ -78,19 +78,16 @@ DEFAULT_WORKFLOW="$ROOT_DIR/.github/workflows/tests.yml"
 GATE_JOB="unit-gate"
 GATE_CHECK_NAME="Unit tests"
 
-# Issue #2134: `main`'s ruleset requires TWO literal check names, and C1 only
-# ever pinned one. The second belonged to a job listed in EXEMPT_JOBS below with
-# its check name written in a COMMENT — so renaming it (or, as #2134 refactors
-# the workflow for size, moving/retitling it) would have silently unblocked
-# `Python utility tests (pocketshell)` with every guard here still green.
-PYTHON_JOB="python"
-PYTHON_CHECK_NAME="Python utility tests (pocketshell)"
+# Issue #2134's C10 pinned the SECOND required check name,
+# `Python utility tests (pocketshell)`. Issue #2643 deleted that job with its
+# subject (the host CLI moved to PocketShell-io/pocketshell-cli), so `main`'s
+# ruleset is back to ONE required `Tests` check and C10 was deleted with it —
+# C1 remains the single load-bearing name pin.
 
 # Jobs that are deliberately NOT part of the `Unit tests` required check.
 # Each one is either its own required context or a batched heavy lane.
 EXEMPT_JOBS=(
   "unit-gate"                # the aggregator itself
-  "python"                   # separate required check: Python utility tests (pocketshell)
   "integration"              # batched Docker lane, not a per-PR blocker
   "sg"                       # issue #2353: scoped-push plan gate, not a per-PR job
 )
@@ -204,18 +201,8 @@ check_workflow() {
     fail "C1: \`$GATE_JOB\` is named '$gate_name', but branch protection requires the literal check name '$GATE_CHECK_NAME'. Renaming it silently demotes every unit-lane guard to non-blocking."
   fi
 
-  # --- C10: the OTHER ruleset-visible check name (issue #2134) ------------
-  printf '%s\n' "$all_jobs" | grep -qx "$PYTHON_JOB" ||
-    fail "C10: the \`$PYTHON_JOB\` job is gone from $workflow; the required \`$PYTHON_CHECK_NAME\` check has no owner"
-  local python_block python_name
-  python_block="$(job_block "$workflow" "$PYTHON_JOB")"
-  [ -n "$python_block" ] || fail "C10: could not read the \`$PYTHON_JOB\` block out of $workflow"
-  python_name="$(printf '%s\n' "$python_block" | sed -n 's/^    name:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' | head -1)"
-  [ -n "$python_name" ] || fail "C10: \`$PYTHON_JOB\` has no \`name:\`"
-  if [ "$python_name" != "$PYTHON_CHECK_NAME" ]; then
-    fail "C10: \`$PYTHON_JOB\` is named '$python_name', but branch protection requires the literal check name '$PYTHON_CHECK_NAME'. Renaming it makes the required check unsatisfiable and blocks every merge."
-  fi
-
+  # C10 (issue #2134's second required-check pin) was DELETED with its subject
+  # (issue #2643): the `python` job and its required check are gone.
   # --- C2/C3: the needs list ---------------------------------------------
   local needs_line
   needs_line="$(printf '%s\n' "$block" | sed -n 's/^    needs:[[:space:]]*\[\(.*\)\][[:space:]]*$/\1/p' | head -1)"
@@ -411,7 +398,6 @@ $out"
   assert_rollup_exit 1 "cancelled-while-running" cancelled cancelled cancelled cancelled cancelled
 
   echo "OK: \`$GATE_JOB\` is named '$GATE_CHECK_NAME' and its three lists agree."
-  echo "OK: \`$PYTHON_JOB\` is named '$PYTHON_CHECK_NAME' (the second required check)."
   echo "OK: \`$GATE_JOB\` if: is '$EXPECTED_GATE_IF' (concurrency-cancel concludes cancelled, #2187)."
   echo "    needs      : $(printf '%s' "$needs" | tr '\n' ' ')"
   echo "    env reads  : $(printf '%s' "$env_vars" | tr '\n' ' ')"
@@ -426,7 +412,7 @@ $out"
 # for the intended reason. The pass count is asserted at the end, so the
 # anti-vacuous guard cannot itself pass vacuously.
 
-SELFTEST_EXPECTED_CASES=18 # 12 + C11/C13 for #2187 (11-14) + C9 one-hop for #2435 (15, 16)
+SELFTEST_EXPECTED_CASES=17  # was 18; #2643 deleted case 4b (the second required check) with its subject
 selftest_passed=0
 selftest_failed=0
 # Overridden per case so C9's scan can be pointed at a sandbox checkout instead
@@ -529,19 +515,8 @@ self_test() {
   cmp -s "$src" "$m4" && st_bad "4 mutation did not apply" || \
     expect_red "4 gate renamed" "C1" "$m4"
 
-  # Case 4b (issue #2134) — the OTHER required check renamed. Same silent-gate
-  #          class as case 4, on the check C1 never covered.
-  local m4b="$sandbox/m4b.yml"
-  awk '
-    /^  python:$/ { inpy = 1 }
-    inpy && /^    name: Python utility tests \(pocketshell\)$/ {
-      print "    name: Python tests"; inpy = 0; next
-    }
-    { print }
-  ' "$src" > "$m4b"
-  cmp -s "$src" "$m4b" && st_bad "4b mutation did not apply" || \
-    expect_red "4b python required check renamed" "C10" "$m4b"
-
+  # Case 4b (issue #2134's second-check rename mutation) was DELETED with its
+  # subject (issue #2643): there is no second required check left to rename.
   # Case 5 — crossed wires: the var names swapped between two real jobs. Every
   #          list still "agrees" as a set; only the pairing is wrong.
   local m5="$sandbox/m5.yml"

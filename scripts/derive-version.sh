@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # scripts/derive-version.sh — issue #2356 (Phase 4 of epic #2350)
 #
-# SINGLE SOURCE OF TRUTH for both the Android app's `versionCode`/`versionName`
-# (app/build.gradle.kts) and the `tools/pocketshell` PyPI package version
-# (stamped into pyproject.toml right before publish — see build.yml). Every
-# consumer MUST shell out to THIS script rather than re-implementing the git
-# commands, so the two sides can never independently drift (the property
-# scripts/check-version-coupling.sh now enforces structurally).
+# SINGLE SOURCE OF TRUTH for the Android app's `versionCode`/`versionName`
+# (app2/build.gradle.kts), derived from the pushed `v*` tag. Every consumer
+# MUST shell out to THIS script rather than re-implementing the git commands.
+#
+# Since issue #2643 the host CLI is NOT a consumer: it moved to
+# PocketShell-io/pocketshell-cli and versions itself from that repo's own
+# tags (first independent release: v0.5.5; the app's version may drift
+# freely). The former cross-repo coupling guards
+# (scripts/check-version-coupling.sh / check-pypi-version.sh) were deleted
+# with the split.
 #
 # Replaces the pre-#2356 "bump versionName + pyproject.toml version by hand,
 # commit, PR, merge, THEN tag" release procedure (D22 hard cut — no legacy

@@ -384,127 +384,8 @@ run_mut() {  # run the MUTATED copy against the REAL tree
   bash "$MUTDIR/select-test-areas.sh" "$@" 2>&1
 }
 
-# ---------------------------------------------------------------------------
-# CASE 16 (B1 + B6 + B7a) — the host-CLI lockstep coupling is load-bearing, at
-# BOTH ends of the wire, and cannot be quietly narrowed.
-#
-# Round 1: `tools/pocketshell/**` selected `host-cli` (0 Kotlin classes) plus
-# the always tier and NOTHING else, so a host-CLI change ran zero of the
-# journeys built to catch host-CLI/client mismatch — the #847 / v0.4.10 class.
-#
-# Round 2 fixed that with an INVOKER-only seam, which structurally could not
-# reach `shared/*` (no shared module shells out). So `:shared:core-usage:test` —
-# the STRICT, fail-loud reader of the NDJSON `tools/pocketshell/.../usage.py`
-# emits — still did not run on a host-CLI change, with all 8 checks and all 10
-# invariants green. 16a-2 is that exact symptom as an assertion; 16e/16f are its
-# mutations.
-#
-# Round 2 also floored the seam at `>= 1`, so the reviewer cut it from 15
-# packages / 569 classes to 9 / 210 without reddening anything. 16d replays that
-# exact erosion.
-# ---------------------------------------------------------------------------
-hostcli_plan="$(printf 'tools/pocketshell/src/pocketshell/tree.py\n' |
-  bash "$SELECT" --changed-stdin --print-plan-only 2>/dev/null)"
-before_hostcli="$(sed -n 's/^JOURNEY_CLASSES=//p' <<<"$hostcli_plan")"
-# The old FolderList* old-CLI journeys were deleted with the app module. Their
-# successors are the two app2 journeys built on what the CLI emits: the session
-# tree (`pocketshell sessions --json`) and the usage panel (`usage --json`).
-if [[ "$before_hostcli" == *"J02SessionTreeListJourney"* ]] &&
-   [[ "$before_hostcli" == *"J12UsagePanelJourney"* ]]; then
-  ok "16a a tools/pocketshell change runs the host-CLI-reading journeys (#1509 G10, #847 class)"
-else
-  bad "16a a host-CLI change does NOT run the host-CLI-reading journeys: $before_hostcli"
-fi
-hostcli_tasks="$(sed -n 's/^UNIT_SHARED_TASKS=//p' <<<"$hostcli_plan")"
-if [[ " $hostcli_tasks " == *" :shared:core-usage:test "* ]] &&
-   [[ " $hostcli_tasks " == *" :shared:core-storage:test "* ]] &&
-   [[ " $hostcli_tasks " == *" :shared:core-hostapi:test "* ]]; then
-  ok "16a-2 a tools/pocketshell change runs the SHARED-module readers of the wire (core-usage / core-storage / core-hostapi) — the round-2 B6 hole"
-else
-  bad "16a-2 a host-CLI change does NOT run the shared-module wire readers: $hostcli_tasks"
-fi
-out="$(POCKETSHELL_TA_HOSTCLI_MARKER='ZZ_NO_SUCH_HOST_CLI_MARKER_ZZ' bash "$SELECT" --verify-manifest 2>&1)"
-if grep -q 'wire-seam PRODUCER packages = 0' <<<"$out" &&
-   grep -q 'wire-seam CONSUMER packages = 0' <<<"$out"; then
-  ok "16b breaking the invoke marker reddens the PRODUCER and CONSUMER floors (the consumer end is anchored on the invoker file list)"
-else
-  bad "16b a dead invoke marker did NOT redden the per-end floors:\n$out"
-fi
-out="$(POCKETSHELL_TA_HOSTCLI_MARKER='ZZ_NO_SUCH_HOST_CLI_MARKER_ZZ' \
-       POCKETSHELL_TA_HOSTCLI_CLI_SOURCE='tools/pocketshell/no_such_cli.py' \
-       bash "$SELECT" --coverage-invariant --only I9 2>&1)"
-if grep -q 'FAIL I9' <<<"$out" && grep -q 'J02SessionTreeListJourney' <<<"$out"; then
-  ok "16c killing every end of the seam reddens the #1509 lockstep pin by name"
-else
-  bad "16c the #1509 pin survived a completely dead wire seam:\n$(grep -E '^(OK|FAIL) I9' <<<"$out")"
-fi
-# 16d — the ROUND-2 REVIEWER'S EXACT EROSION. Dropping the two string-literal
-# alternatives from the invoke marker took the seam from 15 packages / 569
-# classes to 9 / 210 and NOTHING noticed, because both host-CLI floors were
-# `>= 1`. It must be loud now.
-#
-# WHAT IS PINNED, AND WHY IT IS NOT AN EXACT COUNT (#2124 round 4).
-# This case used to assert the literal `wire-seam PRODUCER packages = 9`. The
-# eroded count is not a constant: it is "how many production packages still
-# name `PocketshellCommand` after the two string-literal alternatives are
-# dropped", and that GROWS whenever a new sender routes through the host CLI.
-# #2124 added one (HostAckOutboundDelivery), the count became 10, and this case
-# went red on a tree where the guard was working exactly as designed — a false
-# alarm that costs a CI round and teaches the next author to bump the literal,
-# which re-arms the identical trap. So the assertion is the RELATIONSHIP the
-# case actually exists to prove, in two parts:
-#
-#   (i)  the narrowed marker trips the PRODUCER floor SPECIFICALLY — not merely
-#        "some floor somewhere fired", which `the import-dependency index looks
-#        broken` alone would accept from the consumer or shared-reach floor —
-#        and the count it reports is under the floor production itself
-#        enforces, read off production's own message rather than duplicated
-#        here, so raising or lowering that floor cannot silently desync;
-#   (ii) the erosion genuinely ERODES: the producer count under the narrowed
-#        marker is strictly SMALLER than the count on the unmutated marker.
-#
-# The mutations that must redden it, and do (both run against a private copy
-# of the tree):
-#   * restore the round-2 `>= 1` producer floor in --verify-manifest check 7 —
-#     precisely the B7a regression this case was written for. No PRODUCER line
-#     is emitted under the narrowed marker, so (i) fails. It is the ONLY case
-#     that reddens (56 pass / 1 fail), which is the selectivity this check
-#     needs. Note this mutation does NOT disturb the `index looks broken`
-#     grep: the consumer and shared-reach floors still fire under the narrowed
-#     marker, so that grep alone accepts the regression and reading the
-#     PRODUCER line by name is the load-bearing half.
-#   * narrow production's own marker to `PocketshellCommand` so the erosion is
-#     a no-op. The unmutated producer count is then unreadable (the clean run
-#     is itself red), the `-n` guards below refuse to read a verdict out of it,
-#     and (ii) fails closed rather than passing on a missing baseline.
-# Neither number is written down here, so neither mutation can be absorbed by
-# a stale literal, and legitimate growth of the seam cannot fake a failure.
-clean_manifest="$(bash "$SELECT" --verify-manifest 2>&1)"
-unmutated_producer="$(sed -n 's/.*wire-seam packages = \([0-9]\{1,\}\) producer .*/\1/p' <<<"$clean_manifest")"
-# WHICH ALTERNATIVE IS DROPPED IS TREE-DEPENDENT, and this case must drop one
-# that actually matches something. On the old tree the two string literals were
-# the load-bearing half and `PocketshellCommand` was the survivor; after the
-# rewrite it is the other way round — `PocketshellCommand` is the ONLY
-# alternative any production file still matches (UsageFormat.kt), so keeping it
-# would make this a no-op mutation asserting a red it never caused. The marker
-# below is the shipped expression minus that alternative: a plausible "someone
-# trimmed the regex" edit, distinct from 16b's nonsense marker that matches
-# nothing anywhere.
-out="$(POCKETSHELL_TA_HOSTCLI_MARKER='"pocketshell |pocketshell --' bash "$SELECT" --verify-manifest 2>&1)"
-producer_line="$(grep -E 'wire-seam PRODUCER packages = [0-9]+ \(< [0-9]+\)' <<<"$out" || true)"
-eroded_producer="$(sed -n 's/.*wire-seam PRODUCER packages = \([0-9]\{1,\}\) (< [0-9]\{1,\}).*/\1/p' <<<"$producer_line")"
-producer_floor="$(sed -n 's/.*wire-seam PRODUCER packages = [0-9]\{1,\} (< \([0-9]\{1,\}\)).*/\1/p' <<<"$producer_line")"
-if grep -q 'the import-dependency index looks broken' <<<"$out" &&
-   [[ -n "$unmutated_producer" && -n "$eroded_producer" && -n "$producer_floor" ]] &&
-   [[ "$eroded_producer" -lt "$producer_floor" ]] &&
-   [[ "$eroded_producer" -lt "$unmutated_producer" ]]; then
-  ok "16d the reviewer's seam erosion now reddens --verify-manifest on the PRODUCER floor by name (round-2 B7a: it was silently green) — narrowed marker yields $eroded_producer producer packages, under the enforced floor of $producer_floor and under the unmutated $unmutated_producer"
-else
-  bad "16d the seam erosion is STILL green, or did not trip the PRODUCER floor, or did not erode at all (unmutated='$unmutated_producer' eroded='$eroded_producer' floor='$producer_floor'):\n$out"
-fi
-
-# 16e / 16f — CODE mutations, on their own private copies so case 17's mutation
-# of MUTDIR cannot interact with them.
+# A runner-ready private copy of the scripts, for cases that mutate a SECOND
+# copy while MUTDIR carries another mutation (kept: issue #2170 still uses it).
 mut_copy() {  # $1 = dir name -> echoes a runner-ready dir
   local d="$SANDBOX/$1"
   mkdir -p "$d/lib"
@@ -525,280 +406,46 @@ run_copy() {  # $1 = dir, rest = args
   bash "$d/select-test-areas.sh" "$@" 2>&1
 }
 
-# 16e (B6) — delete the CONSUMER end of the seam, i.e. reproduce round 2's
-# invoker-only design exactly. The shared-reach floor is the check that exists
-# for this and it must be the one that fires.
-B6DIR="$(mut_copy mut-b6-consumer)"
-sed -i 's|^      _pocketshell_hostcli_mark "${imp%.\*}" consumer$|      : # MUTANT 16e: consumer end deleted|' \
-  "$B6DIR/lib/test-areas.sh"
-if grep -q 'MUTANT 16e: consumer end deleted' "$B6DIR/lib/test-areas.sh"; then
-  : # mutant confirmed live before its verdict is read (#1641)
-else
-  bad "16e MUTATION DID NOT APPLY — the consumer-end call is still present in the copy, so 16e's verdict would be meaningless"
-fi
-out="$(run_copy "$B6DIR" --verify-manifest)"
-# The shared-reach COUNT no longer moves under this mutation (core-usage is on
-# the seam by vocabulary as well as by consumption, and the two ends deliberately
-# overlap on the holes the reviewer found), so the load-bearing assertion is the
-# per-END floor: deleting the reply end of the wire must be named as such.
-# 16e-2 below is the other half — that the emitted PLAN really moves.
-if grep -q 'wire-seam CONSUMER packages = 0' <<<"$out" &&
-   ! grep -q '^PASS: manifest verified' <<<"$out"; then
-  ok "16e deleting the CONSUMER end reddens the per-end floor by name — the round-2 seam (invoker-only) can no longer be green"
-else
-  bad "16e the round-2 invoker-only seam is still green:\n$out"
-fi
-out="$(printf 'tools/pocketshell/src/pocketshell/usage.py\n' |
-  POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
-  POCKETSHELL_TEST_AREAS_MANIFEST="$B6DIR/test-areas.txt" \
-  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$B6DIR/ci-app2-journey-suite.sh" \
-  bash "$B6DIR/select-test-areas.sh" --changed-stdin --print-plan-only 2>&1 |
-  sed -n 's/^UNIT_SHARED_TASKS=//p')"
-# Assert on the modules the CONSUMER end is the SOLE route to. core-usage,
-# core-storage and ui-kit survive 16e because the vocabulary end also names
-# them — the two ends deliberately overlap on the holes the reviewer found, and
-# a check that ignored that would be measuring nothing.
-if [[ " $out " != *" :shared:core-portfwd:test "* ]] &&
-   [[ " $out " != *" :shared:core-assistant:test "* ]]; then
-  ok "16e-2 with the consumer end deleted, a host-CLI change stops running the reply-side modules only that end reaches (:shared:core-portfwd:test, :shared:core-assistant:test) — the mutation moves the real plan"
-else
-  bad "16e-2 the consumer-end mutation changed nothing about the emitted plan, so 16e proves nothing: $out"
-fi
-
-# 16f (B6, selectivity) — drop exactly ONE package from the seam: the shared
-# module whose parser IS the wire contract. Every floor stays above its bound
-# (this is the round-2 shape: green totals, one real hole), so the UNIT pin has
-# to be what catches it — including the "the plan actually runs that module"
-# half, which is the literal symptom the reviewer measured.
-B6BDIR="$(mut_copy mut-b6-onepkg)"
-python3 - "$B6BDIR/lib/test-areas.sh" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-anchor = '  local p="$1" end="$2"\n  [[ -n "${POCKETSHELL_TA_PROD_PKG_AREA[$p]:-}" ]] || return 0'
-assert s.count(anchor) == 1, "16f anchor not unique"
-s = s.replace(anchor, anchor + '\n  [[ "$p" == com.pocketshell.core.usage ]] && return 0  # MUTANT 16f')
-open(p, "w").write(s)
-PY
-if grep -q 'MUTANT 16f' "$B6BDIR/lib/test-areas.sh"; then
-  : # live
-else
-  bad "16f MUTATION DID NOT APPLY"
-fi
-out="$(run_copy "$B6BDIR" --verify-manifest)"
-# ROUND-2 SHAPE, RE-DERIVED FOR app2. This case used to assert that dropping one
-# seam package left every --verify-manifest floor GREEN, so that only the I9 unit
-# pin could catch it — that WAS the round-2 hole, on a tree where the consumer end
-# spanned 15 packages and losing one moved no count below its bound. The rewrite
-# centralised every host-CLI call behind one client, so the consumer end is a
-# SINGLE package and dropping it takes that count to zero: the "healthy totals
-# hiding one hole" shape is not reproducible here, and asserting it would be
-# asserting a property this tree does not have.
+# ---------------------------------------------------------------------------
+# CASE 16 — a pinned host-CLI producer change still runs the wire tests.
 #
-# What must hold instead — and what is actually load-bearing as the seam changes
-# size — is that the drop is named. The count floor happens to fire today because
-# the end has one package; the NAMED pin fires regardless of how many packages
-# the end grows back to, which is the protection that does not decay. Both are
-# asserted, the pin first, because it is the one that survives the seam growing.
-if grep -q 'host-CLI wire seam no longer reaches com.pocketshell.core.usage' <<<"$out" &&
-   grep -q 'wire-seam CONSUMER packages = 0' <<<"$out" &&
-   ! grep -q '^PASS: manifest verified' <<<"$out"; then
-  ok "16f-a dropping the one seam package that IS the wire contract is named by the seam pin (and, on this tree, also empties the consumer end)"
-else
-  bad "16f-a the one-package mutation was not named by the seam pin:\n$out"
-fi
-out="$(run_copy "$B6BDIR" --coverage-invariant)"
-if grep -q 'FAIL I9' <<<"$out" &&
-   grep -q 'does NOT select unit class com.pocketshell.core.usage.PocketshellUsageJsonParserTest' <<<"$out" &&
-   [[ "$(grep -c '^FAIL I' <<<"$out")" -eq 1 ]]; then
-  ok "16f-b ...and the I9 UNIT pin reddens by name, and ONLY I9 reddens (the round-2 hole is now caught by exactly one check)"
-else
-  bad "16f-b the usage-parser unit pin is not load-bearing / not selective:\n$(grep -E '^(OK|FAIL) I' <<<"$out")"
-fi
-
+# HISTORY (issue #2643): the host CLI moved to PocketShell-io/pocketshell-cli,
+# and the seam machinery this case used to exercise — invoker/consumer/vocabu-
+# lary marking, the per-end floors (16b), the lockstep-pin kill (16c), the
+# reviewer's erosion replay (16d), the consumer-end code mutation (16e/16e-2),
+# the unit-pin selectivity proofs (16f/16f-b) and the live-Click reader cases
+# (16g-16l) — was deleted with the producer it coupled to (D22: the guard's
+# subject left the repo).
+#
+# What REMAINS load-bearing here: the producer-side trigger inside this repo is
+# now tests/docker/fixture-pins.txt (the pinned wheel the Docker fixtures
+# install). It classifies force-full via the manifest's `full tests/docker/*`
+# row, so bumping the pin runs EVERYTHING — every journey and unit class that
+# reads the wire, plus the rest. 16a/16a-2 pin exactly that; cross-repo
+# contract drift itself is owned by the CLI repo's CI and the Docker fixture
+# running the pinned released wheel.
 # ---------------------------------------------------------------------------
-# CASE 16g/16h — the VOCABULARY end asks the live Click Group for its
-# command names. The old AST census was defeated by runtime command shapes; these
-# cases now prove the live shape is observed and that import/interpreter failures
-# stay loud instead of becoming a smaller vocabulary.
-# ---------------------------------------------------------------------------
-CLIDIR="$SANDBOX/cli"
-mkdir -p "$CLIDIR"
-REAL_CLI="$SCRIPT_DIR/../tools/pocketshell/src/pocketshell/cli.py"
-if python3 - "$REAL_CLI" "$CLIDIR" <<'PY'
-import pathlib
-import sys
-
-src = pathlib.Path(sys.argv[1]).read_text()
-out = pathlib.Path(sys.argv[2])
-
-# LIVE-IMPORT REGRESSION — a Click Group may synthesize a command from its
-# runtime list_commands() implementation without storing a registration node
-# in cli.py. The AST census cannot see this command, but a live Group can.
-dynamic = src.replace(
-    "@click.group(\n",
-    "class DynGroup(click.Group):\n"
-    "    def list_commands(self, ctx):\n"
-    "        return [*super().list_commands(ctx), \"synthetic-live\"]\n\n"
-    "@click.group(\n",
-    1,
-)
-dynamic = dynamic.replace("@click.group(\n", "@click.group(\n    cls=DynGroup,\n", 1)
-(out / "dynamic.py").write_text(dynamic)
-
-# IMPORT-FAILURE MUTATION — a source file that cannot import must be loud.
-broken = src.replace(
-    "import click\n",
-    "import click\nimport pocketshell_issue_2070_missing\n",
-    1,
-)
-(out / "broken-import.py").write_text(broken)
-PY
-then
-  # Every mutant is grep-verified LIVE before any verdict is read (#1641).
-  for _m in 'dynamic:synthetic-live' 'broken-import:pocketshell_issue_2070_missing'; do
-    if ! grep -qF "${_m#*:}" "$CLIDIR/${_m%%:*}.py"; then
-      bad "16g MUTANT ${_m%%:*} DID NOT APPLY — its verdict would be meaningless"
-    fi
-  done
-
-  # 16h — a live Click Group may synthesize a command from list_commands()
-  # without a corresponding source registration. This is the red→green
-  # regression for the AST reader replacement.
-  live_vocab="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="${SCRIPT_DIR}/../tools/pocketshell/src" \
-    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="${CLIDIR}/dynamic.py" bash -c '
-    source "$1/lib/test-areas.sh"
-    _pocketshell_hostcli_read_cli_vocabulary "$2"
-  ' bash "${SCRIPT_DIR}" "${CLIDIR}/dynamic.py" 2>&1)"
-  if grep -qx 'NAME synthetic-live' <<<"$live_vocab" &&
-     grep -qx 'END' <<<"$live_vocab" &&
-     ! grep -q '^UNREADABLE ' <<<"$live_vocab"; then
-    ok "16h the live Click reader observes a command synthesized by list_commands()"
-  else
-    bad "16h the live reader missed synthetic-live or reported an error:
-$live_vocab"
-  fi
-
-  # 16i — importing a CLI with a missing dependency must fail closed and name
-  # the import failure; no partial NAME output may seed the vocabulary.
-  broken_vocab="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="${SCRIPT_DIR}/../tools/pocketshell/src" \
-    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="${CLIDIR}/broken-import.py" bash -c '
-    source "$1/lib/test-areas.sh"
-    _pocketshell_hostcli_read_cli_vocabulary "$2"
-  ' bash "${SCRIPT_DIR}" "${CLIDIR}/broken-import.py" 2>&1)"
-  if grep -q 'UNREADABLE cannot import .*ModuleNotFoundError' <<<"$broken_vocab" &&
-     grep -qx 'END' <<<"$broken_vocab" &&
-     ! grep -q '^NAME ' <<<"$broken_vocab"; then
-    ok "16i a missing import dependency is explicit and fail-closed"
-  else
-    bad "16i a missing import dependency was not fail-closed:
-$broken_vocab"
-  fi
-
-  # 16k — the live-reader mutants must also travel through the selector's
-  # actual index build. Directly calling the helper above proves its protocol,
-  # but would stay green if --verify-manifest stopped consuming that protocol.
-  # Keep the package root explicit: the mutated source lives outside the
-  # checkout while its normal pocketshell.* imports come from the checkout.
-  real_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
-    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$REAL_CLI" \
-    bash "$SELECT" --verify-manifest 2>&1)"
-  real_guard_rc=$?
-  real_live_count="$(sed -n 's/.*over \([0-9][0-9]*\) live Click commands read.*/\1/p' <<<"$real_guard")"
-
-  dynamic_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
-    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/dynamic.py" \
-    bash "$SELECT" --verify-manifest 2>&1)"
-  dynamic_guard_rc=$?
-  dynamic_live_count="$(sed -n 's/.*over \([0-9][0-9]*\) live Click commands read.*/\1/p' <<<"$dynamic_guard")"
-  if [[ "$real_guard_rc" -eq 0 && "$dynamic_guard_rc" -eq 0 ]] &&
-     grep -q '^PASS: manifest verified' <<<"$dynamic_guard" &&
-     [[ "$real_live_count" =~ ^[0-9]+$ && "$dynamic_live_count" =~ ^[0-9]+$ ]] &&
-     (( dynamic_live_count == real_live_count + 1 )) &&
-     ! grep -q 'UNREADABLE\|live vocabulary reader could not import/read' <<<"$dynamic_guard"; then
-    ok "16k the real --verify-manifest index sees synthetic-live ($real_live_count -> $dynamic_live_count commands) with no unreadable diagnostic"
-  else
-    bad "16k the real --verify-manifest dynamic CLI run was not a clean baseline+1 verification (baseline rc=$real_guard_rc count='$real_live_count'; dynamic rc=$dynamic_guard_rc count='$dynamic_live_count'):
-$dynamic_guard"
-  fi
-
-  broken_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
-    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/broken-import.py" \
-    bash "$SELECT" --verify-manifest 2>&1)"
-  broken_guard_rc=$?
-  if [[ "$broken_guard_rc" -ne 0 ]] &&
-     grep -qF 'host-CLI live vocabulary reader could not import/read' <<<"$broken_guard" &&
-     grep -qF "ModuleNotFoundError: No module named 'pocketshell_issue_2070_missing'" <<<"$broken_guard" &&
-     grep -qF 'host-CLI wire-seam VOCABULARY packages = 0 (< 6)' <<<"$broken_guard" &&
-     grep -qF 'host-CLI live Click commands read = 0 (< 12)' <<<"$broken_guard" &&
-     ! grep -q '^PASS: manifest verified' <<<"$broken_guard"; then
-    ok "16k-b the real --verify-manifest broken-import run is nonzero and names the unreadable import plus both vocabulary under-floor diagnostics"
-  else
-    bad "16k-b the real --verify-manifest broken-import run did not fail with the named diagnostics (rc=$broken_guard_rc):
-$broken_guard"
-  fi
-
-  # 16l — mutate the ACTUAL mapfile consumer, not the helper and not a direct
-  # probe. An END-only stream is a readable but empty vocabulary, so this must
-  # trip the live-command floor without laundering itself into an import error.
-  LIVE_FLOOR_DIR="$(mut_copy mut-live-vocabulary-floor)"
-  clean_live_floor="$(run_copy "$LIVE_FLOOR_DIR" --verify-manifest)"
-  clean_live_floor_rc=$?
-  if [[ "$clean_live_floor_rc" -eq 0 ]] &&
-     grep -q '^PASS: manifest verified' <<<"$clean_live_floor"; then
-    : # the private copy is a green control before the mapfile mutation
-  else
-    bad "16l the unmutated private selector/index copy is not a green control (rc=$clean_live_floor_rc):
-$clean_live_floor"
-  fi
-  python3 - "$LIVE_FLOOR_DIR/lib/test-areas.sh" <<'PY'
-import sys
-
-p = sys.argv[1]
-s = open(p).read()
-anchor = '  mapfile -t vocab_lines < <(_pocketshell_hostcli_read_cli_vocabulary "$cli_src")'
-assert s.count(anchor) == 1, "16l mapfile anchor not unique"
-s = s.replace(anchor, """  mapfile -t vocab_lines < <(  # MUTANT 16l: actual consumer emits only END
-    printf '%s\\n' END
-  )""")
-open(p, "w").write(s)
-PY
-  if ! grep -qF 'MUTANT 16l: actual consumer emits only END' "$LIVE_FLOOR_DIR/lib/test-areas.sh"; then
-    bad "16l MUTATION DID NOT APPLY — the private copy still calls the live vocabulary reader"
-  else
-    if out="$(run_copy "$LIVE_FLOOR_DIR" --verify-manifest)"; then
-      bad "16l the END-only actual mapfile consumer still passed --verify-manifest:
-$out"
-    elif grep -qF 'host-CLI live Click commands read = 0 (< 12)' <<<"$out" &&
-         [[ "$(grep -Fc 'host-CLI live Click commands read =' <<<"$out")" -eq 1 ]] &&
-         ! grep -qF 'live vocabulary reader could not import/read' <<<"$out" &&
-         ! grep -q '^PASS: manifest verified' <<<"$out"; then
-      ok "16l mutating the actual mapfile consumer to END-only reddens the named live-vocabulary floor (readable empty stream, selective failure)"
-    else
-      bad "16l the END-only actual mapfile mutation did not trip the named live-vocabulary floor selectively:
-$out"
-    fi
-  fi
-  # Restore the private copy before later cases, even though cleanup also
-  # removes the sandbox. This keeps the mutation local to 16l if the script is
-  # extended with more cases after it.
-  cp "$SCRIPT_DIR/lib/test-areas.sh" "$LIVE_FLOOR_DIR/lib/test-areas.sh"
-  # 16j — a missing/crashed interpreter must not leave a partial vocabulary
-  # looking healthy. The missing END is the fail-closed boundary.
-  mkdir -p "$SANDBOX/nopy"
-  printf '#!/bin/sh\nexit 127\n' > "$SANDBOX/nopy/python3"
-  chmod +x "$SANDBOX/nopy/python3"
-  if ! "$SANDBOX/nopy/python3"; then : ; fi   # shim confirmed non-functional
-  out="$(PATH="$SANDBOX/nopy:$PATH" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q 'the vocabulary reader did not finish' <<<"$out" &&
-     grep -q 'live vocabulary reader could not import/read' <<<"$out"; then
-    ok "16j a crashed/missing interpreter leaves no partial live vocabulary"
-  else
-    bad "16j a dead live reader did not redden the guard:
-$out"
-  fi
+hostcli_plan="$(printf 'tests/docker/fixture-pins.txt\n' |
+  bash "$SELECT" --changed-stdin --print-plan-only 2>/dev/null)"
+before_hostcli="$(sed -n 's/^JOURNEY_CLASSES=//p' <<<"$hostcli_plan")"
+# The old FolderList* old-CLI journeys were deleted with the app module. Their
+# successors are the two app2 journeys built on what the CLI emits: the session
+# tree (`pocketshell sessions --json`) and the usage panel (`usage --json`).
+if [[ "$before_hostcli" == *"J02SessionTreeListJourney"* ]] &&
+   [[ "$before_hostcli" == *"J12UsagePanelJourney"* ]]; then
+  ok "16a a pinned-producer bump (fixture-pins.txt) runs the host-CLI-reading journeys (#1509 G10, #847 class)"
 else
-  bad "16g could not build the live cli.py mutants, so the live-reader cases did not run"
+  bad "16a a pinned-producer bump does NOT run the host-CLI-reading journeys: $before_hostcli"
+fi
+hostcli_tasks="$(sed -n 's/^UNIT_SHARED_TASKS=//p' <<<"$hostcli_plan")"
+hostcli_unit_mode="$(sed -n 's/^UNIT_MODE=//p' <<<"$hostcli_plan")"
+if [[ "$hostcli_unit_mode" == full ]] ||
+   [[ " $hostcli_tasks " == *" :shared:core-usage:test "* &&
+      " $hostcli_tasks " == *" :shared:core-storage:test "* &&
+      " $hostcli_tasks " == *" :shared:core-hostapi:test "* ]]; then
+  ok "16a-2 a pinned-producer bump runs the SHARED-module readers of the wire (full run covers core-usage / core-storage / core-hostapi) — the round-2 B6 hole"
+else
+  bad "16a-2 a pinned-producer bump does NOT run the shared-module wire readers: mode=$hostcli_unit_mode tasks=$hostcli_tasks"
 fi
 
 # ---------------------------------------------------------------------------
@@ -807,8 +454,16 @@ fi
 # Round 1 relied on hand-written area couples, two of which were claimed in the
 # write-up and absent from the manifest; 29 journeys importing connection-core
 # production types were not selected by a connection-core change. Mutation:
-# neuter the import scan so every class depends only on its own area. I8's
-# independent re-scan and the D28 pins must both redden.
+# neuter the import scan so every class depends only on its own area.
+#
+# POST-SPLIT WITNESS (issue #2643): this case used to assert FAIL I9 naming
+# AppDatabaseTest — the unit pin whose ONLY route onto a host-CLI change was
+# the import graph. The host-CLI pin probe is now tests/docker/fixture-pins.txt,
+# which force-fulls, so that pin survives the mutation trivially and can no
+# longer witness anything. The property is now asserted directly against the
+# emitted plan: for a cross-area production probe, the import-derived deps
+# select strictly MORE unit classes than the couples alone — kill the import
+# scan and the scoped plan must measurably shrink.
 # ---------------------------------------------------------------------------
 sed -i "s|import\[\[:space:\]\]+com\\\\.pocketshell\\\\.|import[[:space:]]+zz_no_such_package_zz\\\\.|" \
   "$MUTDIR/lib/test-areas.sh"
@@ -825,25 +480,22 @@ if grep -q 'zz_no_such_package_zz' "$MUTDIR/lib/test-areas.sh" &&
 else
   bad "17 MUTATION DID NOT APPLY — the import scan is still live in the copy, so 17's verdict would be meaningless"
 fi
-out="$(run_mut --coverage-invariant --only I8,I9)"
-# WHICH CHECK CATCHES THIS IS TREE-DEPENDENT, and pinning the wrong one makes the
-# case vacuous. On the old tree, 29 journeys reached connection-core ONLY through
-# the import graph, so killing the derivation reddened I8's escape scan by name.
-# app2 has 11 journeys, and every area they import is either always-tier
-# (connection-core, terminal-render, app-shell) or inside the `couple` closure of
-# the area they live in — so the closure alone still selects all 11 and I8 has
-# nothing to report. That is not the derivation being dead weight: the UNIT half
-# still depends on it entirely, and killing it drops
-# `com.pocketshell.core.storage.AppDatabaseTest` (the CLI-lockstep schema test,
-# reached from `host-cli` only by import) straight out of the plan. So the
-# assertion is I9, by name — the check that this tree's structure actually routes
-# the failure to. If a future journey imports across an uncoupled boundary, I8
-# becomes load-bearing again and this case should grow that assertion back.
-if grep -q 'FAIL I9' <<<"$out" &&
-   grep -q 'does NOT select unit class com.pocketshell.core.storage.AppDatabaseTest' <<<"$out"; then
-  ok "17 disabling the import-derived deps reddens the pinned blast-radius check, naming the escaping lockstep class"
+# The probe is production code in a shared module that app2 classes reach ONLY
+# through the import graph (the usage NDJSON parser and its consumers), so the
+# scoped selection is exactly where import-derived deps show up.
+PROBE17="shared/core-usage/src/main/java/com/pocketshell/core/usage/UsageRemoteSource.kt"
+baseline17="$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+  POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
+  POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$SCRIPT_DIR/ci-app2-journey-suite.sh" \
+  bash "$SCRIPT_DIR/select-test-areas.sh" --changed-stdin --print-plan-only <<<"$PROBE17" 2>&1 |
+  sed -n 's/^UNIT_SELECTED_UNIT_CLASSES=//p')"
+mutated17="$(run_mut --changed-stdin --print-plan-only <<<"$PROBE17" 2>&1 |
+  sed -n 's/^UNIT_SELECTED_UNIT_CLASSES=//p')"
+if [[ "$baseline17" =~ ^[0-9]+$ && "$mutated17" =~ ^[0-9]+$ ]] &&
+   (( mutated17 < baseline17 )); then
+  ok "17 disabling the import-derived deps shrinks the scoped plan ($baseline17 -> $mutated17 unit classes on the cross-area probe) — the edges are load-bearing"
 else
-  bad "17 the import-derived dependency edges are not load-bearing:\n$(grep -E '^(OK|FAIL) I[89]' <<<"$out")"
+  bad "17 the import-derived dependency edges are not load-bearing (baseline='$baseline17' mutated='$mutated17')"
 fi
 cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"   # restore
 

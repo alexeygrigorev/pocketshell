@@ -18,7 +18,8 @@ shared/core-voice/         Whisper and Android speech input plumbing
 shared/core-assistant/     assistant clients and encrypted configuration
 shared/ui-kit/              shared visual primitives and theme
 shared/test-support/        test-only coroutine and fixture helpers
-tools/pocketshell/          server-side Python helper published to PyPI
+pocketshell CLI             host-side Python CLI — its own repo:
+                            PocketShell-io/pocketshell-cli (issue #2643)
 tests/docker/               disposable SSH and aplexer fixtures
 ```
 
@@ -100,7 +101,7 @@ SQL and its exported schemas, with this section as the reason.
 The PyPI package pins aplexer and resolves the bundled `a` next to the Python
 interpreter. A separately installed binary on `PATH` cannot become the product's
 session runtime. The Docker `agents` image follows the same rule: it derives the
-release from `tools/pocketshell/pyproject.toml`, installs both `a` and its
+release from `tests/docker/fixture-pins.txt`, installs both `a` and its
 `aplexer` worker, and runs a create → list → kill → gone self-check while the
 image is built.
 

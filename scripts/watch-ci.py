@@ -84,7 +84,6 @@ from typing import Callable, Optional
 # checks"). Overridable with --required-check (repeatable).
 DEFAULT_REQUIRED_CHECKS = (
     "Unit tests",
-    "Python utility tests (pocketshell)",
     "Integration tests (Docker)",
     "Emulator journey subset (load-bearing, Docker agents)",
 )

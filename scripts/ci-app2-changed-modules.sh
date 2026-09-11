@@ -28,25 +28,19 @@
 #
 # SHARED-INFRASTRUCTURE PATHS also select everything: the version catalog,
 # settings/root build script, the Gradle wrapper, this script, the workflow
-# itself, tests/docker/** (the Testcontainers sshd image the transport
-# integration lane builds) and tools/pocketshell/** (the fixture images COPY it
-# — see below). A catalog bump touches no module directory but can break every
-# lane.
+# itself and tests/docker/** (the fixture images, including the pinned
+# pocketshell wheel + aplexer pins file the agents fixtures install — issue
+# #2643). A catalog bump touches no module directory but can break every lane.
 #
-# A FIXTURE INPUT DOES NOT HAVE TO LIVE UNDER tests/docker/ (issue #2592).
-# tests/docker/Dockerfile.agents — the image the app2-journey lane runs its
-# WHOLE instrumented suite against — builds from repo paths outside its own
-# directory: `COPY tools/pocketshell/pyproject.toml` (the file the build then
-# derives the pinned aplexer release from, and curls that release's binaries)
-# and `COPY tools/pocketshell/src/` (the fixture runs the REAL CLI);
-# Dockerfile.agents-daemon COPYs the whole `tools/pocketshell/` tree. So a
-# CLI-side change rebuilds the fixture while touching nothing under
-# tests/docker/. Before #2592 that selected NO lane: the aplexer pin bump
-# (#2588, d09471e2b) produced a green app2 run in which every app2 job skipped.
-# The prefix is the directory, not the two files, because the whole-tree COPY
-# makes the whole tree an image input — measured cost of the wider prefix over
-# 200 `main` commits: 3 extra fan-outs (19 commits touch tools/pocketshell/, 16
-# of them already in src/ or pyproject.toml).
+# Issue #2592 added `tools/pocketshell/` here because the fixture Dockerfiles
+# COPYed the CLI tree from outside tests/docker/, so a CLI-side change rebuilt
+# the image the journey lane runs against while touching nothing under
+# tests/docker/ (the #2588 aplexer pin bump produced a green app2 run in which
+# every app2 job skipped). Issue #2643 DELETED that entry with its subject:
+# the CLI moved to PocketShell-io/pocketshell-cli, the fixtures install the
+# pinned PyPI wheel, and their only app-repo input (fixture-pins.txt) lives
+# under tests/docker/. The --self-test COPY-source guard below still catches
+# the next fixture input added from elsewhere in the repo.
 #
 # This is not a list anyone has to remember to update: --self-test parses every
 # COPY/ADD in tests/docker/Dockerfile.*, and any source resolving outside
@@ -87,12 +81,9 @@ declare -a SHARED_PREFIXES=(
   "gradlew"
   "gradlew.bat"
   "tests/docker/"
-  # Issue #2592: COPY source of tests/docker/Dockerfile.agents (pyproject.toml
-  # -> the derived aplexer download; src/ -> the real CLI the fixture runs) and,
-  # whole-tree, of Dockerfile.agents-daemon. Changing it rebuilds the image the
-  # journey lane runs against without touching tests/docker/ at all. The
-  # --self-test COPY-source guard keeps this entry honest.
-  "tools/pocketshell/"
+  # tests/docker/** covers every current fixture COPY source, including the
+  # pinned-wheel pins file (issue #2643). The --self-test COPY-source guard
+  # keeps this entry honest for any future fixture input added elsewhere.
   ".github/workflows/app2.yml"
   "scripts/ci-app2-changed-modules.sh"
   "scripts/check-app2-lane-execution.py"
@@ -373,18 +364,16 @@ self_test() {
   commit_file "scripts/ci-app2-journey-suite.sh"
   check "the journey runner (shared)" true true true true
 
-  # Issue #2592: tools/pocketshell/ is a COPY source of the fixture images the
-  # app2 lanes run against, so a CLI-side change rebuilds them while touching
-  # nothing under tests/docker/. The aplexer pin bump (#2588, d09471e2b) is the
-  # instance: it selected NOTHING and produced a green app2 run in which no app2
-  # job executed. Both halves of Dockerfile.agents' COPY set get a case.
+  # Issue #2643: the fixture images install the pinned pocketshell wheel, and
+  # their app-repo input is tests/docker/fixture-pins.txt — a pin bump must
+  # fan every lane out (it changes the image the journey lane runs against).
   git -C "$tmp" reset -q --hard "$base"
-  commit_file "tools/pocketshell/pyproject.toml"
-  check "CLI pyproject (Dockerfile.agents COPY source, shared)" true true true true
+  commit_file "tests/docker/fixture-pins.txt"
+  check "fixture pins file (pinned CLI wheel, shared)" true true true true
 
   git -C "$tmp" reset -q --hard "$base"
-  commit_file "tools/pocketshell/src/pocketshell/cli.py"
-  check "CLI source (Dockerfile.agents COPY source, shared)" true true true true
+  commit_file "tests/docker/Dockerfile.agents"
+  check "agents image definition (shared)" true true true true
 
   # Discriminator: the prefix is tools/pocketshell/, not tools/. A sibling tool
   # is no fixture input and must not fan the lanes out.
@@ -420,24 +409,26 @@ self_test() {
     status=1
   fi
 
-  # ...and the guard is LIVE: strip the tools/ prefixes and it must go red.
-  # A guard that cannot fail is decoration (G6).
+  # ...and the guard is LIVE: strip the tests/docker/ prefix and it must go
+  # red (every current fixture COPY source resolves under tests/docker/, so
+  # removing its prefix must expose them). A guard that cannot fail is
+  # decoration (G6).
   for prefix in "${SHARED_PREFIXES[@]}"; do
-    [[ "$prefix" == tools/* ]] && continue
+    [[ "$prefix" == "tests/docker/" ]] && continue
     pruned+=("$prefix")
   done
   check_fixture_copy_sources_covered "$REPO_ROOT" "${pruned[@]}" 2>/dev/null
   grc=$?
   if [[ $grc -eq 1 ]]; then
-    echo "ok   [COPY-source guard reddens when the tools/ prefix is removed]"
+    echo "ok   [COPY-source guard reddens when the tests/docker/ prefix is removed]"
   else
-    echo "FAIL [COPY-source guard did not redden without the tools/ prefix: rc=$grc]" >&2
+    echo "FAIL [COPY-source guard did not redden without the tests/docker/ prefix: rc=$grc]" >&2
     status=1
   fi
 
   # ...and a fixture input added from ELSEWHERE IN THE REPO reddens too — the
   # literal drift scenario #2592 is about, on a synthetic tree so it stays true
-  # after tools/pocketshell/ is covered.
+  # after issue #2643 removed the last real out-of-directory COPY source.
   mkdir -p "$tmp/fixture-drift/tests/docker" "$tmp/fixture-drift/tools/newthing"
   echo x >"$tmp/fixture-drift/tools/newthing/x.txt"
   printf 'FROM scratch\nCOPY tools/newthing/x.txt /x\n' \
@@ -479,8 +470,9 @@ self_test() {
   fi
 
   # Bumped 13 -> 14 by issue #2474's journey-runner case, 14 -> 20 by issue
-  # #2592's three tools/pocketshell diff cases plus the three COPY-source
-  # drift-guard checks.
+  # #2592's fixture-input diff cases plus the three COPY-source drift-guard
+  # checks; the #2592 CLI-tree cases were re-pointed to the fixture pins file
+  # and image definition by issue #2643.
   if [[ $checks -ne 20 ]]; then
     echo "FAIL: expected 20 checks, ran $checks" >&2
     status=1

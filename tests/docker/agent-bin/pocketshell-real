@@ -1,14 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Run the repository's real Python `pocketshell` package inside the deterministic
-# agents image. The `pocketshell` command beside this helper remains the fixture
-# shim for non-session probes; this helper is the single real host-CLI entrypoint
-# used for aplexer lifecycle, tree, engine, and session-seeding operations.
-real_src=/opt/pocketshell-real/src
-if [ -n "${PYTHONPATH:-}" ]; then
-  export PYTHONPATH="$real_src:$PYTHONPATH"
-else
-  export PYTHONPATH="$real_src"
-fi
+# Run the REAL `pocketshell` CLI inside the deterministic agents image: the
+# pinned PyPI wheel installed at build time (issue #2643 — the CLI is no
+# longer built from this repo, so there is no source tree to PYTHONPATH into).
+# The `pocketshell` command beside this helper remains the fixture shim for
+# non-session probes; this helper is the single real host-CLI entrypoint used
+# for aplexer lifecycle, tree, engine, and session-seeding operations.
 exec python3 -m pocketshell "$@"

@@ -46,10 +46,10 @@ val duplicateJavaResourceExcludes = listOf(
 // from the git tag being built rather than hand-maintained literals, so a
 // release requires no version-bump commit — the tag pushed by
 // scripts/push-release-tag.sh IS the version declaration. The single source of
-// truth for the derivation is scripts/derive-version.sh (shared with the
-// tools/pocketshell PyPI publish step in .github/workflows/build.yml so the two
-// sides can never independently drift — see scripts/check-version-coupling.sh,
-// which now cross-checks THIS module).
+// truth for the derivation is scripts/derive-version.sh (app-only since
+// issue #2643: the host CLI moved to PocketShell-io/pocketshell-cli and
+// versions itself from that repo's own tags — the app version may drift
+// freely; no cross-repo coupling guard remains).
 //
 // MUST NEVER fail/hang the build: any error (script missing, git missing,
 // shallow/tagless checkout, timeout) falls back to a safe placeholder

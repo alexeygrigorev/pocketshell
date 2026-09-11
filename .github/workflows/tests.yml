@@ -688,17 +688,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Issue #2070: the host-CLI vocabulary guard imports cli.py and asks its
-      # live Click Group for list_commands(). Install only the dependency needed
-      # at import time; the pinned quse backend is invoked later at runtime and
-      # is deliberately not part of this filesystem-only guard job.
-      - name: Set up Python 3.11 (issue #2070)
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install live Click reader dependency (issue #2070)
-        run: python3 -m pip install --disable-pip-version-check "click>=8.2.0"
+      # Issue #2070's setup-python + pip-install-click steps were DELETED with
+      # their only consumer (issue #2643): the host-CLI live-vocabulary reader
+      # imported tools/pocketshell's cli.py, and the CLI now lives in
+      # PocketShell-io/pocketshell-cli.
 
       - name: "Run the #2063 test-area coverage guards"
         run: |
@@ -750,12 +743,6 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
-
-      # #2356: Gradle half of check-version-coupling.sh (python: runs the rest).
-      - name: "Version-coupling guard, Gradle cross-check (issue #2356)"
-        run: |
-          chmod +x scripts/check-version-coupling.sh
-          scripts/check-version-coupling.sh
 
       # The #1685 dex register-pressure ratchet step lived here. It assembled the
       # old app module's debug APK and dexed it to keep every
@@ -853,86 +840,12 @@ jobs:
           fi
           echo "All unit-lane jobs succeeded."
 
-  python:
-    name: Python utility tests (pocketshell)
-    runs-on: ubuntu-latest
-
-    # Issue #170 (first PR): the unified `pocketshell` server-side
-    # utility lives under `tools/pocketshell/` as a standalone Python
-    # package. It does not participate in the Gradle build, so a separate
-    # CI job exercises its pytest suite. Cheap (~5 s including install)
-    # so it runs on every push without gating downstream Android jobs.
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install pinned uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.10.11"
-          enable-cache: true
-
-      - name: Verify frozen-lock CI wiring
-        run: |
-          bash scripts/check-python-ci-lock.sh --self-test
-          bash scripts/check-python-ci-lock.sh
-
-      - name: Install pocketshell + dev deps from the committed lock
-        working-directory: tools/pocketshell
-        run: uv sync --frozen --group dev
-
-      # `-rs` prints the REASON for every skipped test in the summary. Issue
-      # #2562: the kernel-level session-cap proof can only run on a host that
-      # delegates a cgroup-v2 user scope, which this runner does not, so it
-      # skips here by design — and a bare "SKIPPED" line is indistinguishable
-      # from a test that quietly stopped running. With `-rs` the log names the
-      # missing capability. `scripts/check-cgroup-cap-proof.sh` is what turns
-      # that skip back into a hard failure on a host that CAN run it.
-      - name: Run pytest
-        working-directory: tools/pocketshell
-        run: uv run --frozen pytest -v -rs
-
-      # Issue #2430 / audit F22: this proof used to be an uncalled top-level
-      # script. It removes the missing-window production guard in a copied tree,
-      # proves the affected test turns red while controls stay green, restores
-      # the source, and verifies the real worktree never changed.
-      - name: Usage missing-window mutation proof (issues #2274, #2430)
-        env:
-          POCKETSHELL_PYTHON: ${{ github.workspace }}/tools/pocketshell/.venv/bin/python
-        run: bash scripts/test-usage-missing-window-mutation.sh
-
-      # Issue #948: fail at PR time when the app `versionName`
-      # (app/build.gradle.kts) and the tools/pocketshell package `version`
-      # (pyproject.toml) drift. The app derives the EXPECTED host pocketshell
-      # CLI version from its own versionName, so a drift makes the in-app
-      # host-version banner nag the user (it happened 2026-06-25: app 0.4.16
-      # vs package 0.4.14). The existing check-pypi-version.sh only runs on
-      # tag push; this catches the drift at PR/push time. --self-test first
-      # proves the guard's own red->green logic, then the bare run checks the
-      # real tree. Cheap (~1s); kept in this cheap Python job, not the emulator
-      # job.
-      - name: "Version-coupling guard (issue #948, restructured for #2356)"
-        run: |
-          chmod +x scripts/check-version-coupling.sh
-          scripts/check-version-coupling.sh --self-test
-          # No JDK/SDK here; `dex` job runs the full (Gradle) check.
-          scripts/check-version-coupling.sh --skip-gradle
-
-      # #1669's "stranded release" was RETIRED by #2356 (versionName is now
-      # tag-derived, no bump step to strand); check-stranded-release.sh
-      # deleted (D22).
-
-      - name: Smoke-test installed CLI
-        working-directory: tools/pocketshell
-        run: |
-          .venv/bin/pocketshell --version
-          .venv/bin/pocketshell --help
-          .venv/bin/pocketshell usage --help
+  # The `python` job ("Python utility tests (pocketshell)") was DELETED with its
+  # subject (issue #2643): the host CLI moved to PocketShell-io/pocketshell-cli
+  # and its pytest suite, uv-lock wiring guard, usage mutation proof and
+  # version-coupling guards run in that repo's own CI now. The app↔CLI contract
+  # is versioned by the PyPI pin (D22 hard cut — no cross-repo coupling guard
+  # remains here); `scripts/derive-version.sh` stays app-only.
 
   sg:
     if: github.event_name=='push'
@@ -959,7 +872,7 @@ jobs:
   # job key and display name are kept
   # verbatim because `Integration tests (Docker)` is a named contract outside this
   # file (scripts/watch-ci.py, scripts/ci-run-jobs.sh, scripts/ci-red-issue.sh,
-  # full-suite-notify.yml, tools/pocketshell tests, process.md).
+  # full-suite-notify.yml, process.md).
   integration:
     name: Integration tests (Docker)
     if: github.event_name != 'pull_request'

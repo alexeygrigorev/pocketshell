@@ -312,12 +312,15 @@ class PocketshellUsageJsonParserTest {
      * wheel document.
      *
      * This is NOT a Kotlin re-implementation of the producer: the resource is
-     * the byte-for-byte output of `normalize_usage_stdout()` applied to
-     * `tools/pocketshell/tests/data/quse-0.0.15-usage.json`, and
-     * `test_committed_producer_ndjson_matches_normalize_output` /
-     * `test_kotlin_test_resource_matches_the_python_producer_fixture` (both in
-     * `tools/pocketshell/tests/test_usage.py`) keep the two sides from
-     * drifting. So this test consumes exactly what a real host emits.
+     * the byte-for-byte output of `normalize_usage_stdout()` applied to that
+     * captured document. Since issue #2643 (the host CLI's
+     * move to PocketShell-io/pocketshell-cli) each repo keeps its own
+     * byte-identical copy of `quse-0.0.15-usage.ndjson` — this one and the
+     * producer fixture in that repo's `tests/data/`, whose
+     * `test_committed_producer_ndjson_matches_normalize_output` keeps the CLI
+     * side honest; cross-repo drift is owned by that repo's CI plus the Docker
+     * fixture here running the pinned released wheel. So this test consumes
+     * exactly what a real host emits.
      */
     private fun quse0015ProducerNdjson(): String =
         javaClass.getResourceAsStream("/quse-0.0.15-usage.ndjson")?.readBytes()

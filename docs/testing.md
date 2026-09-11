@@ -16,7 +16,6 @@ Run these from the repository root:
 
 ```bash
 scripts/full-jvm-gate.py
-uv run --project tools/pocketshell pytest -q
 scripts/assemble-debug.sh
 git diff --check
 ```
@@ -114,8 +113,9 @@ All Dockerfiles live in `tests/docker/`.
 | `pocketshell-test:bootstrap-*` | Setup-detection scenarios for installation and service state |
 
 The `agents` image is based on glibc because the production aplexer release
-publishes glibc binaries. Its build derives the pinned version from
-`tools/pocketshell/pyproject.toml`, installs `/usr/bin/a` beside the Python
+publishes glibc binaries. Its build derives the pinned aplexer version from
+`tests/docker/fixture-pins.txt` (the same file pins the published `pocketshell`
+wheel it installs — issue #2643), installs `/usr/bin/a` beside the Python
 interpreter and its sibling `/usr/bin/aplexer` worker, and runs
 `agents-aplexer-selfcheck.py`. The self-check creates a named session, lists a
 live `phase: running` / `alive: true` row, kills it, and verifies that it is
@@ -194,7 +194,7 @@ To inspect the same product surface manually after a session-runtime change:
 
 ```bash
 rg -n -i 'tmux' \
-  tools/pocketshell/src app2/src/main shared/*/src/main \
+  app2/src/main shared/*/src/main \
   --glob '!shared/core-terminal/src/main/java/com/termux/**' \
   --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/AppDatabase.kt' \
   --glob '!shared/core-storage/src/main/java/com/pocketshell/core/storage/LegacyVersionOneMigration.kt'

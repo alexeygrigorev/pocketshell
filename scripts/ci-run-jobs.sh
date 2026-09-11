@@ -9,14 +9,15 @@
 # USAGE
 #   ci-run-jobs.sh --repo OWNER/NAME --run-id ID [--gh PATH]
 #
-# OUTPUT (stdout, KEY=VALUE, one per line — always all four keys, "unknown"
+# OUTPUT (stdout, KEY=VALUE, one per line — always all three keys, "unknown"
 # when a job is missing from the run, e.g. it never started):
 #   UNIT_GATE=<conclusion>
-#   PYTHON=<conclusion>
 #   INTEGRATION=<conclusion>
 #   EMULATOR_JOURNEY_VERDICT=<conclusion>
 #
-# If $GITHUB_OUTPUT is set, the same four keys (lowercased) are ALSO appended
+# (The fourth key, PYTHON=, was deleted with the `python` job — issue #2643.)
+#
+# If $GITHUB_OUTPUT is set, the same three keys (lowercased) are ALSO appended
 # there for the workflow step to consume directly.
 #
 # Self-test: scripts/test-ci-run-jobs.sh
@@ -59,19 +60,16 @@ job_conclusion() {
 }
 
 unit_gate="$(job_conclusion "Unit tests")"
-python_r="$(job_conclusion "Python utility tests (pocketshell)")"
 integration_r="$(job_conclusion "Integration tests (Docker)")"
 journey_r="$(job_conclusion "Emulator journey aggregate verdict (#1458)")"
 
 printf 'UNIT_GATE=%s\n' "$unit_gate"
-printf 'PYTHON=%s\n' "$python_r"
 printf 'INTEGRATION=%s\n' "$integration_r"
 printf 'EMULATOR_JOURNEY_VERDICT=%s\n' "$journey_r"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     printf 'unit_gate=%s\n' "$unit_gate"
-    printf 'python=%s\n' "$python_r"
     printf 'integration=%s\n' "$integration_r"
     printf 'emulator_journey_verdict=%s\n' "$journey_r"
   } >> "$GITHUB_OUTPUT"

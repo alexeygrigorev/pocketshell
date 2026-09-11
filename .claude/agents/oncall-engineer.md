@@ -219,7 +219,7 @@ git show --stat <sha>                                    # changed paths
 ```
 
 If the diff is **version-only** (only `app/build.gradle*` / `build.gradle*`
-`versionName`/`versionCode`, `tools/pocketshell/pyproject.toml`, changelog) OR
+`versionName`/`versionCode`, changelog) OR
 **test-only / harness-only** (`src/androidTest/**`, `src/test/**`, `scripts/**`
 test harness) AND does **not** touch the production module the failing journey
 exercises, then the commit **cannot have regressed that production journey**.

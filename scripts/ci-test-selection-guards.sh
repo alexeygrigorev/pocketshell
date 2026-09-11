@@ -4,7 +4,8 @@
 # The five #2063 test-area coverage guards, as ONE command. This is the body of
 # the `guards-test-selection` job in `.github/workflows/tests.yml`, and the same
 # thing to run locally when you touch the manifest, the classification engine,
-# the journey registry, or `tools/pocketshell/src/pocketshell/cli.py`.
+# the journey registry, or tests/docker/fixture-pins.txt (the pinned
+# host-CLI producer the seam triggers on since issue #2643).
 #
 # WHY A DEDICATED JOB RATHER THAN A GRADLE TEST. #2063 first reached these
 # guards through a JVM test (`SmartTestSelectionScriptTest`) so `./gradlew test`

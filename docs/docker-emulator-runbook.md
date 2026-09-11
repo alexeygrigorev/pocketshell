@@ -43,7 +43,9 @@ used by the default connected-test path.
 
 The `agents`, `agents-old-cli`, and `agents-daemon` images are glibc-based
 because the pinned aplexer release publishes glibc binaries. Their Dockerfiles
-derive the exact version from `tools/pocketshell/pyproject.toml`, install the
+derive the exact aplexer version from `tests/docker/fixture-pins.txt` (which
+also pins the published `pocketshell` wheel the fixtures install — the CLI is
+no longer built from this repo, issue #2643), install the
 matching `/usr/bin/a` and sibling `/usr/bin/aplexer`, copy the current Python
 helper, and run the fixture self-check. The self-check performs create, list,
 attach-shape, kill, and gone checks against a real session registry.

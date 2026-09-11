@@ -89,73 +89,9 @@ jobs:
             app2/build/outputs/apk/debug/*.apk
           generate_release_notes: true
 
-  publish-pypi:
-    # Build and publish the `pocketshell` Python package alongside the APK
-    # release. Only fires on tag pushes; workflow_dispatch builds are
-    # APK-only (matching the existing `Create Release` gate above).
-    name: Publish pocketshell to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    environment:
-      name: pypi
-      url: https://pypi.org/p/pocketshell
-
-    steps:
-      # Issue #2356: full tag history — the stamp step below and
-      # scripts/check-pypi-version.sh both call scripts/derive-version.sh,
-      # which needs the tag object (and, for versionCode-adjacent checks,
-      # prior tags) reachable in this checkout.
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      # Issue #2356 (Phase 4 of epic #2350): the committed
-      # tools/pocketshell/pyproject.toml `version` is a placeholder (see the
-      # comment in that file) — never published as-is. Stamp the REAL,
-      # tag-derived version into this ephemeral checkout only (never
-      # committed back) from the SAME script app/build.gradle.kts uses, so
-      # both sides can never independently drift (scripts/check-version-
-      # coupling.sh enforces this structurally at PR time).
-      - name: Stamp pyproject.toml version from tag
-        run: |
-          chmod +x scripts/derive-version.sh
-          DERIVED_VERSION="$(scripts/derive-version.sh version-name --ref "${{ github.ref_name }}")"
-          echo "Stamping tools/pocketshell/pyproject.toml version = ${DERIVED_VERSION}"
-          sed -i "0,/^version = \".*\"/s//version = \"${DERIVED_VERSION}\"/" tools/pocketshell/pyproject.toml
-          grep -m1 '^version = ' tools/pocketshell/pyproject.toml
-
-      - name: Verify stamped pyproject.toml version matches the tag
-        # Hard cut (D22): publish must abort if the derivation/stamp step
-        # ever diverges from the tag being published.
-        run: |
-          chmod +x scripts/check-pypi-version.sh
-          scripts/check-pypi-version.sh --check-tag "${{ github.ref_name }}"
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install build backend
-        run: python -m pip install --upgrade build
-
-      - name: Build sdist and wheel
-        working-directory: tools/pocketshell
-        run: python -m build
-
-      - name: Upload built distributions as workflow artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: pocketshell-pypi-${{ github.ref_name }}
-          path: tools/pocketshell/dist/*
-          if-no-files-found: error
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: tools/pocketshell/dist
-          password: ${{ secrets.PYPI_API_TOKEN }}
+  # The `publish-pypi` job was DELETED with its subject (issue #2643): the host
+  # CLI (tools/pocketshell/) moved to PocketShell-io/pocketshell-cli and its
+  # tag-driven PyPI publish, pyproject version stamp and check-pypi-version
+  # guard run in that repo's own CI now. This workflow builds the APK only;
+  # the app version still derives from the pushed tag alone
+  # (scripts/derive-version.sh).

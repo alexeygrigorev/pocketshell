@@ -347,8 +347,8 @@ class J12UsagePanelJourney {
                 "The row carries `engine` but no usable `agent`, which means " +
                 "the fixture's `a` predates aplexer's process-tree detection " +
                 "(#2580), or the CLI does not pass it through (#2581 — whose " +
-                "`aplexer==` pin bump in tools/pocketshell/pyproject.toml is " +
-                "the same line Dockerfile.agents derives the fixture's binary " +
+                "`aplexer==` pin in tests/docker/fixture-pins.txt is " +
+                "the same pin Dockerfile.agents derives the fixture's binary " +
                 "download from, so that bump is what re-points this fixture " +
                 "at a detecting `a`). Until then the pill falls back to the " +
                 "cross-provider answer and this journey proves nothing." +

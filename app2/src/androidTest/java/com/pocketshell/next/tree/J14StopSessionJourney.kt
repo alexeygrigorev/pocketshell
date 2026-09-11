@@ -15,10 +15,10 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.connect.openQuietHost
-import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
+import com.pocketshell.next.terminal.SESSION_CONTEXT_BAR_TAG
 import com.pocketshell.next.terminal.SESSION_HEADER_KEBAB_TAG
 import com.pocketshell.next.terminal.SESSION_SCREEN_TAG
-import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -142,11 +142,9 @@ class J14StopSessionJourney {
 
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        // #2635 N1: stopping a session pops to the workspace LIST — the page
-        // that used to catch it is gone. The stopped session must be gone from
-        // the host, and the survivor must still be listed under its workspace.
-        awaitTag(HOST_WORKSPACES_LIST_TAG)
-        awaitGone(SESSION_SCREEN_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        awaitGone(sessionRowTag(SESSION_TREE))
+        compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
         JourneyScreenshots.capture("02-tree-after-stop", JOURNEY)
 
         val names = hostSessionNames()
@@ -187,8 +185,10 @@ class J14StopSessionJourney {
         compose.onNodeWithText(STOP_SESSION_TITLE).assertIsDisplayed()
         compose.onNodeWithTag(STOP_SESSION_CONFIRM_TAG).performClick()
 
-        awaitTag(HOST_WORKSPACES_LIST_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
         awaitGone(SESSION_SCREEN_TAG)
+        awaitGone(sessionRowTag(SESSION_ATTACHED))
+        compose.onNodeWithTag(sessionRowTag(CANNED_SESSION)).assertIsDisplayed()
         JourneyScreenshots.capture("04-popped-after-stop", JOURNEY)
 
         val names = hostSessionNames()
@@ -196,12 +196,12 @@ class J14StopSessionJourney {
         assertTrue(CANNED_SESSION in names)
     }
 
-    /** #2635 N1: a workspace tap lands on its terminal, not on a page. */
     private fun openWorkspace() {
         compose.openQuietHost(hostId, TIMEOUT_MS)
         awaitTag(workspaceRowTag(WORKSPACE_MAIN))
         compose.onNodeWithTag(workspaceRowTag(WORKSPACE_MAIN)).performClick()
-        awaitTag(SESSION_SCREEN_TAG)
+        awaitTag(WORKSPACE_SCREEN_TAG)
+        awaitTag(sessionRowTag(CANNED_SESSION))
     }
 
     private fun hostSessionNames(): List<String> {
@@ -221,11 +221,11 @@ class J14StopSessionJourney {
 
     private fun awaitSessionScreen() {
         awaitTag(SESSION_SCREEN_TAG)
-        awaitTag(SESSION_TAB_STRIP_TAG)
+        awaitTag(SESSION_CONTEXT_BAR_TAG)
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertIsDisplayed()
         // Quiet terminal chrome puts the workspace name in the large header
-        // and the sibling sessions in the tab strip below it (#2632).
-        compose.onNodeWithTag(SESSION_TAB_STRIP_TAG).assertIsDisplayed()
+        // and the session identity in the compact switcher row below it.
+        compose.onNodeWithTag(SESSION_CONTEXT_BAR_TAG).assertIsDisplayed()
     }
 
     private fun awaitTag(tag: String) {

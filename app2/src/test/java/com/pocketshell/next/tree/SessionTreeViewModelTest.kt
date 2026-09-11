@@ -409,18 +409,12 @@ class SessionTreeViewModelTest {
 
     /**
      * The idempotency contract (`CreatedSession.created == false`): the session
-     * already existed, which is a SUCCESS, never a failure — that is the bug
-     * the host CLI's idempotent create exists to prevent.
-     *
-     * #2635 N1 changed what happens NEXT. The old behaviour showed a notice and
-     * required the user to tap that session's row on the workspace page; N1
-     * deleted that page, so refusing to navigate would leave the user on a
-     * create sheet being told about a session with nothing on screen to reach
-     * it by. It opens the session it found, and still says plainly that it was
-     * not newly created.
+     * already existed, which is a SUCCESS. The tree keeps it visible with a
+     * notice rather than silently resuming it — treating "already there" as a
+     * failure is exactly the bug the host CLI's idempotent create exists to prevent.
      */
     @Test
-    fun `creating a name that already exists opens it and says it already existed`() = runTest(dispatcher) {
+    fun `creating a name that already exists stays on the tree`() = runTest(dispatcher) {
         val hostId = stack.seedHost()
         answerListAndCreate(HEALTHY_LISTING, createdJson("claude-main", created = false))
         val viewModel = viewModel(hostId)
@@ -431,14 +425,10 @@ class SessionTreeViewModelTest {
 
         val create = viewModel.state.value.create
         assertNull("an existing session must NOT read as a failure", create.failure)
-        assertEquals(
-            "#2635 N1: the session it found is the one to open",
-            "claude-main",
-            create.openRequest,
-        )
+        assertNull(create.openRequest)
         assertFalse(create.visible)
         val notice = requireNotNull(create.notice) { "the user should be told it already existed" }
-        assertTrue(notice, notice.contains("already existed"))
+        assertTrue(notice, notice.contains("already exists"))
         assertTrue(notice, notice.contains("claude-main"))
         // And the tree itself is not in an error state over it.
         assertNull(viewModel.state.value.failure)

@@ -11,7 +11,6 @@ import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasClickAction
-import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -34,14 +33,16 @@ import com.pocketshell.next.connect.awaitIdle
 import com.pocketshell.next.connect.openQuietSession
 import com.pocketshell.next.connect.openQuietHost
 import com.pocketshell.next.connect.idleWedgeNote
+import com.pocketshell.next.composer.COMPOSER_SEND_TAG
 import com.pocketshell.next.composer.COMPOSER_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
 import com.pocketshell.next.tree.sessionRowTag
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
-import com.pocketshell.uikit.components.SESSION_LAUNCHER_OVERLAY_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
@@ -58,7 +59,6 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.Description
 import org.junit.runner.RunWith
-import com.pocketshell.uikit.components.COMPOSER_SEND_TAG
 
 /**
  * Journey J03 — attach to a real session on a real host, see it render, type
@@ -280,12 +280,12 @@ class J03AttachAndTypeJourney {
                 .assert(hasClickAction())
                 .performClick()
         } else {
-            // #2635 N1: the workspace tap IS the session tap now. The
-            // journey's point survives unchanged — the session is killed on
-            // the host between the listing and the attach — but the row that
-            // used to be tapped second no longer exists.
+            compose.onNodeWithTag(workspaceTag).performClick()
+            awaitTag(WORKSPACE_SCREEN_TAG)
+            val nestedSessionTag = sessionRowTag(SESSION)
+            awaitTag(nestedSessionTag)
             AgentsFixture.exec("pocketshell sessions kill -- '$SESSION' >/dev/null 2>&1 || true")
-            compose.onNodeWithTag(workspaceTag)
+            compose.onNodeWithTag(nestedSessionTag)
                 .assertIsDisplayed()
                 .assert(hasClickAction())
                 .performClick()
@@ -307,9 +307,9 @@ class J03AttachAndTypeJourney {
 
         // Back is the way out, and it works.
         compose.onNodeWithTag(SESSION_BACK_TAG).performClick()
-        // #2635 N1: Back from a terminal lands on the workspace LIST.
         compose.waitUntil(timeoutMillis = TIMEOUT_MS) {
-            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(HOST_WORKSPACES_TAG).fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithTag(WORKSPACE_SCREEN_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(SESSION_SCREEN_TAG).assertDoesNotExist()
     }
@@ -403,34 +403,20 @@ class J03AttachAndTypeJourney {
 
     /**
      * #2521: the circled always-visible 4-key bar + full composer is gone.
-     * #2631: what is left is a floating overlay launcher, not a docked bar —
-     * the terminal keeps the strip the old row occupied, so the launcher's
-     * rectangle must sit INSIDE the terminal's on a real device too.
+     * Closed session chrome is the compact Prompt Composer + ⌨ launcher.
      */
     @Test
     fun closedChromeIsCompactLauncherOnly() {
         openSession()
         awaitTranscript("the fixture's banner line") { it.contains(BANNER) }
 
-        compose.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertIsDisplayed()
         compose.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
         compose.onNodeWithText("Ctrl").assertDoesNotExist()
         compose.onNodeWithText("Esc").assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_TAG).assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_SEND_TAG).assertDoesNotExist()
-
-        // #2631: the launcher floats over the terminal instead of docking
-        // below it. On the pre-#2631 chrome the terminal stopped short of the
-        // launcher and these bounds were disjoint.
-        val terminal = compose.onNodeWithTag(SESSION_TERMINAL_TAG)
-            .getUnclippedBoundsInRoot()
-        val launcher = compose.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG)
-            .getUnclippedBoundsInRoot()
-        assertTrue(
-            "the launcher must overlay the terminal, got $launcher in $terminal",
-            launcher.top >= terminal.top && launcher.bottom <= terminal.bottom,
-        )
         capture("06-compact-launcher")
     }
 

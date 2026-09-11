@@ -19,8 +19,7 @@ import com.pocketshell.next.workspaces.HOST_WORKSPACES_ERROR_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_LIST_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_LOADING_TAG
 import com.pocketshell.next.workspaces.HOST_WORKSPACES_TAG
-import com.pocketshell.uikit.components.SESSION_TAB_STRIP_TAG
-import com.pocketshell.uikit.components.sessionTabTag
+import com.pocketshell.next.workspaces.WORKSPACE_SCREEN_TAG
 import com.pocketshell.next.workspaces.workspaceRowTag
 import com.pocketshell.next.workspaces.workspaceSessionRowTag
 import androidx.test.platform.app.InstrumentationRegistry
@@ -131,21 +130,10 @@ fun ComposeTestRule.openQuietSession(
     if (onAllNodesWithTag(rootSessionTag).fetchSemanticsNodes().isNotEmpty()) {
         onNodeWithTag(rootSessionTag).performClick()
     } else {
-        // #2635 N1: a workspace tap lands ON the terminal — there is no
-        // workspace page to walk through any more. The tap opens that
-        // workspace's ENTRY session (remembered, else freshest), so a journey
-        // asking for a SPECIFIC sibling finishes the trip on the tab strip.
         onNodeWithTag(workspaceTag).performClick()
-        awaitQuietTag(SESSION_SCREEN_TAG, timeoutMillis)
-        val wanted = sessionTabTag(sessionName)
-        if (onAllNodesWithTag(wanted).fetchSemanticsNodes().isEmpty()) {
-            awaitQuietTag(SESSION_TAB_STRIP_TAG, timeoutMillis)
-            runCatching {
-                onNodeWithTag(SESSION_TAB_STRIP_TAG).performScrollToNode(hasTestTag(wanted))
-            }
-        }
-        awaitQuietTag(wanted, timeoutMillis)
-        onNodeWithTag(wanted).performClick()
+        awaitQuietTag(WORKSPACE_SCREEN_TAG, timeoutMillis)
+        awaitQuietTag(sessionRowTag(sessionName), timeoutMillis)
+        onNodeWithTag(sessionRowTag(sessionName)).performClick()
     }
     awaitQuietTag(SESSION_SCREEN_TAG, timeoutMillis)
 }

@@ -27,12 +27,15 @@ import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
+import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.model.Tag
@@ -41,14 +44,150 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
-// #2635 dead-canon cut: `HostListScreenRender`, `QuietHostSessionAnchorRender`,
-// `HostCardResumeAffordanceRender` and `AgentStateChipsRender` rendered
-// `HostCard` / `SessionRow`, ui-kit components with ZERO app2 consumers that
-// mirrored `com.pocketshell.app.hosts.HostListScreen` — a screen the rewrite
-// hard-deleted with the whole `app` module (#2481). A render case is not
-// coverage when nothing it draws ships; keeping them alive is how
-// `design-system.md` came to list a 387-line component as "canonical" and how
-// a future implementer would have been told to "converge" onto it (D22).
+@Composable
+internal fun HostListScreenRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ScreenHeader(
+            title = "Hosts",
+            subtitle = "5 hosts · 4 sessions",
+            trailing = {
+                Badge(label = "4 active", role = BadgeRole.Active, mono = false)
+            },
+        )
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.Attached,
+            onClick = {},
+        )
+        HostCard(
+            name = "gpu-box",
+            subtitle = "alex@10.0.0.42",
+            status = HostStatus.ActiveSessions(count = 3),
+            onClick = {},
+        )
+        HostCard(
+            name = "prod",
+            subtitle = "deploy@prod.acme.io",
+            status = HostStatus.NoActiveSessions,
+            onClick = {},
+        )
+        HostCard(
+            name = "edge",
+            subtitle = "ci@edge.acme.io",
+            status = HostStatus.ConnectionError,
+            onClick = {},
+        )
+    }
+}
+
+/**
+ * Quiet A1 visual anchor: an existing host surface followed by its existing
+ * session rows. It exercises the production [HostCard], [SessionRow],
+ * [SectionHeader], and [ScreenHeader] primitives under the updated theme so
+ * the palette/shape change is visible in one fresh render artifact.
+ */
+@Composable
+internal fun QuietHostSessionAnchorRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        ScreenHeader(
+            title = "hetzner",
+            subtitle = "Connected · 2 sessions",
+        )
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.Attached,
+            onClick = {},
+        )
+        SectionHeader(label = "~/git", count = 2)
+        SessionRow(
+            name = "pocketshell",
+            tags = listOf(
+                Tag("Claude", TagKind.Agent),
+                Tag("Attached", TagKind.Attached),
+            ),
+            onClick = {},
+        )
+        SessionRow(
+            name = "aplexer",
+            tags = listOf(
+                Tag("Terminal", TagKind.Default),
+                Tag("Detached", TagKind.Detached),
+            ),
+            onClick = {},
+        )
+    }
+}
+
+@Composable
+internal fun HostCardResumeAffordanceRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.Attached,
+            onClick = {},
+        )
+        ResumeLastSessionRowFacsimile(sessionName = "claude-main")
+    }
+    HostCard(
+        name = "gpu-box",
+        subtitle = "alex@10.0.0.42",
+        status = HostStatus.NoActiveSessions,
+        onClick = {},
+    )
+}
+
+/**
+ * Issue #1237: the agent-state chip (idle / working / waiting-for-input) on host
+ * cards, plus the three chip variants standalone. The top card is "waiting" (the
+ * amber come-look signal), then working (accent cyan), idle (neutral), and a
+ * quiet host with NO agent activity (Unknown → no chip, decluttered single dot).
+ * Rendered against the real theme so the fast JVM check shows the chip reads as a
+ * compact status pill next to the host status dot; the emulator screenshot is the
+ * acceptance.
+ */
+@Composable
+internal fun AgentStateChipsRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ScreenHeader(title = "Hosts", subtitle = "4 hosts · 3 active")
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.ActiveSessions(count = 3),
+            agentState = SessionAgentState.WaitingForInput,
+            onClick = {},
+        )
+        HostCard(
+            name = "gpu-box",
+            subtitle = "alex@10.0.0.42",
+            status = HostStatus.ActiveSessions(count = 2),
+            agentState = SessionAgentState.Working,
+            onClick = {},
+        )
+        HostCard(
+            name = "prod",
+            subtitle = "deploy@prod.acme.io",
+            status = HostStatus.ActiveSessions(count = 1),
+            agentState = SessionAgentState.Idle,
+            onClick = {},
+        )
+        HostCard(
+            name = "edge",
+            subtitle = "ci@edge.acme.io",
+            status = HostStatus.NoActiveSessions,
+            agentState = SessionAgentState.Unknown,
+            onClick = {},
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AgentStateChip(state = SessionAgentState.WaitingForInput)
+            AgentStateChip(state = SessionAgentState.Working)
+            AgentStateChip(state = SessionAgentState.Idle)
+        }
+    }
+}
 
 /**
  * Issue #1701: the session-list trailing lane after the full status and agent

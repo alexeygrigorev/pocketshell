@@ -4,14 +4,12 @@ import android.app.Instrumentation
 import android.os.SystemClock
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.next.MainActivity
@@ -24,7 +22,6 @@ import com.pocketshell.next.connect.JourneyScreenshots
 import com.pocketshell.next.connect.SeedBeforeLaunchRule
 import com.pocketshell.next.connect.appGraph
 import com.pocketshell.next.hosts.HOST_LIST_SETTINGS_TAG
-import com.pocketshell.next.hosts.HOST_LIST_TOOLS_TAG
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -105,9 +102,6 @@ class J16SettingsSupportJourney {
 
     @Test
     fun settingsCategoriesPersistChoicesAndDiagnosticsUseNativeShare() {
-        // #2630: Settings left the host page for a sheet behind the header cog.
-        awaitTag(HOST_LIST_TOOLS_TAG)
-        compose.onNodeWithTag(HOST_LIST_TOOLS_TAG).performClick()
         awaitTag(HOST_LIST_SETTINGS_TAG)
         compose.onNodeWithTag(HOST_LIST_SETTINGS_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)
@@ -141,12 +135,6 @@ class J16SettingsSupportJourney {
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)
 
-        // Issue #2633 added an "Account & sync" category above these two, so the
-        // index is now long enough that the last rows can sit below the fold on
-        // a short device. Scroll the list to the row before tapping it rather
-        // than assuming it is composed.
-        compose.onNodeWithTag(SETTINGS_LIST_TAG)
-            .performScrollToNode(hasTestTag(settingsCategoryTag("about")))
         compose.onNodeWithTag(settingsCategoryTag("about")).performClick()
         awaitTag(SETTINGS_ABOUT_PAGE_TAG)
         compose.onNodeWithText("Installed version").assertIsDisplayed()
@@ -154,8 +142,6 @@ class J16SettingsSupportJourney {
         compose.onNodeWithTag(SETTINGS_BACK_TAG).performClick()
         awaitTag(SETTINGS_LIST_TAG)
 
-        compose.onNodeWithTag(SETTINGS_LIST_TAG)
-            .performScrollToNode(hasTestTag(settingsCategoryTag("diagnostics")))
         compose.onNodeWithTag(settingsCategoryTag("diagnostics")).performClick()
         awaitTag(DIAGNOSTICS_PAGE_TAG)
         compose.onNodeWithText("j2610 support handoff", substring = true).assertIsDisplayed()

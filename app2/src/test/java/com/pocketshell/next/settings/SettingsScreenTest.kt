@@ -35,14 +35,13 @@ class SettingsScreenTest {
                     onOpenVoice = { opened += "voice" },
                     onOpenConnections = { opened += "connections" },
                     onOpenAdvanced = { opened += "advanced" },
-                    onOpenAccount = { opened += "account" },
                     onOpenDiagnostics = { opened += "diagnostics" },
                     onOpenAbout = { opened += "about" },
                 ),
             )
         }
 
-        listOf("terminal", "voice", "connections", "advanced", "account", "diagnostics", "about")
+        listOf("terminal", "voice", "connections", "advanced", "diagnostics", "about")
             .forEach { id ->
                 composeRule.onNodeWithTag(SETTINGS_LIST_TAG)
                     .performScrollToNode(hasTestTag(settingsCategoryTag(id)))
@@ -52,34 +51,6 @@ class SettingsScreenTest {
             .performScrollToNode(hasTestTag(settingsCategoryTag("about")))
         composeRule.onNodeWithTag(settingsCategoryTag("about")).performClick()
         assertEquals(listOf("about"), opened)
-    }
-
-    /**
-     * #2635: no `SectionHeader` on a single-section screen.
-     *
-     * A page titled "Settings" carried a "Preferences" label 32dp under it,
-     * over its ONLY section — the same redundancy the Hosts list had (Nielsen
-     * #8). Fails while the header exists.
-     */
-    @Test
-    fun `the single-section settings index has no section label`() {
-        composeRule.setContent {
-            SettingsScreen(
-                navigation = SettingsNavigation(
-                    onBack = {},
-                    onOpenTerminal = {},
-                    onOpenVoice = {},
-                    onOpenConnections = {},
-                    onOpenAdvanced = {},
-                    onOpenAccount = {},
-                    onOpenDiagnostics = {},
-                    onOpenAbout = {},
-                ),
-            )
-        }
-
-        composeRule.onNodeWithText("Preferences").assertDoesNotExist()
-        composeRule.onNodeWithText("Settings").assertIsDisplayed()
     }
 
     @Test
@@ -93,7 +64,6 @@ class SettingsScreenTest {
                     onOpenVoice = {},
                     onOpenConnections = {},
                     onOpenAdvanced = {},
-                    onOpenAccount = {},
                     onOpenDiagnostics = {},
                     onOpenAbout = {},
                 ),

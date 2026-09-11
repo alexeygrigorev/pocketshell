@@ -10,7 +10,6 @@ import com.pocketshell.next.connect.TestConnectStack
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.hostcli.asRemoteExec
 import com.pocketshell.next.nav.Destination
-import com.pocketshell.next.terminal.LastSessionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -163,7 +162,6 @@ class HostWorkspacesViewModelTest {
         hostDao = stack.db.hostDao(),
         projectRootDao = stack.db.projectRootDao(),
         workspaceOrderStore = WorkspaceOrderStore(ApplicationProvider.getApplicationContext()),
-        lastSessionStore = LastSessionStore(ApplicationProvider.getApplicationContext()),
     )
 
     private fun script(

@@ -38,9 +38,7 @@ import com.pocketshell.uikit.theme.PocketShellType
  *
  * Horizontal padding matches [PocketShellDensity.rowPadH] so the label lines up
  * with the rows beneath it; the vertical padding leans on
- * [PocketShellSpacing.sm] for a tight group gap. The 48dp
- * [PocketShellDensity.tapTargetMin] floor is applied only when [onLabelClick]
- * makes the label a real touch target (#2630). Colours stay on the always-dark
+ * [PocketShellSpacing.sm] for a tight group gap. Colours stay on the always-dark
  * raw tokens (#477 single dark scheme).
  *
  * Presentational only.
@@ -66,18 +64,8 @@ fun SectionHeader(
     ) {
         Row(
             modifier = Modifier
-                .weight(1f)
-                // The 48dp floor is a TOUCH floor, so it applies only when the
-                // label is actually tappable. #2630: applying it unconditionally
-                // turned every static "Hosts"/"Tools" divider into a 64dp band
-                // — taller than the rows it was labelling.
-                .then(
-                    if (onLabelClick != null) {
-                        Modifier.defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
-                    } else {
-                        Modifier
-                    },
-                )
+                .weight(if (trailing == null) 1f else 1f)
+                .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
                 .semantics { heading() }
                 .then(
                     if (onLabelClick != null) {

@@ -746,26 +746,6 @@ class ComposerViewModelTest {
             )
         }
 
-    /**
-     * #2630 reproduce-first: a successful stage raised a dismissable
-     * "Attached 1 file." `Info` banner ON TOP of the tile that had just
-     * appeared. This fails while that banner is still emitted and passes when
-     * success is silent — a FAILURE still has to speak, since nothing appears.
-     */
-    @Test
-    fun `a successful stage says so with the tile alone and no banner`() = runTest(dispatcher) {
-        val viewModel = bound()
-
-        viewModel.attach(listOf(pick("diagram.png", "PNGBYTES")))
-        advanceUntilIdle()
-
-        assertEquals(1, viewModel.state.value.attachments.size)
-        assertNull(
-            "a staged tile is its own confirmation; a banner is a second one",
-            viewModel.state.value.notice,
-        )
-    }
-
     @Test
     fun `an attachment with no text is a complete message`() = runTest(dispatcher) {
         val viewModel = bound()

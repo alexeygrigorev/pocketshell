@@ -77,6 +77,7 @@ fun PromptComposerSheet(
     hasRecordAudioPermission: (() -> Boolean)? = null,
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
+    onOpenHotkeys: () -> Unit = {},
     availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     val context = LocalContext.current
@@ -99,18 +100,7 @@ fun PromptComposerSheet(
 
     ComposerModalBottomSheet(
         onDismissRequest = dismiss,
-        // #2635 C1: the sheet has a PARTIAL detent again. `ux-rules.md`
-        // Breakage 4 — "user cannot see the terminal while composing" — has
-        // been open since the composer forced itself to a single expanded
-        // detent: a long draft grew the sheet to the top of the screen with no
-        // settled state between "typing" and "the terminal is gone", and the
-        // sheet could not be pushed back down without dismissing it.
-        //
-        // This stays inside D11 ("prompt composer is a bottom sheet, modal over
-        // the terminal, terminal dims behind"). It is deliberately NOT the
-        // desktop's non-modal floating card, which WOULD contradict D11 and
-        // needs the maintainer's amendment first.
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         modifier = modifier,
     ) {
         PromptComposerContent(
@@ -141,6 +131,7 @@ fun PromptComposerSheet(
             onDiscard = onDiscard,
             deliveryEnabled = deliveryEnabled,
             deliveryDisabledMessage = deliveryDisabledMessage,
+            onOpenHotkeys = onOpenHotkeys,
             availableSlashCommands = availableSlashCommands,
         )
     }
@@ -170,6 +161,7 @@ fun PromptComposerContent(
     imeVisible: Boolean = false,
     deliveryEnabled: Boolean = true,
     deliveryDisabledMessage: String? = null,
+    onOpenHotkeys: () -> Unit = {},
     availableSlashCommands: List<SlashCommand> = SlashCommandAutocomplete.CATALOG,
 ) {
     val title = targetLabel.trim().takeIf { it.isNotEmpty() }?.let { "Input to $it" }
@@ -197,6 +189,7 @@ fun PromptComposerContent(
             onDiscard = onDiscard,
             deliveryEnabled = deliveryEnabled,
             deliveryDisabledMessage = deliveryDisabledMessage,
+            onOpenHotkeys = onOpenHotkeys,
             availableSlashCommands = availableSlashCommands,
         )
     }

@@ -10,11 +10,13 @@ import androidx.compose.ui.unit.Density
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.pocketshell.core.hostapi.SessionRow
 import com.pocketshell.core.hostapi.WorkspaceMembership
+import com.pocketshell.next.tree.SessionTreeUiState
 import com.pocketshell.next.workspaces.HostWorkspacesScreen
 import com.pocketshell.next.workspaces.HostWorkspacesUiState
 import com.pocketshell.next.workspaces.RegisteredWorkspaceRoot
 import com.pocketshell.next.workspaces.WorkspaceProjection
 import com.pocketshell.next.workspaces.WorkspaceRootProjection
+import com.pocketshell.next.workspaces.WorkspaceScreen
 import com.pocketshell.next.workspaces.projectWorkspaceRoots
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -63,32 +65,52 @@ class QuietWorkspaceRenders {
         )
     }
 
-    /**
-     * #2630: the dense single-line workspace row, against a POPULATED state.
-     *
-     * The `i2607-*` fixtures above have no sessions and no activity
-     * timestamps, so they render the (correct) silent variant and show nothing
-     * of the shape the maintainer asked for. This one carries real session
-     * counts and recent activity, so the row reads the way PocketShell
-     * Desktop's sidebar does: `pocketshell  4  just now`.
-     */
     @Test
-    @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
-    fun hostWorkspacesDense() = render("i2630-host-workspaces-dense") {
-        HostWorkspacesScreen(
-            state = denseHostState(),
+    fun emptyWorkspaceDetail() = render("i2607-empty-workspace-detail") {
+        WorkspaceScreen(state = workspaceState("/home/alexey/git/empty"), onRefresh = {}, onOpenSession = {})
+    }
+
+    @Test
+    fun populatedWorkspaceDetail() = render("i2607-populated-workspace-detail") {
+        WorkspaceScreen(
+            state = workspaceState(
+                path = "/home/alexey/git/pocketshell",
+                names = listOf("shell", "agent-review"),
+            ),
             onRefresh = {},
-            onOpenWorkspace = {},
             onOpenSession = {},
-            nowSec = DENSE_NOW,
         )
     }
 
-    // #2635 N1: the four workspace-DETAIL renders are gone with the screen they
-    // drew. `WorkspaceScreen` was the page between a workspace and its
-    // terminal; a workspace tap now opens the terminal, and an empty workspace
-    // opens its create sheet. The host-workspaces renders above are the list
-    // this change is actually about, and they stay.
+    @Test
+    fun populatedWorkspaceDetailFontScale13() = render(
+        name = "i2607-populated-workspace-detail-font-scale-13",
+        fontScale = 1.3f,
+    ) {
+        WorkspaceScreen(
+            state = workspaceState(
+                path = "/home/alexey/git/pocketshell/feature-with-a-long-name",
+                names = listOf("shell", "agent-review"),
+            ),
+            onRefresh = {},
+            onOpenSession = {},
+        )
+    }
+
+    @Test
+    fun populatedWorkspaceDetailFontScale20() = render(
+        name = "i2607-populated-workspace-detail-font-scale-20",
+        fontScale = 2.0f,
+    ) {
+        WorkspaceScreen(
+            state = workspaceState(
+                path = "/home/alexey/git/pocketshell/feature-with-a-long-name",
+                names = listOf("shell", "agent-review"),
+            ),
+            onRefresh = {},
+            onOpenSession = {},
+        )
+    }
 
     private fun hostState(): HostWorkspacesUiState {
         val roots = projectWorkspaceRoots(
@@ -111,37 +133,6 @@ class QuietWorkspaceRenders {
         )
     }
 
-    private fun denseHostState(): HostWorkspacesUiState {
-        val sessions = listOf(
-            active("claude-main", "/home/alexey/git/pocketshell", DENSE_NOW - 20),
-            active("codex-ui", "/home/alexey/git/pocketshell", DENSE_NOW - 400),
-            active("shell", "/home/alexey/git/pocketshell", DENSE_NOW - 900),
-            active("build", "/home/alexey/git/pocketshell", DENSE_NOW - 4_000),
-            active("api", "/home/alexey/work/mobile", DENSE_NOW - 7_200),
-            active("root-shell", "/home/alexey/git", DENSE_NOW - 60),
-        )
-        return HostWorkspacesUiState(
-            hostId = 7,
-            hostLabel = "hetzner",
-            loaded = true,
-            roots = projectWorkspaceRoots(
-                sessions = sessions,
-                memberships = listOf(
-                    WorkspaceMembership("/home/alexey/git/pocketshell", "~/git/pocketshell"),
-                    WorkspaceMembership("/home/alexey/git/empty", "~/git/empty"),
-                    WorkspaceMembership("/home/alexey/work/mobile", "~/work/mobile"),
-                ),
-                registeredRoots = listOf(
-                    RegisteredWorkspaceRoot("/home/alexey/git", "Git", 1L),
-                    RegisteredWorkspaceRoot("/home/alexey/work", "Work", 2L),
-                ),
-            ),
-        )
-    }
-
-    private fun active(name: String, workspace: String, activityEpoch: Long): SessionRow =
-        session(name, workspace).copy(activityEpoch = activityEpoch)
-
     private fun session(name: String, workspace: String): SessionRow = SessionRow(
         name = name,
         id = null,
@@ -156,6 +147,14 @@ class QuietWorkspaceRenders {
         createdEpoch = 1L,
         activityEpoch = null,
     )
+
+    private fun workspaceState(path: String, names: List<String> = emptyList()): SessionTreeUiState =
+        SessionTreeUiState(
+            hostId = 7,
+            workspacePath = path,
+            loaded = true,
+            workspaceSessions = names.map { session(it, path) },
+        )
 
     private fun render(
         name: String,
@@ -181,10 +180,5 @@ class QuietWorkspaceRenders {
                 }
             }
         }
-    }
-
-    private companion object {
-        /** Fixed clock so the dense render's relative labels are deterministic. */
-        const val DENSE_NOW: Long = 1_800_000_000L
     }
 }

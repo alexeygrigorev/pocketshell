@@ -14,7 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.next.composer.ComposerUiState
 import com.pocketshell.uikit.components.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.uikit.components.SESSION_HOTKEYS_LAUNCHER_TAG
-import com.pocketshell.uikit.components.SESSION_LAUNCHER_OVERLAY_TAG
+import com.pocketshell.uikit.components.SESSION_LAUNCHER_BAR_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.components.TerminalHotkeysPage
@@ -50,7 +50,7 @@ class SessionKeyBarTest {
     fun `the compact launcher is present while still attaching`() {
         setContent(SessionUiState.Connecting)
 
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
     }
 
@@ -58,7 +58,7 @@ class SessionKeyBarTest {
     fun `the compact launcher is present once the session is live`() {
         setContent(SessionUiState.Live(createRemoteTerminalSession()))
 
-        composeRule.onNodeWithTag(SESSION_LAUNCHER_OVERLAY_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_LAUNCHER_BAR_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_HOTKEYS_LAUNCHER_TAG).assertIsDisplayed()
     }
 

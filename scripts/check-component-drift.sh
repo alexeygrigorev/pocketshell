@@ -51,26 +51,13 @@ BASELINE_FILE="scripts/component-drift-baseline.txt"
 # widget name followed by an open paren (allowing a space), which is the call
 # form; an `import ...AlertDialog` line has no `(` and is skipped anyway, but we
 # also drop import lines explicitly for safety.
-#
-# `OutlinedTextField` joined the list in #2635: it was the LAST un-tokenised
-# primitive. Three screens had copied the same eight-colour
-# `OutlinedTextFieldDefaults.colors(...)` block and everything else fell back to
-# Material's defaults, which are not Quiet's colours at all. `QuietTextField` is
-# to fields what `PocketShellButton` is to buttons — and, like the others here,
-# the existing call sites are BASELINED rather than banned, so the migration can
-# proceed screen by screen without a flag day.
-RAW_CALL='\b(AlertDialog|CircularProgressIndicator|TextButton|OutlinedTextField)[[:space:]]*\('
+RAW_CALL='\b(AlertDialog|CircularProgressIndicator|TextButton)[[:space:]]*\('
 
 # Emit "<file> <count>" for every file under SCAN_DIRS that has at least one
 # raw call-site, sorted by file.
 current_counts() {
-  # The kit's OWN implementation of a replacement is the one place the raw
-  # widget is supposed to appear — `QuietTextField` IS the `OutlinedTextField`
-  # wrapper, so counting it would make the guard demand a wrapper for the
-  # wrapper.
   grep -rnoE "$RAW_CALL" "${SCAN_DIRS[@]}" --include=*.kt 2>/dev/null \
     | grep -vE ':[0-9]+:[[:space:]]*import ' \
-    | grep -vF 'shared/ui-kit/src/main/java/com/pocketshell/uikit/components/QuietTextField.kt' \
     | cut -d: -f1 \
     | sort \
     | uniq -c \
@@ -122,7 +109,7 @@ self_test() (
   echo "PASS: the clean baselined fixture is accepted"
 
   # Each mutation adds ONE new raw call-site of a different guarded widget, so a
-  # guard that only greps for AlertDialog cannot pass all of them.
+  # guard that only greps for AlertDialog cannot pass all three.
   mutate_and_require_red() {
     local label="$1" added_call="$2"
     mutant_file="$sandbox/$label/ConfirmDialog.kt"
@@ -150,7 +137,6 @@ self_test() (
   mutate_and_require_red AlertDialog 'AlertDialog('
   mutate_and_require_red Spinner 'CircularProgressIndicator('
   mutate_and_require_red TextButton 'TextButton('
-  mutate_and_require_red OutlinedTextField 'OutlinedTextField('
 
   # The live app2 source root must reject a raw component added to an existing
   # production file, even though that file has no baseline row today.
@@ -256,8 +242,7 @@ if (( regressions > 0 )); then
   echo "  Use the shared ui-kit components instead of the raw Material widget:"
   echo "    AlertDialog               -> ConfirmDialog / FormDialog"
   echo "    CircularProgressIndicator -> LoadingIndicator.Spinner"
-  echo "    TextButton                -> PocketShellButton.Text
-    OutlinedTextField         -> QuietTextField"
+  echo "    TextButton                -> PocketShellButton.Text"
   echo "  If a NEW raw call-site is genuinely unavoidable, add it to the shared"
   echo "  ui-kit and re-baseline (--update); do NOT scatter a raw widget into a"
   echo "  screen."

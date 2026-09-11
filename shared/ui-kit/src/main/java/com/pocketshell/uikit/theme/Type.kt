@@ -9,24 +9,10 @@ import androidx.compose.ui.unit.sp
 /**
  * Typography for PocketShell.
  *
- * Sizes are pinned to `docs/design-language.md` § Type, the single source of
- * truth for the type scale (`docs/design-system.md`'s token table mirrors it):
+ * Sizes are pinned to `docs/design-language.md`'s restrained scale:
  *
- * | Rung             | Size | Line height | M3 slot         |
- * |------------------|------|-------------|-----------------|
- * | Screen heading   | 20sp | 26sp        | `headlineSmall` |
- * | Title            | 16sp | 22sp        | `titleMedium`   |
- * | Body             | 14sp | 20sp        | `bodyMedium`    |
- * | Caption / label  | 11sp | 16sp        | `labelSmall`    |
- *
- * Issue #2630: the Quiet redesign shipped every rung one step larger than this
- * (28/20/18/16) while its own doc comment claimed to follow the spec, which is
- * what made the app read as oversized on a phone. If a rung has to change
- * again, change `docs/design-language.md` first and mirror it here — the code
- * never leads the spec.
- *
- * The dense/mono rungs ([bodyDense], [bodyMono], [labelMono]) sit deliberately
- * between these and are NOT part of this table.
+ * Quiet app chrome uses the shared scale from `docs/design-kit/spec/DesignSystem.md`:
+ * 28sp screen headings, 20sp titles, 18sp body, and 16sp metadata/labels.
  *
  * Font families:
  *
@@ -45,7 +31,7 @@ import androidx.compose.ui.unit.sp
  *
  * Today: system monospace (Roboto Mono on most Android builds). Tomorrow:
  * bundled JetBrains Mono. Kept as a named alias so all downstream call sites
- * — terminal surface, inline `<code>` runs, the hotkeys panel — flip in one
+ * — terminal surface, `CommandChip`, inline `<code>` runs — flip in one
  * place when the bundled font lands.
  */
 val JetBrainsMonoFamily: FontFamily = FontFamily.Monospace
@@ -56,36 +42,36 @@ val JetBrainsMonoFamily: FontFamily = FontFamily.Monospace
  * components don't render with garbage sizes.
  */
 val PocketShellTypography: Typography = Typography(
-    // 20sp screen headings.
+    // 28sp screen headings.
     headlineSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
-        lineHeight = 26.sp,
+        fontSize = 28.sp,
+        lineHeight = 34.sp,
     ),
 
-    // 16sp titles and workspace names.
+    // 20sp titles and workspace names.
     titleMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
+        fontSize = 20.sp,
+        lineHeight = 28.sp,
     ),
 
-    // 14sp body — the default reading size for settings and standard rows.
+    // 18sp body — the default reading size for settings and standard rows.
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
+        fontSize = 18.sp,
+        lineHeight = 26.sp,
     ),
 
-    // 11sp captions, metadata and labels.
+    // 16sp metadata and labels.
     labelSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
     ),
 )
 
@@ -107,79 +93,99 @@ val PocketShellTypography: Typography = Typography(
  * monospace family via [JetBrainsMonoFamily].
  */
 object PocketShellType {
-    /** 20sp screen heading — `docs/design-language.md`'s "screen headings" rung. */
-    val screen: TextStyle = TextStyle(
+    /** 28sp Quiet screen title. */
+    val quietScreen: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
+        lineHeight = 34.sp,
+    )
+
+    /** 20sp Quiet workspace and row title. */
+    val quietTitle: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 20.sp,
+        lineHeight = 28.sp,
+    )
+
+    /** 18sp Quiet body copy. */
+    val quietBody: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 18.sp,
         lineHeight = 26.sp,
     )
 
-    /** 16sp workspace or detail title — the "titles" rung. */
-    val title: TextStyle = TextStyle(
+    /** 16sp Quiet supporting metadata. */
+    val quietMetadata: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Normal,
         fontSize = 16.sp,
         lineHeight = 22.sp,
     )
 
-    /** 16sp workspace name. Kept distinct for call-site readability. */
+    /** 16sp Quiet labels and action text. */
+    val quietLabel: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
+    )
+
+    /** 28sp screen heading. */
+    val screen: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
+        lineHeight = 34.sp,
+    )
+
+    /** 20sp workspace or detail title. */
+    val title: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
+        lineHeight = 28.sp,
+    )
+
+    /** 20sp workspace name. Kept distinct for call-site readability. */
     val workspace: TextStyle = title
 
-    /** 14sp standard row and explanatory body text — the "body" rung. */
+    /** 18sp standard row and explanatory body text. */
     val body: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
+        fontSize = 18.sp,
+        lineHeight = 26.sp,
     )
 
-    /** 11sp supporting text and metadata — the "captions" rung. */
+    /** 16sp supporting text and metadata. */
     val metadata: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
     )
 
-    /** 11sp section and field label — the "captions" rung, Medium weight. */
+    /** 16sp section and field label. */
     val label: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
     )
 
-    /** 14sp action label — body-sized so a button never outweighs a title. */
+    /** 18sp action label. */
     val button: TextStyle = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
     )
 
-    /** 11sp terminal-adjacent app text; terminal output has its own grid. */
+    /** 16sp terminal-adjacent app text; terminal output has its own grid. */
     val terminal: TextStyle = metadata
-
-    // The `quiet*` names are the Quiet-redesign spellings of the same four
-    // rungs. They are aliases, never independent values: #2630 shipped because
-    // two parallel copies of one scale drifted apart from each other and from
-    // the spec.
-
-    /** @see screen */
-    val quietScreen: TextStyle = screen
-
-    /** @see title */
-    val quietTitle: TextStyle = title
-
-    /** @see body */
-    val quietBody: TextStyle = body
-
-    /** @see metadata */
-    val quietMetadata: TextStyle = metadata
-
-    /** @see label */
-    val quietLabel: TextStyle = label
 
     /**
      * 13sp dense body (Δ8) — the canonical dense-row size between `labelSmall`(11)

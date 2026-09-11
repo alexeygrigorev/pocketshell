@@ -11,7 +11,9 @@ import org.w3c.dom.Element
  * Pins the shipping launcher identity (issue #2517) and install id
  * (issue #2519): this is PocketShell under `com.pocketshell.app`, so an
  * upgrade replaces the v0.4.x install (same signature). Kotlin namespace
- * stays `com.pocketshell.next`.
+ * stays `com.pocketshell.next`. Issue #2650 split the launcher labels:
+ * the daily-driver debug build is "PocketShell Debug", the release build
+ * plain "PocketShell".
  */
 class LauncherBrandingTest {
 
@@ -29,21 +31,22 @@ class LauncherBrandingTest {
     }
 
     @Test
-    fun launcherLabelIsPocketShellNotNext() {
-        val document = parseXml(locate("app2/src/main/res/values/strings.xml"))
-        val strings = document.getElementsByTagName("string")
-        var appName: String? = null
-        for (i in 0 until strings.length) {
-            val el = strings.item(i) as Element
-            if (el.getAttribute("name") == "app_name") {
-                appName = el.textContent.trim()
-                break
-            }
-        }
-        assertEquals("PocketShell", appName)
+    fun debugLauncherLabelIsPocketShellDebugNotNext() {
+        val appName = appNameIn(locate("app2/src/main/res/values/strings.xml"))
+        assertEquals("PocketShell Debug", appName)
         assertTrue(
             "launcher label must not carry the rewrite's side-by-side 'Next' suffix",
             appName != null && !appName.contains("Next"),
+        )
+    }
+
+    @Test
+    fun releaseOverlayLabelIsPlainPocketShellAndDistinctFromDebug() {
+        val releaseName = appNameIn(locate("app2/src/release/res/values/strings.xml"))
+        assertEquals("PocketShell", releaseName)
+        assertTrue(
+            "debug and release launcher labels must stay distinct",
+            releaseName != appNameIn(locate("app2/src/main/res/values/strings.xml")),
         )
     }
 
@@ -123,6 +126,17 @@ class LauncherBrandingTest {
         DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
             .newDocumentBuilder()
             .parse(file)
+
+    private fun appNameIn(file: File): String? {
+        val strings = parseXml(file).getElementsByTagName("string")
+        for (i in 0 until strings.length) {
+            val el = strings.item(i) as Element
+            if (el.getAttribute("name") == "app_name") {
+                return el.textContent.trim()
+            }
+        }
+        return null
+    }
 
     private fun Element.androidAttr(name: String): String =
         getAttributeNS(ANDROID_NS, name).ifBlank { getAttribute("android:$name") }

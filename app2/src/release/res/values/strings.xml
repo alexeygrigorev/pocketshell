@@ -1,9 +1,10 @@
 <resources>
     <!--
-        Issue #2638: the release build installs under
-        com.pocketshell.app.release NEXT TO the daily-driver debug install, so
-        both launcher icons must be tellable apart at a glance. The debug label
-        (src/main, "PocketShell") must not change — see LauncherBrandingTest.
+        Issue #2650 (supersedes #2638's suffixed naming): the release
+        build IS PocketShell; the daily-driver debug install it sits
+        next to (com.pocketshell.app, src/main label) says
+        "PocketShell Debug" instead. The two labels must stay distinct —
+        see LauncherBrandingTest and scripts/check-apk-signing.sh.
     -->
-    <string name="app_name">PocketShell Rel</string>
+    <string name="app_name">PocketShell</string>
 </resources>

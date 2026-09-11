@@ -50,7 +50,6 @@ import kotlinx.coroutines.flow.StateFlow
  */
 const val HOST_LIST_TAG: String = "host-list"
 const val HOST_LIST_ADD_TAG: String = "host-list-add"
-const val HOST_LIST_SCAN_TAG: String = "host-list-scan"
 const val HOST_LIST_SETTINGS_TAG: String = "host-list-settings"
 const val HOST_LIST_UPDATE_BANNER_TAG: String = "host-list-update-banner"
 const val HOST_LIST_UPDATE_DOWNLOAD_TAG: String = "host-list-update-download"
@@ -64,7 +63,6 @@ const val HOST_LIST_KEYS_TAG: String = "host-list-ssh-keys"
 const val HOST_LIST_SETTINGS_ROW_TAG: String = HOST_LIST_SETTINGS_TAG
 const val HOST_LIST_ADD_FOOTER_TAG: String = HOST_LIST_ADD_TAG
 const val HOST_LIST_ADD_METHODS_TAG: String = "host-list-add-methods"
-const val HOST_LIST_ADD_SCAN_TAG: String = "host-list-add-scan"
 const val HOST_LIST_ADD_DETAILS_TAG: String = "host-list-add-details"
 
 fun hostRowTag(hostId: Long): String = "host-row-$hostId"
@@ -84,7 +82,6 @@ fun HostListRoute(
     onOpenHost: (Long) -> Unit,
     onAddHost: () -> Unit,
     onEditHost: (Long) -> Unit,
-    onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSshKeys: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -114,7 +111,6 @@ fun HostListRoute(
         onOpenHost = onOpenHost,
         onAddHost = onAddHost,
         onEditHost = onEditHost,
-        onScanQr = onScanQr,
         onOpenSettings = onOpenSettings,
         onOpenSshKeys = onOpenSshKeys,
         onDeleteHost = viewModel::delete,
@@ -159,7 +155,8 @@ sealed interface HostListUpdateNotice {
  * - A per-row [Kebab] with Edit / Delete. It sits in the trailing slot the
  *   navigation chevron used to occupy: the row's own tap still dials the host,
  *   and a menu tap does not (an inner clickable consumes it). Share QR was
- *   removed (issue #2523); QR import remains available through Add host.
+ *   removed (issue #2523); QR import was removed from the app entirely, so
+ *   hosts are added by entering connection details.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -168,7 +165,6 @@ fun HostListScreen(
     onOpenHost: (Long) -> Unit,
     onAddHost: () -> Unit,
     onEditHost: (Long) -> Unit,
-    onScanQr: () -> Unit,
     onOpenSettings: () -> Unit,
     onDeleteHost: (Long) -> Unit,
     onOpenSshKeys: () -> Unit = {},
@@ -278,10 +274,6 @@ fun HostListScreen(
 
     if (showAddHostMethods) {
         AddHostMethodSheet(
-            onScanQr = {
-                showAddHostMethods = false
-                onScanQr()
-            },
             onEnterDetails = {
                 showAddHostMethods = false
                 onAddHost()
@@ -307,14 +299,13 @@ fun HostListScreen(
 }
 
 /**
- * The two real entry points into host setup. It deliberately has no standalone
+ * The remaining entry point into host setup. It deliberately has no standalone
  * primary action: choosing a row is the action, which keeps the sheet from
  * becoming a second form or a preview-only branch.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddHostMethodSheet(
-    onScanQr: () -> Unit,
     onEnterDetails: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -333,12 +324,6 @@ private fun AddHostMethodSheet(
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
             SheetHeader(title = "Add host", onClose = onDismiss)
-            ListRow(
-                title = "Scan a QR code",
-                subtitle = "Import from your computer",
-                onClick = onScanQr,
-                modifier = Modifier.testTag(HOST_LIST_ADD_SCAN_TAG),
-            )
             ListRow(
                 title = "Enter connection details",
                 subtitle = "Address, user and SSH key",

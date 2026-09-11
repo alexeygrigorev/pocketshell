@@ -188,7 +188,6 @@ class AppNavHostTest {
         assertNavigatesTo(nav, Destination.About.route(), "About")
         assertNavigatesTo(nav, Destination.Update.route(), "Update")
         assertNavigatesTo(nav, Destination.SshKeys.route(), "SshKeys")
-        assertNavigatesTo(nav, Destination.QrScan.route(), "QrScan")
         assertNavigatesTo(nav, Destination.Hosts.route(), "Hosts")
     }
 
@@ -247,7 +246,6 @@ class AppNavHostTest {
                 // and their argument decoding, not the screens.
                 hostFormScreen = { hostId, _, _, _ -> Text("HostForm(hostId=$hostId)") },
                 sshKeysScreen = { _, _ -> Text("SshKeys") },
-                qrScanScreen = { _, _ -> Text("QrScan") },
                 // Task P-6: Settings and WorkspaceRoots resolve ViewModels
                 // through `hiltViewModel()` too, for the same reason as every
                 // other stand-in above. Their own behaviour is covered by

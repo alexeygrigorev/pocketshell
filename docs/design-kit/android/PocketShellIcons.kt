@@ -55,7 +55,6 @@ private val paths: Map<String, List<String>> = mapOf(
     "trash" to listOf("M3 6h18", "M6 6v15h12V6", "M9 6V3h6v3", "M10 10v7", "M14 10v7"),
     "ports" to listOf("M3 7h18", "M16 3l5 4-5 4", "M21 17H3", "M8 13l-5 4 5 4"),
     "chart" to listOf("M5 21V10", "M12 21V3", "M19 21V7"),
-    "qr" to listOf("M3 3h6v6H3z", "M15 3h6v6h-6z", "M3 15h6v6H3z", "M15 15h3v3h3v3h-6z"),
     "flash" to listOf("M13 2L4 14h7v8L21 9h-8z"),
     "eye" to listOf("M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z", "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6"),
     "pause" to listOf("M8 4v16", "M16 4v16"),

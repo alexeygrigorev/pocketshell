@@ -1,0 +1,9 @@
+<resources>
+    <!--
+        Issue #2638: the release build installs under
+        com.pocketshell.app.release NEXT TO the daily-driver debug install, so
+        both launcher icons must be tellable apart at a glance. The debug label
+        (src/main, "PocketShell") must not change — see LauncherBrandingTest.
+    -->
+    <string name="app_name">PocketShell Rel</string>
+</resources>

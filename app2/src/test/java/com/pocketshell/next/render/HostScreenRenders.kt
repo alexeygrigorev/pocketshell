@@ -13,11 +13,6 @@ import com.pocketshell.next.hosts.HostListScreen
 import com.pocketshell.next.hosts.HostListUiState
 import com.pocketshell.next.hosts.HostListUpdateNotice
 import com.pocketshell.next.hosts.HostRow
-import com.pocketshell.next.hosts.QrScannerViewModel
-import com.pocketshell.next.hosts.QrScannerScreen
-import com.pocketshell.next.hosts.SshImportAuth
-import com.pocketshell.next.hosts.SshImportConfig
-import com.pocketshell.next.hosts.SshImportPayloadCodec
 import com.pocketshell.next.hosts.SshKeyRow
 import com.pocketshell.next.hosts.SshKeysScreen
 import com.pocketshell.next.hosts.SshKeysUiState
@@ -60,7 +55,6 @@ class HostScreenRenders {
             onOpenHost = {},
             onAddHost = {},
             onEditHost = {},
-            onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
         )
@@ -80,7 +74,6 @@ class HostScreenRenders {
             onOpenHost = {},
             onAddHost = {},
             onEditHost = {},
-            onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
             updateNotice = HostListUpdateNotice.Available(
@@ -105,7 +98,6 @@ class HostScreenRenders {
             onOpenHost = {},
             onAddHost = {},
             onEditHost = {},
-            onScanQr = {},
             onOpenSettings = {},
             onDeleteHost = {},
         )
@@ -196,55 +188,6 @@ class HostScreenRenders {
             onPickFile = {},
             onDelete = {},
             onDismissMessage = {},
-        )
-    }
-
-    /** The scanner's non-camera states (the preview itself needs a device). */
-    @Test
-    fun qrScannerPermissionDenied() = render("quiet-412-qr-permission-denied") {
-        QrScannerScreen(
-            state = QrScannerViewModel.State.PermissionDenied(canRetry = true),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onClose = {},
-        )
-    }
-
-    @Test
-    fun qrScannerFailed() = render("quiet-412-qr-failed") {
-        QrScannerScreen(
-            state = QrScannerViewModel.State.Failed("That QR is not a PocketShell host code"),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onClose = {},
-        )
-    }
-
-    @Test
-    fun qrScannerReview() = render("quiet-412-qr-review") {
-        val config = SshImportConfig(
-            name = "Development host",
-            host = "dev.example.test",
-            port = 22,
-            username = "alexey",
-            auth = SshImportAuth.KeyReference("hetzner-key"),
-        )
-        QrScannerScreen(
-            state = QrScannerViewModel.State.Review(
-                config = config,
-                payload = SshImportPayloadCodec.encode(config),
-            ),
-            onScanned = {},
-            onRetryPermission = {},
-            onPickImage = {},
-            onRetry = {},
-            onConfirmImport = {},
-            onCancelReview = {},
-            onClose = {},
         )
     }
 

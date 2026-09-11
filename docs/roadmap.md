@@ -27,7 +27,7 @@ app2 rewrite and the aplexer-only session contract.
 ## Later
 
 - Port-forwarding polish and host setup recovery.
-- QR host sharing and biometric key handling improvements.
+- Biometric key handling improvements.
 - Home-screen session/tunnel status surfaces.
 - Mosh, only after a real UDP transport and a defined server installation path
   exist.

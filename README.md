@@ -43,11 +43,11 @@ host capability column.
   recognizer turns dictation into commands or agent prompts. A key bar adds Esc,
   Tab, Ctrl, Alt, and arrows above the keyboard; per-host snippets and prompt
   templates cut down typing further.
-- **Host management.** Save SSH hosts, import or generate keys, unlock key
-  passphrases biometrically, and import a host from a **QR code**.
+- **Host management.** Save SSH hosts, import or generate keys, and unlock key
+  passphrases biometrically.
 - **Server-side helpers, zero phone-side credentials.** Provider usage/quota,
-  the session tree, repo browsing, env files, and QR sharing run through
-  the `pocketshell` helper on the box. Provider credentials never move onto the
+  the session tree, repo browsing, and env files run through the
+  `pocketshell` helper on the box. Provider credentials never move onto the
   phone.
 - **More.** Remote file browse/view, share a file from another Android app onto
   the host, per-host port forwarding, and a dense dark dev-tool UI.
@@ -105,8 +105,8 @@ Requirements: Android 8.0 (API 26) or newer.
 ### 2. Install the server-side helper on the dev box
 
 The app drives a small Python helper named `pocketshell` on each box for
-usage/quota, the session tree, repos, env, and QR sharing. Install the
-same version as the app:
+usage/quota, the session tree, repos, and env. Install the same version as
+the app:
 
 ```bash
 uv tool install pocketshell
@@ -116,23 +116,12 @@ uv tool install 'pocketshell==0.4.44'
 pipx install pocketshell
 ```
 
-To also generate host QR codes from the box, add the QR extra:
-
-```bash
-uv tool install pocketshell --with "qrcode[pil]"
-```
-
 Put `~/.local/bin` on `PATH` for **non-interactive** SSH (the app does not
 open a login shell). See [docs/server-setup.md](docs/server-setup.md) and the CLI repo's README
 ([PocketShell-io/pocketshell-cli](https://github.com/PocketShell-io/pocketshell-cli),
 extracted from this repo's `tools/pocketshell/` in issue #2643).
 
 ## Configure a host
-
-You can add a host two ways: scan a QR code (fastest), or enter the details
-manually.
-
-### Manual entry
 
 1. On the **Hosts** screen, tap the **+** button.
 2. Fill in the host form:
@@ -149,45 +138,6 @@ To add keys, open the SSH keys screen and use **Import key** (load an existing
 private key from the device) or **Generate** (create a new key on the device).
 PocketShell inspects the key locally and prompts for a passphrase when one is
 needed; passphrases are not stored.
-
-### QR code import
-
-QR import is the fastest way to set up a host — it carries the host details and,
-optionally, the private key, so there is nothing to type on the phone.
-
-**On the dev box**, generate a QR from an SSH config alias (resolves host, port,
-user, and identity file via `ssh -G`):
-
-```bash
-pocketshell qr-share dev
-```
-
-Or pass the details explicitly, skipping `~/.ssh/config`:
-
-```bash
-pocketshell qr-share \
-  --host dev.example.com \
-  --user ubuntu \
-  --port 22 \
-  --key ~/.ssh/id_ed25519 \
-  --name "dev box"
-```
-
-`qr-share` prints the QR inline when the terminal is a TTY, or writes a numbered
-PNG sequence (`qr-share-01.png`, ...) with `--png --out-dir <dir>`. Large keys
-are split across several QR codes automatically; the helper pauses between codes
-so you can scan each in turn.
-
-**On the phone**, go to **Settings → Import host → Scan QR** (or tap **Scan QR**
-on the add-host form) and point the camera at the code(s). The scanner
-reassembles multi-part codes and imports the host once every part has arrived.
-
-> The QR payload can include your private key, which is a visible secret on the
-> screen. Generate and scan QR codes in a private space, prefer
-> passphrase-protected keys, and delete any generated PNGs after import.
-
-Full payload format, multi-QR envelope, and the `pocketshell://import?...` deep
-link are documented in [docs/ssh-qr-import.md](docs/ssh-qr-import.md).
 
 ## Connect
 

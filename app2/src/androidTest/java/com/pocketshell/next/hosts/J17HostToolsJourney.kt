@@ -38,12 +38,12 @@ import org.junit.runner.RunWith
 
 /**
  * J17 — current-window evidence for the host tools added by the Quiet
- * redesign: SSH-key detail/generation/import/copy and QR setup.
+ * redesign: SSH-key detail/generation/import/copy and the Add host sheet.
  *
  * The assertions deliberately drive the real navigation graph on an emulator.
  * JVM screen tests cover the state tables; this journey proves that the tools
- * are reachable from Hosts and that the system clipboard/camera surface exists
- * in the shipping Activity chrome.
+ * are reachable from Hosts and that the system clipboard surface exists in the
+ * shipping Activity chrome.
  */
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -84,21 +84,11 @@ class J17HostToolsJourney {
             ),
         )
 
-        // QR setup is an optional camera feature. Grant it to this debug test
-        // package so the evidence captures the real preview screen rather than
-        // a platform permission dialog.
-        val packageName = InstrumentationRegistry.getInstrumentation()
-            .targetContext.packageName
-        runCatching {
-            InstrumentationRegistry.getInstrumentation().uiAutomation
-                .executeShellCommand("pm grant $packageName android.permission.CAMERA")
-                .close()
-        }
         println("J17_SEED ${description.methodName}")
     }
 
     @Test
-    fun hostToolsReachRealKeyAndQrSurfaces() {
+    fun hostToolsReachRealKeySurfaces() {
         awaitTag(hostRowTag(9_701L))
 
         compose.onNodeWithTag(HOST_LIST_KEYS_TAG).performClick()
@@ -140,10 +130,6 @@ class J17HostToolsJourney {
         compose.onNodeWithTag(HOST_LIST_ADD_TAG).performClick()
         awaitTag(HOST_LIST_ADD_METHODS_TAG)
         capture("06-host-add-methods")
-        compose.onNodeWithTag(HOST_LIST_ADD_SCAN_TAG).performClick()
-        awaitTag(QR_SCANNER_INSTRUCTION_TAG)
-        compose.onNodeWithTag(QR_SCANNER_INSTRUCTION_TAG).assertIsDisplayed()
-        capture("07-qr-scanner")
     }
 
     private fun pressBackToHosts() {

@@ -26,11 +26,11 @@ First-run state. One next action.
 PNG: `screens/hosts-empty.png`
 
 ### 03 · Add host (`add-host`)
-**Surface:** sheet. **Existing mapping:** HostForm / QrScan.
+**Surface:** sheet. **Existing mapping:** HostForm.
 **Job:** Choose a setup method.
-Two ways into the same setup flow.
+One path into the same setup flow.
 
-- Both paths end in a connection review.
+- The path ends in a connection review.
 - Sheet contains no separate primary button.
 
 PNG: `screens/add-host.png`
@@ -67,28 +67,7 @@ Explicit trust, not a disguised success step.
 
 PNG: `screens/trust.png`
 
-### 07 · Scan host (`qr-scan`)
-**Surface:** page. **Existing mapping:** QrScan.
-**Job:** Import host details.
-Camera acquisition is a system integration, not a new visual style.
-
-- Camera rectangle is an illustration; this prototype does not access the camera.
-- Production requests camera permission in context and supports multi-part progress.
-- Show import review is a prototype-only control.
-
-PNG: `screens/qr-scan.png`
-
-### 08 · Review import (`qr-review`)
-**Surface:** page. **Existing mapping:** QrScan: review.
-**Job:** Review a scanned host.
-No silent credential import.
-
-- Never render the private key in the summary.
-- Duplicate hosts require an explicit replace decision in implementation.
-
-PNG: `screens/qr-review.png`
-
-### 09 · SSH keys (`keys`)
+### 07 · SSH keys (`keys`)
 **Surface:** page. **Existing mapping:** SshKeys.
 **Job:** Select or manage authentication.
 Friendly identities, not raw IDs.
@@ -98,7 +77,7 @@ Friendly identities, not raw IDs.
 
 PNG: `screens/keys.png`
 
-### 10 · Import key (`key-import`)
+### 08 · Import key (`key-import`)
 **Surface:** page. **Existing mapping:** SshKeys: import.
 **Job:** Import existing authentication.
 A focused import form with a system-file alternative.
@@ -109,7 +88,7 @@ A focused import form with a system-file alternative.
 
 PNG: `screens/key-import.png`
 
-### 11 · Generate key (`key-generate`)
+### 09 · Generate key (`key-generate`)
 **Surface:** page. **Existing mapping:** SshKeys: generate.
 **Job:** Create a device key.
 One modern default and an explicit protection choice.
@@ -119,7 +98,7 @@ One modern default and an explicit protection choice.
 
 PNG: `screens/key-generate.png`
 
-### 12 · Laptop key (`key-detail`)
+### 10 · Laptop key (`key-detail`)
 **Surface:** page. **Existing mapping:** SshKeys: details.
 **Job:** Use or inspect a key.
 Dependencies are visible before deletion.
@@ -129,7 +108,7 @@ Dependencies are visible before deletion.
 
 PNG: `screens/key-detail.png`
 
-### 13 · Remove key? (`delete-key`)
+### 11 · Remove key? (`delete-key`)
 **Surface:** sheet. **Existing mapping:** SshKeys: delete.
 **Job:** Remove local authentication safely.
 Deletion scope is explicit.
@@ -138,7 +117,7 @@ Deletion scope is explicit.
 
 PNG: `screens/delete-key.png`
 
-### 14 · Unlock key (`unlock`)
+### 12 · Unlock key (`unlock`)
 **Surface:** sheet. **Existing mapping:** Key unlock / Android BiometricPrompt.
 **Job:** Authenticate without reconfiguring the host.
 A native biometric handoff with a passphrase fallback.
@@ -150,7 +129,7 @@ PNG: `screens/unlock.png`
 
 ## 02 · Workspaces & roots
 
-### 15 · hetzner (`workspaces`)
+### 13 · hetzner (`workspaces`)
 **Surface:** page. **Existing mapping:** Tree → new workspace-first projection.
 **Job:** Find the workspace, then its terminal.
 The approved visual anchor: a quiet, folder-first host screen.
@@ -162,7 +141,7 @@ The approved visual anchor: a quiet, folder-first host screen.
 
 PNG: `screens/workspaces.png`
 
-### 16 · hetzner (`workspace-search`)
+### 14 · hetzner (`workspace-search`)
 **Surface:** page. **Existing mapping:** New: workspace search.
 **Job:** Find a workspace by name.
 Search returns workspaces, not mixed object types.
@@ -173,7 +152,7 @@ Search returns workspaces, not mixed object types.
 
 PNG: `screens/workspace-search.png`
 
-### 17 · hetzner (`host-tools`)
+### 15 · hetzner (`host-tools`)
 **Surface:** sheet. **Existing mapping:** Tree header actions.
 **Job:** Reach occasional host utilities.
 Host tools stop competing with the workspace list.
@@ -183,7 +162,7 @@ Host tools stop competing with the workspace list.
 
 PNG: `screens/host-tools.png`
 
-### 18 · Add workspace (`add-workspace`)
+### 16 · Add workspace (`add-workspace`)
 **Surface:** page. **Existing mapping:** New: root-scoped folder picker.
 **Job:** Choose a workspace within the selected root.
 Existing folders and new folders share the same entry point.
@@ -195,7 +174,7 @@ Existing folders and new folders share the same entry point.
 
 PNG: `screens/add-workspace.png`
 
-### 19 · Choose folder (`folder-browser`)
+### 17 · Choose folder (`folder-browser`)
 **Surface:** page. **Existing mapping:** New: nested folder picker.
 **Job:** Use a nested folder, not just a root’s first child.
 Browsing and selecting a directory are separate gestures.
@@ -205,7 +184,7 @@ Browsing and selecting a directory are separate gestures.
 
 PNG: `screens/folder-browser.png`
 
-### 20 · Create folder (`create-folder`)
+### 18 · Create folder (`create-folder`)
 **Surface:** sheet. **Existing mapping:** New: folder creation.
 **Job:** Start from a folder that does not exist yet.
 Create exactly what is named; no hidden process launch.
@@ -216,7 +195,7 @@ Create exactly what is named; no hidden process launch.
 
 PNG: `screens/create-folder.png`
 
-### 21 · Create folder (`create-folder-error`)
+### 19 · Create folder (`create-folder-error`)
 **Surface:** sheet. **Existing mapping:** New: create validation.
 **Job:** Recover without losing the folder choice.
 Existence is not a fatal dead end.
@@ -225,7 +204,7 @@ Existence is not a fatal dead end.
 
 PNG: `screens/create-folder-error.png`
 
-### 22 · pocketshell (`workspace`)
+### 20 · pocketshell (`workspace`)
 **Surface:** page. **Existing mapping:** New: workspace/{hostId}/{path}.
 **Job:** Open a terminal or start another session here.
 Sessions belong to this folder; terminal remains the work surface.
@@ -236,7 +215,7 @@ Sessions belong to this folder; terminal remains the work surface.
 
 PNG: `screens/workspace.png`
 
-### 23 · new-project (`workspace-empty`)
+### 21 · new-project (`workspace-empty`)
 **Surface:** page. **Existing mapping:** New: empty workspace.
 **Job:** Start the first terminal in a workspace.
 A folder persists independently of its sessions.
@@ -246,7 +225,7 @@ A folder persists independently of its sessions.
 
 PNG: `screens/workspace-empty.png`
 
-### 24 · pocketshell (`workspace-actions`)
+### 22 · pocketshell (`workspace-actions`)
 **Surface:** sheet. **Existing mapping:** New: workspace actions.
 **Job:** Manage workspace presentation.
 Folder operations have explicit scope.
@@ -256,7 +235,7 @@ Folder operations have explicit scope.
 
 PNG: `screens/workspace-actions.png`
 
-### 25 · Remove from list? (`remove-workspace`)
+### 23 · Remove from list? (`remove-workspace`)
 **Surface:** sheet. **Existing mapping:** New: remove workspace.
 **Job:** Unpin without destroying work.
 Remove is not delete and is not stop.
@@ -265,7 +244,7 @@ Remove is not delete and is not stop.
 
 PNG: `screens/remove-workspace.png`
 
-### 26 · Project roots (`roots`)
+### 24 · Project roots (`roots`)
 **Surface:** page. **Existing mapping:** WorkspaceRoots.
 **Job:** Choose where workspaces live.
 Roots remain distinct from projects.
@@ -275,7 +254,7 @@ Roots remain distinct from projects.
 
 PNG: `screens/roots.png`
 
-### 27 · Add project root (`add-root`)
+### 25 · Add project root (`add-root`)
 **Surface:** page. **Existing mapping:** WorkspaceRoots: add.
 **Job:** Register a remote root.
 A location, not another project abstraction.
@@ -285,7 +264,7 @@ A location, not another project abstraction.
 
 PNG: `screens/add-root.png`
 
-### 28 · ~/git (`root-actions`)
+### 26 · ~/git (`root-actions`)
 **Surface:** sheet. **Existing mapping:** New: root actions.
 **Job:** Create a session at ~/git itself.
 An explicit route to working directly at the root.
@@ -295,7 +274,7 @@ An explicit route to working directly at the root.
 
 PNG: `screens/root-actions.png`
 
-### 29 · hetzner (`root-session`)
+### 27 · hetzner (`root-session`)
 **Surface:** page. **Existing mapping:** New: root-local session.
 **Job:** Find the terminal started directly in ~/git.
 Sessions can exist at a root without inventing a project folder.
@@ -305,7 +284,7 @@ Sessions can exist at a root without inventing a project folder.
 
 PNG: `screens/root-session.png`
 
-### 30 · Reorder workspaces (`reorder`)
+### 28 · Reorder workspaces (`reorder`)
 **Surface:** page. **Existing mapping:** New: manual order.
 **Job:** Arrange projects once.
 Stable placement is a preference, not an activity feed.
@@ -315,7 +294,7 @@ Stable placement is a preference, not an activity feed.
 
 PNG: `screens/reorder.png`
 
-### 31 · hetzner (`host-offline`)
+### 29 · hetzner (`host-offline`)
 **Surface:** page. **Existing mapping:** Tree: offline.
 **Job:** Keep context during network failure.
 Unavailable is not the same as empty.
@@ -325,7 +304,7 @@ Unavailable is not the same as empty.
 
 PNG: `screens/host-offline.png`
 
-### 32 · hetzner (`host-empty`)
+### 30 · hetzner (`host-empty`)
 **Surface:** page. **Existing mapping:** Tree: empty root.
 **Job:** Add a first workspace in a registered root.
 An empty root still exists and can create work.
@@ -336,7 +315,7 @@ PNG: `screens/host-empty.png`
 
 ## 03 · Start & use terminals
 
-### 33 · New session (`new-session`)
+### 31 · New session (`new-session`)
 **Surface:** sheet. **Existing mapping:** CreateSessionSheet.
 **Job:** Start another terminal in the current folder.
 Choose a program. No separate Shell-versus-Agent wizard.
@@ -347,7 +326,7 @@ Choose a program. No separate Shell-versus-Agent wizard.
 
 PNG: `screens/new-session.png`
 
-### 34 · Session options (`session-options`)
+### 32 · Session options (`session-options`)
 **Surface:** sheet. **Existing mapping:** CreateSessionSheet: advanced.
 **Job:** Override launch defaults deliberately.
 Advanced choices exist, but not in the everyday path.
@@ -357,7 +336,7 @@ Advanced choices exist, but not in the everyday path.
 
 PNG: `screens/session-options.png`
 
-### 35 · Grok is not available (`agent-unavailable`)
+### 33 · Grok is not available (`agent-unavailable`)
 **Surface:** sheet. **Existing mapping:** CreateSessionSheet: failure.
 **Job:** Recover from a missing agent.
 A launch failure explains the next step.
@@ -367,7 +346,7 @@ A launch failure explains the next step.
 
 PNG: `screens/agent-unavailable.png`
 
-### 36 · pocketshell (`terminal`)
+### 34 · pocketshell (`terminal`)
 **Surface:** terminal. **Existing mapping:** Session.
 **Job:** Read output and send input.
 A terminal, not a transcript. Input opens over the fixed grid.
@@ -378,7 +357,7 @@ A terminal, not a transcript. Input opens over the fixed grid.
 
 PNG: `screens/terminal.png`
 
-### 37 · Sessions (`session-switch`)
+### 35 · Sessions (`session-switch`)
 **Surface:** sheet. **Existing mapping:** New: workspace session switcher.
 **Job:** Move between terminals in a workspace.
 Readable switching instead of squeezing tabs onto a phone.
@@ -388,7 +367,7 @@ Readable switching instead of squeezing tabs onto a phone.
 
 PNG: `screens/session-switch.png`
 
-### 38 · Terminal (`terminal-actions`)
+### 36 · Terminal (`terminal-actions`)
 **Surface:** sheet. **Existing mapping:** Session: overflow.
 **Job:** Leave safely or explicitly end a process.
 Navigation and destructive lifecycle actions are not peers.
@@ -398,7 +377,7 @@ Navigation and destructive lifecycle actions are not peers.
 
 PNG: `screens/terminal-actions.png`
 
-### 39 · pocketshell (`composer`)
+### 37 · pocketshell (`composer`)
 **Surface:** terminal. **Existing mapping:** PromptComposerSheet.
 **Job:** Write input without losing the output.
 One draft surface; visible terminal context stays above it.
@@ -409,7 +388,7 @@ One draft surface; visible terminal context stays above it.
 
 PNG: `screens/composer.png`
 
-### 40 · Add to input (`composer-tools`)
+### 38 · Add to input (`composer-tools`)
 **Surface:** sheet. **Existing mapping:** ComposerBar: tools.
 **Job:** Add context to a draft.
 One tools menu, no stack of competing pills.
@@ -419,7 +398,7 @@ One tools menu, no stack of competing pills.
 
 PNG: `screens/composer-tools.png`
 
-### 41 · pocketshell (`dictation`)
+### 39 · pocketshell (`dictation`)
 **Surface:** terminal. **Existing mapping:** ComposerBar: recording.
 **Job:** Dictate, review, then send.
 Recording and sending are separate actions.
@@ -430,7 +409,7 @@ Recording and sending are separate actions.
 
 PNG: `screens/dictation.png`
 
-### 42 · pocketshell (`attachment`)
+### 40 · pocketshell (`attachment`)
 **Surface:** terminal. **Existing mapping:** ComposerBar: attachments.
 **Job:** Send a file reference with input.
 Attachment status sits next to the draft, not in another destination.
@@ -441,7 +420,7 @@ Attachment status sits next to the draft, not in another destination.
 
 PNG: `screens/attachment.png`
 
-### 43 · Recent prompts (`history`)
+### 41 · Recent prompts (`history`)
 **Surface:** sheet. **Existing mapping:** MessageHistorySheet.
 **Job:** Reuse input.
 History inserts into the draft; it never executes.
@@ -451,7 +430,7 @@ History inserts into the draft; it never executes.
 
 PNG: `screens/history.png`
 
-### 44 · Slash commands (`commands`)
+### 42 · Slash commands (`commands`)
 **Surface:** sheet. **Existing mapping:** SlashCommandDropdown.
 **Job:** Find supported input commands.
 Contextual command insertion, not a second agent UI.
@@ -461,7 +440,7 @@ Contextual command insertion, not a second agent UI.
 
 PNG: `screens/commands.png`
 
-### 45 · Terminal keys (`hotkeys`)
+### 43 · Terminal keys (`hotkeys`)
 **Surface:** sheet. **Existing mapping:** TerminalHotkeysSheet.
 **Job:** Send special terminal keys.
 Large keyboard targets, quiet styling.
@@ -471,7 +450,7 @@ Large keyboard targets, quiet styling.
 
 PNG: `screens/hotkeys.png`
 
-### 46 · End Terminal? (`end-session`)
+### 44 · End Terminal? (`end-session`)
 **Surface:** sheet. **Existing mapping:** Stop-session ConfirmDialog.
 **Job:** Stop remote work deliberately.
 Danger is scoped to one named session.
@@ -481,7 +460,7 @@ Danger is scoped to one named session.
 
 PNG: `screens/end-session.png`
 
-### 47 · pocketshell (`reconnecting`)
+### 45 · pocketshell (`reconnecting`)
 **Surface:** terminal. **Existing mapping:** Session: Reconnecting.
 **Job:** Recover the existing session, not start a duplicate.
 Network failure preserves output and drafts.
@@ -492,7 +471,7 @@ Network failure preserves output and drafts.
 
 PNG: `screens/reconnecting.png`
 
-### 48 · Session ended (`session-ended`)
+### 46 · Session ended (`session-ended`)
 **Surface:** page. **Existing mapping:** Session: ended.
 **Job:** Continue after a session exits.
 An ended process cannot be fixed by a generic retry.
@@ -502,7 +481,7 @@ An ended process cannot be fixed by a generic retry.
 
 PNG: `screens/session-ended.png`
 
-### 49 · Review before resending (`send-uncertain`)
+### 47 · Review before resending (`send-uncertain`)
 **Surface:** page. **Existing mapping:** Composer: delivery state.
 **Job:** Avoid duplicate command execution.
 No false delivered claim and no dangerous automatic resend.
@@ -515,7 +494,7 @@ PNG: `screens/send-uncertain.png`
 
 ## 04 · Files & transfers
 
-### 50 · Files (`files`)
+### 48 · Files (`files`)
 **Surface:** page. **Existing mapping:** Files.
 **Job:** Find and inspect a remote file.
 The same flat row language, starting at the current workspace.
@@ -526,7 +505,7 @@ The same flat row language, starting at the current workspace.
 
 PNG: `screens/files.png`
 
-### 51 · Files (`files-folder`)
+### 49 · Files (`files-folder`)
 **Surface:** page. **Existing mapping:** Files: directory state.
 **Job:** Browse into a workspace folder.
 A deeper directory keeps the file-browser navigation model.
@@ -536,7 +515,7 @@ A deeper directory keeps the file-browser navigation model.
 
 PNG: `screens/files-folder.png`
 
-### 52 · Files (`files-parent`)
+### 50 · Files (`files-parent`)
 **Surface:** page. **Existing mapping:** Files: directory state.
 **Job:** Move up without entering workspace selection.
 The parent location remains in the file browser.
@@ -546,7 +525,7 @@ The parent location remains in the file browser.
 
 PNG: `screens/files-parent.png`
 
-### 53 · Files (`file-tools`)
+### 51 · Files (`file-tools`)
 **Surface:** sheet. **Existing mapping:** Files: overflow.
 **Job:** Manage file operations.
 File actions do not become six header buttons.
@@ -556,7 +535,7 @@ File actions do not become six header buttons.
 
 PNG: `screens/file-tools.png`
 
-### 54 · Create folder (`create-file-folder`)
+### 52 · Create folder (`create-file-folder`)
 **Surface:** sheet. **Existing mapping:** Files: create folder.
 **Job:** Create a remote directory while browsing files.
 Folder creation is not workspace registration.
@@ -566,7 +545,7 @@ Folder creation is not workspace registration.
 
 PNG: `screens/create-file-folder.png`
 
-### 55 · README.md (`file-actions`)
+### 53 · README.md (`file-actions`)
 **Surface:** sheet. **Existing mapping:** Files / FileViewer: actions.
 **Job:** Act on a selected file.
 Save is not an ambiguous substitute for Download.
@@ -576,7 +555,7 @@ Save is not an ambiguous substitute for Download.
 
 PNG: `screens/file-actions.png`
 
-### 56 · README.md (`markdown`)
+### 54 · README.md (`markdown`)
 **Surface:** page. **Existing mapping:** FileViewer: markdown.
 **Job:** Read formatted text.
 Document content is readable without adding card layers.
@@ -586,7 +565,7 @@ Document content is readable without adding card layers.
 
 PNG: `screens/markdown.png`
 
-### 57 · README.md (`source`)
+### 55 · README.md (`source`)
 **Surface:** page. **Existing mapping:** FileViewer: source.
 **Job:** Inspect raw file content.
 Source is a file mode, never a session mode.
@@ -595,7 +574,7 @@ Source is a file mode, never a session mode.
 
 PNG: `screens/source.png`
 
-### 58 · Edit README.md (`editor`)
+### 56 · Edit README.md (`editor`)
 **Surface:** page. **Existing mapping:** FileViewer: edit.
 **Job:** Update a file on hetzner.
 Editing is an explicit mode with a clear remote save.
@@ -605,7 +584,7 @@ Editing is an explicit mode with a clear remote save.
 
 PNG: `screens/editor.png`
 
-### 59 · Keep your changes? (`unsaved`)
+### 57 · Keep your changes? (`unsaved`)
 **Surface:** sheet. **Existing mapping:** FileViewer: dirty buffer.
 **Job:** Leave an editor safely.
 Local edits are not silently thrown away.
@@ -614,7 +593,7 @@ Local edits are not silently thrown away.
 
 PNG: `screens/unsaved.png`
 
-### 60 · workspace.png (`image-view`)
+### 58 · workspace.png (`image-view`)
 **Surface:** page. **Existing mapping:** FileViewer: image.
 **Job:** Inspect a remote image.
 The image owns the viewport.
@@ -624,7 +603,7 @@ The image owns the viewport.
 
 PNG: `screens/image-view.png`
 
-### 61 · Rename file (`rename-file`)
+### 59 · Rename file (`rename-file`)
 **Surface:** sheet. **Existing mapping:** Files: rename.
 **Job:** Change a remote filename.
 A small form uses the same field and action rules.
@@ -633,7 +612,7 @@ A small form uses the same field and action rules.
 
 PNG: `screens/rename-file.png`
 
-### 62 · Delete README.md? (`delete-file`)
+### 60 · Delete README.md? (`delete-file`)
 **Surface:** sheet. **Existing mapping:** Files: delete.
 **Job:** Delete a remote file deliberately.
 The host and directory remove scope ambiguity.
@@ -642,7 +621,7 @@ The host and directory remove scope ambiguity.
 
 PNG: `screens/delete-file.png`
 
-### 63 · File changed on host (`file-conflict`)
+### 61 · File changed on host (`file-conflict`)
 **Surface:** page. **Existing mapping:** New: file conflict.
 **Job:** Avoid overwriting concurrent changes.
 Preserve both versions by default.
@@ -651,7 +630,7 @@ Preserve both versions by default.
 
 PNG: `screens/file-conflict.png`
 
-### 64 · Transfers (`transfers`)
+### 62 · Transfers (`transfers`)
 **Surface:** page. **Existing mapping:** Files: transfer states.
 **Job:** Understand upload/download state.
 Progress means measured bytes, not an animated guess.
@@ -663,7 +642,7 @@ PNG: `screens/transfers.png`
 
 ## 05 · Services & usage
 
-### 65 · Services & tunnels (`services`)
+### 63 · Services & tunnels (`services`)
 **Surface:** page. **Existing mapping:** Ports: discovery off.
 **Job:** Choose how to expose a remote service locally.
 Discovery and a running tunnel are separate states.
@@ -673,7 +652,7 @@ Discovery and a running tunnel are separate states.
 
 PNG: `screens/services.png`
 
-### 66 · Services & tunnels (`services-active`)
+### 64 · Services & tunnels (`services-active`)
 **Surface:** page. **Existing mapping:** Ports: discovery on.
 **Job:** Forward a service and open its local address.
 Available versus active is visible without a port table.
@@ -683,7 +662,7 @@ Available versus active is visible without a port table.
 
 PNG: `screens/services-active.png`
 
-### 67 · Development server (`tunnel-detail`)
+### 65 · Development server (`tunnel-detail`)
 **Surface:** page. **Existing mapping:** Ports: details.
 **Job:** Use or stop one active tunnel.
 Addresses and exposure are inspectable before use.
@@ -693,7 +672,7 @@ Addresses and exposure are inspectable before use.
 
 PNG: `screens/tunnel-detail.png`
 
-### 68 · Add tunnel (`add-tunnel`)
+### 66 · Add tunnel (`add-tunnel`)
 **Surface:** page. **Existing mapping:** Ports: add.
 **Job:** Create a local port forward.
 Safe defaults without hiding the mapping.
@@ -703,7 +682,7 @@ Safe defaults without hiding the mapping.
 
 PNG: `screens/add-tunnel.png`
 
-### 69 · Usage (`usage`)
+### 67 · Usage (`usage`)
 **Surface:** page. **Existing mapping:** Usage.
 **Job:** Check remaining provider capacity.
 Quota gets a destination, not duplicate header chrome.
@@ -716,7 +695,7 @@ PNG: `screens/usage.png`
 
 ## 06 · Settings & support
 
-### 70 · Settings (`settings`)
+### 68 · Settings (`settings`)
 **Surface:** page. **Existing mapping:** Settings.
 **Job:** Find a preference.
 A short index, not six expanded configuration panels.
@@ -726,7 +705,7 @@ A short index, not six expanded configuration panels.
 
 PNG: `screens/settings.png`
 
-### 71 · Terminal (`terminal-settings`)
+### 69 · Terminal (`terminal-settings`)
 **Surface:** page. **Existing mapping:** Settings: terminal.
 **Job:** Make terminal output comfortable to read.
 A live reading sample instead of a raw pixel setting.
@@ -736,7 +715,7 @@ A live reading sample instead of a raw pixel setting.
 
 PNG: `screens/terminal-settings.png`
 
-### 72 · Voice (`voice-settings`)
+### 70 · Voice (`voice-settings`)
 **Surface:** page. **Existing mapping:** Settings: voice.
 **Job:** Configure dictation.
 Everyday voice choices; technical silence windows stay elsewhere.
@@ -746,7 +725,7 @@ Everyday voice choices; technical silence windows stay elsewhere.
 
 PNG: `screens/voice-settings.png`
 
-### 73 · Dictation language (`language`)
+### 71 · Dictation language (`language`)
 **Surface:** page. **Existing mapping:** Settings: voice language.
 **Job:** Choose a language.
 A focused, accessible list instead of inline radio clutter.
@@ -755,7 +734,7 @@ A focused, accessible list instead of inline radio clutter.
 
 PNG: `screens/language.png`
 
-### 74 · Connections (`connection-settings`)
+### 72 · Connections (`connection-settings`)
 **Surface:** page. **Existing mapping:** Settings: background grace.
 **Job:** Tune mobile app switching behavior.
 Transport lifetime is not process lifetime.
@@ -765,7 +744,7 @@ Transport lifetime is not process lifetime.
 
 PNG: `screens/connection-settings.png`
 
-### 75 · Keep connection (`grace`)
+### 73 · Keep connection (`grace`)
 **Surface:** sheet. **Existing mapping:** Settings: grace picker.
 **Job:** Choose a connection grace period.
 A understandable duration picker.
@@ -774,7 +753,7 @@ A understandable duration picker.
 
 PNG: `screens/grace.png`
 
-### 76 · Advanced (`advanced-settings`)
+### 74 · Advanced (`advanced-settings`)
 **Surface:** page. **Existing mapping:** Settings: advanced.
 **Job:** Adjust compatibility settings deliberately.
 Failure-recovery knobs leave the main path.
@@ -784,7 +763,7 @@ Failure-recovery knobs leave the main path.
 
 PNG: `screens/advanced-settings.png`
 
-### 77 · Diagnostics (`diagnostics`)
+### 75 · Diagnostics (`diagnostics`)
 **Surface:** page. **Existing mapping:** CrashReports.
 **Job:** Find useful evidence after a failure.
 Understand and review before exporting.
@@ -794,7 +773,7 @@ Understand and review before exporting.
 
 PNG: `screens/diagnostics.png`
 
-### 78 · Connection report (`report`)
+### 76 · Connection report (`report`)
 **Surface:** page. **Existing mapping:** CrashReports: detail.
 **Job:** Inspect and share a support report.
 Plain-language summary with optional trace.
@@ -804,7 +783,7 @@ Plain-language summary with optional trace.
 
 PNG: `screens/report.png`
 
-### 79 · Clear local reports? (`clear-reports`)
+### 77 · Clear local reports? (`clear-reports`)
 **Surface:** sheet. **Existing mapping:** CrashReports: clear.
 **Job:** Remove local diagnostics.
 A consistent destructive-action pattern.
@@ -813,7 +792,7 @@ A consistent destructive-action pattern.
 
 PNG: `screens/clear-reports.png`
 
-### 80 · About PocketShell (`about`)
+### 78 · About PocketShell (`about`)
 **Surface:** page. **Existing mapping:** Settings: About.
 **Job:** Check the installed build.
 Build identity without outdated fixture version claims.
@@ -823,7 +802,7 @@ Build identity without outdated fixture version claims.
 
 PNG: `screens/about.png`
 
-### 81 · Update available (`update`)
+### 79 · Update available (`update`)
 **Surface:** page. **Existing mapping:** Settings: update.
 **Job:** Review a new release.
 The update path is separate from ordinary workspace use.

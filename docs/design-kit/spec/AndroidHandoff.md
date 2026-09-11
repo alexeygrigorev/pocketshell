@@ -38,7 +38,7 @@ The preview code expects Material 3, foundation/layout, runtime, ui, and ui-tool
 | Ports(hostId) | Services & tunnels | Host-scoped; workspace is only a contextual entry point. |
 | Usage | Usage | Carry selected host explicitly; no provider secrets on phone. |
 | HostForm | Connection details | Test connection before final connect. |
-| SshKeys / QrScan | Keys / scan / review | Reuse real crypto, parsing and trust boundary. |
+| SshKeys | Keys | Reuse real crypto, parsing and trust boundary. |
 | WorkspaceRoots(hostId) | Project roots | Accessible from host tools, not buried in global settings. |
 | Settings | Settings categories | General user controls; timings behind Advanced. |
 | CrashReports | Diagnostics / report | Review before export; don't export secrets. |
@@ -65,9 +65,9 @@ Known nested folders may be searched across configured roots. For large filesyst
 
 **Modal behavior.** Replace the current sheet rather than piling sheets on one another. Use actual ModalBottomSheet/Dialog behavior for focus, accessibility, Back and outside dismissal. The static in-place preview sheets are not sufficient production modal accessibility.
 
-**Native handoffs.** Use the Android document picker, Sharesheet, runtime microphone/camera permissions and biometrics. No custom copies of those system screens. Keep host-key trust verification distinct from QR import. A changed fingerprint must block connection until independently verified, not reuse a routine first-trust prompt.
+**Native handoffs.** Use the Android document picker, Sharesheet, runtime microphone permissions and biometrics. No custom copies of those system screens. A changed fingerprint must block connection until independently verified, not reuse a routine first-trust prompt.
 
-**Security.** QR/private-key handling remains in the existing audited path. No real secrets in preview fixtures. Use structured host helper APIs for creation; do not concatenate unsanitized names into shell commands. Show the exact destination for creation and never silently overwrite/merge or create missing parents. Tunnel default is localhost binding; broader exposure needs explicit disclosure.
+**Security.** Private-key handling remains in the existing audited path. No real secrets in preview fixtures. Use structured host helper APIs for creation; do not concatenate unsanitized names into shell commands. Show the exact destination for creation and never silently overwrite/merge or create missing parents. Tunnel default is localhost binding; broader exposure needs explicit disclosure.
 
 ## Port in this order
 1. Put tokens and primitives into shared/ui-kit; render the host anchor and match it at 412dp and large font.

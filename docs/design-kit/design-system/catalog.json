@@ -133,14 +133,6 @@
       "blocks": [
         {
           "type": "row",
-          "title": "Scan a QR code",
-          "subtitle": "Import from your computer",
-          "route": "qr-scan",
-          "icon": "qr",
-          "trailing": ""
-        },
-        {
-          "type": "row",
           "title": "Enter connection details",
           "subtitle": "Address, user and SSH key",
           "route": "host-form",
@@ -151,13 +143,13 @@
       "footer": [],
       "layout": "sheet",
       "base": "hosts",
-      "description": "Two ways into the same setup flow.",
+      "description": "One path into the setup flow.",
       "job": "Choose a setup method.",
       "notes": [
-        "Both paths end in a connection review.",
+        "The path ends in a connection review.",
         "Sheet contains no separate primary button."
       ],
-      "source": "HostForm / QrScan",
+      "source": "HostForm",
       "headerAction": "",
       "headerRoute": "",
       "status": "",
@@ -362,124 +354,8 @@
       "keyflow": ""
     },
     {
-      "id": "qr-scan",
-      "index": 7,
-      "title": "Scan host",
-      "group": "01 \u00b7 Hosts & access",
-      "subtitle": "",
-      "back": "hosts",
-      "blocks": [
-        {
-          "type": "text",
-          "text": "Point your camera at the PocketShell QR code on your computer.",
-          "tone": "secondary"
-        },
-        {
-          "type": "scanner"
-        },
-        {
-          "type": "text",
-          "text": "Waiting for a QR code\u2026",
-          "tone": "secondary"
-        },
-        {
-          "type": "button",
-          "label": "Show import review",
-          "route": "qr-review",
-          "variant": "secondary"
-        },
-        {
-          "type": "row",
-          "title": "Enter details instead",
-          "subtitle": "",
-          "route": "host-form",
-          "icon": "",
-          "trailing": ""
-        }
-      ],
-      "footer": [],
-      "layout": "page",
-      "base": "workspaces",
-      "description": "Camera acquisition is a system integration, not a new visual style.",
-      "job": "Import host details.",
-      "notes": [
-        "Camera rectangle is an illustration; this prototype does not access the camera.",
-        "Production requests camera permission in context and supports multi-part progress.",
-        "Show import review is a prototype-only control."
-      ],
-      "source": "QrScan",
-      "headerAction": "",
-      "headerRoute": "",
-      "status": "",
-      "keyflow": ""
-    },
-    {
-      "id": "qr-review",
-      "index": 8,
-      "title": "Review import",
-      "group": "01 \u00b7 Hosts & access",
-      "subtitle": "",
-      "back": "qr-scan",
-      "blocks": [
-        {
-          "type": "section",
-          "title": "Connection",
-          "action": "",
-          "route": ""
-        },
-        {
-          "type": "row",
-          "title": "hetzner",
-          "subtitle": "alexey@dev.example.com",
-          "route": "",
-          "icon": "",
-          "trailing": ""
-        },
-        {
-          "type": "section",
-          "title": "Authentication",
-          "action": "",
-          "route": ""
-        },
-        {
-          "type": "row",
-          "title": "Imported key",
-          "subtitle": "ED25519 \u00b7 Passphrase protected",
-          "route": "key-detail",
-          "icon": "key",
-          "trailing": ""
-        },
-        {
-          "type": "text",
-          "text": "This QR includes a private key. Import it only from a source you trust.",
-          "tone": "secondary"
-        }
-      ],
-      "footer": [
-        {
-          "type": "button",
-          "label": "Import and connect",
-          "route": "trust",
-          "variant": "primary"
-        }
-      ],
-      "layout": "page",
-      "base": "workspaces",
-      "description": "No silent credential import.",
-      "job": "Review a scanned host.",
-      "notes": [
-        "Never render the private key in the summary.",
-        "Duplicate hosts require an explicit replace decision in implementation."
-      ],
-      "source": "QrScan: review",
-      "headerAction": "",
-      "headerRoute": "",
-      "status": "",
-      "keyflow": ""
-    },
-    {
       "id": "keys",
-      "index": 9,
+      "index": 7,
       "title": "SSH keys",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -541,7 +417,7 @@
     },
     {
       "id": "key-import",
-      "index": 10,
+      "index": 8,
       "title": "Import key",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -615,7 +491,7 @@
     },
     {
       "id": "key-generate",
-      "index": 11,
+      "index": 9,
       "title": "Generate key",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -691,7 +567,7 @@
     },
     {
       "id": "key-detail",
-      "index": 12,
+      "index": 10,
       "title": "Laptop key",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -778,7 +654,7 @@
     },
     {
       "id": "delete-key",
-      "index": 13,
+      "index": 11,
       "title": "Remove key?",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -824,7 +700,7 @@
     },
     {
       "id": "unlock",
-      "index": 14,
+      "index": 12,
       "title": "Unlock key",
       "group": "01 \u00b7 Hosts & access",
       "subtitle": "",
@@ -870,7 +746,7 @@
     },
     {
       "id": "workspaces",
-      "index": 15,
+      "index": 13,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "Connected",
@@ -995,7 +871,7 @@
     },
     {
       "id": "workspace-search",
-      "index": 16,
+      "index": 14,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "Connected",
@@ -1060,7 +936,7 @@
     },
     {
       "id": "host-tools",
-      "index": 17,
+      "index": 15,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1140,7 +1016,7 @@
     },
     {
       "id": "add-workspace",
-      "index": 18,
+      "index": 16,
       "title": "Add workspace",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1237,7 +1113,7 @@
     },
     {
       "id": "folder-browser",
-      "index": 19,
+      "index": 17,
       "title": "Choose folder",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1303,7 +1179,7 @@
     },
     {
       "id": "create-folder",
-      "index": 20,
+      "index": 18,
       "title": "Create folder",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1364,7 +1240,7 @@
     },
     {
       "id": "create-folder-error",
-      "index": 21,
+      "index": 19,
       "title": "Create folder",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1421,7 +1297,7 @@
     },
     {
       "id": "workspace",
-      "index": 22,
+      "index": 20,
       "title": "pocketshell",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "hetzner \u00b7 ~/git",
@@ -1490,7 +1366,7 @@
     },
     {
       "id": "workspace-empty",
-      "index": 23,
+      "index": 21,
       "title": "new-project",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "hetzner \u00b7 ~/git",
@@ -1540,7 +1416,7 @@
     },
     {
       "id": "workspace-actions",
-      "index": 24,
+      "index": 22,
       "title": "pocketshell",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1604,7 +1480,7 @@
     },
     {
       "id": "remove-workspace",
-      "index": 25,
+      "index": 23,
       "title": "Remove from list?",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1650,7 +1526,7 @@
     },
     {
       "id": "roots",
-      "index": 26,
+      "index": 24,
       "title": "Project roots",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "hetzner",
@@ -1702,7 +1578,7 @@
     },
     {
       "id": "add-root",
-      "index": 27,
+      "index": 25,
       "title": "Add project root",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1755,7 +1631,7 @@
     },
     {
       "id": "root-actions",
-      "index": 28,
+      "index": 26,
       "title": "~/git",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1819,7 +1695,7 @@
     },
     {
       "id": "root-session",
-      "index": 29,
+      "index": 27,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "Connected",
@@ -1881,7 +1757,7 @@
     },
     {
       "id": "reorder",
-      "index": 30,
+      "index": 28,
       "title": "Reorder workspaces",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "",
@@ -1927,7 +1803,7 @@
     },
     {
       "id": "host-offline",
-      "index": 31,
+      "index": 29,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "Offline \u00b7 Saved list",
@@ -1979,7 +1855,7 @@
     },
     {
       "id": "host-empty",
-      "index": 32,
+      "index": 30,
       "title": "hetzner",
       "group": "02 \u00b7 Workspaces & roots",
       "subtitle": "Connected",
@@ -2018,7 +1894,7 @@
     },
     {
       "id": "new-session",
-      "index": 33,
+      "index": 31,
       "title": "New session",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2108,7 +1984,7 @@
     },
     {
       "id": "session-options",
-      "index": 34,
+      "index": 32,
       "title": "Session options",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2161,7 +2037,7 @@
     },
     {
       "id": "agent-unavailable",
-      "index": 35,
+      "index": 33,
       "title": "Grok is not available",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2212,7 +2088,7 @@
     },
     {
       "id": "terminal",
-      "index": 36,
+      "index": 34,
       "title": "pocketshell",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 Connected",
@@ -2300,7 +2176,7 @@
     },
     {
       "id": "session-switch",
-      "index": 37,
+      "index": 35,
       "title": "Sessions",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2348,7 +2224,7 @@
     },
     {
       "id": "terminal-actions",
-      "index": 38,
+      "index": 36,
       "title": "Terminal",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2413,7 +2289,7 @@
     },
     {
       "id": "composer",
-      "index": 39,
+      "index": 37,
       "title": "pocketshell",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 Connected",
@@ -2494,7 +2370,7 @@
     },
     {
       "id": "composer-tools",
-      "index": 40,
+      "index": 38,
       "title": "Add to input",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2558,7 +2434,7 @@
     },
     {
       "id": "dictation",
-      "index": 41,
+      "index": 39,
       "title": "pocketshell",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 Connected",
@@ -2632,7 +2508,7 @@
     },
     {
       "id": "attachment",
-      "index": 42,
+      "index": 40,
       "title": "pocketshell",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 Connected",
@@ -2706,7 +2582,7 @@
     },
     {
       "id": "history",
-      "index": 43,
+      "index": 41,
       "title": "Recent prompts",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2754,7 +2630,7 @@
     },
     {
       "id": "commands",
-      "index": 44,
+      "index": 42,
       "title": "Slash commands",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2813,7 +2689,7 @@
     },
     {
       "id": "hotkeys",
-      "index": 45,
+      "index": 43,
       "title": "Terminal keys",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2859,7 +2735,7 @@
     },
     {
       "id": "end-session",
-      "index": 46,
+      "index": 44,
       "title": "End Terminal?",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -2906,7 +2782,7 @@
     },
     {
       "id": "reconnecting",
-      "index": 47,
+      "index": 45,
       "title": "pocketshell",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 Reconnecting",
@@ -3003,7 +2879,7 @@
     },
     {
       "id": "session-ended",
-      "index": 48,
+      "index": 46,
       "title": "Session ended",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "hetzner \u00b7 pocketshell",
@@ -3064,7 +2940,7 @@
     },
     {
       "id": "send-uncertain",
-      "index": 49,
+      "index": 47,
       "title": "Review before resending",
       "group": "03 \u00b7 Start & use terminals",
       "subtitle": "",
@@ -3118,7 +2994,7 @@
     },
     {
       "id": "files",
-      "index": 50,
+      "index": 48,
       "title": "Files",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "hetzner \u00b7 ~/git",
@@ -3202,7 +3078,7 @@
     },
     {
       "id": "files-folder",
-      "index": 51,
+      "index": 49,
       "title": "Files",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "pocketshell \u00b7 app2",
@@ -3253,7 +3129,7 @@
     },
     {
       "id": "files-parent",
-      "index": 52,
+      "index": 50,
       "title": "Files",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "hetzner",
@@ -3312,7 +3188,7 @@
     },
     {
       "id": "file-tools",
-      "index": 53,
+      "index": 51,
       "title": "Files",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3384,7 +3260,7 @@
     },
     {
       "id": "create-file-folder",
-      "index": 54,
+      "index": 52,
       "title": "Create folder",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3439,7 +3315,7 @@
     },
     {
       "id": "file-actions",
-      "index": 55,
+      "index": 53,
       "title": "README.md",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3512,7 +3388,7 @@
     },
     {
       "id": "markdown",
-      "index": 56,
+      "index": 54,
       "title": "README.md",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "pocketshell",
@@ -3562,7 +3438,7 @@
     },
     {
       "id": "source",
-      "index": 57,
+      "index": 55,
       "title": "README.md",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "pocketshell",
@@ -3611,7 +3487,7 @@
     },
     {
       "id": "editor",
-      "index": 58,
+      "index": 56,
       "title": "Edit README.md",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "pocketshell",
@@ -3656,7 +3532,7 @@
     },
     {
       "id": "unsaved",
-      "index": 59,
+      "index": 57,
       "title": "Keep your changes?",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3703,7 +3579,7 @@
     },
     {
       "id": "image-view",
-      "index": 60,
+      "index": 58,
       "title": "workspace.png",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "pocketshell",
@@ -3735,7 +3611,7 @@
     },
     {
       "id": "rename-file",
-      "index": 61,
+      "index": 59,
       "title": "Rename file",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3779,7 +3655,7 @@
     },
     {
       "id": "delete-file",
-      "index": 62,
+      "index": 60,
       "title": "Delete README.md?",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3825,7 +3701,7 @@
     },
     {
       "id": "file-conflict",
-      "index": 63,
+      "index": 61,
       "title": "File changed on host",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "",
@@ -3874,7 +3750,7 @@
     },
     {
       "id": "transfers",
-      "index": 64,
+      "index": 62,
       "title": "Transfers",
       "group": "04 \u00b7 Files & transfers",
       "subtitle": "hetzner",
@@ -3929,7 +3805,7 @@
     },
     {
       "id": "services",
-      "index": 65,
+      "index": 63,
       "title": "Services & tunnels",
       "group": "05 \u00b7 Services & usage",
       "subtitle": "hetzner",
@@ -3980,7 +3856,7 @@
     },
     {
       "id": "services-active",
-      "index": 66,
+      "index": 64,
       "title": "Services & tunnels",
       "group": "05 \u00b7 Services & usage",
       "subtitle": "hetzner",
@@ -4046,7 +3922,7 @@
     },
     {
       "id": "tunnel-detail",
-      "index": 67,
+      "index": 65,
       "title": "Development server",
       "group": "05 \u00b7 Services & usage",
       "subtitle": "hetzner",
@@ -4114,7 +3990,7 @@
     },
     {
       "id": "add-tunnel",
-      "index": 68,
+      "index": 66,
       "title": "Add tunnel",
       "group": "05 \u00b7 Services & usage",
       "subtitle": "",
@@ -4197,7 +4073,7 @@
     },
     {
       "id": "usage",
-      "index": 69,
+      "index": 67,
       "title": "Usage",
       "group": "05 \u00b7 Services & usage",
       "subtitle": "hetzner",
@@ -4276,7 +4152,7 @@
     },
     {
       "id": "settings",
-      "index": 70,
+      "index": 68,
       "title": "Settings",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4348,7 +4224,7 @@
     },
     {
       "id": "terminal-settings",
-      "index": 71,
+      "index": 69,
       "title": "Terminal",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4412,7 +4288,7 @@
     },
     {
       "id": "voice-settings",
-      "index": 72,
+      "index": 70,
       "title": "Voice",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4465,7 +4341,7 @@
     },
     {
       "id": "language",
-      "index": 73,
+      "index": 71,
       "title": "Dictation language",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4531,7 +4407,7 @@
     },
     {
       "id": "connection-settings",
-      "index": 74,
+      "index": 72,
       "title": "Connections",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4582,7 +4458,7 @@
     },
     {
       "id": "grace",
-      "index": 75,
+      "index": 73,
       "title": "Keep connection",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4644,7 +4520,7 @@
     },
     {
       "id": "advanced-settings",
-      "index": 76,
+      "index": 74,
       "title": "Advanced",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4700,7 +4576,7 @@
     },
     {
       "id": "diagnostics",
-      "index": 77,
+      "index": 75,
       "title": "Diagnostics",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4762,7 +4638,7 @@
     },
     {
       "id": "report",
-      "index": 78,
+      "index": 76,
       "title": "Connection report",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4832,7 +4708,7 @@
     },
     {
       "id": "clear-reports",
-      "index": 79,
+      "index": 77,
       "title": "Clear local reports?",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4873,7 +4749,7 @@
     },
     {
       "id": "about",
-      "index": 80,
+      "index": 78,
       "title": "About PocketShell",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",
@@ -4926,7 +4802,7 @@
     },
     {
       "id": "update",
-      "index": 81,
+      "index": 79,
       "title": "Update available",
       "group": "06 \u00b7 Settings & support",
       "subtitle": "",

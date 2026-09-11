@@ -9,8 +9,6 @@ object MockupScreens {
         host_form(),
         connecting(),
         trust(),
-        qr_scan(),
-        qr_review(),
         keys(),
         key_import(),
         key_generate(),
@@ -121,7 +119,6 @@ private fun add_host() = MockupScreen(
     back = "hosts", headerIcon = "", headerRoute = "",
     layout = "sheet", base = "hosts", connected = false,
     nodes = listOf(
-        MockupNode.Row("Scan a QR code", "Import from your computer", "qr-scan", "qr", "", false),
         MockupNode.Row("Enter connection details", "Address, user and SSH key", "host-form", "server", "", false),
     ),
     footer = listOf(
@@ -171,37 +168,6 @@ private fun trust() = MockupScreen(
     footer = listOf(
         MockupNode.Button("Trust and connect", "workspaces", "primary"),
         MockupNode.Button("Cancel", "back", "text"),
-    ),
-)
-
-private fun qr_scan() = MockupScreen(
-    id = "qr-scan", title = "Scan host", subtitle = "",
-    back = "hosts", headerIcon = "", headerRoute = "",
-    layout = "page", base = "workspaces", connected = false,
-    nodes = listOf(
-        MockupNode.Text("Point your camera at the PocketShell QR code on your computer.", "secondary"),
-        MockupNode.Scanner,
-        MockupNode.Text("Waiting for a QR code…", "secondary"),
-        MockupNode.Button("Show import review", "qr-review", "secondary"),
-        MockupNode.Row("Enter details instead", "", "host-form", "", "", false),
-    ),
-    footer = listOf(
-    ),
-)
-
-private fun qr_review() = MockupScreen(
-    id = "qr-review", title = "Review import", subtitle = "",
-    back = "qr-scan", headerIcon = "", headerRoute = "",
-    layout = "page", base = "workspaces", connected = false,
-    nodes = listOf(
-        MockupNode.Section("Connection", "", ""),
-        MockupNode.Row("hetzner", "alexey@dev.example.com", "", "", "", false),
-        MockupNode.Section("Authentication", "", ""),
-        MockupNode.Row("Imported key", "ED25519 · Passphrase protected", "key-detail", "key", "", false),
-        MockupNode.Text("This QR includes a private key. Import it only from a source you trust.", "secondary"),
-    ),
-    footer = listOf(
-        MockupNode.Button("Import and connect", "trust", "primary"),
     ),
 )
 

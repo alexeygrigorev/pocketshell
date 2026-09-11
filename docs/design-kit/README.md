@@ -15,10 +15,10 @@ rather than kept alongside (D22 — one design system, not two).
 |---|---|
 | `design-system/tokens.json` | Colour, type, spacing, size, radius, motion. **The** source of truth — edit here, never in a screen. |
 | `design-system/tokens.css` | Generated from `tokens.json`. Do not hand-edit. |
-| `design-system/catalog.json` | All 81 frames: content, route and state descriptions. Machine-readable equivalent of the interactive prototype. |
+| `design-system/catalog.json` | All 79 frames: content, route and state descriptions. Machine-readable equivalent of the interactive prototype. |
 | `design-system/icons.json` | Icon path data, shared by the SVG and Compose registries. |
 | `design-system/prototype.{css,js}`, `template.html` | The browser renderer, for regenerating the prototype. |
-| `icons/*.svg` | 46 icons, same paths as `icons.json`. |
+| `icons/*.svg` | 45 icons, same paths as `icons.json`. |
 | `android/PocketShellTheme.kt` | Generated `PsTokens` + `PocketShellQuietTheme`, mapped to Material color/type/shape roles. |
 | `android/PocketShellIcons.kt` | Native vector registry generated from the same paths as the SVGs — avoids raster icons and glyph substitution. |
 | `android/PocketShellComponents.kt` | Header, row, workspace row, button, field, sheet — plus a clearly marked **preview-only** fixture renderer. |

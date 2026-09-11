@@ -32,7 +32,6 @@ sealed interface MockupNode {
     data class Code(val text: String) : MockupNode
     data class Empty(val title: String, val text: String, val icon: String = "") : MockupNode
     data class Progress(val title: String, val text: String) : MockupNode
-    data object Scanner : MockupNode
     data class Tabs(val modes: List<FileMode>) : MockupNode
     data class Document(val title: String, val paragraphs: List<String>, val heading: String, val code: String, val after: String) : MockupNode
     data object ImagePreview : MockupNode

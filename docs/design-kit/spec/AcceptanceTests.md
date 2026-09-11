@@ -27,7 +27,7 @@ Reject empty/illegal folder names inline. Existing folder detection offers reuse
 Use TalkBack to verify root headings, merged workspace row semantics and distinct sessions. Do not announce decorative chevrons twice. Tiny session marks are not focusable controls. Check each interactive control's actual hit rectangle is at least 48dp. Use real selectable/toggleable semantics and one owner for RadioButton/Switch actions. Verify sheet focus trapping and Back/outside dismissal with native containers. Do not depend on color alone.
 
 ## Setup and security
-Unknown fingerprint and changed fingerprint are distinct states. QR import review exposes the host and key source before trust/connect. Biometric cancellation falls back safely without storing passphrases in preview state or logs. Only use native permission/document/share surfaces. Inspect support exports for sensitive terminal content and secrets.
+Unknown fingerprint and changed fingerprint are distinct states. Biometric cancellation falls back safely without storing passphrases in preview state or logs. Only use native permission/document/share surfaces. Inspect support exports for sensitive terminal content and secrets.
 
 ## Backend/API tasks not supplied by the UI kit
-Durable empty-workspace membership and desktop sharing, bounded recursive directory discovery, folder existence/preflight validation, program availability detection, model/status accuracy, actual terminal send acknowledgement, reconnect state, secure key/QR operations, real file conflicts/transfers and tunnel management still belong to the existing app/helper layers.
+Durable empty-workspace membership and desktop sharing, bounded recursive directory discovery, folder existence/preflight validation, program availability detection, model/status accuracy, actual terminal send acknowledgement, reconnect state, secure key operations, real file conflicts/transfers and tunnel management still belong to the existing app/helper layers.

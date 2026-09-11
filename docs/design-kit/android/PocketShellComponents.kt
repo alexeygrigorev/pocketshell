@@ -347,12 +347,6 @@ private fun PsNode(n: MockupNode, screen: MockupScreen, act: (String) -> Unit) {
             LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 16.dp), color = PsTokens.secondary, trackColor = PsTokens.divider)
             Text(n.text, style = PsTokens.bodyType, color = PsTokens.secondary)
         }
-        MockupNode.Scanner -> Box(Modifier.fillMaxWidth().height(300.dp).background(PsTokens.terminal, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                PsIcon("qr", size = 64.dp); Spacer(Modifier.height(20.dp))
-                Text("Camera preview · illustrative", style = PsTokens.metadataType, color = PsTokens.muted)
-            }
-        }
         is MockupNode.Tabs -> {
             Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                 n.modes.forEach { mode -> TextButton({ act(mode.route) }) {

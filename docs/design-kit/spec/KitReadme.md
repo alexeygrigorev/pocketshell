@@ -31,7 +31,7 @@ The prototype starts on the approved host/workspaces screen. Use the left rail t
 ## What is real and what is simulated
 The layouts, controls, screen navigation, search, selected demo state, editable drafts, folder/session creation fixtures and the visual system are implemented in HTML. No SSH, terminal emulation, microphone, camera, biometric authentication, provider data, credential handling, remote file operation or tunnel runs. Rows labelled as native handoffs intentionally show an explanation instead of performing an operation. Do not enter real secrets.
 
-The 81 frames are **screens, sheets and states**, not 81 new app destinations. They cover the original recording's app-owned surfaces, current Android navigation routes, and the proposed workspace-first flows. The recording's Android-owned file picker and notification panel are not redesigned as custom app screens.
+The 79 frames are **screens, sheets and states**, not 81 new app destinations. They cover the original recording's app-owned surfaces, current Android navigation routes, and the proposed workspace-first flows. The recording's Android-owned file picker and notification panel are not redesigned as custom app screens.
 
 The Kotlin is an **integration starting point and native preview catalog**, not a finished APK. Its pure models and fixture catalog were compiled with kotlinc. The Compose layer has not been built against your app, rendered in Android Studio, run on an emulator or tested with TalkBack. See the remaining gates in `docs/AcceptanceTests.md`.
 

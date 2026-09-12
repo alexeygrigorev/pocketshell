@@ -155,6 +155,66 @@ class HostWorkspacesViewModelTest {
             assertFalse(viewModel.state.value.addWorkspaceBrowserVisible)
         }
 
+    /**
+     * Issue #2616, upgrade-shaped: a STORED root may be home-relative
+     * (`~/git`), with no session or membership on the host to infer home from.
+     * Browsing it must resolve `~` against the host's own home before any
+     * SFTP use — and the sheet's root becomes absolute so containment and the
+     * persisted path agree with what was browsed.
+     */
+    @Test
+    fun `a home-relative stored root is browsed through the host's home`() = runTest(dispatcher) {
+        val hostId = stack.seedHost()
+        stack.factory.script = { connection ->
+            connection.onExec("pwd", ExecResult(0, "/home/testuser\n", "", false))
+            connection.sftpFixture().seedDirectory("/home/testuser/git")
+            connection.sftpFixture().seedDirectory("/home/testuser/git/app")
+        }
+
+        val viewModel = viewModel(hostId)
+        viewModel.openAddWorkspace("~/git")
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertNull(state.addWorkspaceRootFoldersFailure)
+        assertEquals(
+            listOf(WorkspaceFolderEntry("app", "/home/testuser/git/app")),
+            state.addWorkspaceRootFolders,
+        )
+        assertEquals("the sheet's root must become absolute", "/home/testuser/git", state.addWorkspaceRootPath)
+    }
+
+    /** And a workspace added under it is persisted with its absolute path. */
+    @Test
+    fun `adding a workspace with a home-relative path persists the absolute path`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            val added = mutableListOf<String>()
+            stack.factory.script = { connection ->
+                connection.onExec("pwd", ExecResult(0, "/home/testuser\n", "", false))
+                connection.onExecMatching("workspaces add", once = false, { "workspaces add" in it }) { command ->
+                    added += command
+                    ExecResult(0, """{"schema":1,"workspaces":[]}""", "", false)
+                }
+                connection.sftpFixture().seedDirectory("/home/testuser/git")
+                connection.sftpFixture().seedDirectory("/home/testuser/git/app")
+            }
+
+            val viewModel = viewModel(hostId)
+            viewModel.openAddWorkspace("~/git")
+            advanceUntilIdle()
+            viewModel.setAddWorkspacePath("~/git/app")
+            viewModel.addWorkspace()
+            advanceUntilIdle()
+
+            assertNull(viewModel.state.value.addWorkspaceFailure)
+            assertTrue("the add must have reached the host CLI", added.isNotEmpty())
+            assertTrue(
+                "the persisted path must be absolute, got: ${added.last()}",
+                added.last().contains("/home/testuser/git/app") && !added.last().contains("~"),
+            )
+        }
+
     private fun viewModel(hostId: Long) = HostWorkspacesViewModel(
         savedStateHandle = SavedStateHandle(mapOf(Destination.ARG_HOST_ID to hostId)),
         registry = stack.registry,

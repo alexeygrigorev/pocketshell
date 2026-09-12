@@ -820,21 +820,32 @@ class FileExplorerViewModel @Inject constructor(
      * The directory to open when the route carried no path: the route argument
      * if there is one, else the login shell's working directory.
      *
+     * A home-relative route (`~/git`, issue #2616) is expanded against that
+     * same host-reported home before any SFTP use — SFTP has no shell and
+     * cannot expand `~` itself.
+     *
      * `pwd` over [HostConnection.exec] rather than an SFTP call, because the
      * channel deliberately has no "canonicalize"/"home" verb — the file screens
      * are its only consumer and this is the only place that needs one. A host
      * that cannot answer falls back to the root, which is always listable.
      */
     private suspend fun resolveStartDirectory(connection: HostConnection): String {
-        startPath?.takeIf { it.isNotBlank() }?.let { return RemotePath.normalize(it) }
-        val home = runCatching { connection.exec("pwd") }.getOrNull()
+        val carried = startPath?.takeIf { it.isNotBlank() }
+        if (carried != null && !RemotePath.isHomeRelative(carried)) return RemotePath.normalize(carried)
+        val home = remoteHome(connection)
+        if (carried != null) {
+            return RemotePath.normalize(RemotePath.expandHome(carried, home) ?: carried)
+        }
+        return if (home.isNullOrBlank()) RemotePath.ROOT else RemotePath.normalize(home)
+    }
+
+    private suspend fun remoteHome(connection: HostConnection): String? =
+        runCatching { connection.exec("pwd") }.getOrNull()
             ?.takeIf { it.exitCode == 0 && !it.timedOut }
             ?.stdout
             ?.lineSequence()
             ?.map { it.trim() }
             ?.lastOrNull { it.startsWith("/") }
-        return if (home.isNullOrBlank()) RemotePath.ROOT else RemotePath.normalize(home)
-    }
 
     private suspend fun sftp(): SftpChannel = when (val result = registry.getOrConnect(hostId)) {
         is ConnectResult.Connected -> result.connection.sftp()

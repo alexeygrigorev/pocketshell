@@ -99,6 +99,31 @@ class FileExplorerViewModelTest {
             )
         }
 
+    /**
+     * Issue #2616: a route may carry a home-relative start path (`~/git`).
+     * SFTP cannot expand `~`, so the explorer must resolve it against the
+     * host-reported home before listing — the same `pwd` the pathless route
+     * uses.
+     */
+    @Test
+    fun `a home-relative route path is expanded through the host's home`() =
+        runTest(dispatcher) {
+            val hostId = stack.seedHost()
+            stack.seedSftp = { sftp ->
+                sftp.seedDirectory("$HOME/git")
+                sftp.seedFile("$HOME/git/notes.txt", "hi")
+            }
+            val viewModel = explorer(hostId, "~/git")
+
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            val state = viewModel.state.value
+            assertNull(state.failure)
+            assertEquals("$HOME/git", state.path)
+            assertEquals(listOf("notes.txt"), state.entries.map { it.name })
+        }
+
     @Test
     fun `opening a directory lists it and going up returns to the parent`() = runTest(dispatcher) {
         val hostId = stack.seedHost()

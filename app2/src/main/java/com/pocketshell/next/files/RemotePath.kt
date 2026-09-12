@@ -97,4 +97,35 @@ object RemotePath {
 
     /** One breadcrumb: the [label] shown and the absolute [path] a tap opens. */
     data class Crumb(val label: String, val path: String)
+
+    /**
+     * True when [path] defers to the login shell's home — `~`, `~/...`,
+     * `$HOME` or `$HOME/...`. SFTP has no shell and cannot expand these, so a
+     * caller must resolve them against the host-reported home before any
+     * SFTP use (issue #2616).
+     */
+    fun isHomeRelative(path: String): Boolean =
+        path == "~" || path.startsWith("~/") ||
+            path == "\$HOME" || path.startsWith("\$HOME/")
+
+    /**
+     * Expands a home-relative [path] against the host-reported [home].
+     *
+     * `~` and `$HOME` become [home] itself; their `/`-prefixed forms are joined
+     * under it. Anything else is returned unchanged — the function never
+     * rewrites an absolute or shell-relative path. Returns null only when
+     * [path] is home-relative and [home] is null or blank (the host could not
+     * be asked, e.g. `pwd` failed): the caller then has no honest absolute
+     * spelling to use.
+     */
+    fun expandHome(path: String, home: String?): String? {
+        val resolvedHome = home?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }
+        return when {
+            path == "~" -> resolvedHome
+            path.startsWith("~/") -> resolvedHome?.let { "$it/${path.removePrefix("~/")}" }
+            path == "\$HOME" -> resolvedHome
+            path.startsWith("\$HOME/") -> resolvedHome?.let { "$it/${path.removePrefix("\$HOME/")}" }
+            else -> path
+        }
+    }
 }

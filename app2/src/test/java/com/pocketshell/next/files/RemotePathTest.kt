@@ -1,6 +1,9 @@
 package com.pocketshell.next.files
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -74,5 +77,41 @@ class RemotePathTest {
             RemotePath.crumbs("/home/alexey/git"),
         )
         assertEquals(listOf(RemotePath.Crumb("/", "/")), RemotePath.crumbs("/"))
+    }
+
+    @Test
+    fun `home-relative shapes are recognised`() {
+        assertTrue(RemotePath.isHomeRelative("~"))
+        assertTrue(RemotePath.isHomeRelative("~/git"))
+        assertTrue(RemotePath.isHomeRelative("\$HOME"))
+        assertTrue(RemotePath.isHomeRelative("\$HOME/git"))
+        assertFalse(RemotePath.isHomeRelative("/home/alexey/git"))
+        assertFalse(RemotePath.isHomeRelative("git"))
+        // A directory literally named `~x` is not a home reference.
+        assertFalse(RemotePath.isHomeRelative("~git"))
+    }
+
+    @Test
+    fun `expandHome resolves both alias spellings against the host home`() {
+        assertEquals("/home/alexey", RemotePath.expandHome("~", "/home/alexey"))
+        assertEquals("/home/alexey/git", RemotePath.expandHome("~/git", "/home/alexey"))
+        assertEquals("/home/alexey", RemotePath.expandHome("\$HOME", "/home/alexey"))
+        assertEquals("/home/alexey/git", RemotePath.expandHome("\$HOME/git", "/home/alexey"))
+        // A trailing slash on the home must not produce a double separator.
+        assertEquals("/home/alexey/git", RemotePath.expandHome("~/git", "/home/alexey/"))
+    }
+
+    @Test
+    fun `expandHome passes absolute paths through untouched`() {
+        assertEquals("/home/alexey/git", RemotePath.expandHome("/home/alexey/git", "/home/alexey"))
+        assertEquals("/srv/data", RemotePath.expandHome("/srv/data", null))
+        assertEquals("/srv/data", RemotePath.expandHome("/srv/data", ""))
+    }
+
+    @Test
+    fun `expandHome without a host home has no honest answer`() {
+        assertNull(RemotePath.expandHome("~", null))
+        assertNull(RemotePath.expandHome("~/git", null))
+        assertNull(RemotePath.expandHome("\$HOME", ""))
     }
 }

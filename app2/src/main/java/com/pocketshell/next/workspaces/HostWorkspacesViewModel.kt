@@ -11,6 +11,7 @@ import com.pocketshell.core.transport.ConnectResult
 import com.pocketshell.core.transport.HostConnection
 import com.pocketshell.core.transport.SftpEntry
 import com.pocketshell.next.connect.ConnectionsRegistry
+import com.pocketshell.next.files.RemotePath
 import com.pocketshell.next.hostcli.HostCliClientFactory
 import com.pocketshell.next.nav.Destination
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -228,7 +229,15 @@ class HostWorkspacesViewModel @Inject constructor(
                 }
                 return@launch
             }
-            runCatching { connection.sftp().list(rootPath) }
+            // A stored root may be home-relative (`~/git`, issue #2616): SFTP
+            // has no shell, so resolve it against the host's home before
+            // listing, and keep the sheet's root absolute so containment and
+            // the persisted path agree with what was browsed.
+            val resolvedRoot = resolveRemotePath(connection, rootPath)
+            if (resolvedRoot != rootPath) {
+                _state.update { it.copy(addWorkspaceRootPath = resolvedRoot) }
+            }
+            runCatching { connection.sftp().list(resolvedRoot) }
                 .fold(
                     onSuccess = { entries ->
                         _state.update {
@@ -290,7 +299,11 @@ class HostWorkspacesViewModel @Inject constructor(
                     )
                 }
             } ?: return@launch
-            runCatching { connection.sftp().list(target) }
+            val resolved = resolveRemotePath(connection, target)
+            if (resolved != target) {
+                _state.update { it.copy(addWorkspaceBrowsePath = resolved) }
+            }
+            runCatching { connection.sftp().list(resolved) }
                 .fold(
                     onSuccess = { entries ->
                         _state.update {
@@ -383,15 +396,6 @@ class HostWorkspacesViewModel @Inject constructor(
             return
         }
         if (_state.value.addingWorkspace) return
-        val root = canonicalRemotePath(_state.value.addWorkspaceRootPath)
-        val canonicalPath = canonicalRemotePath(path)
-        if (root == null || canonicalPath == null || !isWithinRoot(canonicalPath, root)) {
-            _state.update {
-                it.copy(addWorkspaceFailure = "Choose a folder inside ${_state.value.addWorkspaceRootPath}.")
-            }
-            return
-        }
-        _state.update { it.copy(addingWorkspace = true, addWorkspaceFailure = null) }
         viewModelScope.launch {
             val host = hostDao.getById(hostId)
             if (host == null) {
@@ -409,6 +413,22 @@ class HostWorkspacesViewModel @Inject constructor(
                     return@launch
                 }
             }
+            // Canonicalization needs the host's home when either side is
+            // home-relative (#2616): the typed path and the root must land in
+            // the same absolute space before containment is decided and the
+            // workspace is persisted.
+            val home = if (RemotePath.isHomeRelative(path) || RemotePath.isHomeRelative(_state.value.addWorkspaceRootPath)) {
+                resolveRemoteHome(connection)
+            } else {
+                null
+            }
+            val root = canonicalRemotePath(_state.value.addWorkspaceRootPath, home)
+            val canonicalPath = canonicalRemotePath(path, home)
+            if (root == null || canonicalPath == null || !isWithinRoot(canonicalPath, root)) {
+                finishAdd("Choose a folder inside ${_state.value.addWorkspaceRootPath}.")
+                return@launch
+            }
+            _state.update { it.copy(addingWorkspace = true, addWorkspaceFailure = null) }
             val entry = runCatching { connection.sftp().stat(canonicalPath) }.getOrElse { error ->
                 finishAdd(userMessage(error, "Could not inspect the workspace folder: "))
                 return@launch
@@ -645,6 +665,27 @@ class HostWorkspacesViewModel @Inject constructor(
         is HostCliError -> error.userMessage
         else -> prefix + (error.message ?: error::class.simpleName ?: "unknown error")
     }
+
+    /**
+     * Canonicalises a user- or store-supplied path, expanding a home-relative
+     * one (`~/git`) against the host's own home first (issue #2616): SFTP has
+     * no shell and cannot expand `~`, and a home-relative spelling must never
+     * reach it — or be persisted. Falls back to the raw spelling when the host
+     * cannot be asked, letting the existing failure UI speak.
+     */
+    private suspend fun resolveRemotePath(connection: HostConnection, requested: String): String {
+        if (!RemotePath.isHomeRelative(requested)) return requested
+        return canonicalRemotePath(requested, resolveRemoteHome(connection)) ?: requested
+    }
+
+    /** The login shell's home — the one thing `~` needs before any SFTP use. */
+    private suspend fun resolveRemoteHome(connection: HostConnection): String? =
+        runCatching { connection.exec("pwd") }.getOrNull()
+            ?.takeIf { it.exitCode == 0 && !it.timedOut }
+            ?.stdout
+            ?.lineSequence()
+            ?.map { it.trim() }
+            ?.lastOrNull { it.startsWith("/") }
 
     private fun isWithinRoot(path: String, root: String): Boolean =
         path == root || path.startsWith("$root/")

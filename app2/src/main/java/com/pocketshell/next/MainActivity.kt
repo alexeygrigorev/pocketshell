@@ -109,7 +109,8 @@ class MainActivity : FragmentActivity() {
     /**
      * Same reason [grace] is registered here: instrumentation replaces
      * [App] with `HiltTestApplication`, so [App.onCreate] never runs.
-     * [ForwardingResume.observeProcessLifecycle] is idempotent.
+     * The observer is attached once; a later call still resumes when the
+     * process is already `STARTED` (the journey suite's shape).
      */
     @Inject
     lateinit var forwardingResume: ForwardingResume

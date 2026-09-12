@@ -108,6 +108,27 @@ class ForwardingResumeTest {
     }
 
     @Test
+    fun secondObserveWhileAlreadyStarted_requestsResumeAgain() = runTest(dispatcher) {
+        seedHost(enabled = true)
+        val started = AtomicInteger(0)
+        val resume = resume { started.incrementAndGet() }
+        val owner = FakeLifecycleOwner()
+        owner.registry.currentState = Lifecycle.State.STARTED
+
+        resume.observeProcessLifecycle(owner)
+        advanceUntilIdle()
+        val afterFirst = started.get()
+        assertTrue("already-STARTED owner must seed an immediate resume", afterFirst >= 1)
+
+        resume.observeProcessLifecycle(owner)
+        advanceUntilIdle()
+        assertTrue(
+            "later MainActivity attach must resume even if ProcessLifecycleOwner stayed STARTED",
+            started.get() > afterFirst,
+        )
+    }
+
+    @Test
     fun alreadyStartedOwner_atAttach_seedsImmediateResume() = runTest(dispatcher) {
         seedHost(enabled = true)
         val started = AtomicInteger(0)

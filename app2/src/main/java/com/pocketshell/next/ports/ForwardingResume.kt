@@ -28,8 +28,9 @@ import kotlinx.coroutines.withContext
  * are skipped — launch cannot prompt.
  *
  * Foreground-only (D21): no WorkManager, no AlarmManager, no boot receiver.
- * [observeProcessLifecycle] is idempotent so [com.pocketshell.next.App] and
- * [com.pocketshell.next.MainActivity] can both attach.
+ * The observer is attached once so [com.pocketshell.next.App] and
+ * [com.pocketshell.next.MainActivity] can both call [observeProcessLifecycle];
+ * a later call still resumes when the owner is already `STARTED`.
  */
 @Singleton
 class ForwardingResume @Inject constructor(
@@ -52,17 +53,28 @@ class ForwardingResume @Inject constructor(
 
     /**
      * Attach [ProcessLifecycleOwner] (or any [LifecycleOwner]) so a resume
-     * sweep fires on every `ON_START`. Subsequent calls are no-ops. Seeds an
-     * immediate resume when the owner is already `STARTED` (cold launch).
+     * sweep fires on every `ON_START`. The observer is added once.
+     *
+     * A later call still seeds an immediate resume when the owner is already
+     * `STARTED`. Instrumentation keeps the process in `STARTED` across
+     * activity launches ([App] is replaced by `HiltTestApplication`, so
+     * [com.pocketshell.next.MainActivity] is the attach site) and would
+     * otherwise never see another `ON_START`.
      */
     fun observeProcessLifecycle(owner: LifecycleOwner = ProcessLifecycleOwner.get()) {
-        synchronized(this) {
-            if (lifecycleAttached) return
-            lifecycleAttached = true
+        val attachObserver = synchronized(this) {
+            if (lifecycleAttached) {
+                false
+            } else {
+                lifecycleAttached = true
+                true
+            }
         }
         scope.launch {
             val alreadyStarted = withContext(Dispatchers.Main) {
-                owner.lifecycle.addObserver(processLifecycleObserver)
+                if (attachObserver) {
+                    owner.lifecycle.addObserver(processLifecycleObserver)
+                }
                 owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
             }
             if (alreadyStarted) requestResume()

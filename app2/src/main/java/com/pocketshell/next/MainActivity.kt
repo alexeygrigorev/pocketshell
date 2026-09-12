@@ -109,8 +109,9 @@ class MainActivity : FragmentActivity() {
     /**
      * Same reason [grace] is registered here: instrumentation replaces
      * [App] with `HiltTestApplication`, so [App.onCreate] never runs.
-     * The observer is attached once; a later call still resumes when the
-     * process is already `STARTED` (the journey suite's shape).
+     * Observer attach is in [onCreate]; the sweep is [onStart] because
+     * `startForegroundService` is only legal once this activity is foreground
+     * and ProcessLifecycleOwner can stay `STARTED` across launches.
      */
     @Inject
     lateinit var forwardingResume: ForwardingResume
@@ -183,6 +184,11 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        forwardingResume.resumeNow()
     }
 }
 

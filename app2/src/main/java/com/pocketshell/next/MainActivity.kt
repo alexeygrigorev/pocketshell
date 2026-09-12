@@ -48,6 +48,7 @@ import com.pocketshell.next.hosts.HostListRoute
 import com.pocketshell.next.hosts.SshKeysRoute
 import com.pocketshell.next.nav.Destination
 import com.pocketshell.next.ports.AddTunnelRoute
+import com.pocketshell.next.ports.ForwardingResume
 import com.pocketshell.next.ports.PortForwardRoute
 import com.pocketshell.next.ports.ServicesRoute
 import com.pocketshell.next.ports.TunnelDetailRoute
@@ -105,6 +106,14 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var grace: GraceCoordinator
 
+    /**
+     * Same reason [grace] is registered here: instrumentation replaces
+     * [App] with `HiltTestApplication`, so [App.onCreate] never runs.
+     * [ForwardingResume.observeProcessLifecycle] is idempotent.
+     */
+    @Inject
+    lateinit var forwardingResume: ForwardingResume
+
     @Inject
     lateinit var connections: ConnectionsRegistry
 
@@ -114,6 +123,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         grace.register(application)
+        forwardingResume.observeProcessLifecycle()
         // #887/#2533: after edge-to-edge, SOFT_INPUT_ADJUST_NOTHING so the OS
         // neither resizes nor pans the window when the keyboard shows.
         // enableEdgeToEdge already sets setDecorFitsSystemWindows(false), which

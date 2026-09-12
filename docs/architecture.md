@@ -27,7 +27,9 @@ tests/docker/               disposable SSH and aplexer fixtures
 is pure JVM code, so the host contract is tested against captured JSON without
 an emulator. `core-terminal` contains the vendored emulator and the
 PocketShell-specific PTY bridge helpers. The app owns screen state and connects
-those modules through `ConnectionsRegistry`.
+those modules through `ConnectionsRegistry`. `core-portfwd` auto-forwards
+in-window ports once a supervisor is mounted; auto-forward resume is
+`ProcessLifecycleOwner` `ON_START`, not a screen.
 
 ## Session contract
 

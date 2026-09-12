@@ -196,7 +196,10 @@ derive_version_code() {
     return
   fi
   local n
-  n="$(git -C "$repo" tag --list 'v*' --merged "$ref" 2>/dev/null | grep -c '^v[0-9]')" || n=0
+  # 'v[0-9]*', not 'v*': the nightly chain force-pushes a moving `validated-rc`
+  # marker tag (scripts/ci-nightly-rc-mark.sh) and the bare glob matches it.
+  # The grep below is a second, independent guard — see #2646.
+  n="$(git -C "$repo" tag --list 'v[0-9]*' --merged "$ref" 2>/dev/null | grep -c '^v[0-9]')" || n=0
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   echo $((n + VERSION_CODE_OFFSET))
 }
@@ -219,15 +222,19 @@ derive_version_name() {
     return
   fi
 
+  # --match 'v[0-9]*', NOT 'v*' (#2646): a release tag is `v` followed by a
+  # DIGIT. The bare `v*` glob also matched the nightly chain's force-updated
+  # `validated-rc` marker tag, so every non-tag build derived
+  # `alidated-rc-N-gsha` (leading `v` stripped) as its versionName.
   local exact
-  if exact="$(git -C "$repo" describe --exact-match --tags --match 'v*' "$ref" 2>/dev/null)" &&
+  if exact="$(git -C "$repo" describe --exact-match --tags --match 'v[0-9]*' "$ref" 2>/dev/null)" &&
     [[ -n "$exact" ]]; then
     printf '%s\n' "${exact#v}"
     return
   fi
 
   local desc
-  if desc="$(git -C "$repo" describe --tags --match 'v*' --always "$ref" 2>/dev/null)" &&
+  if desc="$(git -C "$repo" describe --tags --match 'v[0-9]*' --always "$ref" 2>/dev/null)" &&
     [[ -n "$desc" ]]; then
     if [[ "$desc" == v* ]]; then
       # Non-exact but relative to a real v* tag: "v0.4.44-12-gabc1234".
@@ -365,6 +372,31 @@ run_self_test() {
   local vc4
   vc4="$(derive_version_code "$repo" HEAD)"
   check "stray non-v* tag ignored" "$vc4" "$vc3"
+
+  # Issue #2646: a stray tag that STARTS with `v` but is not a version — the
+  # nightly chain's force-updated `validated-rc` marker — must be ignored by
+  # BOTH derivations. The bare `v*` glob used to match it, mangling
+  # versionName to `alidated-rc-...` on every non-tag build.
+  git -C "$repo" tag validated-rc
+  local vn5
+  vn5="$(derive_version_name "$repo" HEAD)"
+  check "v-prefixed non-version tag on a tagged commit ignored by versionName (#2646)" \
+    "$vn5" "0.2.0"
+  check "v-prefixed non-version tag ignored by versionCode (#2646)" \
+    "$(derive_version_code "$repo" HEAD)" "$vc3"
+
+  # The real CI shape: the marker sits on a commit PAST the newest v* tag
+  # (the nightly force-moves it; release tags never move). A branch Build
+  # dispatch there must still describe from v0.2.0, never from the marker.
+  git -C "$repo" commit --quiet --allow-empty -m "c4"
+  git -C "$repo" tag -f validated-rc >/dev/null 2>&1
+  local sha4 vn6
+  sha4="$(git -C "$repo" rev-parse --short HEAD)"
+  vn6="$(derive_version_name "$repo" HEAD)"
+  check "force-moved validated-rc marker never becomes the version (#2646)" \
+    "$vn6" "0.2.0-1-g${sha4}"
+  check "force-moved validated-rc marker leaves versionCode unchanged (#2646)" \
+    "$(derive_version_code "$repo" HEAD)" "$((3 + VERSION_CODE_OFFSET))"
 
   # A COPY of the tree nested inside the repo must NOT inherit the repo's
   # tags. This is the shape the pre-release confidence gate creates when it

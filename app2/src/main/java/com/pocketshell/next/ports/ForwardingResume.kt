@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -46,7 +48,13 @@ class ForwardingResume @Inject constructor(
     /** Testable start-service seam. Production starts [ForwardService]. */
     internal var startService: (Context) -> Unit = { ForwardService.resume(it) }
 
-    internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Last-ditch handler (#2659): this scope fires on every app foreground, so a
+    // throw here must degrade to a log line, never an uncaught crash.
+    internal var scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.IO +
+            CoroutineExceptionHandler { _, t -> Log.e(TAG, "forwarding resume task failed", t) },
+    )
 
     private val processLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         if (event == Lifecycle.Event.ON_START) {
@@ -113,6 +121,12 @@ class ForwardingResume @Inject constructor(
             withContext(Dispatchers.Main) {
                 startService(applicationContext)
             }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Exception) {
+            // Never rethrow: a transient DB failure during the foreground sweep
+            // must leave auto-forward as-is, not crash the app (#2659).
+            Log.e(TAG, "resume sweep failed; auto-forward left as-is", t)
         } finally {
             resumeSweepCount.incrementAndGet()
         }

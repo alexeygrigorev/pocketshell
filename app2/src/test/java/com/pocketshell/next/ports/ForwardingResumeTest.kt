@@ -7,13 +7,17 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
@@ -214,6 +218,43 @@ class ForwardingResumeTest {
                 started.get(),
             )
         }
+
+    @Test
+    fun resumeSweep_withFailingDb_doesNotCrash_andStillCountsSweep() = runTest(dispatcher) {
+        val uncaught = mutableListOf<Throwable>()
+        val started = AtomicInteger(0)
+        val resume = ForwardingResume(
+            applicationContext = context,
+            hostDao = ThrowingHostDao(db.hostDao()),
+            sshKeyDao = db.sshKeyDao(),
+        )
+        resume.scope = CoroutineScope(
+            SupervisorJob() + dispatcher +
+                CoroutineExceptionHandler { _, t -> uncaught.add(t) },
+        )
+        resume.startService = { started.incrementAndGet() }
+
+        resume.resumeNow()
+        advanceUntilIdle()
+
+        assertEquals("failed sweep must not start the service", 0, started.get())
+        assertEquals(
+            "failed sweep still counts toward resumeSweepCount",
+            1,
+            resume.resumeSweepCount.get(),
+        )
+        assertEquals(
+            "sweep failure must be caught inside resumeIfNeeded, never reach the scope handler",
+            emptyList<Throwable>(),
+            uncaught,
+        )
+    }
+
+    /** Room reopens a closed in-memory DB as empty, so simulate the DB failure at the DAO. */
+    private class ThrowingHostDao(real: HostDao) : HostDao by real {
+        override fun getEnabled(): Flow<List<HostEntity>> =
+            flow { throw IllegalStateException("cannot perform this operation because the connection pool has been closed") }
+    }
 
     private fun resume(onStart: () -> Unit): ForwardingResume {
         val resume = ForwardingResume(

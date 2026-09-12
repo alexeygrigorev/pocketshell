@@ -100,6 +100,11 @@ import kotlinx.coroutines.runBlocking
  *
  *  - The seed creates five real aplexer shell sessions in two workspaces and
  *    one root-level session.
+ *  - The two workspaces are also registered as durable memberships
+ *    (`pocketshell workspaces add`) under the host row's tree identity.
+ *    Un-membered live cwds under a configured root belong under Other
+ *    (#2620), so the root's reorder page only has workspaces to exercise
+ *    when the fixture holds the real product state: durable memberships.
  *  - `~/.pocketshell-fixture-session-errors.json` adds an explicit enumeration
  *    error to the real aplexer payload for the partial-listing test. The other
  *    methods remove it, so a leftover fault cannot change a happy-path result.
@@ -133,6 +138,13 @@ class J02SessionTreeListJourney {
     private var hostId: Long = 0
     private var rootId: Long = 0
 
+    /**
+     * The opaque durable-state identity this test's host row carries. Seed
+     * time and the app must agree on it: memberships added under any other
+     * identity are invisible to `workspaces list --host <treeIdentity>`.
+     */
+    private lateinit var treeIdentity: String
+
     private suspend fun seed(description: Description) {
         val graph = appGraph()
         graph.connectionsRegistry().closeAll()
@@ -142,6 +154,7 @@ class J02SessionTreeListJourney {
         val fingerprint = AgentsFixture.probeHostKeyFingerprint()
         println("J02_FIXTURE ${AgentsFixture.host}:${AgentsFixture.port} $fingerprint")
 
+        treeIdentity = "j02-tree-${description.methodName}"
         seedHostSessions(description)
 
         val keyPath = AgentsFixture.installPrivateKey(fileName = "j02_fixture_key")
@@ -157,6 +170,7 @@ class J02SessionTreeListJourney {
                 port = AgentsFixture.port,
                 username = AgentsFixture.USER,
                 keyId = keyId,
+                treeIdentity = treeIdentity,
                 trustedHostKeyAlgorithm = "SHA256",
                 trustedHostKeySha256 = fingerprint,
             ),
@@ -193,6 +207,14 @@ class J02SessionTreeListJourney {
             AgentsFixture.exec("pocketshell sessions kill -- '$displayName' >/dev/null 2>&1 || true")
             AgentsFixture.exec(
                 "pocketshell sessions create --cwd '$workspace' --mem none --json -- '$tag' >/dev/null",
+            )
+        }
+        // Durable memberships under THIS test's tree identity — the same value
+        // the host row carries. `workspaces add` is idempotent, so a rerun on
+        // leftover fixture state is a no-op, not a failure.
+        for (workspace in listOf(WORKSPACE_MAIN, WORKSPACE_APLEXER)) {
+            AgentsFixture.exec(
+                "pocketshell workspaces add '$workspace' --host '$treeIdentity' --json >/dev/null",
             )
         }
         if (partial) {

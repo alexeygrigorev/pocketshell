@@ -105,6 +105,49 @@ class WorkspaceProjectionTest {
         assertEquals(listOf("observed"), workspace.sessions.map { it.name })
     }
 
+    /**
+     * Issue #2620 (spec frame 25, remove-workspace): with the membership gone,
+     * a still-running session must surface under Other — not be re-created as
+     * a non-durable row inside the configured root above its path, which made
+     * Remove look like it did nothing.
+     */
+    @Test
+    fun `a removed workspace's live session surfaces under Other, not the configured root`() {
+        val result = projectWorkspaceRoots(
+            sessions = listOf(session("still-running", "/home/alexey/git/app")),
+            memberships = emptyList(),
+            registeredRoots = listOf(RegisteredWorkspaceRoot("/home/alexey/git", "Git")),
+        )
+
+        val git = result.single { it.label == "Git" }
+        assertTrue(
+            "the root must not re-create the removed workspace, got ${git.workspaces.map { it.path }}",
+            git.workspaces.isEmpty(),
+        )
+        assertTrue("the root itself has no live session", git.rootSessions.isEmpty())
+
+        val other = result.single { it.other }
+        val workspace = other.workspaces.single()
+        assertEquals("/home/alexey/git/app", workspace.path)
+        assertFalse(workspace.durable)
+        assertEquals(listOf("still-running"), workspace.sessions.map { it.name })
+    }
+
+    /** Root-level sessions stay in the root even with no membership anywhere. */
+    @Test
+    fun `a live session exactly at a configured root stays in that root`() {
+        val result = projectWorkspaceRoots(
+            sessions = listOf(session("root-shell", "/home/alexey/git")),
+            memberships = emptyList(),
+            registeredRoots = listOf(RegisteredWorkspaceRoot("/home/alexey/git", "Git")),
+        )
+
+        val git = result.single { it.label == "Git" }
+        assertEquals(listOf("root-shell"), git.rootSessions.map { it.name })
+        assertTrue(git.workspaces.isEmpty())
+        assertTrue("nothing belongs in Other here", result.none { it.other })
+    }
+
     @Test
     fun `workspace summary names session kinds and collapses duplicate kinds`() {
         val sessions = listOf(

@@ -78,8 +78,22 @@ concurrency:
   # does not run is exactly the D37 bypass this cron exists to close, and it
   # would look green (cancelled, not failed) while doing it. Same split
   # tests.yml already uses for its own schedule.
+  #
+  # Issue #2593 (decision D40): pushes never cancel and are never cancelled.
+  # Cancelling a superseded push run does not just drop redundant work — it
+  # drops that commit's ONLY validation: the next push's lane selector diffs
+  # against `github.event.before`, whose TREE already contains the cancelled
+  # commit's changes, so those changes are never selected by any later run
+  # (2adafd86d's app2 changes reached main with zero journey execution, read
+  # green, and were covered only by an unrelated later fail-open). With
+  # `cancel-in-progress` false for pushes, every push's run completes and
+  # validates exactly its own diff; back-to-back merges queue heavy runs
+  # serially, which is the accepted cost. PR groups still cancel in-progress:
+  # only a PR's final head can merge, so cancelling its own earlier heads
+  # leaves nothing unvalidated. Dispatch joins the push/ref group and no
+  # longer cancels or gets cancelled either (the 2026-09-06 pitfall shape).
   group: ${{ github.event_name == 'schedule' && format('{0}-sched', github.workflow) || format('{0}-{1}', github.workflow, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref)) }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

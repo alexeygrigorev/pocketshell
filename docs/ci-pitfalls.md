@@ -396,3 +396,51 @@ What to do:
 
 `app2.yml`'s specific grouping is fixed by #2600; the shape recurs anywhere a
 concurrency group spans triggers with different costs.
+
+## The cancelled-run vacuous green: a superseded push run was that commit's ONLY validation
+
+The sequel to the shape above, and worse: even when every run in the burst is
+a `main` push, cancellation does not just replace a validation — it DELETES
+one, and nothing after it ever re-does it.
+
+The mechanics: a push run's lane selector (`scripts/ci-app2-changed-modules.sh`
+for `app2.yml`, `scripts/ci-plan.sh` for `tests.yml`) diffs against
+`github.event.before` — the tree of the commit the push REPLACED. A tree diff
+against that commit shows only the NEW commit's changes, because the old
+commit's changes are already IN its tree. So when push B cancels run A and
+then selects lanes from its own diff:
+
+- run A (commit X's changes) died cancelled — X never validated;
+- run B (tools-only) selects no heavy lanes — correct for ITS diff, and
+  `success`;
+- X's changes are now permanently invisible to selection: every later run's
+  `before` tree contains them.
+
+Every run involved reads green. Nothing is red, nothing is cancelled-after-
+failure, and the lane's last execution predates a real app2 change that is on
+`main`. Observed as #2593: `2adafd86d` (#2587, app2 code) cancelled by
+`d09471e2b`'s tools-only push, zero journey execution, covered only by an
+unrelated later push that fail-opened all lanes.
+
+`success` on a lane-selected run answers "were the SELECTED lanes green", not
+"was this commit's diff validated". Those differ by exactly the selection
+decision — a run that validated nothing and a run that validated everything
+wear the same conclusion.
+
+What to do:
+
+- The mechanical fix (decision D40): `main` push runs never cancel and are
+  never cancelled (`cancel-in-progress` is PR-only in `app2.yml` and
+  `tests.yml`). Every push run completes and validates exactly its own diff;
+  a queued run is a delayed validation, never a lost one. The procedural
+  mitigations above ("hold the window", "let that run finish") are what a
+  solo maintainer does while the mechanism is still cancellable — they are
+  habits, not guarantees, and two agents sharing the repo break them.
+- When reading history, never reconstruct "was change X validated?" from run
+  conclusions alone. Find the newest run where X's lane JOB executed
+  (`gh run view --json jobs`), and check its head SHA is at or before X...
+  anything else can read a selection-skip as coverage.
+- If lane selection ever grows a non-git base (an Actions-API "last executed"
+  walk), re-audit this entry: the pure-git/fail-open selector is what kept
+  the failure mode a concurrency problem instead of also an API-dependency
+  problem.

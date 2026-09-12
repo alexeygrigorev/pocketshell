@@ -26,8 +26,15 @@ on:
   schedule: [{cron: "0 0,8,16 * * *"}]
 
 concurrency:
+  # Issue #2593 (decision D40, same change as app2.yml): only PR runs cancel
+  # in progress. Push runs on a ref validate exactly their own diff, so a
+  # superseded push run is that commit's ONLY validation being dropped — its
+  # replacement's ci-plan diff base already contains the cancelled commit's
+  # changes, and they are never selected again. Back-to-back pushes on main
+  # now queue instead; PR iteration stays fast, and the schedule keeps its
+  # own never-cancelled group.
   group: ${{ github.event_name=='schedule'&&'sched'||format('{0}-{1}',github.workflow,github.event_name=='pull_request'&&format('pr-{0}',github.event.pull_request.number)||format('ref-{0}',github.ref)) }}
-  cancel-in-progress: ${{ github.event_name!='schedule' }}
+  cancel-in-progress: ${{ github.event_name=='pull_request' }}
 
 jobs:
   # Issue #2060 (CI Phase A): the ~25 SERIAL guard steps this job used to carry in

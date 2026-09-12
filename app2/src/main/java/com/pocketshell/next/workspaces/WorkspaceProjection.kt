@@ -224,37 +224,25 @@ fun projectWorkspaceRoots(
             continue
         }
 
+        val root = findRoot(path, rootSpecs.values.toList(), resolvedHome)
+            ?: otherBucket(rootBuckets, rootSpecs).rootSpec
+        val bucket = rootBuckets.getOrPut(root.key) { RootBucket(root) }
+
         // A session exactly at a root belongs in the quiet root-level group.
         // This prevents a fake child workspace named after the root.
-        val root = findRoot(path, rootSpecs.values.toList(), resolvedHome)
-        if (root != null && root.path != null && path == root.path) {
-            rootBuckets.getOrPut(root.key) { RootBucket(root) }.rootSessions += session
-            continue
+        if (root.path != null && path == root.path) {
+            bucket.rootSessions += session
+        } else {
+            val workspace = durableRows[path] ?: bucket.workspaces.getOrPut(path) {
+                MutableWorkspace(
+                    path = path,
+                    displayPath = pathLabel(path, resolvedHome),
+                    sessions = mutableListOf(),
+                    durable = false,
+                )
+            }
+            workspace.sessions += session
         }
-
-        // A session inside a durably-member workspace attaches to that row,
-        // wherever its membership placed it.
-        val durable = durableRows[path]
-        if (durable != null) {
-            durable.sessions += session
-            continue
-        }
-
-        // Issue #2620 (spec frame 25, remove-workspace): a live session whose
-        // cwd has no durable membership is Other's business — even when a
-        // configured root lies above the path. Letting findRoot claim it would
-        // re-create a non-durable row inside that root the instant its
-        // membership is removed, so Remove would look like it did nothing and
-        // the workspace would never surface under Other.
-        val workspace = otherBucket(rootBuckets, rootSpecs).workspaces.getOrPut(path) {
-            MutableWorkspace(
-                path = path,
-                displayPath = pathLabel(path, resolvedHome),
-                sessions = mutableListOf(),
-                durable = false,
-            )
-        }
-        workspace.sessions += session
     }
 
     return rootBuckets.values

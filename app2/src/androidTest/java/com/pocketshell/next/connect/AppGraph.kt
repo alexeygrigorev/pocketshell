@@ -10,6 +10,7 @@ import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.next.composer.ComposerAttachmentStager
 import com.pocketshell.next.composer.ComposerDraftStore
 import com.pocketshell.next.ports.ForwardingController
+import com.pocketshell.next.ports.ForwardingResume
 import com.pocketshell.next.settings.SettingsRepository
 import com.pocketshell.next.terminal.GraceCoordinator
 import com.pocketshell.next.voice.PendingTranscriptionStore
@@ -37,6 +38,7 @@ interface AppGraph {
     fun projectRootDao(): ProjectRootDao
     fun connectionsRegistry(): ConnectionsRegistry
     fun forwardingController(): ForwardingController
+    fun forwardingResume(): ForwardingResume
 
     /**
      * Task P-1. The composer's sent-message log, so a journey can read what the

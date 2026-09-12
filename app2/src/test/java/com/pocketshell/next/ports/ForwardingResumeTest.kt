@@ -23,7 +23,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -108,7 +107,7 @@ class ForwardingResumeTest {
     }
 
     @Test
-    fun secondObserveWhileAlreadyStarted_requestsResumeAgain() = runTest(dispatcher) {
+    fun secondObserveWhileAlreadyStarted_doesNotStartServiceAgain() = runTest(dispatcher) {
         seedHost(enabled = true)
         val started = AtomicInteger(0)
         val resume = resume { started.incrementAndGet() }
@@ -118,13 +117,14 @@ class ForwardingResumeTest {
         resume.observeProcessLifecycle(owner)
         advanceUntilIdle()
         val afterFirst = started.get()
-        assertTrue("already-STARTED owner must seed an immediate resume", afterFirst >= 1)
+        assertEquals("addObserver on STARTED dispatches ON_START", 1, afterFirst)
 
         resume.observeProcessLifecycle(owner)
         advanceUntilIdle()
-        assertTrue(
-            "later MainActivity attach must resume even if ProcessLifecycleOwner stayed STARTED",
-            started.get() > afterFirst,
+        assertEquals(
+            "second observe is attach-only; process stays STARTED so there is no new ON_START",
+            afterFirst,
+            started.get(),
         )
     }
 
@@ -139,7 +139,7 @@ class ForwardingResumeTest {
         resume.observeProcessLifecycle(owner)
         advanceUntilIdle()
 
-        assertTrue("already-STARTED owner must seed an immediate resume", started.get() >= 1)
+        assertEquals("addObserver on STARTED dispatches ON_START", 1, started.get())
     }
 
     @Test
@@ -155,6 +155,65 @@ class ForwardingResumeTest {
 
         assertEquals(0, started.get())
     }
+
+    @Test
+    fun resumeNow_withEnabledHost_startsService() = runTest(dispatcher) {
+        seedHost(enabled = true)
+        val started = AtomicInteger(0)
+        val resume = resume { started.incrementAndGet() }
+
+        resume.resumeNow()
+        advanceUntilIdle()
+
+        assertEquals(1, started.get())
+    }
+
+    @Test
+    fun resumeNow_withNoEnabledHost_doesNotStartService() = runTest(dispatcher) {
+        seedHost(enabled = false)
+        val started = AtomicInteger(0)
+        val resume = resume { started.incrementAndGet() }
+
+        resume.resumeNow()
+        advanceUntilIdle()
+
+        assertEquals(0, started.get())
+    }
+
+    @Test
+    fun resumeNow_passphraseProtected_isSkipped() = runTest(dispatcher) {
+        seedHost(enabled = true, hasPassphrase = true)
+        val started = AtomicInteger(0)
+        val resume = resume { started.incrementAndGet() }
+
+        resume.resumeNow()
+        advanceUntilIdle()
+
+        assertEquals(0, started.get())
+    }
+
+    @Test
+    fun resumeNow_afterLeftoverAttachWhileProcessStarted_startsServiceWithoutNewOnStart() =
+        runTest(dispatcher) {
+            seedHost(enabled = true)
+            val started = AtomicInteger(0)
+            val resume = resume { started.incrementAndGet() }
+            val owner = FakeLifecycleOwner()
+            owner.registry.currentState = Lifecycle.State.STARTED
+
+            resume.observeProcessLifecycle(owner)
+            advanceUntilIdle()
+            assertEquals("leftover attach consumed ON_START", 1, started.get())
+
+            started.set(0)
+            resume.resumeNow()
+            advanceUntilIdle()
+            assertEquals(
+                "MainActivity.onStart must resume after leftover attach with no new process ON_START",
+                1,
+                started.get(),
+            )
+        }
 
     private fun resume(onStart: () -> Unit): ForwardingResume {
         val resume = ForwardingResume(

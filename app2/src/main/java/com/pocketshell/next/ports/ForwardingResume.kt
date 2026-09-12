@@ -9,6 +9,8 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -29,8 +31,11 @@ import kotlinx.coroutines.withContext
  *
  * Foreground-only (D21): no WorkManager, no AlarmManager, no boot receiver.
  * The observer is attached once so [com.pocketshell.next.App] and
- * [com.pocketshell.next.MainActivity] can both call [observeProcessLifecycle];
- * a later call still resumes when the owner is already `STARTED`.
+ * [com.pocketshell.next.MainActivity] can both call [observeProcessLifecycle].
+ * `ON_START` covers app-from-background. [resumeNow] is the activity-foreground
+ * sweep: the process can stay `STARTED` across activity launches (no new
+ * `ON_START`) and `startForegroundService` is only legal once the activity is
+ * in the foreground (API 31+).
  */
 @Singleton
 class ForwardingResume @Inject constructor(
@@ -51,15 +56,21 @@ class ForwardingResume @Inject constructor(
 
     private var lifecycleAttached: Boolean = false
 
+    /** Completed [resumeIfNeeded] sweeps. Journey seed waits on this. */
+    internal val resumeSweepCount = AtomicInteger(0)
+
+    private val _lifecycleObserverAttached = AtomicBoolean(false)
+    internal val lifecycleObserverAttached: Boolean
+        get() = _lifecycleObserverAttached.get()
+
     /**
      * Attach [ProcessLifecycleOwner] (or any [LifecycleOwner]) so a resume
      * sweep fires on every `ON_START`. The observer is added once.
      *
-     * A later call still seeds an immediate resume when the owner is already
-     * `STARTED`. Instrumentation keeps the process in `STARTED` across
-     * activity launches ([App] is replaced by `HiltTestApplication`, so
-     * [com.pocketshell.next.MainActivity] is the attach site) and would
-     * otherwise never see another `ON_START`.
+     * A later call is attach-only. Instrumentation keeps the process
+     * `STARTED` across activity launches, so there is no new `ON_START`;
+     * [resumeNow] from [com.pocketshell.next.MainActivity.onStart] is the
+     * foreground sweep (`startForegroundService` is legal then).
      */
     fun observeProcessLifecycle(owner: LifecycleOwner = ProcessLifecycleOwner.get()) {
         val attachObserver = synchronized(this) {
@@ -71,14 +82,22 @@ class ForwardingResume @Inject constructor(
             }
         }
         scope.launch {
-            val alreadyStarted = withContext(Dispatchers.Main) {
+            withContext(Dispatchers.Main) {
                 if (attachObserver) {
                     owner.lifecycle.addObserver(processLifecycleObserver)
                 }
-                owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                _lifecycleObserverAttached.set(true)
             }
-            if (alreadyStarted) requestResume()
         }
+    }
+
+    /**
+     * Run the enabled-host sweep now. [com.pocketshell.next.MainActivity.onStart]
+     * calls this so `startForegroundService` happens while the activity is
+     * foreground. Idempotent with an already-mounted supervisor (`reconnectNow`).
+     */
+    fun resumeNow() {
+        requestResume()
     }
 
     private fun requestResume() {
@@ -86,11 +105,17 @@ class ForwardingResume @Inject constructor(
     }
 
     private suspend fun resumeIfNeeded() {
-        val enabled = hostDao.getEnabled().first()
-        if (enabled.isEmpty()) return
-        val usable = enabled.any { host -> hostHasUsableKey(host.id, host.keyId) }
-        if (!usable) return
-        startService(applicationContext)
+        try {
+            val enabled = hostDao.getEnabled().first()
+            if (enabled.isEmpty()) return
+            val usable = enabled.any { host -> hostHasUsableKey(host.id, host.keyId) }
+            if (!usable) return
+            withContext(Dispatchers.Main) {
+                startService(applicationContext)
+            }
+        } finally {
+            resumeSweepCount.incrementAndGet()
+        }
     }
 
     private suspend fun hostHasUsableKey(hostId: Long, keyId: Long): Boolean {

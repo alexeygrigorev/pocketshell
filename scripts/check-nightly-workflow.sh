@@ -28,11 +28,13 @@
 #      workflow_dispatch input can turn the gate off;
 #   6. a SCHEDULED run actually reaches the job — its `if:` excludes only
 #      pull_request, never schedule or workflow_dispatch;
-#   7. a scheduled run is not cancellable by an unrelated push — `schedule` gets
-#      its own concurrency group and is exempt from cancel-in-progress. Without
-#      this a push could kill the nightly mid-flight and the cadence would read
-#      as `cancelled`, not `failure`: a bypass by accident, which is precisely
-#      the D37 shape.
+#   7. a scheduled run is not cancellable — `schedule` gets its own concurrency
+#      group, and cancel-in-progress is PR-only (D40, #2593), an expression
+#      that evaluates false for schedule, push and dispatch. Without this a
+#      push could kill the nightly mid-flight and the cadence would read as
+#      `cancelled`, not `failure`: a bypass by accident, which is precisely
+#      the D37 shape. The pre-D40 `!= 'schedule'` form is pinned out too: it
+#      made push runs cancel each other, dropping a push's only validation.
 #   8. on.push / on.pull_request do NOT carry paths: / paths-ignore. GitHub's
 #      workflow-level path filter is the #2354 required-check footgun AND has
 #      been observed to suppress this workflow's schedule: cadence entirely
@@ -157,8 +159,8 @@ cancel = concurrency["cancel-in-progress"].to_s
 unless group.include?("schedule")
   abort "FAIL: the concurrency group does not special-case schedule (#{group}) — a scheduled run sharing a push's group can be cancelled mid-flight, and a cancelled cadence reads as 'not failed' while proving nothing"
 end
-unless cancel.include?("schedule")
-  abort "FAIL: cancel-in-progress does not exempt schedule (#{cancel}) — see the group check above"
+unless cancel.include?("== 'pull_request'")
+  abort "FAIL: cancel-in-progress is not PR-only (#{cancel}) — D40 pins the PR-only form, which evaluates false for schedule, push and dispatch, so the cadence can never be cancelled mid-flight (see the group check above)"
 end
 
 # 9. a schedule/dispatch run fail-opens every lane.
@@ -292,7 +294,13 @@ self_test() {
 
   m="$temp_dir/cancellable.yml"; cp "$valid" "$m"
   sed -i "s|^  cancel-in-progress: .*$|  cancel-in-progress: true|" "$m"
-  expect_red "a schedule-cancellable lane is rejected" "$m" "cancel-in-progress does not exempt schedule"
+  expect_red "a schedule-cancellable lane is rejected" "$m" "cancel-in-progress is not PR-only"
+
+  # The exact regression that hit main on 2026-09-12: reverting to the pre-D40
+  # form re-arms push-vs-push cancellation and must keep failing this guard.
+  m="$temp_dir/pushcancel.yml"; cp "$valid" "$m"
+  sed -i "s|^  cancel-in-progress: .*$|  cancel-in-progress: \${{ github.event_name != 'schedule' }}|" "$m"
+  expect_red "the pre-D40 push-cancelling form is rejected" "$m" "cancel-in-progress is not PR-only"
 
   m="$temp_dir/sharedgroup.yml"; cp "$valid" "$m"
   sed -i "s|^  group: .*$|  group: \${{ github.workflow }}-\${{ github.ref }}|" "$m"

@@ -1,6 +1,7 @@
 package com.pocketshell.next.di
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import androidx.room.Room
 import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.AppDatabase
@@ -349,7 +350,16 @@ object AppModule {
     // test seams (URL, backoff, HTTP client, zone) that Hilt would try to
     // bind as missing types.
 
+    /**
+     * A release-variant install must be offered the release APK (#2657):
+     * the debug APK is a different applicationId signed with a different
+     * key and cannot update it in place.
+     */
     @Provides
     @Singleton
-    fun provideReleaseChecker(): ReleaseChecker = ReleaseChecker()
+    fun provideReleaseChecker(@ApplicationContext context: Context): ReleaseChecker {
+        val debuggableInstall =
+            context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        return ReleaseChecker(preferReleaseApk = !debuggableInstall)
+    }
 }

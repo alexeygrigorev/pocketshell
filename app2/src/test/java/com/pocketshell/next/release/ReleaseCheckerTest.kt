@@ -172,6 +172,53 @@ class ReleaseCheckerTest {
         )
     }
 
+    /** #2638 releases carry two APK assets with different applicationIds. */
+    private val bothVariantAssets = """
+        {"name":"pocketshell-0.5.1-debug.apk","browser_download_url":"https://example.com/pocketshell-0.5.1-debug.apk"},
+        {"name":"pocketshell-0.5.1-release.apk","browser_download_url":"https://example.com/pocketshell-0.5.1-release.apk"}
+    """.trimIndent()
+
+    @Test
+    fun releaseInstall_prefersReleaseAsset_whenBothVariantsExist() = runBlocking {
+        val checker = ReleaseChecker(
+            preferReleaseApk = true,
+            http = { ReleaseHttpResponse(200, releaseJson(tagName = "v0.5.1", assets = bothVariantAssets)) },
+        )
+        val result = checker.checkForUpdate("0.5.0")
+        assertEquals(
+            "release install must not be offered the debug APK (#2657)",
+            "https://example.com/pocketshell-0.5.1-release.apk",
+            (result as ReleaseCheckResult.UpdateAvailable).info.apkUrl,
+        )
+    }
+
+    @Test
+    fun releaseInstall_fallsBackToSingleDebugAsset() = runBlocking {
+        val checker = ReleaseChecker(
+            preferReleaseApk = true,
+            http = { ReleaseHttpResponse(200, releaseJson(tagName = "v0.5.1")) },
+        )
+        val result = checker.checkForUpdate("0.5.0")
+        assertEquals(
+            "single-asset releases keep the historical fallback",
+            "https://example.com/pocketshell-0.5.1.apk",
+            (result as ReleaseCheckResult.UpdateAvailable).info.apkUrl,
+        )
+    }
+
+    @Test
+    fun debugInstall_prefersDebugAsset_whenBothVariantsExist() = runBlocking {
+        val checker = ReleaseChecker(
+            http = { ReleaseHttpResponse(200, releaseJson(tagName = "v0.5.1", assets = bothVariantAssets)) },
+        )
+        val result = checker.checkForUpdate("0.5.0")
+        assertEquals(
+            "debug install keeps the historical -debug.apk preference",
+            "https://example.com/pocketshell-0.5.1-debug.apk",
+            (result as ReleaseCheckResult.UpdateAvailable).info.apkUrl,
+        )
+    }
+
     @Test
     fun transientFailure_retriesOnce_andSucceeds() = runBlocking {
         val calls = AtomicInteger(0)

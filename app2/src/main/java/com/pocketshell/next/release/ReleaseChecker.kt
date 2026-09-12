@@ -69,6 +69,13 @@ open class ReleaseChecker(
     private val retryBackoffMs: Long = RETRY_BACKOFF_MS,
     private val http: ReleaseHttpClient = HttpUrlConnectionReleaseClient(),
     private val zoneId: ZoneId = ZoneId.systemDefault(),
+    /**
+     * True when the installed APK is the release variant (#2657): the banner
+     * must then offer the `-release.apk` asset, since the debug APK is a
+     * different applicationId signed with a different key and cannot update
+     * in place. Default false = debug install = historical behavior.
+     */
+    private val preferReleaseApk: Boolean = false,
 ) {
     companion object {
         private const val REPO = "alexeygrigorev/pocketshell"
@@ -191,7 +198,7 @@ open class ReleaseChecker(
             ?: return ParsedReleaseOutcome.Failed("Release $tagName has no html_url")
         val assets = json.optJSONArray("assets")
             ?: return ParsedReleaseOutcome.Failed("Release $tagName has no downloadable APK assets")
-        val apkUrl = pickApkUrl(assets)
+        val apkUrl = pickApkUrl(assets, preferReleaseApk)
             ?: return ParsedReleaseOutcome.Failed("Release $tagName has no downloadable APK assets")
         val publishedDateLabel = formatPublishedDate(json.optString("published_at"), zoneId)
         return ParsedReleaseOutcome.UpdateAvailable(
@@ -205,18 +212,22 @@ open class ReleaseChecker(
     }
 
     /**
-     * Prefer the historical `pocketshell-<ver>-debug.apk` name when it is
-     * present, otherwise the first `.apk` asset. Release asset names have
-     * drifted; a tagged release with *any* APK is still an offer.
+     * Selects the APK asset matching the installed variant (#2657): release
+     * installs get `-release.apk`, debug installs `-debug.apk` (same
+     * applicationId + signing key either way). When no variant-named asset
+     * matches — single-asset pre-#2638 releases, drifted names — the
+     * historical fallback applies: prefer any `-debug.apk`, else the first
+     * `.apk` asset.
      */
-    private fun pickApkUrl(assets: org.json.JSONArray): String? {
+    private fun pickApkUrl(assets: org.json.JSONArray, preferReleaseApk: Boolean): String? {
         var firstApk: String? = null
         for (i in 0 until assets.length()) {
             val asset = assets.optJSONObject(i) ?: continue
             val name = asset.optString("name")
             val url = asset.optString("browser_download_url")
             if (!name.endsWith(".apk", ignoreCase = true) || url.isBlank()) continue
-            if (name.contains("pocketshell", ignoreCase = true) && name.contains("-debug.apk")) {
+            val variantMatch = if (preferReleaseApk) name.contains("-release.apk") else name.contains("-debug.apk")
+            if (variantMatch && name.contains("pocketshell", ignoreCase = true)) {
                 return url
             }
             if (firstApk == null) firstApk = url

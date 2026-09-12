@@ -43,12 +43,13 @@ Final JSON contract: `result` is the semantic CI outcome; `exit_code` and `exit_
 Process exit-code contract (`exit_code`; the semantic `result` may be shared by
 more than one termination path):
 
-    0  green       — all REQUIRED checks concluded `success` (or appropriately
-                     skipped) and the run is complete.
+    0  green       — all REQUIRED checks concluded `success` (or `skipped` with
+                     --allow-skipped-required) and the run is complete.
     1  failed      — the RUN COMPLETED with a genuine failure.
     2  hang         — no job-state progress for --no-progress-timeout.
-    3  unresolved  — the run / inputs couldn't be resolved, or `gh` stayed broken
-                     past the retry budget.
+    3  unresolved  — the run / inputs couldn't be resolved, `gh` stayed broken
+                     past the retry budget, or NO required check matched any
+                     job in the run (issue #2545 watcher-config error).
     4  superseded  — the run was cancelled because a NEWER run for the same
                      workflow+branch replaced it (the `main` concurrency group).
                      Nothing is broken; re-watch the newest head.
@@ -80,12 +81,25 @@ from typing import Callable, Optional
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-# The protected-`main` required checks (see process.md "Protected `main`
-# checks"). Overridable with --required-check (repeatable).
+# The protected-`main` required checks of the `Tests` workflow
+# (.github/workflows/tests.yml — see process.md "Protected `main` checks").
+# Overridable with --required-check (repeatable).
+#
+# Issue #2545: every name here MUST be a real job name in the workflow the
+# watcher is pointed at. A required name that matches no job in the watched
+# run is a loud config error (see classify_run), never a silent `missing` —
+# the old third entry, `Emulator journey subset (load-bearing, Docker
+# agents)`, matched no workflow at all after the app2 rewrite and produced
+# permanent vacuous greens.
+#
+# The journey lane is NOT in `Tests` any more: it lives in
+# .github/workflows/app2.yml as `app2 journey suite (emulator + Docker
+# agents)`. This watcher watches ONE run; to watch the journey lane, invoke
+# it a second time against the app2 run with
+#   --required-check "app2 journey suite (emulator + Docker agents)"
 DEFAULT_REQUIRED_CHECKS = (
     "Unit tests",
     "Integration tests (Docker)",
-    "Emulator journey subset (load-bearing, Docker agents)",
 )
 
 DEFAULT_INTERVAL_S = 25.0
@@ -416,6 +430,8 @@ def classify_run(
     run_conclusion: Optional[str],
     jobs: list[dict],
     required_names: list[str],
+    *,
+    allow_skipped_required: bool = False,
 ) -> Classification:
     """Decide whether this poll is terminal and, if so, with what result.
 
@@ -423,11 +439,18 @@ def classify_run(
     caller keeps polling). When the run is complete (or a required check has
     already definitively failed), result is RESULT_GREEN / RESULT_FAILED.
 
-    Skipped handling: a `skipped` required check is treated as a non-failure ON
-    ITS OWN. But a required check that is skipped because its gating job FAILED
-    must surface that gating failure — so if ANY job in the run failed, a skipped
-    required check does not let the run be called green; the failing job is
-    reported and the result is RESULT_FAILED.
+    Skipped handling (issue #2545): a `skipped` required check is a
+    selection-skip — the lane never ran — so it is NOT a pass by default. It
+    is accepted only with allow_skipped_required AND when nothing else in the
+    run failed. A required check that is skipped because its gating job
+    FAILED must surface that gating failure — so if ANY job in the run
+    failed, a skipped required check does not let the run be called green;
+    the failing job is reported and the result is RESULT_FAILED.
+
+    Missing handling (issue #2545): a required name matching NO job in the
+    completed run is a watcher-config error. Some-resolved/some-missing is a
+    hard RESULT_FAILED; none-resolved is RESULT_UNRESOLVED (nothing was
+    measured). Either way it is never green.
 
     Cancelled handling (issue #1650): `cancelled` is NOT a failure. A GENUINE
     failure is always checked FIRST and always wins, so a run that genuinely
@@ -561,10 +584,59 @@ def classify_run(
         )
 
     # Run reports success. Validate the required checks individually.
+    #
+    # Issue #2545: a required name that matched NO job in this run is a broken
+    # watcher config, not a pass. The old policy read `missing` as ok on an
+    # otherwise-green run, so pointing the watcher at a workflow that produces
+    # none (or the wrong subset) of the required names returned a confident
+    # green that measured nothing ("I could not check" rendered identically to
+    # "I checked and it is fine").
+    #   * SOME names resolve, some don't → hard fail naming the config error.
+    #     Within the correct workflow this means a required job was renamed or
+    #     removed, which is exactly the named-contract breakage the required
+    #     list exists to catch.
+    #   * NO name resolves → the run almost certainly belongs to a DIFFERENT
+    #     workflow than the required names describe; there is nothing here to
+    #     judge, so this is `unresolved` (exit 3), never green and never a
+    #     test failure.
+    missing_required = [
+        rc for rc in required.values() if rc.status == "missing"
+    ]
+    if missing_required:
+        missing_names = ", ".join(rc.name for rc in missing_required)
+        if len(missing_required) == len(required):
+            return Classification(
+                result=RESULT_UNRESOLVED,
+                required=required,
+                failing_jobs=[],
+                reason=(
+                    "watcher config error (issue #2545): NONE of the required "
+                    f"checks ({missing_names}) match any job in this run — it "
+                    "likely belongs to a different workflow than the required "
+                    "names describe. Pass --required-check with that "
+                    "workflow's job names. Nothing was measured; this is not "
+                    "green and not a test failure."
+                ),
+            )
+        return Classification(
+            result=RESULT_FAILED,
+            required=required,
+            failing_jobs=failed_jobs or [rc.name for rc in missing_required],
+            reason=(
+                "required check(s) matched no job in this run — renamed job "
+                "or wrong workflow for these required names (watcher config "
+                f"error, issue #2545): {missing_names}"
+            ),
+        )
+
     not_passing = [
         rc
         for rc in required.values()
-        if not _required_ok(rc, any_job_failed=bool(failed_jobs))
+        if not _required_ok(
+            rc,
+            any_job_failed=bool(failed_jobs),
+            allow_skipped_required=allow_skipped_required,
+        )
     ]
     if not_passing:
         # A required check is skipped-due-to-a-failed-gate, missing, or otherwise
@@ -592,28 +664,32 @@ def classify_run(
     )
 
 
-def _required_ok(rc: RequiredCheck, any_job_failed: bool) -> bool:
+def _required_ok(
+    rc: RequiredCheck,
+    any_job_failed: bool,
+    *,
+    allow_skipped_required: bool = False,
+) -> bool:
     """Is a single required check acceptable for a green verdict?
 
     - completed/success → ok.
-    - completed/skipped → ok ONLY if nothing else in the run failed. A skipped
-      check whose gating job failed is NOT ok (surface the gate failure).
+    - completed/skipped → ok ONLY with --allow-skipped-required AND nothing
+      else in the run failed. Issue #2545: a skipped required check is a
+      selection-skip ("the lane never ran"), not a validation of it; reading
+      it as a pass is opt-in, not the default.
     - completed/<genuinely failing> → not ok (handled earlier, defensive here).
     - completed/cancelled → not ok, but handled earlier as a no-verdict rather
       than a failure (issue #1650).
-    - missing (no matching job) → ok ONLY if nothing else failed; a missing
-      required check on an otherwise-green run usually means a renamed/optional
-      job, but on a run with a failed job it likely means it was gated away.
+    - missing (no matching job) → never ok; handled earlier in classify_run as
+      a loud watcher-config error (issue #2545). Defensive `False` here.
     """
     if rc.status != "completed":
-        if rc.status == "missing":
-            return not any_job_failed
         return False
     conclusion = rc.conclusion or ""
     if conclusion == "success":
         return True
     if conclusion == "skipped":
-        return not any_job_failed
+        return allow_skipped_required and not any_job_failed
     return False
 
 
@@ -663,6 +739,7 @@ class Watcher:
         *,
         repo: Optional[str] = None,
         required_checks: Optional[list[str]] = None,
+        allow_skipped_required: bool = False,
         interval_s: float = DEFAULT_INTERVAL_S,
         no_progress_timeout_s: float = DEFAULT_NO_PROGRESS_TIMEOUT_S,
         max_wall_clock_s: float = DEFAULT_MAX_WALL_CLOCK_S,
@@ -674,6 +751,7 @@ class Watcher:
         self.gh = gh
         self.repo = repo
         self.required_checks = list(required_checks or DEFAULT_REQUIRED_CHECKS)
+        self.allow_skipped_required = allow_skipped_required
         self.interval_s = interval_s
         self.no_progress_timeout_s = no_progress_timeout_s
         self.max_wall_clock_s = max_wall_clock_s
@@ -975,7 +1053,11 @@ class Watcher:
             self._heartbeat(_progress_line(run_status, jobs, poll=polls))
 
             verdict = classify_run(
-                run_status, run_conclusion, jobs, self.required_checks
+                run_status,
+                run_conclusion,
+                jobs,
+                self.required_checks,
+                allow_skipped_required=self.allow_skipped_required,
             )
             if verdict.result is not None:
                 return self._finalize(verdict, jobs, run_id, start, polls, run=data)
@@ -1233,8 +1315,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="append",
         dest="required_checks",
         metavar="NAME",
-        help="Required check name (repeatable). Defaults to the protected-main "
-        "four if omitted.",
+        help="Required check name (repeatable). Defaults to the Tests "
+        "workflow's protected-main pair; see DEFAULT_REQUIRED_CHECKS. A name "
+        "matching no job in the watched run is a loud config error (issue "
+        "#2545), never a silent pass.",
+    )
+    p.add_argument(
+        "--allow-skipped-required",
+        action="store_true",
+        dest="allow_skipped_required",
+        help="Treat a completed/skipped REQUIRED check as passing when nothing "
+        "else failed. Default off (issue #2545): a skipped required check is a "
+        "selection-skip, not a validation of the lane.",
     )
     p.add_argument(
         "--log-file",
@@ -1298,6 +1390,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         GhRunner(),
         repo=args.repo,
         required_checks=args.required_checks,
+        allow_skipped_required=args.allow_skipped_required,
         interval_s=args.interval,
         no_progress_timeout_s=args.no_progress_timeout,
         max_wall_clock_s=args.max_wall_clock,

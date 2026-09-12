@@ -55,6 +55,7 @@ class UpdateCheckSchedulerTest {
     private fun scheduler(
         checker: ReleaseChecker,
         now: () -> Long = { 1_000_000L },
+        version: String = "0.5.0",
     ): UpdateCheckScheduler {
         val s = UpdateCheckScheduler(
             applicationContext = context,
@@ -63,7 +64,7 @@ class UpdateCheckSchedulerTest {
         )
         s.scope = CoroutineScope(SupervisorJob() + dispatcher)
         s.nowMillis = now
-        s.currentVersionProvider = { "0.5.0" }
+        s.currentVersionProvider = { version }
         return s
     }
 
@@ -194,6 +195,113 @@ class UpdateCheckSchedulerTest {
         s.refreshNow()
         advanceUntilIdle()
         assertEquals(v52, s.updateAvailable.value)
+    }
+
+    /**
+     * Issue #2552: the throttle survives process death, so the offer has to
+     * survive with it. The restarted scheduler must show the banner straight
+     * from the store — the foreground check is still inside the 6h window and
+     * must not touch the network.
+     */
+    @Test
+    fun processDeath_restoresOfferFromStore_withoutNetworkCall() = runTest(dispatcher) {
+        val info = release("v0.5.1")
+        val first = scheduler(
+            checker = ScriptedReleaseChecker(mutableListOf(ReleaseCheckResult.UpdateAvailable(info))),
+        )
+        first.refreshNow()
+        advanceUntilIdle()
+        assertEquals(info, first.updateAvailable.value)
+
+        // The process died and came back: a fresh scheduler over the same
+        // store, clock still inside the throttle window.
+        var clock = 1_000_000L + 1_000L
+        val restartedChecker = ScriptedReleaseChecker(mutableListOf())
+        val restarted = scheduler(restartedChecker, now = { clock })
+        val owner = FakeLifecycleOwner()
+        owner.registry.currentState = Lifecycle.State.STARTED
+
+        restarted.observeProcessLifecycle(owner)
+        advanceUntilIdle()
+
+        assertEquals("the persisted offer must come back after process death", info, restarted.updateAvailable.value)
+        assertEquals("a throttled resume must not have hit the network", 0, restartedChecker.calls)
+    }
+
+    /** A dismissal survives process death the same way the offer does. */
+    @Test
+    fun processDeath_afterDismissal_staysHidden() = runTest(dispatcher) {
+        val first = scheduler(
+            checker = ScriptedReleaseChecker(
+                mutableListOf(ReleaseCheckResult.UpdateAvailable(release("v0.5.1"))),
+            ),
+        )
+        first.refreshNow()
+        advanceUntilIdle()
+        first.dismissCurrentUpdate()
+
+        val restartedChecker = ScriptedReleaseChecker(mutableListOf())
+        val restarted = scheduler(
+            checker = restartedChecker,
+            now = { 1_000_000L + 1_000L },
+        )
+        val owner = FakeLifecycleOwner()
+        owner.registry.currentState = Lifecycle.State.STARTED
+
+        restarted.observeProcessLifecycle(owner)
+        advanceUntilIdle()
+
+        assertNull("a dismissed offer must not come back after process death", restarted.updateAvailable.value)
+        assertEquals(0, restartedChecker.calls)
+    }
+
+    /** Installing the offered version (or newer) retires the persisted offer. */
+    @Test
+    fun processDeath_afterInstalledVersionCaughtUp_clearsStoreAndStaysHidden() = runTest(dispatcher) {
+        val first = scheduler(
+            checker = ScriptedReleaseChecker(
+                mutableListOf(ReleaseCheckResult.UpdateAvailable(release("v0.5.1"))),
+            ),
+        )
+        first.refreshNow()
+        advanceUntilIdle()
+
+        val restarted = scheduler(
+            checker = ScriptedReleaseChecker(mutableListOf()),
+            now = { 1_000_000L + 1_000L },
+            version = "0.5.1",
+        )
+        val owner = FakeLifecycleOwner()
+        owner.registry.currentState = Lifecycle.State.STARTED
+
+        restarted.observeProcessLifecycle(owner)
+        advanceUntilIdle()
+
+        assertNull(restarted.updateAvailable.value)
+        assertNull("the stale offer must not linger in the store", UpdateCheckStore(context).foundRelease())
+    }
+
+    /** A check that says up to date clears any stored offer, not just the banner. */
+    @Test
+    fun upToDateCheck_clearsTheStoredOffer() = runTest(dispatcher) {
+        val first = scheduler(
+            checker = ScriptedReleaseChecker(
+                mutableListOf(ReleaseCheckResult.UpdateAvailable(release("v0.5.1"))),
+            ),
+        )
+        first.refreshNow()
+        advanceUntilIdle()
+        assertEquals("v0.5.1", UpdateCheckStore(context).foundRelease()?.tagName)
+
+        val second = scheduler(
+            checker = ScriptedReleaseChecker(mutableListOf(ReleaseCheckResult.UpToDate)),
+            now = { 1_000_000L + UpdateCheckScheduler.DEFAULT_THROTTLE_WINDOW_MILLIS + 1 },
+        )
+        second.refreshNow()
+        advanceUntilIdle()
+
+        assertNull(second.updateAvailable.value)
+        assertNull(UpdateCheckStore(context).foundRelease())
     }
 
     private class FakeLifecycleOwner : LifecycleOwner {

@@ -104,6 +104,7 @@ class UpdateCheckScheduler @Inject constructor(
             lifecycleAttached = true
         }
         scope.launch {
+            rehydrateFoundRelease()
             val alreadyStarted = withContext(Dispatchers.Main) {
                 owner.lifecycle.addObserver(processLifecycleObserver)
                 _lifecycleObserverAttached.set(true)
@@ -149,6 +150,7 @@ class UpdateCheckScheduler @Inject constructor(
                     is ReleaseCheckResult.UpdateAvailable -> {
                         _lastResult.value = result
                         _updateCheckFailed.value = null
+                        store.markFoundRelease(result.info)
                         _updateAvailable.value =
                             if (store.dismissedTag() == result.info.tagName) null else result.info
                     }
@@ -157,6 +159,7 @@ class UpdateCheckScheduler @Inject constructor(
                         _lastResult.value = result
                         _updateAvailable.value = null
                         _updateCheckFailed.value = null
+                        store.clearFoundRelease()
                     }
 
                     is ReleaseCheckResult.Failed -> {
@@ -172,6 +175,28 @@ class UpdateCheckScheduler @Inject constructor(
                 _checking.value = false
             }
         }
+    }
+
+    /**
+     * Process death must not read as "you are up to date" (issue #2552).
+     *
+     * The throttle timestamp survives in the store, so the first foreground
+     * check after a restart returns early — and an offer held only in memory
+     * would stay gone for the rest of the 6h window, indistinguishable from
+     * being current. Restore the persisted offer instead, without a network
+     * call, unless the user already dismissed that tag or the installed
+     * version has caught up (the app updated itself under the offer).
+     */
+    private fun rehydrateFoundRelease() {
+        if (_updateAvailable.value != null) return
+        val found = store.foundRelease() ?: return
+        if (found.tagName == store.dismissedTag()) return
+        val currentVersion = currentVersionProvider() ?: return
+        if (!releaseChecker.isNewer(currentVersion, found.tagName)) {
+            store.clearFoundRelease()
+            return
+        }
+        _updateAvailable.value = found
     }
 
     private fun readInstalledVersionName(): String? = try {
